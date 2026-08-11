@@ -1,0 +1,1 @@
+"""Interactive graphics canvas."""

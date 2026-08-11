@@ -1,0 +1,40 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+.build-venv*/
+venv/
+
+# PyInstaller output
+build/
+dist/
+
+# Local FFmpeg development copy
+ffmpeg/
+
+# Playlist Canvas user and generated files
+.playlist.autosave.json
+*.recovery.json
+*.pvsproj
+*.project.json
+/description.txt
+/playlist.csv
+
+# Logs and temporary output
+*.log
+*.tmp
+*.temp
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
