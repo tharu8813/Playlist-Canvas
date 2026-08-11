@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/platform-Windows%2064--bit-0078D4" alt="Windows 64-bit">
     <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python 3.12">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
-    <img src="https://img.shields.io/badge/license-GPLv3-blue" alt="GNU GPL v3">
+    <img src="https://img.shields.io/badge/license-Source--Available%20Noncommercial-blue" alt="Source-Available Noncommercial License">
     <img src="https://img.shields.io/badge/Built%20with-ChatGPT%20Codex-10A37F" alt="Built with ChatGPT Codex">
   </p>
 </div>
@@ -139,8 +139,22 @@ playlist_project/
 
 ## 라이선스 안내
 
-Playlist Canvas는 [GNU General Public License v3.0](LICENSE.txt)에 따라 배포되는 자유 소프트웨어입니다. GPL v3의 조건에 따라 프로그램을 사용, 연구, 수정하고 재배포할 수 있습니다.
+Playlist Canvas는 [Playlist Canvas Source-Available Noncommercial Share-Alike License 1.0](LICENSE.txt)에 따라 배포됩니다. 이 라이선스는 OSI 승인 오픈소스 라이선스가 아닌 맞춤형 비상업용 소스 공개(source-available) 라이선스입니다.
 
-이 프로그램은 상품성 또는 특정 목적 적합성에 대한 묵시적 보증을 포함해 **어떠한 보증도 없이** 제공됩니다. 자세한 조건은 `LICENSE.txt` 전문을 확인하세요.
+- 프로그램으로 영상과 콘텐츠를 제작하는 용도는 개인·교육·업무·상업 목적 모두 허용합니다.
+- 제작물의 판매·광고·후원·수익화·라이선스에는 제한이 없습니다. 단, 사용한 음악·이미지 등 입력 자료의 권리는 사용자가 별도로 확인해야 합니다.
+- 프로그램과 수정본의 상업적 수정·판매·유료 배포·유료 접근 제공은 금지됩니다.
+- 수정본을 배포할 때는 이 라이선스를 그대로 적용하고, 완전한 대응 소스를 무료로 함께 공개해야 합니다.
+- 프로그램 또는 수정본을 배포할 때 저작권, Playlist Canvas 기반이라는 사실, 수정 내역과 [원본 GitHub 저장소](https://github.com/tharu8813/Playlist-Canvas)를 표시해야 합니다.
+- 제작한 영상을 웹사이트·SNS·스트리밍 또는 동영상 플랫폼에 공개할 때 아래 크레딧을 표시하는 것을 권장하지만, 이는 선택 사항이며 라이선스 의무가 아닙니다.
+
+```text
+이 영상은 Playlist Canvas를 이용해 제작되었습니다.
+https://github.com/tharu8813/Playlist-Canvas
+```
+
+영상 내부 워터마크, 설명 크레딧 또는 저장소 링크는 요구하지 않습니다. 별도의 상업적 소프트웨어 이용 허가는 저작권자에게 문의해야 합니다.
+
+이 프로그램은 상품성 또는 특정 목적 적합성에 대한 묵시적 보증을 포함해 **어떠한 보증도 없이** 제공됩니다. 정확한 조건은 `LICENSE.txt` 전문을 확인하세요.
 
 FFmpeg 자동 설치 기능이 내려받는 BtbN FFmpeg GPL 배포본과 PySide6 등 제3자 구성요소에는 각각의 라이선스 조건이 적용됩니다.

@@ -164,7 +164,7 @@ class AboutDialog(QDialog):
             )
 
     def _open_license(self) -> None:
-        """Open the bundled GPL v3 text in the user's default text viewer."""
+        """Open the bundled application license in the user's default text viewer."""
         korean = self.translator.language is Language.KOREAN
         if not self.license_path.is_file() or not QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self.license_path))
@@ -172,8 +172,8 @@ class AboutDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "라이선스 오류" if korean else "License error",
-                "GNU GPL v3 라이선스 파일을 열 수 없습니다."
-                if korean else "Could not open the GNU GPL v3 license file.",
+                "Playlist Canvas 라이선스 파일을 열 수 없습니다."
+                if korean else "Could not open the Playlist Canvas license file.",
             )
 
     def retranslate(self) -> None:
@@ -196,15 +196,19 @@ class AboutDialog(QDialog):
             ("설정되지 않음" if korean else "Not configured")
         )
         self.notice_label.setText(
-            "Playlist Canvas는 GNU GPL v3에 따라 배포되는 자유 소프트웨어이며 어떠한 보증도 없이 제공됩니다. "
+            "Playlist Canvas는 비상업적 동일조건 소스 공개 라이선스로 배포됩니다. "
+            "프로그램과 수정본의 상업적 수정·배포는 금지되며, 제작물의 상업적 이용은 허용됩니다. "
+            "온라인 제작물에 Playlist Canvas와 원본 저장소를 표시하는 것은 선택 사항입니다. "
             "FFmpeg는 앱에 포함되지 않으며, 자동 설치본은 BtbN FFmpeg GPL 배포본을 SHA-256으로 검증합니다."
             if korean else
-            "Playlist Canvas is free software distributed under GNU GPL v3, without any warranty. "
+            "Playlist Canvas uses a noncommercial, share-alike source-available license. Commercial modification or "
+            "distribution of the app is prohibited, while commercial use of output is permitted. Crediting Playlist "
+            "Canvas and its original repository in public online uploads is optional. "
             "FFmpeg is not bundled; managed installs use the SHA-256-verified BtbN FFmpeg GPL build."
         )
         self.copy_button.setText("진단 정보 복사" if korean else "Copy diagnostics")
         self.open_logs_button.setText("로그 폴더 열기" if korean else "Open log folder")
-        self.open_license_button.setText("GNU GPL v3 보기" if korean else "View GNU GPL v3")
+        self.open_license_button.setText("라이선스 보기" if korean else "View license")
         self.buttons.button(QDialogButtonBox.StandardButton.Close).setText(
             "닫기" if korean else "Close"
         )

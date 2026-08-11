@@ -86,18 +86,25 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertTrue(icon.is_file())
         self.assertGreater(icon.stat().st_size, 1_000)
 
-    def test_gpl_v3_license_is_applied_to_repository_build_and_installer(self) -> None:
+    def test_noncommercial_license_is_applied_to_repository_build_and_installer(self) -> None:
         license_path = ROOT / "LICENSE.txt"
         license_text = license_path.read_text(encoding="utf-8")
         specification = (ROOT / "playlist_canvas.spec").read_text(encoding="utf-8")
         installer = (ROOT / "setup.iss").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("GNU GENERAL PUBLIC LICENSE", license_text)
-        self.assertIn("Version 3, 29 June 2007", license_text)
+        self.assertIn("Playlist Canvas Source-Available Noncommercial Share-Alike License 1.0", license_text)
+        self.assertIn("Noncommercial Software Modification and Distribution", license_text)
+        self.assertIn("Same License and Source Availability", license_text)
+        self.assertIn("Ownership and Use of Output", license_text)
+        self.assertIn("Attribution for Output is optional", license_text)
+        self.assertIn("이 영상은 Playlist Canvas를 이용해 제작되었습니다.", license_text)
+        self.assertIn("https://github.com/tharu8813/Playlist-Canvas", license_text)
         self.assertIn('project_root / "LICENSE.txt"', specification)
         self.assertIn('#define LicenseFilePath "LICENSE.txt"', installer)
         self.assertIn('Source: "LICENSE.txt"; DestDir: "{app}"', installer)
-        self.assertIn("GNU General Public License v3.0", readme)
+        self.assertIn("Source-Available Noncommercial Share-Alike License 1.0", readme)
+        self.assertIn("선택 사항이며 라이선스 의무가 아닙니다", readme)
+        self.assertIn("이 영상은 Playlist Canvas를 이용해 제작되었습니다.", readme)
 
     def test_release_version_is_semantic(self) -> None:
         parts = __version__.split(".")

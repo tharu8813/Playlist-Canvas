@@ -42,7 +42,7 @@ Inno Setup 6을 설치한 뒤 프로젝트 루트에서 다음 명령을 실행�
 
 `setup.iss`는 `dist\Playlist Canvas` 폴더 전체를 설치 원본으로 사용합니다. 따라서 PyInstaller 빌드가 먼저 성공해야 합니다.
 
-설치 마법사는 루트의 `LICENSE.txt`를 GNU GPL v3 동의 화면으로 표시하며, 설치된 프로그램 폴더에도 같은 원문을 복사합니다.
+설치 마법사는 루트의 `LICENSE.txt`를 Playlist Canvas Source-Available Noncommercial Share-Alike License 1.0 동의 화면으로 표시하며, 설치된 프로그램 폴더에도 같은 원문을 복사합니다.
 
 완성된 설치 파일은 다음 위치에 생성됩니다.
 
@@ -66,7 +66,10 @@ output-setup\Playlist Canvas-1.0.0-setup.exe
 ## 5. 배포 시 유의 사항
 
 - 앱이 내려받는 FFmpeg Windows 빌드는 GPL 라이선스입니다. 배포 페이지와 앱 안내에서 FFmpeg 및 해당 배포본의 라이선스 정보를 함께 고지합니다.
-- Playlist Canvas 바이너리를 배포할 때는 동일한 GPL v3 라이선스 아래의 대응 소스 코드도 GitHub Release와 같은 공개 위치에서 접근할 수 있어야 합니다.
+- Playlist Canvas 원본이나 수정본은 비상업적으로만 무료 배포할 수 있으며, `LICENSE.txt`, 저작권 표시, 원본 저장소 주소와 수정 사실을 유지해야 합니다.
+- 수정본 배포 시 동일한 라이선스를 적용하고 완전한 대응 소스를 실행 파일과 동시에 무료로 공개해야 합니다.
+- 프로그램으로 만든 영상이나 콘텐츠의 판매·수익화·공개 업로드에는 제한이 없습니다. 온라인 설명에 Playlist Canvas 사용 사실과 원본 저장소 주소를 표시하는 것은 권장 사항이며 의무가 아닙니다.
+- Playlist Canvas 자체와 수정본의 상업적 수정·판매·유료 배포·유료 접근 제공은 금지됩니다.
 - FFmpeg를 별도로 번들하기로 정책을 변경할 경우 `ffmpeg.exe`와 필요한 라이선스 파일만 선별하고, 배포본 크기와 해당 바이너리의 출처를 다시 검토합니다.
 - 코드 서명을 적용하면 Windows SmartScreen 경고를 줄일 수 있습니다. 서명 인증서와 타임스탬프 서버는 배포 환경에서 관리합니다.
 - FFmpeg 설치 폴더와 로그는 `%LOCALAPPDATA%\PlaylistCanvas` 아래에 있으므로 관리자 권한 없이 동작합니다. 이전 버전에서 저장한 설정과 복구본은 첫 실행 시 자동으로 이전됩니다.
