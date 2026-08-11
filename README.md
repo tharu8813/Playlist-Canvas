@@ -8,6 +8,7 @@
     <img src="https://img.shields.io/badge/platform-Windows%2064--bit-0078D4" alt="Windows 64-bit">
     <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python 3.12">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
+    <img src="https://img.shields.io/badge/license-GPLv3-blue" alt="GNU GPL v3">
     <img src="https://img.shields.io/badge/Built%20with-ChatGPT%20Codex-10A37F" alt="Built with ChatGPT Codex">
   </p>
 </div>
@@ -43,13 +44,14 @@ Playlist Canvas는 정적인 이미지와 음악을 합치는 수준을 넘어, 
 
 ## 사용자 설치
 
-1. GitHub의 **Releases** 페이지에서 최신 Windows ZIP 파일을 받습니다.
-2. ZIP 파일을 원하는 폴더에 완전히 압축 해제합니다.
-3. `Playlist Canvas.exe`를 실행합니다.
-4. **도구 → 설정 → FFmpeg → FFmpeg 자동 다운로드 및 설치**를 선택합니다.
-5. 새 프로젝트를 만들고 음악과 화면 요소를 추가한 뒤 MP4로 내보냅니다.
+1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.0.0-setup.exe`를 받습니다.
+2. Setup 파일을 실행하고 설치 언어를 선택합니다.
+3. 설치 위치와 바탕 화면 바로가기 생성 여부를 선택한 뒤 **설치**를 누릅니다.
+4. 설치가 완료되면 **Playlist Canvas 실행**을 선택하거나 시작 메뉴의 바로가기를 실행합니다.
+5. 처음 실행한 뒤 **도구 → 설정 → FFmpeg → FFmpeg 자동 다운로드 및 설치**를 선택합니다.
+6. 새 프로젝트를 만들고 음악과 화면 요소를 추가한 뒤 MP4로 내보냅니다.
 
-> `Playlist Canvas.exe`만 `_internal` 폴더와 분리하면 Python 또는 Qt DLL을 불러올 수 없습니다. 배포 폴더 전체를 함께 보관하세요.
+> 코드 서명되지 않은 개발 빌드에서는 Windows SmartScreen 안내가 표시될 수 있습니다. GitHub Releases의 공식 설치 파일인지 확인한 후 실행하세요.
 
 ## FFmpeg 자동 설치
 
@@ -98,11 +100,19 @@ Windows GitHub Actions에서도 같은 컴파일, 회귀 테스트, PyInstaller 
 
 ## Windows 배포본 빌드
 
+먼저 PyInstaller로 설치 프로그램에 포함할 애플리케이션 폴더를 생성합니다.
+
 ```powershell
 python -m PyInstaller --noconfirm --clean playlist_canvas.spec
 ```
 
-완성된 `dist\Playlist Canvas` 폴더 전체를 ZIP으로 묶어 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
+그다음 Inno Setup 6으로 [setup.iss](setup.iss)를 컴파일합니다.
+
+```powershell
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+```
+
+완성된 `output-setup\Playlist Canvas-1.0.0-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
 
 ## 프로젝트 구조
 
@@ -115,6 +125,7 @@ playlist_project/
 ├─ tools/                  # 개발 보조 도구
 ├─ main.py                 # 애플리케이션 진입점
 ├─ playlist_canvas.spec    # PyInstaller Windows 빌드 설정
+├─ setup.iss               # Inno Setup 설치 프로그램 설정
 └─ PACKAGING.md            # 배포 및 검수 가이드
 ```
 
@@ -128,4 +139,8 @@ playlist_project/
 
 ## 라이선스 안내
 
-FFmpeg 자동 설치 기능이 사용하는 BtbN FFmpeg GPL 배포본은 별도의 오픈 소스 라이선스를 따릅니다. 저장소를 공개하거나 바이너리를 배포하기 전에 Playlist Canvas 자체의 라이선스 파일과 제3자 고지 정책을 확정해 추가하세요.
+Playlist Canvas는 [GNU General Public License v3.0](LICENSE.txt)에 따라 배포되는 자유 소프트웨어입니다. GPL v3의 조건에 따라 프로그램을 사용, 연구, 수정하고 재배포할 수 있습니다.
+
+이 프로그램은 상품성 또는 특정 목적 적합성에 대한 묵시적 보증을 포함해 **어떠한 보증도 없이** 제공됩니다. 자세한 조건은 `LICENSE.txt` 전문을 확인하세요.
+
+FFmpeg 자동 설치 기능이 내려받는 BtbN FFmpeg GPL 배포본과 PySide6 등 제3자 구성요소에는 각각의 라이선스 조건이 적용됩니다.

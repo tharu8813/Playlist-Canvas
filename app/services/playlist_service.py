@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-import sys
 from collections.abc import Iterable
 from math import isfinite
 from pathlib import Path
@@ -16,6 +15,7 @@ from PySide6.QtCore import QObject, QSettings, Signal
 
 from app.models.playlist import PlaylistTrack
 from app.renderer.ffmpeg_renderer import FFmpegNotFoundError, FFmpegRenderer
+from app.utils.subprocess_utils import hidden_process_kwargs
 
 LOGGER = logging.getLogger(__name__)
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg"}
@@ -96,8 +96,7 @@ class PlaylistService(QObject):
         kwargs: dict[str, object] = {
             "capture_output": True, "text": True, "timeout": 15, "check": False,
         }
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        kwargs.update(hidden_process_kwargs())
         try:
             completed = subprocess.run(command, **kwargs)
             duration = float(completed.stdout.strip()) if completed.returncode == 0 else 0.0

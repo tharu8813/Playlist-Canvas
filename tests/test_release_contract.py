@@ -7,6 +7,7 @@ from app import __version__
 from app.services.ai_project_prompt_service import (
     AIProjectPromptService, AIProjectPromptSettings,
 )
+from app.utils.subprocess_utils import hidden_process_kwargs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,10 +52,52 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("app_icon.ico", specification)
         self.assertIn('name="Playlist Canvas"', specification)
 
+    def test_every_ffmpeg_subprocess_uses_hidden_window_options(self) -> None:
+        paths = (
+            "app/ffmpeg/managed_installer.py",
+            "app/renderer/ffmpeg_renderer.py",
+            "app/renderer/python_visualizer.py",
+            "app/services/playlist_service.py",
+            "app/dialogs/settings_dialog.py",
+        )
+        for relative_path in paths:
+            source = (ROOT / relative_path).read_text(encoding="utf-8")
+            process_calls = source.count("subprocess.run(") + source.count("subprocess.Popen(")
+            self.assertGreater(process_calls, 0, relative_path)
+            self.assertEqual(
+                source.count("hidden_process_kwargs()"), process_calls, relative_path
+            )
+
+    def test_windows_hidden_process_options_disable_console_windows(self) -> None:
+        options = hidden_process_kwargs()
+        self.assertIn("creationflags", options)
+        self.assertIn("startupinfo", options)
+        self.assertNotEqual(int(options["creationflags"]), 0)
+        startup_info = options["startupinfo"]
+        self.assertNotEqual(startup_info.dwFlags, 0)  # type: ignore[attr-defined]
+
+    def test_gitignore_keeps_runtime_ffmpeg_source_tracked(self) -> None:
+        ignore_file = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("/ffmpeg/", ignore_file.splitlines())
+        self.assertNotIn("ffmpeg/", ignore_file.splitlines())
+
     def test_release_icon_exists(self) -> None:
         icon = ROOT / "app" / "resources" / "app_icon.ico"
         self.assertTrue(icon.is_file())
         self.assertGreater(icon.stat().st_size, 1_000)
+
+    def test_gpl_v3_license_is_applied_to_repository_build_and_installer(self) -> None:
+        license_path = ROOT / "LICENSE.txt"
+        license_text = license_path.read_text(encoding="utf-8")
+        specification = (ROOT / "playlist_canvas.spec").read_text(encoding="utf-8")
+        installer = (ROOT / "setup.iss").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("GNU GENERAL PUBLIC LICENSE", license_text)
+        self.assertIn("Version 3, 29 June 2007", license_text)
+        self.assertIn('project_root / "LICENSE.txt"', specification)
+        self.assertIn('#define LicenseFilePath "LICENSE.txt"', installer)
+        self.assertIn('Source: "LICENSE.txt"; DestDir: "{app}"', installer)
+        self.assertIn("GNU General Public License v3.0", readme)
 
     def test_release_version_is_semantic(self) -> None:
         parts = __version__.split(".")

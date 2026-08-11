@@ -12,7 +12,10 @@ analysis = Analysis(
     binaries=[],
     # FFmpeg is deliberately not bundled. The installed application downloads
     # and checksum-verifies its own per-user copy on first use.
-    datas=[(str(project_root / "app" / "resources" / "app_icon.ico"), "app/resources")],
+    datas=[
+        (str(project_root / "app" / "resources" / "app_icon.ico"), "app/resources"),
+        (str(project_root / "LICENSE.txt"), "."),
+    ],
     hiddenimports=["PySide6.QtSvg", "PySide6.QtMultimedia", "PySide6.QtOpenGLWidgets"],
     hookspath=[],
     hooksconfig={},

@@ -14,9 +14,10 @@ venv/
 # PyInstaller output
 build/
 dist/
+output-setup/
 
 # Local FFmpeg development copy
-ffmpeg/
+/ffmpeg/
 
 # Playlist Canvas user and generated files
 .playlist.autosave.json
@@ -37,4 +38,3 @@ ffmpeg/
 .DS_Store
 Thumbs.db
 desktop.ini
-

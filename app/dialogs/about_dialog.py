@@ -36,6 +36,10 @@ class AboutDialog(QDialog):
         self.translator = translator
         self.ffmpeg_path = ffmpeg_path
         self.log_directory = log_directory
+        resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+        self.license_path = resource_root / "LICENSE.txt"
+        if not self.license_path.is_file():
+            self.license_path = Path(sys.executable).resolve().parent / "LICENSE.txt"
         self.setObjectName("aboutDialog")
         self.setMinimumSize(620, 520)
         self.resize(660, 560)
@@ -98,12 +102,15 @@ class AboutDialog(QDialog):
         self.copy_button.clicked.connect(self._copy_diagnostics)
         self.open_logs_button = QPushButton()
         self.open_logs_button.clicked.connect(self._open_logs)
+        self.open_license_button = QPushButton()
+        self.open_license_button.clicked.connect(self._open_license)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self.buttons.rejected.connect(self.reject)
         self.buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
         action_row = QHBoxLayout()
         action_row.addWidget(self.copy_button)
         action_row.addWidget(self.open_logs_button)
+        action_row.addWidget(self.open_license_button)
         action_row.addStretch()
         action_row.addWidget(self.buttons)
 
@@ -156,6 +163,19 @@ class AboutDialog(QDialog):
                 "로그 폴더를 열 수 없습니다." if korean else "Could not open the log folder.",
             )
 
+    def _open_license(self) -> None:
+        """Open the bundled GPL v3 text in the user's default text viewer."""
+        korean = self.translator.language is Language.KOREAN
+        if not self.license_path.is_file() or not QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(self.license_path))
+        ):
+            QMessageBox.warning(
+                self,
+                "라이선스 오류" if korean else "License error",
+                "GNU GPL v3 라이선스 파일을 열 수 없습니다."
+                if korean else "Could not open the GNU GPL v3 license file.",
+            )
+
     def retranslate(self) -> None:
         korean = self.translator.language is Language.KOREAN
         self.setWindowTitle("프로그램 정보" if korean else "About Playlist Canvas")
@@ -176,14 +196,15 @@ class AboutDialog(QDialog):
             ("설정되지 않음" if korean else "Not configured")
         )
         self.notice_label.setText(
-            "FFmpeg는 애플리케이션에 포함되지 않으며, 설정에서 사용자가 별도로 내려받을 수 있습니다. "
-            "자동 설치본은 BtbN FFmpeg GPL 배포본을 SHA-256으로 검증합니다."
+            "Playlist Canvas는 GNU GPL v3에 따라 배포되는 자유 소프트웨어이며 어떠한 보증도 없이 제공됩니다. "
+            "FFmpeg는 앱에 포함되지 않으며, 자동 설치본은 BtbN FFmpeg GPL 배포본을 SHA-256으로 검증합니다."
             if korean else
-            "FFmpeg is not bundled with the application and can be downloaded separately in Settings. "
-            "Managed installs use the SHA-256-verified BtbN FFmpeg GPL build."
+            "Playlist Canvas is free software distributed under GNU GPL v3, without any warranty. "
+            "FFmpeg is not bundled; managed installs use the SHA-256-verified BtbN FFmpeg GPL build."
         )
         self.copy_button.setText("진단 정보 복사" if korean else "Copy diagnostics")
         self.open_logs_button.setText("로그 폴더 열기" if korean else "Open log folder")
+        self.open_license_button.setText("GNU GPL v3 보기" if korean else "View GNU GPL v3")
         self.buttons.button(QDialogButtonBox.StandardButton.Close).setText(
             "닫기" if korean else "Close"
         )

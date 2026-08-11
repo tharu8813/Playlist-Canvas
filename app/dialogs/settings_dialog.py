@@ -37,6 +37,7 @@ from app.services.app_settings_service import (
 )
 from app.services.theme_service import Theme
 from app.utils.i18n import Language, Translator
+from app.utils.subprocess_utils import hidden_process_kwargs
 
 
 class SettingsDialog(QDialog):
@@ -290,7 +291,8 @@ class SettingsDialog(QDialog):
             return
         try:
             completed = subprocess.run(
-                [str(path), "-version"], capture_output=True, text=True, timeout=10, check=False
+                [str(path), "-version"], capture_output=True, text=True, timeout=10, check=False,
+                **hidden_process_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             self._show_test_result(False, str(error))
@@ -306,6 +308,7 @@ class SettingsDialog(QDialog):
                 text=True,
                 timeout=10,
                 check=False,
+                **hidden_process_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             self._show_test_result(False, str(error))

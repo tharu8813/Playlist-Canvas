@@ -15,6 +15,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 
 from app.utils.level_meter_painter import paint_level_meter
 from app.utils.particle_painter import paint_particles
+from app.utils.subprocess_utils import hidden_process_kwargs
 
 
 class PythonVisualizerError(RuntimeError):
@@ -114,7 +115,10 @@ class PythonVisualizerRenderer:
             "-vn", "-ac", str(channels), "-ar", str(self.sample_rate), "-f", "s16le", "-",
         ]
         try:
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                **hidden_process_kwargs(),
+            )
         except OSError as error:
             raise PythonVisualizerError(f"Could not start FFmpeg audio decoding: {error}") from error
         raw = bytearray()
@@ -187,7 +191,9 @@ class PythonVisualizerRenderer:
             "-ss", f"{max(0.0, seconds):.3f}", "-t", "0.18", "-i", str(audio_path),
             "-vn", "-ac", "1", "-ar", str(self.sample_rate), "-f", "s16le", "-",
         ]
-        completed = subprocess.run(command, capture_output=True, check=False)
+        completed = subprocess.run(
+            command, capture_output=True, check=False, **hidden_process_kwargs()
+        )
         if completed.returncode != 0 or not completed.stdout:
             return np.full(max(4, bands), 0.08, dtype=np.float32)
         samples = np.frombuffer(completed.stdout, dtype="<i2").astype(np.float32) / 32768.0
@@ -280,7 +286,10 @@ class PythonVisualizerRenderer:
             "-framerate", str(fps), "-i", "-", "-an", "-c:v", "qtrle", "-pix_fmt", "argb", str(path),
         ]
         try:
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(
+                command, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+                **hidden_process_kwargs(),
+            )
         except OSError as error:
             raise PythonVisualizerError(f"Could not start Python visualizer encoding: {error}") from error
         assert process.stdin is not None

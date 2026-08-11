@@ -17,6 +17,7 @@ from PySide6.QtGui import QImage
 
 from app.models.playlist import PlaylistTrack
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
+from app.utils.subprocess_utils import hidden_process_kwargs
 
 
 class FFmpegNotFoundError(RuntimeError):
@@ -490,6 +491,7 @@ class FFmpegRenderer:
                 text=True,
                 timeout=10,
                 check=False,
+                **hidden_process_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             raise RenderError("Could not inspect the available FFmpeg encoders.") from error
@@ -620,6 +622,7 @@ class FFmpegRenderer:
             process = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 encoding="utf-8", errors="replace",
+                **hidden_process_kwargs(),
             )
         except OSError as error:
             raise RenderError(f"Could not start FFmpeg: {error}") from error

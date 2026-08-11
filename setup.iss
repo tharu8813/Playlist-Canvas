@@ -18,7 +18,7 @@
 ; 선택적 설정 (필요시 수정)
 #define SourcePath "dist\Playlist Canvas"
 #define SetupIconPath "app\resources\app_icon.ico"
-#define LicenseFilePath ""  ; 라이센스 파일 경로 (예: "license.txt")
+#define LicenseFilePath "LICENSE.txt"
 #define ReadmeFilePath ""   ; Readme 파일 경로 (예: "readme.txt")
 
 ; ============================================================================
@@ -82,6 +82,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#SourcePath}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb,*.log,*.tmp"
+Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
