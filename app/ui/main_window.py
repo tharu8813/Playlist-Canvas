@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 import json
 import logging
@@ -3968,6 +3969,11 @@ class MainWindow(QMainWindow):
             application.setPalette(palette)
             application.setProperty("playlistCanvasEffectiveTheme", effective_name)
 
+        bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+
+        spin_up_path = (bundle_root / "assets" / "icons" / "spin_up.svg").as_posix()
+        spin_down_path = (bundle_root / "assets" / "icons" / "spin_down.svg").as_posix()
+        
         style_sheet = (
             f"""
             QMainWindow {{ background: {colors['window']}; color: {colors['text']}; }}
@@ -4041,8 +4047,8 @@ class MainWindow(QMainWindow):
             QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid #1685D1; }}
             QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; width: 24px; height: 15px; margin: 0px; background: {colors['button']}; border-left: 1px solid {colors['border']}; border-bottom: 1px solid {colors['border']}; border-top-right-radius: 5px; }}
             QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; width: 24px; height: 15px; margin: 0px; background: {colors['button']}; border-left: 1px solid {colors['border']}; border-bottom-right-radius: 5px; }}
-            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url("assets/icons/spin_up.svg"); width: 9px; height: 6px; }}
-            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url("assets/icons/spin_down.svg"); width: 9px; height: 6px; }}
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url("{spin_up_path}"); width: 9px; height: 6px; }}
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url("{spin_down_path}"); width: 9px; height: 6px; }}
             QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{ background: {colors['hover']}; }}
             QSpinBox::up-button:pressed, QSpinBox::down-button:pressed, QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed {{ background: #1685D1; }}
             QCheckBox, QLabel {{ color: {colors['text']}; padding: 3px; }}
