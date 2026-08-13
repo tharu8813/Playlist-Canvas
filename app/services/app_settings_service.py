@@ -48,10 +48,16 @@ class AppSettings:
     audio_bitrate: str = "192k"
     smooth_scrolling: bool = True
     smooth_scroll_duration_ms: int = 180
+    # Per-export dimensions derived from the active project ratio. They are not
+    # persisted as app-wide defaults because every project can have a different ratio.
+    render_width: int = 0
+    render_height: int = 0
 
     @property
     def resolution(self) -> tuple[int, int]:
         """Return the validated pixel dimensions for the selected resolution."""
+        if self.render_width > 0 and self.render_height > 0:
+            return self.render_width, self.render_height
         return RESOLUTIONS.get(self.resolution_name, RESOLUTIONS["1920 × 1080 (Full HD)"])
 
     def render_settings(self) -> RenderSettings:

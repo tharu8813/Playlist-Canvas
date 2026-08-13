@@ -73,6 +73,7 @@ def main() -> int:
     if not window.show_startup_dialog():
         window.close()
         return 0
+    window.schedule_automatic_update_check()
     return application.exec()
 
 

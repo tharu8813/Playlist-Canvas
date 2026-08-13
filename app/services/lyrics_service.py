@@ -16,6 +16,67 @@ class LyricsService:
     _lrc_time = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
     _srt_time = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)")
 
+    @staticmethod
+    def decode_line_breaks(value: object) -> str:
+        """Interpret the two LRC characters ``\\n`` as an in-app line break."""
+        return str(value).replace("\\n", "\n")
+
+    @staticmethod
+    def encode_line_breaks(value: object) -> str:
+        """Store in-app line breaks as the two literal LRC characters ``\\n``."""
+        normalized = str(value).replace("\r\n", "\n").replace("\r", "\n")
+        return normalized.replace("\n", "\\n")
+
+    @staticmethod
+    def lrc_timestamp(seconds: float) -> str:
+        """Format seconds as a conventional hundredth-resolution LRC timestamp."""
+        total_hundredths = max(0, round(float(seconds) * 100))
+        minutes, remainder = divmod(total_hundredths, 6_000)
+        whole_seconds, hundredths = divmod(remainder, 100)
+        return f"{minutes:02d}:{whole_seconds:02d}.{hundredths:02d}"
+
+    @classmethod
+    def format_lrc(
+        cls, cues: list[dict[str, object]], *, title: str = "",
+        artist: str = "", creator: str = "Playlist Canvas",
+    ) -> str:
+        """Serialize timed lyric cues into a UTF-8 LRC document."""
+        lines: list[str] = []
+        for tag, value in (("ti", title), ("ar", artist), ("by", creator)):
+            cleaned = str(value).replace("\r", " ").replace("\n", " ").strip()
+            if cleaned:
+                lines.append(f"[{tag}:{cleaned}]")
+        if lines:
+            lines.append("")
+        ordered = sorted(
+            cues, key=lambda cue: (float(cue.get("start", 0.0)), str(cue.get("text", "")))
+        )
+        for cue in ordered:
+            text = cls.encode_line_breaks(cue.get("text", "")).strip()
+            lines.append(f"[{cls.lrc_timestamp(float(cue.get('start', 0.0)))}]{text}")
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    @classmethod
+    def save_lrc(
+        cls, path: str | Path, cues: list[dict[str, object]], *,
+        title: str = "", artist: str = "",
+    ) -> Path:
+        """Write a generated LRC file atomically using UTF-8."""
+        target = Path(path).expanduser()
+        if target.suffix.lower() != ".lrc":
+            target = target.with_suffix(".lrc")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.tmp")
+            temporary.write_text(
+                cls.format_lrc(cues, title=title, artist=artist),
+                encoding="utf-8",
+            )
+            temporary.replace(target)
+            return target.resolve()
+        except OSError as error:
+            raise LyricsError(f"Could not save LRC file: {error}") from error
+
     @classmethod
     def load(cls, path: str | Path) -> list[dict[str, float | str]]:
         lyric_path = Path(path)
@@ -34,7 +95,7 @@ class LyricsService:
     def current_text(cls, cues: list[dict[str, object]], elapsed: float) -> str:
         """Return the cue active at elapsed seconds, or an empty string."""
         cue = cls.current_cue(cues, elapsed)
-        return str(cue.get("text", "")) if cue else ""
+        return cls.decode_line_breaks(cue.get("text", "")) if cue else ""
 
     @classmethod
     def current_cue(cls, cues: list[dict[str, object]], elapsed: float) -> dict[str, object] | None:
@@ -99,7 +160,7 @@ class LyricsService:
     def _parse_lrc(cls, content: str) -> list[dict[str, float | str]]:
         cues: list[dict[str, float | str]] = []
         for line in content.splitlines():
-            text = cls._lrc_time.sub("", line).strip()
+            text = cls.decode_line_breaks(cls._lrc_time.sub("", line).strip())
             for minute, second in cls._lrc_time.findall(line):
                 cues.append({"start": int(minute) * 60 + float(second), "end": 0.0, "text": text})
         cues.sort(key=lambda cue: float(cue["start"]))

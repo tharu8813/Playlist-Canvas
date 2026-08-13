@@ -117,6 +117,7 @@ class Source:
     subtitle_previous_opacity: float = 0.34
     subtitle_previous_blur: float = 1.5
     subtitle_current_line: int = -1
+    subtitle_current_line_count: int = 1
     subtitle_scroll_offset: float = 0.0
     subtitle_timing_offset: float = 0.0
     track_list_count: int = 5
@@ -172,15 +173,34 @@ class Source:
     particle_seed: int = 17
     animation_in: str = "none"
     animation_out: str = "none"
+    # Kept for loading projects and presets created before entrance/exit timing
+    # was split. New code should use the two phase-specific values below.
     animation_duration: float = 0.45
+    animation_in_duration: float = 0.45
+    animation_out_duration: float = 0.45
     timeline_start: float = 0.0
     timeline_duration: float = 0.0
     id: str = field(default_factory=lambda: str(uuid4()))
+
+    def __post_init__(self) -> None:
+        """Honor the former single-duration constructor argument."""
+        if (
+            self.animation_duration != 0.45
+            and self.animation_in_duration == 0.45
+            and self.animation_out_duration == 0.45
+        ):
+            self.animation_in_duration = self.animation_duration
+            self.animation_out_duration = self.animation_duration
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the model to JSON-compatible data."""
         result = asdict(self)
         result["source_type"] = self.source_type.value
+        # Older Playlist Canvas versions only understand one duration. The
+        # longer phase is the least surprising compatibility fallback.
+        result["animation_duration"] = max(
+            self.animation_in_duration, self.animation_out_duration,
+        )
         return result
 
     @classmethod
@@ -190,6 +210,9 @@ class Source:
             raise ValueError("Project sources must be objects.")
         source_data = data.copy()
         source_data["source_type"] = SourceType(source_data["source_type"])
+        legacy_animation_duration = source_data.get("animation_duration", 0.45)
+        source_data.setdefault("animation_in_duration", legacy_animation_duration)
+        source_data.setdefault("animation_out_duration", legacy_animation_duration)
         source_data["shadow"] = Shadow(**source_data.get("shadow", {}))
         source_data["gradient"] = Gradient(**source_data.get("gradient", {}))
         source = cls(**source_data)

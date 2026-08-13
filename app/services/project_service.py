@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 from tempfile import NamedTemporaryFile, gettempdir
 import time
@@ -39,6 +40,28 @@ class ProjectService:
     PACKAGE_SUFFIX = ".pvsproj"
     MANIFEST_NAME = "project.json"
     THUMBNAIL_NAME = "thumbnail.png"
+    _ASSET_HASH_PREFIX = re.compile(r"^(?:[0-9a-fA-F]{12}_)+")
+    _MAX_ASSET_BASENAME_LENGTH = 120
+
+    @classmethod
+    def _safe_asset_basename(cls, raw_name: str) -> str:
+        """Return a stable Windows-safe basename without accumulated save hashes."""
+        name = cls._ASSET_HASH_PREFIX.sub("", Path(raw_name).name)
+        safe_name = "".join(
+            char if char.isalnum() or char in "._- " else "_"
+            for char in name
+        ).rstrip(" .")
+        if not safe_name:
+            safe_name = "asset"
+        suffix = Path(safe_name).suffix
+        stem = safe_name[:-len(suffix)] if suffix else safe_name
+        available = max(1, cls._MAX_ASSET_BASENAME_LENGTH - len(suffix))
+        return f"{stem[:available].rstrip(' .') or 'asset'}{suffix}"
+
+    @classmethod
+    def _asset_archive_path(cls, identity: str, raw_name: str) -> str:
+        digest = sha256(identity.casefold().encode("utf-8")).hexdigest()[:12]
+        return f"assets/{digest}_{cls._safe_asset_basename(raw_name)}"
 
     @classmethod
     def save(
@@ -128,12 +151,9 @@ class ProjectService:
                 return raw_path
             resolved = source_path.resolve()
             if resolved not in assets:
-                digest = sha256(str(resolved).casefold().encode("utf-8")).hexdigest()[:12]
-                safe_name = "".join(
-                    char if char.isalnum() or char in "._- " else "_"
-                    for char in resolved.name
+                assets[resolved] = cls._asset_archive_path(
+                    str(resolved), resolved.name,
                 )
-                assets[resolved] = f"assets/{digest}_{safe_name}"
             return assets[resolved]
 
         if packaged.settings.content_mode == "embed":
@@ -194,16 +214,20 @@ class ProjectService:
             if required_bytes > max(0, shutil.disk_usage(cache_root).free - 512 * 1024 * 1024):
                 raise OSError("Not enough temporary disk space to open this project safely.")
             data = json.loads(archive.read(cls.MANIFEST_NAME).decode("utf-8"))
+            extracted_assets: dict[str, Path] = {}
             for info in archive.infolist():
                 parts = PurePosixPath(info.filename).parts
                 if info.is_dir() or not parts or parts[0] != "assets":
                     continue
                 if any(part in {"", ".", ".."} for part in parts):
                     raise ValueError("Unsafe asset path in project package.")
-                destination = cache_root.joinpath(*parts)
+                archive_path = PurePosixPath(info.filename).as_posix()
+                local_path = cls._asset_archive_path(archive_path, parts[-1])
+                destination = cache_root.joinpath(*PurePosixPath(local_path).parts)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(info, "r") as source, destination.open("wb") as output:
                     shutil.copyfileobj(source, output)
+                extracted_assets[archive_path] = destination
             thumbnail_cache = cache_root / cls.THUMBNAIL_NAME
             if cls.THUMBNAIL_NAME in archive.namelist():
                 if archive.getinfo(cls.THUMBNAIL_NAME).file_size > 32 * 1024 * 1024:
@@ -216,7 +240,10 @@ class ProjectService:
                 return ""
             parts = PurePosixPath(raw_path).parts
             if parts and parts[0] == "assets":
-                candidate = cache_root.joinpath(*parts)
+                archive_path = PurePosixPath(raw_path).as_posix()
+                candidate = extracted_assets.get(
+                    archive_path, cache_root.joinpath(*parts),
+                )
                 return str(candidate.resolve())
             return raw_path
 

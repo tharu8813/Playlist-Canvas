@@ -77,5 +77,6 @@ class PlaylistTrack:
                     )
             if float(cue["end"]) < float(cue["start"]):
                 raise ValueError(f"Track '{track.title}' lyric cue ends before it starts.")
+            cue["text"] = str(cue.get("text", "")).replace("\\n", "\n")
         track.lyrics.sort(key=lambda cue: (float(cue["start"]), float(cue["end"])))
         return track

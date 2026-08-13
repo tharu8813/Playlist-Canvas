@@ -37,14 +37,15 @@ class ExportSettingsDialog(QDialog):
 
     def __init__(self, settings: AppSettings, track_count: int, duration_seconds: float,
                  translator: Translator, default_output_path: str | Path,
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None,
+                 canvas_size: tuple[int, int] | None = None) -> None:
         super().__init__(parent)
         self.translator = translator
         self._base_settings = settings
+        self.canvas_size = canvas_size
         self.setMinimumWidth(480)
         self.resolution_combo = QComboBox()
-        self.resolution_combo.addItems(RESOLUTIONS)
-        self.resolution_combo.setCurrentText(settings.resolution_name)
+        self._populate_resolutions(settings)
         self.fps_combo = QComboBox()
         self.fps_combo.addItems(["24", "25", "30", "50", "60"])
         self.fps_combo.setCurrentText(str(settings.fps))
@@ -111,16 +112,75 @@ class ExportSettingsDialog(QDialog):
     @property
     def app_settings(self) -> AppSettings:
         """Return this export's settings while retaining app-wide path defaults."""
+        resolution_data = self.resolution_combo.currentData()
+        if not isinstance(resolution_data, tuple) or len(resolution_data) != 3:
+            width, height = self._base_settings.resolution
+            base_name = self._base_settings.resolution_name
+        else:
+            width, height, base_name = resolution_data
         return AppSettings(
             ffmpeg_path=self._base_settings.ffmpeg_path,
             output_directory=str(self.output_path.parent),
-            resolution_name=self.resolution_combo.currentText(),
+            resolution_name=str(base_name),
             fps=int(self.fps_combo.currentText()),
             video_codec=str(self.codec_combo.currentData()),
             crf=self.crf_spin.value(),
             preset=self.preset_combo.currentText(),
             audio_bitrate=self.audio_bitrate_combo.currentText(),
+            smooth_scrolling=self._base_settings.smooth_scrolling,
+            smooth_scroll_duration_ms=self._base_settings.smooth_scroll_duration_ms,
+            render_width=int(width),
+            render_height=int(height),
         )
+
+    def _populate_resolutions(self, settings: AppSettings) -> None:
+        """Offer quality tiers that always retain the active project's ratio."""
+        if self.canvas_size is None:
+            for name, size in RESOLUTIONS.items():
+                self.resolution_combo.addItem(name, (*size, name))
+            index = self.resolution_combo.findData(
+                (*settings.resolution, settings.resolution_name)
+            )
+            self.resolution_combo.setCurrentIndex(max(0, index))
+            return
+        canvas_width, canvas_height = self.canvas_size
+        ratio = canvas_width / max(1, canvas_height)
+
+        def even(value: float) -> int:
+            return max(2, round(value / 2.0) * 2)
+
+        selected_index = 0
+        for index, (base_name, base_size) in enumerate(RESOLUTIONS.items()):
+            long_edge = max(base_size)
+            if canvas_width >= canvas_height:
+                width = long_edge
+                height = even(long_edge / max(ratio, 1e-9))
+            else:
+                height = long_edge
+                width = even(long_edge * ratio)
+            quality = base_name.partition("(")[2].removesuffix(")")
+            label = f"{width} × {height} (프로젝트 비율 · {quality})"
+            if self.translator.language is not Language.KOREAN:
+                label = f"{width} × {height} (Project ratio · {quality})"
+            self.resolution_combo.addItem(label, (width, height, base_name))
+            if base_name == settings.resolution_name:
+                selected_index = index
+        exact_width = even(canvas_width)
+        exact_height = even(canvas_height)
+        existing = {
+            (self.resolution_combo.itemData(index)[0], self.resolution_combo.itemData(index)[1])
+            for index in range(self.resolution_combo.count())
+        }
+        if (exact_width, exact_height) not in existing:
+            label = (
+                f"{exact_width} × {exact_height} (프로젝트 캔버스)"
+                if self.translator.language is Language.KOREAN else
+                f"{exact_width} × {exact_height} (Project canvas)"
+            )
+            self.resolution_combo.addItem(
+                label, (exact_width, exact_height, settings.resolution_name)
+            )
+        self.resolution_combo.setCurrentIndex(selected_index)
 
     @property
     def save_as_default(self) -> bool:
@@ -216,10 +276,18 @@ class ExportSettingsDialog(QDialog):
         duration = self._format_duration(self.duration_seconds)
         self.summary_label.setText(
             f"내보낼 곡 {self.track_count}개 · 총 재생 시간 {duration}\n"
-            "품질과 출력 위치를 확인한 후 내보내기를 시작하세요."
+            + (
+                f"프로젝트 캔버스 {self.canvas_size[0]} × {self.canvas_size[1]}의 화면 비율을 유지합니다.\n"
+                if self.canvas_size is not None else ""
+            )
+            + "품질과 출력 위치를 확인한 후 내보내기를 시작하세요."
             if korean else
             f"{self.track_count} track(s) · total duration {duration}\n"
-            "Review the quality and output destination, then start the export."
+            + (
+                f"The {self.canvas_size[0]} × {self.canvas_size[1]} project canvas ratio will be preserved.\n"
+                if self.canvas_size is not None else ""
+            )
+            + "Review the quality and output destination, then start the export."
         )
 
     @staticmethod

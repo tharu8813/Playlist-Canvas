@@ -117,10 +117,13 @@ class ReleaseContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         packaging = (ROOT / "PACKAGING.md").read_text(encoding="utf-8")
+        installer = (ROOT / "setup.iss").read_text(encoding="utf-8")
         lock_file = (ROOT / "requirements-lock.txt").read_text(encoding="utf-8")
         self.assertIn(f"filevers=({parts}, 0)", version_info)
         self.assertIn(f"prodvers=({parts}, 0)", version_info)
         self.assertIn('StringStruct("FileVersion", "' + __version__ + '")', version_info)
+        self.assertIn(f'#define MyAppVersion "{__version__}"', installer)
+        self.assertIn(f'#define MyAppFileVersion "{__version__}.0"', installer)
         self.assertIn("Python 3.12", packaging)
         self.assertIn("python312.dll", packaging)
         self.assertIn("Python 3.12", lock_file.splitlines()[0])

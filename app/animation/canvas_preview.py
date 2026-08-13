@@ -39,16 +39,25 @@ class CanvasAnimationPreviewController(QObject):
         item._suppress_position_sync = True
         self._set_selected_without_signal(item, False)
 
-        duration = max(100, min(3000, round(source.animation_duration * 1000)))
+        entrance_duration = max(
+            100, min(3000, round(source.animation_in_duration * 1000)),
+        )
+        exit_duration = max(
+            100, min(3000, round(source.animation_out_duration * 1000)),
+        )
         sequence = QSequentialAnimationGroup(self)
         if source.animation_in != "none":
             sequence.addAnimation(
-                self._phase(item, source, source.animation_in, duration, entering=True)
+                self._phase(
+                    item, source, source.animation_in, entrance_duration, entering=True,
+                )
             )
         if source.animation_out != "none":
             sequence.addAnimation(QPauseAnimation(320))
             sequence.addAnimation(
-                self._phase(item, source, source.animation_out, duration, entering=False)
+                self._phase(
+                    item, source, source.animation_out, exit_duration, entering=False,
+                )
             )
         sequence.finished.connect(self._restore)
         self._group = sequence

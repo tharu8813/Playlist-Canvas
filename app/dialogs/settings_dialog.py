@@ -5,7 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QUrl, Qt, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -36,7 +37,8 @@ from app.services.app_settings_service import (
     AppSettings,
 )
 from app.services.theme_service import Theme
-from app.utils.i18n import Language, Translator
+from app.services.language_pack_service import LanguagePackError
+from app.utils.i18n import Language, LanguageSelection, Translator
 from app.utils.subprocess_utils import hidden_process_kwargs
 
 
@@ -45,7 +47,7 @@ class SettingsDialog(QDialog):
 
     download_requested = Signal()
 
-    def __init__(self, settings: AppSettings, language: Language, theme: Theme,
+    def __init__(self, settings: AppSettings, language: LanguageSelection, theme: Theme,
                  translator: Translator, parent: object | None = None) -> None:
         super().__init__(parent)
         self.translator = translator
@@ -113,9 +115,29 @@ class SettingsDialog(QDialog):
         self.theme_combo.addItem("", Theme.AUTO)
         self.theme_combo.setCurrentIndex(self.theme_combo.findData(theme))
         self.language_combo = QComboBox()
-        self.language_combo.addItem("한국어", Language.KOREAN)
-        self.language_combo.addItem("English", Language.ENGLISH)
-        self.language_combo.setCurrentIndex(self.language_combo.findData(language))
+        self._populate_language_combo(language.value)
+        self.language_pack_status = QLabel()
+        self.language_pack_status.setObjectName("mutedLabel")
+        self.language_pack_status.setWordWrap(True)
+        self.language_pack_import_button = QPushButton()
+        self.language_pack_remove_button = QPushButton()
+        self.language_pack_folder_button = QPushButton()
+        self.language_pack_reload_button = QPushButton()
+        language_pack_controls = QWidget()
+        language_pack_layout = QHBoxLayout(language_pack_controls)
+        language_pack_layout.setContentsMargins(0, 0, 0, 0)
+        language_pack_layout.setSpacing(6)
+        language_pack_layout.addWidget(self.language_pack_import_button)
+        language_pack_layout.addWidget(self.language_pack_remove_button)
+        language_pack_layout.addWidget(self.language_pack_folder_button)
+        language_pack_layout.addWidget(self.language_pack_reload_button)
+        language_pack_layout.addStretch(1)
+        language_pack_panel = QWidget()
+        language_pack_panel_layout = QVBoxLayout(language_pack_panel)
+        language_pack_panel_layout.setContentsMargins(0, 0, 0, 0)
+        language_pack_panel_layout.setSpacing(5)
+        language_pack_panel_layout.addWidget(language_pack_controls)
+        language_pack_panel_layout.addWidget(self.language_pack_status)
         self.smooth_scroll_check = QCheckBox()
         self.smooth_scroll_check.setChecked(settings.smooth_scrolling)
         self.smooth_scroll_duration_slider = QSlider(Qt.Orientation.Horizontal)
@@ -149,6 +171,11 @@ class SettingsDialog(QDialog):
         self.ffmpeg_download_button.clicked.connect(self.download_requested.emit)
         self.output_browse_button.clicked.connect(self._browse_output)
         self.ffmpeg_edit.textChanged.connect(self._refresh_ffmpeg_status)
+        self.language_combo.currentIndexChanged.connect(self._update_language_pack_ui)
+        self.language_pack_import_button.clicked.connect(self._import_language_pack)
+        self.language_pack_remove_button.clicked.connect(self._remove_language_pack)
+        self.language_pack_folder_button.clicked.connect(self._open_language_pack_folder)
+        self.language_pack_reload_button.clicked.connect(self._reload_language_packs)
 
         ffmpeg_row = QHBoxLayout()
         ffmpeg_row.addWidget(self.ffmpeg_edit, 1)
@@ -197,10 +224,12 @@ class SettingsDialog(QDialog):
         app_form = QFormLayout(app_group)
         self.theme_label = QLabel()
         self.language_label = QLabel()
+        self.language_pack_label = QLabel()
         self.smooth_scroll_label = QLabel()
         self.smooth_scroll_speed_label = QLabel()
         app_form.addRow(self.theme_label, self.theme_combo)
         app_form.addRow(self.language_label, self.language_combo)
+        app_form.addRow(self.language_pack_label, language_pack_panel)
         app_form.addRow(self.smooth_scroll_label, self.smooth_scroll_check)
         app_form.addRow(self.smooth_scroll_speed_label, smooth_scroll_speed_row)
 
@@ -242,6 +271,7 @@ class SettingsDialog(QDialog):
         self.retranslate()
         self._update_smooth_scroll_ui()
         self._refresh_ffmpeg_status()
+        self._update_language_pack_ui()
 
     @property
     def app_settings(self) -> AppSettings:
@@ -265,9 +295,120 @@ class SettingsDialog(QDialog):
         return Theme(self.theme_combo.currentData())
 
     @property
-    def selected_language(self) -> Language:
+    def selected_language(self) -> Language | str:
         """Return the selected application language."""
-        return Language(self.language_combo.currentData())
+        return str(self.language_combo.currentData() or Language.ENGLISH.value)
+
+    def _populate_language_combo(self, selected_locale: str) -> None:
+        self.language_combo.blockSignals(True)
+        self.language_combo.clear()
+        for option in self.translator.available_languages():
+            self.language_combo.addItem(option.display_name, option.locale)
+        index = self.language_combo.findData(selected_locale)
+        if index < 0:
+            index = self.language_combo.findData(Language.ENGLISH.value)
+        self.language_combo.setCurrentIndex(max(0, index))
+        self.language_combo.blockSignals(False)
+
+    def _import_language_pack(self) -> None:
+        korean = self.translator.language is Language.KOREAN
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "언어팩 가져오기" if korean else "Import language pack",
+            str(Path.home()),
+            "Playlist Canvas language pack (*.json);;JSON files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            pack = self.translator.pack_service.import_pack(Path(path))
+        except (LanguagePackError, OSError) as error:
+            QMessageBox.warning(
+                self,
+                "언어팩 오류" if korean else "Language pack error",
+                str(error),
+            )
+            return
+        self.translator.refresh_packs()
+        self._populate_language_combo(pack.locale)
+        self._update_language_pack_ui()
+        QMessageBox.information(
+            self,
+            "언어팩 설치 완료" if korean else "Language pack installed",
+            f"{pack.native_name} ({pack.locale})",
+        )
+
+    def _remove_language_pack(self) -> None:
+        locale = str(self.language_combo.currentData() or "")
+        pack = self.translator.pack_service.packs.get(locale)
+        if pack is None:
+            return
+        korean = self.translator.language is Language.KOREAN
+        response = QMessageBox.question(
+            self,
+            "언어팩 제거" if korean else "Remove language pack",
+            f"{pack.native_name} 언어팩을 제거할까요?"
+            if korean else f"Remove the {pack.native_name} language pack?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.translator.pack_service.remove_pack(locale)
+        except (LanguagePackError, OSError) as error:
+            QMessageBox.warning(
+                self,
+                "언어팩 오류" if korean else "Language pack error",
+                str(error),
+            )
+            return
+        self.translator.refresh_packs()
+        self._populate_language_combo(Language.ENGLISH.value)
+        self._update_language_pack_ui()
+
+    def _open_language_pack_folder(self) -> None:
+        korean = self.translator.language is Language.KOREAN
+        directory = self.translator.pack_service.directory
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            QMessageBox.warning(
+                self, "언어팩 폴더 오류" if korean else "Language pack folder error",
+                str(error),
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+            QMessageBox.warning(
+                self, "언어팩 폴더 오류" if korean else "Language pack folder error",
+                "언어팩 폴더를 열 수 없습니다."
+                if korean else "Could not open the language pack folder.",
+            )
+
+    def _reload_language_packs(self) -> None:
+        selected = str(self.language_combo.currentData() or Language.ENGLISH.value)
+        self.translator.refresh_packs()
+        self._populate_language_combo(selected)
+        self._update_language_pack_ui()
+
+    def _update_language_pack_ui(self, _index: int = -1) -> None:
+        locale = str(self.language_combo.currentData() or "")
+        pack = self.translator.pack_service.packs.get(locale)
+        korean = self.translator.language is Language.KOREAN
+        self.language_pack_remove_button.setEnabled(pack is not None)
+        if pack is not None:
+            self.language_pack_status.setText(
+                f"{pack.native_name} · {pack.locale} · v{pack.version} · {pack.author}"
+            )
+        else:
+            error_count = len(self.translator.pack_service.errors)
+            suffix = (
+                f" · 오류 파일 {error_count}개 무시됨" if korean and error_count else
+                f" · {error_count} invalid file(s) ignored" if error_count else ""
+            )
+            self.language_pack_status.setText(
+                ("기본 내장 언어" if korean else "Built-in language") + suffix
+            )
 
     def _browse_ffmpeg(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -446,6 +587,11 @@ class SettingsDialog(QDialog):
         )
         self.theme_label.setText("테마" if korean else "Theme")
         self.language_label.setText("언어" if korean else "Language")
+        self.language_pack_label.setText("외부 언어팩" if korean else "External language packs")
+        self.language_pack_import_button.setText("가져오기" if korean else "Import")
+        self.language_pack_remove_button.setText("제거" if korean else "Remove")
+        self.language_pack_folder_button.setText("폴더 열기" if korean else "Open folder")
+        self.language_pack_reload_button.setText("새로고침" if korean else "Reload")
         self.smooth_scroll_label.setText("스크롤 동작" if korean else "Scrolling")
         self.smooth_scroll_speed_label.setText(
             "부드러움" if korean else "Smoothness"
@@ -506,6 +652,7 @@ class SettingsDialog(QDialog):
             "취소" if korean else "Cancel"
         )
         self._refresh_ffmpeg_status()
+        self._update_language_pack_ui()
 
     def _ffmpeg_browse_title(self) -> str:
         return "FFmpeg 실행 파일 선택" if self.translator.language is Language.KOREAN else "Choose FFmpeg executable"

@@ -39,6 +39,7 @@ class PythonVisualizerRenderer:
         directory: Path,
         cancel_event: threading.Event,
         progress_callback: Callable[[float, str], None] | None = None,
+        track_windows: Sequence[tuple[float, float]] = (),
     ) -> list[Path]:
         """Create one alpha-preserving video layer for every configured source."""
         if not overlays:
@@ -83,7 +84,8 @@ class PythonVisualizerRenderer:
                 f"Preparing visualizer layer {index + 1}/{len(overlays)}",
             )
             self._encode_layer(path, overlay, source_levels, fps, cancel_event, progress_callback,
-                               index, len(overlays), stereo_levels, encoding_started_at)
+                               index, len(overlays), stereo_levels, encoding_started_at,
+                               track_windows)
             paths.append(path)
         self._report(progress_callback, 1.0, "Visualizer frames complete")
         return paths
@@ -276,6 +278,7 @@ class PythonVisualizerRenderer:
         overlay_count: int,
         stereo_levels: tuple[np.ndarray, np.ndarray] | None = None,
         encoding_started_at: float | None = None,
+        track_windows: Sequence[tuple[float, float]] = (),
     ) -> None:
         """Stream local RGBA frames into an alpha-capable MOV file."""
         width = max(8, int(getattr(overlay, "width")))
@@ -337,6 +340,14 @@ class PythonVisualizerRenderer:
                     channel_values=channel_values, image_buffer=frame_buffer,
                     frame_rate=fps, peak_values=peak_values,
                 )
+                animation = self._animation_state(
+                    frame_seconds, track_windows, overlay,
+                )
+                if animation is not None:
+                    style, progress, entering = animation
+                    frame_buffer = self._apply_animation(
+                        frame_buffer, style, progress, entering,
+                    )
             else:
                 image_format = QImage.Format.Format_RGBA8888
                 if (frame_buffer.width() != width or frame_buffer.height() != height
@@ -375,6 +386,86 @@ class PythonVisualizerRenderer:
         stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
         if process.wait() != 0:
             raise PythonVisualizerError(stderr.strip() or "Could not encode the Python visualizer layer.")
+
+    @staticmethod
+    def _animation_state(
+        seconds: float,
+        track_windows: Sequence[tuple[float, float]],
+        overlay: object,
+    ) -> tuple[str, float, bool] | None:
+        """Resolve one reactive source's per-track entrance or exit state."""
+        if not track_windows:
+            return None
+        animation_in = str(getattr(overlay, "animation_in", "none"))
+        animation_out = str(getattr(overlay, "animation_out", "none"))
+        in_duration = max(0.001, float(getattr(overlay, "animation_in_duration", 0.45)))
+        out_duration = max(0.001, float(getattr(overlay, "animation_out_duration", 0.45)))
+        for index, (start, duration) in enumerate(track_windows):
+            end = start + duration
+            if seconds < start:
+                if index == 0 and animation_in != "none":
+                    return animation_in, 0.0, True
+                if index > 0 and animation_out != "none":
+                    return animation_out, 1.0, False
+                return None
+            if seconds < end:
+                if animation_in != "none" and seconds < start + in_duration:
+                    return animation_in, min(1.0, (seconds - start) / in_duration), True
+                if animation_out != "none" and seconds >= end - out_duration:
+                    return animation_out, min(1.0, (seconds - (end - out_duration)) / out_duration), False
+                return None
+        if animation_out != "none":
+            return animation_out, 1.0, False
+        return None
+
+    @staticmethod
+    def _apply_animation(
+        image: QImage, style: str, raw_progress: float, entering: bool,
+    ) -> QImage:
+        """Apply Canvas-compatible opacity, slide, and zoom to a reactive layer."""
+        raw_progress = max(0.0, min(1.0, raw_progress))
+        if entering:
+            visible_progress = 1.0 - (1.0 - raw_progress) ** 3
+        else:
+            visible_progress = 1.0 - raw_progress ** 3
+        if visible_progress <= 0.0:
+            transparent = QImage(image.size(), QImage.Format.Format_RGBA8888)
+            transparent.fill(0)
+            return transparent
+        result = QImage(image.size(), QImage.Format.Format_RGBA8888)
+        result.fill(0)
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setOpacity(
+            visible_progress
+            if style in {"fade", "zoom"}
+            else 0.35 + 0.65 * visible_progress
+        )
+        width = float(image.width())
+        height = float(image.height())
+        if style == "zoom":
+            scale = 0.76 + 0.24 * visible_progress
+            target_width = width * scale
+            target_height = height * scale
+            target = QRectF(
+                (width - target_width) / 2.0,
+                (height - target_height) / 2.0,
+                target_width,
+                target_height,
+            )
+        else:
+            distance = min(180.0, max(72.0, max(width, height) * 0.22))
+            remaining = distance * (1.0 - visible_progress)
+            dx, dy = {
+                "slide_left": (-remaining, 0.0),
+                "slide_right": (remaining, 0.0),
+                "slide_up": (0.0, -remaining),
+                "slide_down": (0.0, remaining),
+            }.get(style, (0.0, 0.0))
+            target = QRectF(dx, dy, width, height)
+        painter.drawImage(target, image)
+        painter.end()
+        return result
 
     @staticmethod
     def _frame_progress_message(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from app import __version__
 from app.models.playlist import PlaylistTrack
 from app.models.project import CanvasSettings, ProjectDocument
 from app.models.source import Source, SourceType
@@ -22,6 +23,23 @@ class ProjectModelValidationTests(unittest.TestCase):
         self.assertFalse(restored.canvas.snap_enabled)
         self.assertEqual(restored.sources[0].text, "%title%")
         self.assertEqual(restored.playlist[0].lyrics_timing_offset_seconds, 0.35)
+        self.assertEqual(restored.app_version, __version__)
+
+    def test_legacy_project_without_app_version_remains_compatible(self) -> None:
+        payload = ProjectDocument().to_dict()
+        payload.pop("app_version")
+        restored = ProjectDocument.from_dict(payload)
+        self.assertEqual(restored.app_version, "")
+
+    def test_project_lyrics_decode_literal_lrc_line_breaks(self) -> None:
+        payload = ProjectDocument(
+            playlist=[PlaylistTrack(
+                "song.mp3", "Song", duration_seconds=10.0,
+                lyrics=[{"start": 1.0, "end": 4.0, "text": r"First\nSecond"}],
+            )]
+        ).to_dict()
+        restored = ProjectDocument.from_dict(payload)
+        self.assertEqual(restored.playlist[0].lyrics[0]["text"], "First\nSecond")
 
     def test_duplicate_source_ids_are_rejected(self) -> None:
         first = Source(SourceType.TEXT, "First")

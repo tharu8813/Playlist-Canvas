@@ -125,6 +125,10 @@ class VisualizerOverlay:
     z_index: float = 0.0
     timeline_start: float = 0.0
     timeline_duration: float = 0.0
+    animation_in: str = "none"
+    animation_out: str = "none"
+    animation_in_duration: float = 0.45
+    animation_out_duration: float = 0.45
 
 
 class FFmpegRenderer:
@@ -195,6 +199,7 @@ class FFmpegRenderer:
         if missing:
             raise RenderError(f"Audio file is missing: {missing[0]}")
         selected_settings = settings or RenderSettings()
+        self._validate_settings(selected_settings)
         self.ensure_encoder_available(selected_settings.video_codec)
         if cancel_event.is_set():
             raise RenderCancelledError("Rendering was cancelled.")
@@ -218,18 +223,28 @@ class FFmpegRenderer:
                     if not frame.save(str(frame_path), "PNG"):
                         raise RenderError("Could not create a temporary Canvas image.")
                 frame_paths.append(frame_path)
+            visual_sequence = (
+                list(zip(frame_paths, durations, strict=True))
+                if explicit_frames else self._visual_sequence(active_tracks, frame_paths)
+            )
+            total_duration = self._timeline_duration(active_tracks)
+            self._validate_visual_timeline(
+                visual_sequence, static_layers, total_duration, selected_settings.fps,
+            )
             segments = self._normalize_audio(
                 active_tracks, temporary, selected_settings, progress_callback, cancel_event
             )
-            self._insert_silence_for_gaps(
+            segment_durations = self._insert_silence_for_gaps(
                 active_tracks, segments, temporary, selected_settings, progress_callback, cancel_event
             )
             concat_path = temporary / "playlist.ffconcat"
-            self._write_concat_file(concat_path, segments)
+            self._write_concat_file(concat_path, segments, segment_durations)
             audio_path = temporary / "playlist_audio.m4a"
             self._report(progress_callback, "Combining audio", 0.62, "Concatenating normalized tracks")
             self._run([
-                "-f", "concat", "-safe", "0", "-i", str(concat_path), "-c", "copy",
+                "-f", "concat", "-safe", "0", "-i", str(concat_path),
+                "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                "-b:a", selected_settings.audio_bitrate,
                 "-movflags", "+faststart", str(audio_path),
             ], cancel_event=cancel_event)
             visualizer_paths: list[Path] = []
@@ -244,7 +259,7 @@ class FFmpegRenderer:
                 try:
                     visualizer_paths = PythonVisualizerRenderer(self.executable).render_layers(
                         audio_path, visualizers, selected_settings.fps, temporary, cancel_event,
-                        visualizer_progress,
+                        visualizer_progress, self._track_windows(active_tracks),
                     )
                 except PythonVisualizerError as error:
                     if cancel_event.is_set():
@@ -279,13 +294,8 @@ class FFmpegRenderer:
                     list(zip(layer_paths, [frame.duration_seconds for frame in layer.frames], strict=True)),
                 )
                 static_concat_paths.append((layer.z_index, layer_manifest))
-            visual_sequence = (
-                list(zip(frame_paths, durations, strict=True))
-                if explicit_frames else self._visual_sequence(active_tracks, frame_paths)
-            )
             video_concat_path = temporary / "video.ffconcat"
             self._write_visual_concat(video_concat_path, visual_sequence)
-            total_duration = self._timeline_duration(active_tracks)
 
             def encoding_progress(line: str) -> None:
                 seconds = self._parse_progress_seconds(line)
@@ -343,7 +353,13 @@ class FFmpegRenderer:
             self._run(video_arguments, progress_parser=encoding_progress, cancel_event=cancel_event)
             if cancel_event.is_set():
                 raise RenderCancelledError("Rendering was cancelled.")
-            temporary_video.replace(target)
+            try:
+                temporary_video.replace(target)
+            except OSError as error:
+                raise RenderError(
+                    "Could not replace the output video. Close any program using "
+                    f"'{target.name}', check the destination folder, and try again."
+                ) from error
         self._report(progress_callback, "Complete", 1.0, "Export completed")
         return RenderResult(target, len(active_tracks))
 
@@ -357,9 +373,9 @@ class FFmpegRenderer:
             requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
             start = max(cursor, requested)
             gap = max(0.0, start - cursor)
-            if gap > 0.01:
+            if gap > 0.001:
                 sequence.append((last_frame, gap))
-            sequence.append((frame_path, max(0.01, track.duration_seconds)))
+            sequence.append((frame_path, max(0.001, track.duration_seconds)))
             last_frame = frame_path
             cursor = start + track.duration_seconds
         return sequence
@@ -482,6 +498,50 @@ class FFmpegRenderer:
                     f"Frame {index} does not match the first canvas frame."
                 )
 
+    @staticmethod
+    def _validate_settings(settings: RenderSettings) -> None:
+        """Reject invalid encoder geometry before it can create a corrupt output."""
+        if settings.fps <= 0 or settings.fps > 240:
+            raise RenderError("The export frame rate must be between 1 and 240 FPS.")
+        if settings.output_width <= 0 or settings.output_height <= 0:
+            raise RenderError("The export resolution must be greater than zero.")
+        if settings.output_width % 2 or settings.output_height % 2:
+            raise RenderError(
+                "The export width and height must be even numbers for YUV video."
+            )
+        if not settings.video_codec.strip():
+            raise RenderError("Select a video encoder before exporting.")
+
+    @staticmethod
+    def _validate_visual_timeline(
+        visual_sequence: list[tuple[Path, float]],
+        static_layers: list[StaticOverlayLayer],
+        expected_duration: float,
+        fps: int,
+    ) -> None:
+        """Require every composited stream to cover the same playlist timeline."""
+        tolerance = max(0.002, 1.0 / max(1, fps) + 0.001)
+
+        def validate(label: str, durations: list[float]) -> None:
+            if not durations or any(duration <= 0.0 for duration in durations):
+                raise RenderError(f"{label} contains an invalid frame duration.")
+            actual = sum(durations)
+            if abs(actual - expected_duration) > tolerance:
+                raise RenderError(
+                    f"{label} is {actual:.3f}s long, but the playlist is "
+                    f"{expected_duration:.3f}s. Export was stopped to prevent "
+                    "misaligned video and audio."
+                )
+
+        validate("The prepared Canvas video", [duration for _path, duration in visual_sequence])
+        for index, layer in enumerate(static_layers, start=1):
+            if not layer.frames:
+                continue
+            validate(
+                f"Static overlay layer {index}",
+                [frame.duration_seconds for frame in layer.frames],
+            )
+
     def ensure_encoder_available(self, encoder: str) -> None:
         """Fail early when the active FFmpeg build lacks the selected encoder."""
         try:
@@ -547,18 +607,20 @@ class FFmpegRenderer:
                          settings: RenderSettings,
                          progress_callback: Callable[[str, float, str], None] | None,
                          cancel_event: threading.Event) -> list[Path]:
-        """Convert every source format to matching AAC segments for concat demuxing."""
+        """Normalize every track to an exact-duration lossless segment."""
         segments: list[Path] = []
         for index, track in enumerate(tracks):
             self._report(
                 progress_callback, "Preparing audio", 0.05 + 0.48 * index / len(tracks),
                 f"Normalizing {track.filename}",
             )
-            output = directory / f"track_{index:04d}.m4a"
+            output = directory / f"track_{index:04d}.nut"
+            duration = f"{track.duration_seconds:.6f}"
             self._run([
-                "-threads", "0", "-i", track.file_path, "-vn", "-map", "0:a:0?",
-                "-c:a", "aac", "-ar", "48000", "-ac", "2",
-                "-b:a", settings.audio_bitrate, "-y", str(output),
+                "-threads", "0", "-i", track.file_path, "-vn", "-map", "0:a:0",
+                "-af", f"apad=whole_dur={duration}", "-t", duration,
+                "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "nut",
+                "-y", str(output),
             ], cancel_event=cancel_event)
             segments.append(output)
         self._report(progress_callback, "Preparing audio", 0.53, "Audio normalization complete")
@@ -566,38 +628,53 @@ class FFmpegRenderer:
 
     def _insert_silence_for_gaps(self, tracks: list[PlaylistTrack], segments: list[Path],
                                  directory: Path, settings: RenderSettings,
-                                 progress_callback: Callable[[str, float, str], None],
-                                 cancel_event: threading.Event) -> None:
-        """Insert AAC silence segments for user-defined timeline gaps before concatenation."""
+                                 progress_callback: Callable[[str, float, str], None] | None,
+                                 cancel_event: threading.Event) -> list[float]:
+        """Insert lossless silence segments for user-defined timeline gaps."""
         if not any(track.start_time_seconds is not None for track in tracks):
-            return
+            return [track.duration_seconds for track in tracks]
         combined: list[Path] = []
+        combined_durations: list[float] = []
         cursor = 0.0
         for index, (track, segment) in enumerate(zip(tracks, segments, strict=True)):
             requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
             start = max(cursor, requested)
             gap = max(0.0, start - cursor)
-            if gap > 0.01:
-                silence = directory / f"silence_{index:04d}.m4a"
+            if gap > 0.001:
+                silence = directory / f"silence_{index:04d}.nut"
                 self._run([
-                    "-f", "lavfi", "-t", f"{gap:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
-                    "-c:a", "aac", "-b:a", settings.audio_bitrate, "-y", str(silence),
+                    "-f", "lavfi", "-t", f"{gap:.6f}", "-i", "anullsrc=r=48000:cl=stereo",
+                    "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "nut",
+                    "-y", str(silence),
                 ], cancel_event=cancel_event)
                 combined.append(silence)
+                combined_durations.append(gap)
                 self._report(progress_callback, "Preparing audio", 0.56,
                              f"Inserted {gap:.1f}s of silence")
             combined.append(segment)
+            combined_durations.append(track.duration_seconds)
             cursor = start + track.duration_seconds
         segments[:] = combined
+        return combined_durations
 
     @staticmethod
-    def _write_concat_file(path: Path, segments: list[Path]) -> None:
+    def _write_concat_file(
+        path: Path, segments: list[Path], durations: list[float] | None = None,
+    ) -> None:
         """Write an FFmpeg concat-demuxer manifest with safely quoted file paths."""
         def quote(segment: Path) -> str:
             return segment.resolve().as_posix().replace("'", "'\\''")
 
         lines = ["ffconcat version 1.0"]
-        lines.extend(f"file '{quote(segment)}'" for segment in segments)
+        if durations is not None and len(durations) != len(segments):
+            raise RenderError("Audio segment durations do not match the prepared files.")
+        for index, segment in enumerate(segments):
+            lines.append(f"file '{quote(segment)}'")
+            if durations is not None:
+                duration = durations[index]
+                if duration <= 0.0:
+                    raise RenderError("Audio segment duration must be greater than zero.")
+                lines.append(f"duration {duration:.6f}")
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     @staticmethod
@@ -679,6 +756,18 @@ class FFmpegRenderer:
             start = max(cursor, requested)
             cursor = start + track.duration_seconds
         return cursor
+
+    @staticmethod
+    def _track_windows(tracks: list[PlaylistTrack]) -> list[tuple[float, float]]:
+        """Return sequenced global start/duration pairs for enabled tracks."""
+        windows: list[tuple[float, float]] = []
+        cursor = 0.0
+        for track in tracks:
+            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
+            start = max(cursor, requested)
+            windows.append((start, track.duration_seconds))
+            cursor = start + track.duration_seconds
+        return windows
 
     @staticmethod
     def _parse_progress_seconds(line: str) -> float | None:

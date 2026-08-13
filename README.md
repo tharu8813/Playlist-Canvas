@@ -4,7 +4,7 @@
   <p>음악, 가사, 비주얼 요소를 하나의 캔버스에서 편집해 플레이리스트 영상을 만드는 Windows 데스크톱 편집기</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-1.0.0-1685D1" alt="Version 1.0.0">
+    <img src="https://img.shields.io/badge/version-1.0.1-1685D1" alt="Version 1.0.1">
     <img src="https://img.shields.io/badge/platform-Windows%2064--bit-0078D4" alt="Windows 64-bit">
     <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python 3.12">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
@@ -39,12 +39,14 @@ Playlist Canvas는 정적인 이미지와 음악을 합치는 수준을 넘어, 
 - 디자인 프리셋과 AI 프로젝트 빌더 프롬프트 생성
 - 자동 저장, 비정상 종료 복구와 누락 미디어 재연결
 - 한국어·영어 UI, 라이트·다크 테마와 부드러운 스크롤
+- 검증된 외부 JSON 언어팩 가져오기와 사용자 제작 번역 패치
 - H.264/H.265 및 지원되는 GPU 인코더를 이용한 MP4 내보내기
 - FFmpeg 자동 다운로드, SHA-256 검증, 설치 및 즉시 적용
+- GitHub Releases 기반 자동 업데이트 확인, 릴리즈 노트 표시와 검증된 Setup 실행
 
 ## 사용자 설치
 
-1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.0.0-setup.exe`를 받습니다.
+1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.0.1-setup.exe`를 받습니다.
 2. Setup 파일을 실행하고 설치 언어를 선택합니다.
 3. 설치 위치와 바탕 화면 바로가기 생성 여부를 선택한 뒤 **설치**를 누릅니다.
 4. 설치가 완료되면 **Playlist Canvas 실행**을 선택하거나 시작 메뉴의 바로가기를 실행합니다.
@@ -65,6 +67,30 @@ FFmpeg는 애플리케이션 배포본에 포함되지 않습니다. 설정 화�
 6. 설치된 실행 파일 경로를 자동 저장하고 즉시 적용
 
 설치 중에는 진행 창이 애플리케이션 모달로 표시되어 다른 편집 작업을 수행할 수 없습니다.
+
+## 프로그램 업데이트
+
+프로그램 시작 후 GitHub의 최신 안정 릴리즈를 백그라운드에서 확인합니다. 새 버전이 있으면 릴리즈 설명을 표시하며, 동의하면 공식 Setup 자산을 내려받아 GitHub가 제공하는 파일 크기와 SHA-256 digest를 검증한 뒤 실행합니다.
+
+- 시작 알림을 닫으면 해당 릴리즈 버전은 자동으로 다시 표시하지 않습니다.
+- 이후 새 릴리즈가 등록되면 다시 한 번 안내합니다.
+- 건너뛴 버전도 **도움말 → 업데이트 확인**에서 수동으로 확인하고 설치할 수 있습니다.
+- 업데이트 실행 전 저장되지 않은 프로젝트가 있으면 저장·버리기·취소를 선택할 수 있습니다.
+
+## 외부 언어팩
+
+기본 한국어·영어 외의 번역은 **도구 → 설정 → 일반 → 외부 언어팩**에서 UTF-8 JSON 파일로 가져올 수 있습니다. 언어팩은 사용자 데이터 폴더에 설치되며 프로그램을 다시 빌드하지 않고 가져오기·제거·새로고침할 수 있습니다.
+
+- 누락된 번역은 영어로 표시됩니다.
+- 실행 코드가 없는 JSON 데이터만 허용합니다.
+- 잘못된 JSON, 호환되지 않는 스키마, 자리표시자 오류와 1MB 초과 파일은 거부합니다.
+- 형식과 예제는 [`docs/language-packs`](docs/language-packs/README.md)에서 확인할 수 있습니다.
+
+Windows에서는 첫 실행 시 `%LOCALAPPDATA%\PlaylistCanvas\languages\`에 기본
+`ko.json`, `en.json`과 모든 번역 값이 비어 있는
+`language-pack-template.json`을 자동 생성합니다. 빈 템플릿을 복사해 로캘
+이름으로 변경한 다음 번역 값과 메타데이터를 작성하면 됩니다. 아직 작성하지
+않은 빈 번역 값은 영어로 표시됩니다.
 
 ## 지원 형식
 
@@ -112,7 +138,7 @@ python -m PyInstaller --noconfirm --clean playlist_canvas.spec
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 ```
 
-완성된 `output-setup\Playlist Canvas-1.0.0-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
+완성된 `output-setup\Playlist Canvas-1.0.1-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
 
 ## 프로젝트 구조
 

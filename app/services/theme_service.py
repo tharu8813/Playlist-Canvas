@@ -25,6 +25,14 @@ class ThemeService(QObject):
         super().__init__(parent)
         saved = QSettings().value("theme", Theme.AUTO.value)
         self._preference = Theme(saved) if saved in {item.value for item in Theme} else Theme.AUTO
+        application = QGuiApplication.instance()
+        baseline_key = "playlistCanvasSystemPaletteDark"
+        baseline = application.property(baseline_key) if application is not None else None
+        if not isinstance(baseline, bool):
+            baseline = QGuiApplication.palette().window().color().lightness() < 128
+            if application is not None:
+                application.setProperty(baseline_key, baseline)
+        self._system_palette_dark = baseline
         style_hints = QGuiApplication.styleHints()
         if hasattr(style_hints, "colorSchemeChanged"):
             style_hints.colorSchemeChanged.connect(lambda _scheme: self.refresh_auto_theme())
@@ -45,8 +53,10 @@ class ThemeService(QObject):
             return Theme.LIGHT
         if scheme is Qt.ColorScheme.Dark:
             return Theme.DARK
-        window_color = QGuiApplication.palette().window().color()
-        return Theme.DARK if window_color.lightness() < 128 else Theme.LIGHT
+        # The application installs its own palette for explicit themes. Using
+        # that palette here would make Auto permanently inherit the last manual
+        # choice whenever a platform reports an Unknown color scheme.
+        return Theme.DARK if self._system_palette_dark else Theme.LIGHT
 
     def set_preference(self, preference: Theme | str) -> None:
         """Persist and publish a new explicit or automatic theme preference.

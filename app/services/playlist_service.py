@@ -6,6 +6,7 @@ import logging
 import shutil
 import subprocess
 from collections.abc import Iterable
+from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
 from uuid import uuid4
@@ -19,6 +20,14 @@ from app.utils.subprocess_utils import hidden_process_kwargs
 
 LOGGER = logging.getLogger(__name__)
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg"}
+
+
+@dataclass(slots=True)
+class AudioImportCandidate:
+    """A playable track plus the tag fields that require user attention."""
+
+    track: PlaylistTrack
+    missing_fields: tuple[str, ...] = ()
 
 
 class PlaylistService(QObject):
@@ -38,39 +47,66 @@ class PlaylistService(QObject):
 
     def add_files(self, paths: Iterable[str | Path]) -> int:
         """Read and append all valid audio files, returning the number added."""
-        added = 0
+        return self.add_tracks(
+            candidate.track for candidate in self.inspect_files(paths)
+        )
+
+    def inspect_files(
+        self, paths: Iterable[str | Path],
+    ) -> list[AudioImportCandidate]:
+        """Read valid audio files and report which common tags are absent."""
+        candidates: list[AudioImportCandidate] = []
         for raw_path in paths:
             path = Path(raw_path)
             if path.suffix.lower() not in AUDIO_EXTENSIONS or not path.is_file():
                 continue
-            track = self._read_track(path)
-            if track is not None:
-                self._tracks.append(track)
-                added += 1
-        if added:
+            candidates.append(self._read_candidate(path))
+        return candidates
+
+    def add_tracks(self, tracks: Iterable[PlaylistTrack]) -> int:
+        """Append already-inspected tracks as one observable transaction."""
+        prepared = list(tracks)
+        if prepared:
+            self._tracks.extend(prepared)
             self.playlist_changed.emit()
-        return added
+        return len(prepared)
 
     def _read_track(self, path: Path) -> PlaylistTrack | None:
         """Extract common tags while retaining usable tracks with missing metadata."""
+        return self._read_candidate(path).track
+
+    def _read_candidate(self, path: Path) -> AudioImportCandidate:
+        """Extract a track and preserve knowledge of genuinely missing tags."""
         try:
             audio = MutagenFile(path, easy=True)
             tags = getattr(audio, "tags", None) or {}
             info = getattr(audio, "info", None)
-            title = self._tag_value(tags, "title") or path.stem
-            artist = self._tag_value(tags, "artist") or "Unknown Artist"
-            album = self._tag_value(tags, "album") or "Unknown Album"
+            raw_values = {
+                "title": self._tag_value(tags, "title").strip(),
+                "artist": self._tag_value(tags, "artist").strip(),
+                "album": self._tag_value(tags, "album").strip(),
+            }
+            missing = tuple(name for name, value in raw_values.items() if not value)
+            title = raw_values["title"] or path.stem
+            artist = raw_values["artist"] or "Unknown Artist"
+            album = raw_values["album"] or "Unknown Album"
             duration = float(getattr(info, "length", 0.0))
             duration = duration if isfinite(duration) and duration >= 0 else 0.0
             if duration <= 0.0:
                 duration = self._probe_duration(path)
-            return PlaylistTrack(str(path.resolve()), title, artist, album, duration)
+            return AudioImportCandidate(
+                PlaylistTrack(str(path.resolve()), title, artist, album, duration),
+                missing,
+            )
         except Exception as error:  # mutagen exposes format-specific exceptions
             LOGGER.warning("Unable to read audio metadata: %s", path, exc_info=error)
             self.metadata_failed.emit(str(path), str(error))
-            return PlaylistTrack(
-                str(path.resolve()), path.stem,
-                duration_seconds=self._probe_duration(path),
+            return AudioImportCandidate(
+                PlaylistTrack(
+                    str(path.resolve()), path.stem,
+                    duration_seconds=self._probe_duration(path),
+                ),
+                ("title", "artist", "album"),
             )
 
     @staticmethod

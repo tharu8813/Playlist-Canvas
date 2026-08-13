@@ -8,6 +8,7 @@ from math import isfinite
 from typing import Any
 from uuid import uuid4
 
+from app import __version__
 from app.models.playlist import PlaylistTrack
 from app.models.layer import LayerGroup
 from app.models.source import Source
@@ -76,11 +77,13 @@ class ProjectDocument:
     settings: ProjectSettings = field(default_factory=ProjectSettings)
     content_library: list[ProjectContent] = field(default_factory=list)
     version: int = 2
+    app_version: str = __version__
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the document into JSON-compatible data."""
         return {
             "version": self.version,
+            "app_version": self.app_version,
             "canvas": asdict(self.canvas),
             "theme": self.theme,
             "language": self.language,
@@ -99,6 +102,9 @@ class ProjectDocument:
         version = int(data.get("version", 1))
         if version not in {1, 2}:
             raise ValueError("This project version is not supported.")
+        app_version = data.get("app_version", "")
+        if not isinstance(app_version, str) or len(app_version) > 64:
+            raise ValueError("Project application version must be a short string.")
         sources = data.get("sources", [])
         groups = data.get("groups", [])
         playlist = data.get("playlist", [])
@@ -182,6 +188,7 @@ class ProjectDocument:
 
         return cls(
             version=2,
+            app_version=app_version,
             sources=source_models,
             groups=group_models,
             playlist=track_models,

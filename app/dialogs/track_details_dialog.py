@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.playlist import PlaylistTrack
+from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.services.lyrics_service import LyricsError, LyricsService
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.utils.i18n import Translator
@@ -59,15 +61,32 @@ class TrackDetailsDialog(QDialog):
 
         self.info_group = QGroupBox()
         info_form = QFormLayout(self.info_group)
+        info_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        info_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.info_name_labels: list[QLabel] = []
         self.info_labels: list[QLabel] = []
         for value in (
             track.title, track.artist, track.album, track.file_path,
             track.duration_label,
         ):
-            field = QLabel(value)
+            name_label = QLabel()
+            name_label.setObjectName("trackInfoName")
+            name_label.setMinimumWidth(78)
+            name_label.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+            )
+            field = QLabel(value.strip() if isinstance(value, str) and value.strip() else "—")
+            field.setObjectName("trackInfoValue")
             field.setWordWrap(True)
+            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            if value == track.file_path:
+                field.setToolTip(track.file_path)
+            self.info_name_labels.append(name_label)
             self.info_labels.append(field)
-            info_form.addRow("", field)
+            info_form.addRow(name_label, field)
         root.addWidget(self.info_group)
 
         self.lyrics_group = QGroupBox()
@@ -77,11 +96,18 @@ class TrackDetailsDialog(QDialog):
         self.lyrics_path.setObjectName("mutedLabel")
         self.lyrics_path.setWordWrap(True)
         self.load_button = QPushButton()
+        self.edit_lrc_button = QPushButton()
+        self.export_lrc_button = QPushButton()
         self.clear_button = QPushButton()
         path_row.addWidget(self.lyrics_path, 1)
         path_row.addWidget(self.load_button)
         path_row.addWidget(self.clear_button)
         lyrics_layout.addLayout(path_row)
+        lyrics_action_row = QHBoxLayout()
+        lyrics_action_row.addStretch(1)
+        lyrics_action_row.addWidget(self.edit_lrc_button)
+        lyrics_action_row.addWidget(self.export_lrc_button)
+        lyrics_layout.addLayout(lyrics_action_row)
 
         timing_form = QFormLayout()
         self.timing_label = QLabel()
@@ -220,6 +246,8 @@ class TrackDetailsDialog(QDialog):
         root.addWidget(self.buttons)
 
         self.load_button.clicked.connect(self._load_lyrics)
+        self.edit_lrc_button.clicked.connect(self._edit_in_lrc_generator)
+        self.export_lrc_button.clicked.connect(self._export_current_lyrics_as_lrc)
         self.clear_button.clicked.connect(self._clear_lyrics)
         self.earlier_button.clicked.connect(lambda: self._nudge_timing(-0.1))
         self.later_button.clicked.connect(lambda: self._nudge_timing(0.1))
@@ -265,6 +293,80 @@ class TrackDetailsDialog(QDialog):
         self.selected_lyrics_path = ""
         self.selected_lyrics = []
         self._refresh_preview()
+
+    def _edit_in_lrc_generator(self) -> None:
+        """Round-trip this track's timed lyrics through the LRC generator."""
+        self.media_player.pause()
+        dialog = LrcGeneratorDialog(
+            [],
+            self.translator,
+            self,
+            track_edit_mode=True,
+            initial_audio_path=self.track.file_path,
+            initial_cues=self.selected_lyrics,
+            initial_title=self.track.title,
+            initial_artist=self.track.artist,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        edited_cues = dialog.timed_cues()
+        if edited_cues:
+            self.selected_lyrics = [cue.copy() for cue in edited_cues]
+        if dialog.saved_paths:
+            self.selected_lyrics_path = str(dialog.saved_paths[-1].resolve())
+        self._refresh_preview()
+
+    def _export_current_lyrics_as_lrc(self) -> None:
+        """Convert the attached/embedded cues to LRC with this track's offset applied."""
+        korean = self.translator.language.value == "ko"
+        if not self.selected_lyrics:
+            QMessageBox.warning(
+                self,
+                "내보낼 가사 없음" if korean else "No lyrics to export",
+                "먼저 시간 정보가 있는 가사를 등록하세요."
+                if korean else "Attach timed lyrics before exporting an LRC file.",
+            )
+            return
+        source = Path(self.selected_lyrics_path) if self.selected_lyrics_path else Path(self.track.file_path)
+        default_name = source.with_suffix(".lrc")
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "현재 가사를 LRC로 내보내기" if korean else "Export current lyrics as LRC",
+            str(default_name),
+            "LRC lyrics (*.lrc)",
+        )
+        if not selected:
+            return
+        offset = self.timing_offset_spin.value()
+        adjusted_cues: list[dict[str, object]] = []
+        for cue in self.selected_lyrics:
+            start = max(0.0, float(cue.get("start", 0.0)) - offset)
+            end = max(start, float(cue.get("end", start + 8.0)) - offset)
+            adjusted_cues.append({
+                "start": start,
+                "end": end,
+                "text": LyricsService.decode_line_breaks(cue.get("text", "")),
+            })
+        try:
+            saved = LyricsService.save_lrc(
+                selected,
+                adjusted_cues,
+                title=self.track.title,
+                artist=self.track.artist,
+            )
+        except LyricsError as error:
+            QMessageBox.critical(
+                self,
+                "LRC 내보내기 오류" if korean else "LRC export error",
+                str(error),
+            )
+            return
+        QMessageBox.information(
+            self,
+            "LRC 내보내기 완료" if korean else "LRC export complete",
+            f"현재 가사를 LRC 파일로 저장했습니다.\n{saved}"
+            if korean else f"The current lyrics were saved as an LRC file.\n{saved}",
+        )
 
     def _toggle_playback(self) -> None:
         """Play or pause the selected track without leaving the settings form."""
@@ -345,7 +447,9 @@ class TrackDetailsDialog(QDialog):
             return
 
         def cue_text(index: int) -> str:
-            return str(self.selected_lyrics[index].get("text", "")).strip()
+            return LyricsService.decode_line_breaks(
+                self.selected_lyrics[index].get("text", "")
+            ).strip()
 
         self.previous_lyric.setText(cue_text(cue_index - 1) if cue_index > 0 else "")
         self.current_lyric.setText(cue_text(cue_index))
@@ -378,6 +482,8 @@ class TrackDetailsDialog(QDialog):
             or ("연결된 가사 파일이 없습니다." if korean else "No lyric file attached.")
         )
         self.clear_button.setEnabled(bool(self.selected_lyrics_path or self.selected_lyrics))
+        self.edit_lrc_button.setEnabled(self._audio_available or bool(self.selected_lyrics))
+        self.export_lrc_button.setEnabled(bool(self.selected_lyrics))
         count = len(self.selected_lyrics)
         self.cue_summary.setText(
             f"{count}개 타임코드 · 보정 적용 미리보기"
@@ -395,7 +501,9 @@ class TrackDetailsDialog(QDialog):
             # A positive offset advances lyrics, so their display timestamp is
             # cue time minus the offset.
             start = float(cue.get("start", 0.0)) - offset
-            text = str(cue.get("text", "")).replace("\n", " / ").strip()
+            text = LyricsService.decode_line_breaks(
+                cue.get("text", "")
+            ).replace("\n", " / ").strip()
             lines.append(f"[{self._timestamp(start)}]  {text}")
         if count > 120:
             lines.append(f"… +{count - 120}")
@@ -418,15 +526,27 @@ class TrackDetailsDialog(QDialog):
             ("제목", "아티스트", "앨범", "파일", "재생 시간")
             if korean else ("Title", "Artist", "Album", "File", "Duration")
         )
-        form = self.info_group.layout()
-        if isinstance(form, QFormLayout):
-            for row, name in enumerate(info_names):
-                label_item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
-                if label_item is not None and isinstance(label_item.widget(), QLabel):
-                    label_item.widget().setText(name)
+        for label, name in zip(self.info_name_labels, info_names):
+            label.setText(name)
         self.lyrics_group.setTitle("가사 / 자막" if korean else "Lyrics / subtitles")
         self.playback_group.setTitle("노래와 가사 미리보기" if korean else "Audio and lyrics preview")
         self.load_button.setText("파일 불러오기…" if korean else "Load file…")
+        self.edit_lrc_button.setText(
+            "LRC 생성기로 편집…" if korean else "Edit in LRC Generator…"
+        )
+        self.edit_lrc_button.setToolTip(
+            "현재 곡의 오디오와 등록된 가사·타이밍을 LRC 생성기에서 편집합니다."
+            if korean else
+            "Edit this track's audio, lyrics, and timing in the LRC generator."
+        )
+        self.export_lrc_button.setText(
+            "LRC로 내보내기…" if korean else "Export as LRC…"
+        )
+        self.export_lrc_button.setToolTip(
+            "현재 곡의 타이밍 보정을 적용하고 여러 줄 가사는 문자 \\n으로 저장합니다."
+            if korean else
+            "Applies this track's timing offset and stores multi-line lyrics using the literal \\n characters."
+        )
         self.clear_button.setText("연결 해제" if korean else "Detach")
         self.timing_label.setText("곡별 타이밍 보정" if korean else "Per-track timing offset")
         self.reset_button.setText("초기화" if korean else "Reset")

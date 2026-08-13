@@ -27,6 +27,9 @@ from app import __version__
 from app.utils.i18n import Language, Translator
 
 
+REPOSITORY_URL = "https://github.com/tharu8813/Playlist-Canvas"
+
+
 class AboutDialog(QDialog):
     """Show release identity, runtime details, and support shortcuts."""
 
@@ -76,6 +79,7 @@ class AboutDialog(QDialog):
         self.os_title = QLabel()
         self.ffmpeg_title = QLabel()
         self.log_title = QLabel()
+        self.repository_title = QLabel()
         details_form.addRow(self.version_title, QLabel(__version__))
         details_form.addRow(
             self.runtime_title,
@@ -93,6 +97,15 @@ class AboutDialog(QDialog):
         self.log_value.setWordWrap(True)
         self.log_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         details_form.addRow(self.log_title, self.log_value)
+        self.repository_link = QLabel(
+            f'<a href="{REPOSITORY_URL}">github.com/tharu8813/Playlist-Canvas</a>'
+        )
+        self.repository_link.setOpenExternalLinks(True)
+        self.repository_link.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
+        self.repository_link.setToolTip(REPOSITORY_URL)
+        details_form.addRow(self.repository_title, self.repository_link)
 
         self.notice_label = QLabel()
         self.notice_label.setObjectName("mutedLabel")
@@ -137,6 +150,7 @@ class AboutDialog(QDialog):
             f"OS: {self._windows_label()}",
             f"FFmpeg: {ffmpeg}",
             f"Logs: {self.log_directory}",
+            f"Repository: {REPOSITORY_URL}",
             f"Frozen build: {'yes' if getattr(sys, 'frozen', False) else 'no'}",
         ))
 
@@ -190,6 +204,7 @@ class AboutDialog(QDialog):
         self.os_title.setText("운영체제" if korean else "Operating system")
         self.ffmpeg_title.setText("FFmpeg 상태" if korean else "FFmpeg status")
         self.log_title.setText("로그 폴더" if korean else "Log folder")
+        self.repository_title.setText("GitHub 저장소" if korean else "GitHub repository")
         self.ffmpeg_value.setText(
             str(self.ffmpeg_path)
             if self.ffmpeg_path else

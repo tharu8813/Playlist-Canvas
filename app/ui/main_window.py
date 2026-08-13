@@ -8,12 +8,14 @@ import logging
 from pathlib import Path
 import shutil
 import threading
+import traceback as traceback_module
 from tempfile import TemporaryDirectory
 
-from PySide6.QtCore import QByteArray, QMimeData, QSettings, QStandardPaths, Qt, QTimer
+from PySide6.QtCore import (QByteArray, QMimeData, QProcess, QSettings,
+                            QStandardPaths, Qt, QTimer)
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QCloseEvent, QDragEnterEvent,
                            QDropEvent, QFontDatabase, QIcon, QImage, QImageWriter,
-                           QKeySequence, QPainter, QPen, QPixmap)
+                           QKeySequence, QPainter, QPalette, QPen, QPixmap)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -50,13 +52,17 @@ from app.dialogs.new_project_dialog import NewProjectDialog
 from app.dialogs.playlist_export_dialog import PlaylistExportDialog
 from app.dialogs.preset_dialog import DesignPresetDialog
 from app.dialogs.ai_project_builder_dialog import AIProjectBuilderDialog
+from app.dialogs.audio_metadata_dialog import AudioMetadataDialog
 from app.dialogs.project_settings_dialog import ProjectSettingsDialog
+from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
+from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.dialogs.settings_dialog import SettingsDialog
 from app.dialogs.startup_dialog import StartupDialog
 from app.dialogs.track_details_dialog import TrackDetailsDialog
 from app.dialogs.shortcuts_dialog import ShortcutsDialog
 from app.dialogs.about_dialog import AboutDialog
 from app.dialogs.help_dialog import HelpDialog
+from app.dialogs.update_dialogs import UpdateAvailableDialog, UpdateDownloadDialog
 from app.ffmpeg.install_worker import FFmpegInstallWorker
 from app.ffmpeg.managed_installer import ManagedFFmpegInstallation, ManagedFFmpegInstaller
 from app.inspector.source_inspector import SourceInspector
@@ -77,6 +83,12 @@ from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
 from app.services.playlist_export_service import PlaylistExportError, PlaylistExportService
 from app.services.app_settings_service import AppSettingsService
 from app.services.smooth_scroll_service import SmoothScrollService
+from app.services.update_service import (
+    GitHubUpdateService,
+    ReleaseInfo,
+    normalized_version,
+)
+from app.services.update_worker import UpdateCheckWorker, UpdateDownloadWorker
 from app.presets.preset_service import PresetDefinition
 from app.preview.canvas_snapshot import CanvasSnapshot
 from app.renderer.ffmpeg_renderer import (
@@ -96,6 +108,7 @@ from app.utils.image_loader import load_pixmap
 from app.utils.logging_setup import log_directory, report_unexpected_error
 from app.widgets.playlist_editor import PlaylistEditor
 from app.widgets.content_library_panel import ContentLibraryPanel
+from app import __version__
 
 
 LOGGER = logging.getLogger(__name__)
@@ -175,6 +188,13 @@ class MainWindow(QMainWindow):
         self._ffmpeg_install_worker: FFmpegInstallWorker | None = None
         self._ffmpeg_install_dialog: FFmpegInstallProgressDialog | None = None
         self._settings_dialog: SettingsDialog | None = None
+        self._update_service = GitHubUpdateService()
+        self._update_check_worker: UpdateCheckWorker | None = None
+        self._update_check_manual = False
+        self._update_download_worker: UpdateDownloadWorker | None = None
+        self._update_download_dialog: UpdateDownloadDialog | None = None
+        self._downloaded_update_path: Path | None = None
+        self._update_install_authorized = False
         self._source_buttons: dict[SourceType, QPushButton] = {}
         self.setAcceptDrops(True)
         self.resize(1560, 920)
@@ -186,6 +206,8 @@ class MainWindow(QMainWindow):
         self._apply_style()
         self._add_welcome_sources()
         self.translator.language_changed.connect(self.retranslate)
+        self.translator.language_changed.connect(self._sync_language_actions)
+        self.translator.packs_changed.connect(self._rebuild_language_menu)
         self.theme_service.theme_changed.connect(self._on_theme_changed)
         self.retranslate()
         self._connect_history()
@@ -201,7 +223,7 @@ class MainWindow(QMainWindow):
         self.new_action = QAction(self)
         self.new_action.setShortcut(QKeySequence.StandardKey.New)
         self.new_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
-        self.new_action.triggered.connect(self._new_project)
+        self.new_action.triggered.connect(self._show_project_start_dialog)
         toolbar.addAction(self.new_action)
         self.open_action = QAction(self)
         self.open_action.setShortcut(QKeySequence.StandardKey.Open)
@@ -288,17 +310,10 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         language_menu = QMenu(self)
         self.language_menu = language_menu
-        group = QActionGroup(self)
-        group.setExclusive(True)
-        self.language_actions: dict[Language, QAction] = {}
-        for language, label in ((Language.KOREAN, "한국어"), (Language.ENGLISH, "English")):
-            action = QAction(label, self)
-            action.setCheckable(True)
-            action.setChecked(language is self.translator.language)
-            action.triggered.connect(lambda checked=False, value=language: self.translator.set_language(value))
-            group.addAction(action)
-            language_menu.addAction(action)
-            self.language_actions[language] = action
+        self.language_group = QActionGroup(self)
+        self.language_group.setExclusive(True)
+        self.language_actions: dict[str, QAction] = {}
+        self._rebuild_language_menu()
         self.language_button = QToolButton()
         self.language_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.language_button.setMenu(language_menu)
@@ -393,6 +408,32 @@ class MainWindow(QMainWindow):
             lambda _source: self._update_alignment_toolbar_actions()
         )
         self._update_alignment_toolbar_actions()
+
+    def _rebuild_language_menu(self) -> None:
+        """Rebuild the language picker after external packs change."""
+        for action in tuple(self.language_group.actions()):
+            self.language_group.removeAction(action)
+            action.deleteLater()
+        self.language_menu.clear()
+        self.language_actions.clear()
+
+        for option in self.translator.available_languages():
+            action = QAction(option.display_name, self)
+            action.setCheckable(True)
+            action.setChecked(option.locale == self.translator.locale)
+            action.triggered.connect(
+                lambda checked=False, locale=option.locale: (
+                    self.translator.set_language(locale) if checked else None
+                )
+            )
+            self.language_group.addAction(action)
+            self.language_menu.addAction(action)
+            self.language_actions[option.locale] = action
+
+    def _sync_language_actions(self) -> None:
+        """Keep the toolbar language selection in sync with Settings."""
+        for locale, action in self.language_actions.items():
+            action.setChecked(locale == self.translator.locale)
 
     @staticmethod
     def _toolbar_spacer() -> QWidget:
@@ -977,6 +1018,10 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(self.preview_action)
 
         self.tools_menu = menu_bar.addMenu("")
+        self.lrc_generator_action = QAction(self)
+        self.lrc_generator_action.triggered.connect(self._show_lrc_generator)
+        self.tools_menu.addAction(self.lrc_generator_action)
+        self.tools_menu.addSeparator()
         self.tools_menu.addAction(self.settings_action)
         self.tools_menu.addSeparator()
         self.language_menu.setTitle("언어")
@@ -991,6 +1036,12 @@ class MainWindow(QMainWindow):
         self.shortcuts_action = QAction(self)
         self.shortcuts_action.triggered.connect(self._show_shortcuts)
         self.help_menu.addAction(self.shortcuts_action)
+        self.help_menu.addSeparator()
+        self.check_updates_action = QAction(self)
+        self.check_updates_action.triggered.connect(
+            lambda: self._check_for_updates(manual=True)
+        )
+        self.help_menu.addAction(self.check_updates_action)
         self.help_menu.addSeparator()
         self.about_action = QAction(self)
         self.about_action.setMenuRole(QAction.MenuRole.AboutRole)
@@ -1039,6 +1090,9 @@ class MainWindow(QMainWindow):
             self._preview_source_animation
         )
         top_splitter.addWidget(self.inspector)
+        top_splitter.setStretchFactor(0, 0)
+        top_splitter.setStretchFactor(1, 1)
+        top_splitter.setStretchFactor(2, 0)
         top_splitter.setSizes([220, 1030, 300])
         self.workspace_splitter = QSplitter(Qt.Orientation.Vertical)
         self.workspace_splitter.setObjectName("workspaceSplitter")
@@ -1355,8 +1409,25 @@ class MainWindow(QMainWindow):
             "Audio files (*.mp3 *.wav *.flac *.aac *.m4a *.ogg)",
         )
         if paths:
-            self.playlist_service.add_files(paths)
-            self.project_content_service.add_paths(paths)
+            _added, accepted_paths = self._import_audio_files(paths)
+            self.project_content_service.add_paths(accepted_paths)
+
+    def _import_audio_files(
+        self, paths: list[str] | list[Path],
+    ) -> tuple[int, list[Path]]:
+        """Inspect audio tags, request missing project metadata, and add tracks."""
+        candidates = self.playlist_service.inspect_files(paths)
+        if not candidates:
+            return 0, []
+        tracks = [candidate.track for candidate in candidates]
+        if any(candidate.missing_fields for candidate in candidates):
+            dialog = AudioMetadataDialog(candidates, self.translator, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return 0, []
+            tracks = dialog.selected_tracks
+        added = self.playlist_service.add_tracks(tracks)
+        accepted_paths = [Path(track.file_path) for track in tracks]
+        return added, accepted_paths
 
     def _add_library_content(self, path: str, media_type: str) -> None:
         """Turn a reusable library entry into the appropriate project object."""
@@ -1371,7 +1442,7 @@ class MainWindow(QMainWindow):
         if media_type == "image":
             self._add_dropped_images([content_path], None)
         elif media_type == "audio":
-            self.playlist_service.add_files([content_path])
+            self._import_audio_files([content_path])
         elif media_type == "font":
             font_id = QFontDatabase.addApplicationFont(str(content_path))
             families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
@@ -1449,8 +1520,8 @@ class MainWindow(QMainWindow):
         image_paths = [path for path in paths if path.suffix.lower() in image_extensions]
         audio_paths = [path for path in paths if path.suffix.lower() in AUDIO_EXTENSIONS]
         image_count = self._add_dropped_images(image_paths, position)
-        audio_count = self.playlist_service.add_files(audio_paths)
-        self.project_content_service.add_paths([*image_paths, *audio_paths])
+        audio_count, accepted_audio_paths = self._import_audio_files(audio_paths)
+        self.project_content_service.add_paths([*image_paths, *accepted_audio_paths])
         if image_count or audio_count:
             korean = self.translator.language is Language.KOREAN
             message = (
@@ -1653,6 +1724,10 @@ class MainWindow(QMainWindow):
             self.translator,
             default_directory / "playlist.mp4",
             self,
+            canvas_size=(
+                round(self.canvas.scene_model.artboard_rect.width()),
+                round(self.canvas.scene_model.artboard_rect.height()),
+            ),
         )
         if export_options.exec() != export_options.DialogCode.Accepted:
             return
@@ -1671,7 +1746,8 @@ class MainWindow(QMainWindow):
             return
         render_settings = selected_app_settings.render_settings()
         settings_summary = (
-            f"{selected_app_settings.resolution_name} · {selected_app_settings.fps} FPS · "
+            f"{render_settings.output_width} × {render_settings.output_height} · "
+            f"{selected_app_settings.fps} FPS · "
             f"{selected_app_settings.video_codec} · CRF {selected_app_settings.crf} · "
             f"AAC {selected_app_settings.audio_bitrate}"
         )
@@ -1793,6 +1869,8 @@ class MainWindow(QMainWindow):
                 requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
                 start = max(cursor, requested)
                 sources = self.store.sources()
+                intro = min(track.duration_seconds / 2, max((source.animation_in_duration for source in sources if source.animation_in != "none"), default=0.0))
+                outro = min((track.duration_seconds - intro) / 2, max((source.animation_out_duration for source in sources if source.animation_out != "none"), default=0.0))
                 gap = max(0.0, start - cursor)
                 if gap > 0.001:
                     # Explicit-frame exports need a visual frame for every silent
@@ -1811,18 +1889,38 @@ class MainWindow(QMainWindow):
                             ):
                                 gap_points.add(boundary)
                     ordered_gap_points = sorted(gap_points)
+                    gap_phase = "out" if previous_track is not None else "in"
+                    if previous_track is not None:
+                        previous_intro = min(
+                            previous_track.duration_seconds / 2,
+                            max((source.animation_in_duration for source in sources
+                                 if source.animation_in != "none"), default=0.0),
+                        )
+                        gap_phase_duration = min(
+                            (previous_track.duration_seconds - previous_intro) / 2,
+                            max((source.animation_out_duration for source in sources
+                                 if source.animation_out != "none"), default=0.0),
+                        )
+                    else:
+                        gap_phase_duration = intro
                     for point, next_point in zip(
-                        ordered_gap_points, ordered_gap_points[1:], strict=True
+                        ordered_gap_points, ordered_gap_points[1:]
                     ):
+                        animation_state = {}
+                        if gap_phase_duration > 0.0:
+                            animation_state = {
+                                "animation_phase": gap_phase,
+                                "animation_progress": 1.0 if gap_phase == "out" else 0.0,
+                                "animation_phase_duration": gap_phase_duration,
+                            }
                         frames.append(capture_composed_frame(
                             gap_track, previous_number if previous_track else number,
                             previous_start if previous_track else start,
                             max(0.001, next_point - point),
                             elapsed_seconds=gap_elapsed,
                             timeline_seconds=min(next_point - 0.0005, point + 0.0005),
+                            **animation_state,
                         ))
-                intro = min(track.duration_seconds / 2, max((source.animation_duration for source in sources if source.animation_in != "none"), default=0.0))
-                outro = min((track.duration_seconds - intro) / 2, max((source.animation_duration for source in sources if source.animation_out != "none"), default=0.0))
 
                 def capture_animation_frames(
                     phase: str, duration: float,
@@ -1840,12 +1938,12 @@ class MainWindow(QMainWindow):
                         return captured
                     steps = max(2, round(duration * animation_fps))
                     for step in range(steps):
-                        progress = (step + 1) / steps if phase == "in" else step / steps
+                        progress = step / steps
                         elapsed = (
-                            duration * (step + 1) / steps
+                            duration * step / steps
                             if phase == "in"
                             else intro + max(0.0, track.duration_seconds - intro - outro)
-                            + duration * (step + 1) / steps
+                            + duration * step / steps
                         )
                         captured.append(capture_composed_frame(
                             track, number, start, duration / steps,
@@ -1859,6 +1957,16 @@ class MainWindow(QMainWindow):
                 frames.extend(capture_animation_frames("in", intro))
                 has_progress_bar = any(source.source_type is SourceType.PROGRESS_BAR for source in sources)
                 has_lyrics = any(source.source_type is SourceType.LYRICS for source in sources)
+                has_time_text = any(
+                    source.source_type is SourceType.TIME
+                    or (source.source_type is SourceType.TEXT and any(
+                        token in source.text.lower() for token in (
+                            "%current_time%", "%track_current_time%",
+                            "%video_current_time%",
+                        )
+                    ))
+                    for source in sources
+                )
                 sample_points = {intro, intro + stable}
                 for source in sources:
                     boundaries = [source.timeline_start]
@@ -1871,6 +1979,24 @@ class MainWindow(QMainWindow):
                 if has_progress_bar:
                     progress_steps = min(180, max(1, round(stable)))
                     sample_points.update(intro + stable * step / progress_steps for step in range(progress_steps + 1))
+                if has_time_text:
+                    # Timestamp templates change at whole-second boundaries. A
+                    # time-only project previously captured just one stable
+                    # frame, leaving its clock frozen for the rest of the song.
+                    first_local_second = max(1, int(intro) + 1)
+                    last_local_second = int(intro + stable)
+                    sample_points.update(
+                        float(second)
+                        for second in range(first_local_second, last_local_second + 1)
+                        if intro < second < intro + stable
+                    )
+                    first_global_second = max(1, int(start + intro) + 1)
+                    last_global_second = int(start + intro + stable)
+                    sample_points.update(
+                        float(second) - start
+                        for second in range(first_global_second, last_global_second + 1)
+                        if intro < float(second) - start < intro + stable
+                    )
                 if has_lyrics:
                     lyric_sources = [
                         source for source in sources
@@ -2130,6 +2256,10 @@ class MainWindow(QMainWindow):
                 z_index=source.z_index,
                 timeline_start=source.timeline_start,
                 timeline_duration=source.timeline_duration,
+                animation_in=source.animation_in,
+                animation_out=source.animation_out,
+                animation_in_duration=source.animation_in_duration,
+                animation_out_duration=source.animation_out_duration,
             ))
         # FFmpeg overlays later inputs on top.  Preserve the Canvas stacking
         # order when two reactive sources overlap.
@@ -2153,6 +2283,241 @@ class MainWindow(QMainWindow):
         except FFmpegNotFoundError:
             pass
         AboutDialog(self.translator, ffmpeg_path, log_directory(), self).exec()
+
+    def schedule_automatic_update_check(self) -> None:
+        """Check once after startup without delaying project selection or first paint."""
+        QTimer.singleShot(1200, lambda: self._check_for_updates(manual=False))
+
+    def _check_for_updates(self, manual: bool) -> None:
+        """Request the latest stable GitHub Release on a background thread."""
+        if self._update_check_worker and self._update_check_worker.isRunning():
+            if manual:
+                self.statusBar().showMessage(
+                    "이미 업데이트를 확인하고 있습니다."
+                    if self.translator.language is Language.KOREAN else
+                    "An update check is already in progress.",
+                    4000,
+                )
+            return
+        if self._update_download_worker and self._update_download_worker.isRunning():
+            return
+        self._update_check_manual = manual
+        self.check_updates_action.setEnabled(False)
+        if manual:
+            self.statusBar().showMessage(
+                "GitHub에서 최신 버전을 확인하는 중입니다…"
+                if self.translator.language is Language.KOREAN else
+                "Checking GitHub for the latest version…"
+            )
+        worker = UpdateCheckWorker(self._update_service)
+        self._update_check_worker = worker
+        worker.release_found.connect(self._update_release_found)
+        worker.failed.connect(self._update_check_failed)
+        worker.finished.connect(self._update_check_finished)
+        worker.start()
+
+    def _update_release_found(self, release: ReleaseInfo) -> None:
+        """Compare versions, honor automatic dismissal, and show release notes."""
+        manual = self._update_check_manual
+        korean = self.translator.language is Language.KOREAN
+        try:
+            release_version = normalized_version(release.version)
+            current_version = normalized_version(__version__)
+        except Exception as error:
+            self._update_check_failed(str(error))
+            return
+        if current_version > release_version:
+            QMessageBox.warning(
+                self,
+                "버전 확인 경고" if korean else "Version check warning",
+                (
+                    f"현재 프로그램 버전({__version__})이 GitHub 최신 릴리즈"
+                    f"({release.version})보다 높습니다.\n"
+                    "개발 또는 아직 공개되지 않은 빌드일 수 있으며 업데이트는 실행하지 않습니다."
+                )
+                if korean else
+                (
+                    f"The installed version ({__version__}) is newer than the latest "
+                    f"GitHub release ({release.version}).\n"
+                    "This may be a development or not-yet-published build. No update will run."
+                ),
+            )
+            return
+        if current_version == release_version:
+            if manual:
+                QMessageBox.information(
+                    self,
+                    "업데이트 확인" if korean else "Check for updates",
+                    f"현재 최신 버전({__version__})을 사용하고 있습니다."
+                    if korean else f"Playlist Canvas {__version__} is up to date.",
+                )
+            return
+
+        settings = QSettings()
+        skipped = str(settings.value("updates/skipped_release_tag", "") or "")
+        if not manual and skipped == release.tag_name:
+            return
+        dialog = UpdateAvailableDialog(release, __version__, korean, not manual, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            if not manual:
+                settings.setValue("updates/skipped_release_tag", release.tag_name)
+                settings.sync()
+            return
+        settings.remove("updates/skipped_release_tag")
+        settings.sync()
+        self._start_update_download(release)
+
+    def _update_check_failed(self, message: str) -> None:
+        """Keep automatic network failures quiet but explain manual failures."""
+        LOGGER.warning("Update check failed: %s", message)
+        if self._update_check_manual:
+            korean = self.translator.language is Language.KOREAN
+            QMessageBox.warning(
+                self,
+                "업데이트 확인 실패" if korean else "Update check failed",
+                f"최신 릴리즈를 확인하지 못했습니다.\n\n{message}"
+                if korean else f"Could not check the latest release.\n\n{message}",
+            )
+
+    def _update_check_finished(self) -> None:
+        self.check_updates_action.setEnabled(True)
+        self.statusBar().clearMessage()
+        if self._update_check_worker:
+            self._update_check_worker.deleteLater()
+        self._update_check_worker = None
+
+    def _start_update_download(self, release: ReleaseInfo) -> None:
+        """Download the selected GitHub Setup into the per-user update directory."""
+        if not release.can_install:
+            return
+        data_root = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppLocalDataLocation
+        )
+        target = Path(data_root or Path.cwd() / ".app-data") / "updates"
+        korean = self.translator.language is Language.KOREAN
+        dialog = UpdateDownloadDialog(release, korean, self)
+        worker = UpdateDownloadWorker(self._update_service, release, target)
+        self._update_download_dialog = dialog
+        self._update_download_worker = worker
+        self._downloaded_update_path = None
+        worker.progress.connect(dialog.update_progress)
+        worker.succeeded.connect(self._update_download_succeeded)
+        worker.failed.connect(self._update_download_failed)
+        worker.cancelled.connect(self._update_download_cancelled)
+        worker.finished.connect(self._update_download_finished)
+        dialog.cancel_requested.connect(worker.cancel)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        QApplication.processEvents()
+        worker.start()
+
+    def _update_download_succeeded(self, path: Path) -> None:
+        self._downloaded_update_path = Path(path)
+        if self._update_download_dialog:
+            self._update_download_dialog.complete(True)
+            self._update_download_dialog = None
+
+    def _update_download_failed(self, message: str) -> None:
+        LOGGER.error("Update download failed: %s", message)
+        if self._update_download_dialog:
+            self._update_download_dialog.complete(False)
+            self._update_download_dialog = None
+        korean = self.translator.language is Language.KOREAN
+        QMessageBox.critical(
+            self,
+            "업데이트 다운로드 실패" if korean else "Update download failed",
+            f"Setup을 안전하게 다운로드하지 못했습니다.\n\n{message}"
+            if korean else f"The Setup file could not be downloaded safely.\n\n{message}",
+        )
+
+    def _update_download_cancelled(self) -> None:
+        if self._update_download_dialog:
+            self._update_download_dialog.complete(False)
+            self._update_download_dialog = None
+        self.statusBar().showMessage(
+            "업데이트 다운로드를 취소했습니다."
+            if self.translator.language is Language.KOREAN else
+            "Update download cancelled.",
+            5000,
+        )
+
+    def _update_download_finished(self) -> None:
+        path = self._downloaded_update_path
+        self._downloaded_update_path = None
+        if self._update_download_worker:
+            self._update_download_worker.deleteLater()
+        self._update_download_worker = None
+        if path is not None:
+            QTimer.singleShot(0, lambda installer=path: self._launch_update_setup(installer))
+
+    def _launch_update_setup(self, installer: Path) -> None:
+        """Resolve unsaved work, start the verified Setup, and close the old version."""
+        korean = self.translator.language is Language.KOREAN
+        if (self._animation_preview_active
+                or (self._render_worker and self._render_worker.isRunning())
+                or (self._ffmpeg_install_worker and self._ffmpeg_install_worker.isRunning())):
+            QMessageBox.warning(
+                self,
+                "업데이트 대기" if korean else "Update is waiting",
+                "현재 작업을 마친 뒤 도움말 → 업데이트 확인에서 다시 실행해 주세요."
+                if korean else
+                "Finish the current operation, then use Help → Check for updates again.",
+            )
+            return
+        response = QMessageBox.question(
+            self,
+            "업데이트 설치" if korean else "Install update",
+            "다운로드와 SHA-256 검증을 완료했습니다.\n"
+            "프로그램을 종료하고 Setup을 실행할까요?"
+            if korean else
+            "Download and SHA-256 verification are complete.\n"
+            "Close Playlist Canvas and run Setup now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            self.statusBar().showMessage(
+                f"Setup 저장 위치: {installer}"
+                if korean else f"Setup saved to: {installer}",
+                10000,
+            )
+            return
+        if self._project_dirty:
+            save_response = QMessageBox.warning(
+                self,
+                "저장되지 않은 변경 사항" if korean else "Unsaved changes",
+                "업데이트 전에 프로젝트를 저장할까요?"
+                if korean else "Save the project before updating?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if save_response == QMessageBox.StandardButton.Save:
+                self._save_project()
+                if self._project_dirty:
+                    return
+            elif save_response != QMessageBox.StandardButton.Discard:
+                return
+        if not installer.is_file():
+            QMessageBox.critical(
+                self,
+                "업데이트 오류" if korean else "Update error",
+                "다운로드한 Setup 파일을 찾을 수 없습니다."
+                if korean else "The downloaded Setup file could not be found.",
+            )
+            return
+        if not QProcess.startDetached(str(installer), []):
+            QMessageBox.critical(
+                self,
+                "업데이트 실행 실패" if korean else "Could not start update",
+                "Setup 파일을 실행하지 못했습니다. 다운로드 폴더에서 직접 실행해 주세요."
+                if korean else
+                "Setup could not be started. Run it manually from the update folder.",
+            )
+            return
+        self._update_install_authorized = True
+        self.close()
 
     def _show_settings(self) -> None:
         """Show and persist the Phase 4A application settings."""
@@ -2390,8 +2755,27 @@ class MainWindow(QMainWindow):
     def _choose_preset(self) -> None:
         """Select and apply a complete visual canvas preset to this project."""
         dialog = DesignPresetDialog(self.translator, self)
-        if dialog.exec() and dialog.selected_preset:
-            self._apply_preset(dialog.selected_preset)
+        if not dialog.exec() or dialog.selected_preset is None:
+            return
+        preset = dialog.selected_preset
+        korean = self.translator.language is Language.KOREAN
+        answer = QMessageBox.warning(
+            self,
+            "프리셋 적용 경고" if korean else "Apply preset warning",
+            (
+                f"'{preset.name('ko')}' 프리셋을 적용하면 현재 캔버스의 모든 요소가 "
+                "프리셋 요소로 교체됩니다.\n\n재생목록은 유지되며, 적용 후 Ctrl+Z로 되돌릴 수 있습니다.\n"
+                "계속 적용할까요?"
+                if korean else
+                f"Applying '{preset.name('en')}' will replace every current Canvas "
+                "source with the preset sources.\n\nThe playlist will be preserved, and "
+                "you can undo afterward with Ctrl+Z.\nApply this preset?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer is QMessageBox.StandardButton.Yes:
+            self._apply_preset(preset)
 
     def _show_ai_project_builder(self) -> None:
         """Open the standalone configurable AI Project Builder."""
@@ -2399,19 +2783,75 @@ class MainWindow(QMainWindow):
 
     def _apply_preset(self, preset: PresetDefinition) -> None:
         """Replace canvas sources with a preset while preserving the playlist."""
-        self.store.replace(preset.builder())
+        artboard = self.canvas.scene_model.artboard_rect
+        self.store.replace(self._preset_sources_for_canvas(
+            preset, artboard.width(), artboard.height(),
+        ))
         message = "프리셋을 적용했습니다. Ctrl+Z로 되돌릴 수 있습니다."
         if self.translator.language is not Language.KOREAN:
             message = "Preset applied. Press Ctrl+Z to undo."
         self.statusBar().showMessage(message, 4000)
 
-    def _new_project(self) -> bool:
-        if not self._confirm_unsaved_changes():
+    @staticmethod
+    def _preset_sources_for_canvas(
+        preset: PresetDefinition, canvas_width: float, canvas_height: float,
+    ) -> list[Source]:
+        """Adapt a 1280×720 design to the project without changing its ratio."""
+        return MainWindow._adapt_sources_to_canvas(
+            preset.builder(), 1280.0, 720.0, canvas_width, canvas_height,
+        )
+
+    @staticmethod
+    def _adapt_sources_to_canvas(
+        sources: list[Source], source_width: float, source_height: float,
+        target_width: float, target_height: float,
+    ) -> list[Source]:
+        """Scale source sizes uniformly and distribute their centres by canvas ratio."""
+        if min(source_width, source_height, target_width, target_height) <= 0:
+            return [Source.from_dict(source.to_dict()) for source in sources]
+        adapted = [Source.from_dict(source.to_dict()) for source in sources]
+        x_ratio = target_width / source_width
+        y_ratio = target_height / source_height
+        factor = min(x_ratio, y_ratio)
+        scalable_fields = (
+            "border_radius", "outline_width", "font_size",
+            "visualizer_line_width", "track_list_row_spacing",
+            "track_list_item_padding", "subtitle_line_spacing",
+            "subtitle_previous_blur", "level_meter_gap",
+            "particle_min_size", "particle_max_size",
+        )
+        for source in adapted:
+            if source.source_type is SourceType.BACKGROUND:
+                source.x = 0.0
+                source.y = 0.0
+                source.width = target_width
+                source.height = target_height
+            else:
+                center_x = (source.x + source.width / 2.0) * x_ratio
+                center_y = (source.y + source.height / 2.0) * y_ratio
+                source.width *= factor
+                source.height *= factor
+                source.x = max(
+                    0.0, min(target_width - source.width, center_x - source.width / 2.0)
+                )
+                source.y = max(
+                    0.0, min(target_height - source.height, center_y - source.height / 2.0)
+                )
+            for field in scalable_fields:
+                setattr(source, field, getattr(source, field) * factor)
+            source.shadow.blur_radius *= factor
+            source.shadow.offset_x *= factor
+            source.shadow.offset_y *= factor
+        return adapted
+
+    def _new_project(self, *, confirm_unsaved: bool = True) -> bool:
+        if confirm_unsaved and not self._confirm_unsaved_changes():
             return False
         dialog = NewProjectDialog(self.translator, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return False
         canvas_width, canvas_height = dialog.canvas_size
+        selected_preset = dialog.selected_design_preset
         previous_project_path = self.current_project_path
         self._history_restoring = True
         try:
@@ -2429,7 +2869,12 @@ class MainWindow(QMainWindow):
             self.grid_action.setChecked(True)
             self.snap_action.setChecked(True)
             self.canvas.scene_model.snap_enabled = True
-            self._add_welcome_sources()
+            if selected_preset is None:
+                self._add_welcome_sources()
+            else:
+                self.store.replace(self._preset_sources_for_canvas(
+                    selected_preset, canvas_width, canvas_height,
+                ))
             self.canvas.fit_artboard()
         finally:
             self._history_restoring = False
@@ -2446,6 +2891,21 @@ class MainWindow(QMainWindow):
             self._project_dirty = False
         self._update_project_status()
         return True
+
+    def _show_project_start_dialog(self) -> bool:
+        """Reuse the launch project chooser for File > New and the toolbar action."""
+        if not self._confirm_unsaved_changes():
+            return False
+        while True:
+            dialog = StartupDialog(self.translator, self.recent_projects, self)
+            if dialog.exec() != dialog.DialogCode.Accepted:
+                return False
+            if dialog.action == StartupDialog.NEW_PROJECT:
+                if self._new_project(confirm_unsaved=False):
+                    return True
+                continue
+            if dialog.project_path is not None and self._load_project_path(dialog.project_path):
+                return True
 
     def _project_document(self) -> ProjectDocument:
         """Collect current UI and domain state into a portable document."""
@@ -2505,7 +2965,7 @@ class MainWindow(QMainWindow):
             if dialog.exec() != dialog.DialogCode.Accepted:
                 return False
             if dialog.action == StartupDialog.NEW_PROJECT:
-                if self._new_project():
+                if self._new_project(confirm_unsaved=False):
                     return True
                 continue
             if dialog.project_path is not None and self._load_project_path(dialog.project_path):
@@ -2834,14 +3294,44 @@ class MainWindow(QMainWindow):
 
     def _load_project_path(self, path: Path) -> bool:
         """Restore a selected project path through the normal safe load workflow."""
+        stage = "프로젝트 파일 읽기" if self.translator.language is Language.KOREAN else "Reading project file"
+        previous_document = ProjectDocument.from_dict(self._project_document().to_dict())
+        previous_path = self.current_project_path
+        previous_legacy_path = self._legacy_project_path
+        previous_dirty = self._project_dirty
+        previous_selection = self.store.selected_ids
+        previous_active = self.store.selected.id if self.store.selected is not None else None
+        apply_started = False
         try:
             document = ProjectService.load(path)
+            if document.app_version and document.app_version != __version__:
+                korean = self.translator.language is Language.KOREAN
+                QMessageBox.warning(
+                    self,
+                    "프로젝트 버전 차이" if korean else "Project version differs",
+                    (
+                        "이 프로젝트는 다른 버전의 Playlist Canvas에서 저장되었습니다.\n\n"
+                        f"프로젝트 저장 버전: {document.app_version}\n"
+                        f"현재 프로그램 버전: {__version__}\n\n"
+                        "일부 기능이나 표시 결과가 달라질 수 있습니다. 프로젝트를 계속 엽니다."
+                        if korean else
+                        "This project was saved with a different version of Playlist Canvas.\n\n"
+                        f"Project version: {document.app_version}\n"
+                        f"Current app version: {__version__}\n\n"
+                        "Some features or visual results may differ. The project will continue opening."
+                    ),
+                    QMessageBox.StandardButton.Ok,
+                    QMessageBox.StandardButton.Ok,
+                )
             if (document.settings.title == "Untitled Project"
                     and path.suffix.lower() == ".json"):
                 document.settings.title = path.stem.removesuffix(".project")
+            stage = "누락된 미디어 확인" if self.translator.language is Language.KOREAN else "Validating project media"
             if not self._resolve_project_media(document, path):
                 return False
+            stage = "프로젝트 작업공간 적용" if self.translator.language is Language.KOREAN else "Applying project workspace"
             self._history_restoring = True
+            apply_started = True
             try:
                 self._apply_project(document)
                 self.history.reset(self._project_document().to_dict())
@@ -2861,9 +3351,101 @@ class MainWindow(QMainWindow):
             if self._legacy_project_path is not None:
                 QTimer.singleShot(0, self._offer_legacy_upgrade)
             return True
-        except ProjectError as error:
-            self._show_project_error(error)
+        except Exception as error:
+            rollback_error: Exception | None = None
+            if apply_started:
+                try:
+                    self._history_restoring = True
+                    self._apply_project(previous_document)
+                    valid_selection = [
+                        source_id for source_id in previous_selection
+                        if self.store.get(source_id) is not None
+                    ]
+                    active = previous_active if previous_active in valid_selection else None
+                    self.store.select_many(valid_selection, active)
+                    self.history.reset(previous_document.to_dict())
+                except Exception as restore_error:  # pragma: no cover - last-resort diagnostics
+                    rollback_error = restore_error
+                    LOGGER.exception("Failed to restore the workspace after project load failure")
+                finally:
+                    self._history_restoring = False
+            self.current_project_path = previous_path
+            self._legacy_project_path = previous_legacy_path
+            self.upgrade_project_action.setEnabled(previous_legacy_path is not None)
+            self._project_dirty = previous_dirty
+            self._update_project_status()
+            self._show_project_load_crash(path, stage, error, rollback_error)
             return False
+
+    def _show_project_load_crash(
+        self, path: Path, stage: str, error: Exception,
+        rollback_error: Exception | None = None,
+    ) -> None:
+        """Show detailed, copyable diagnostics for a recoverable load failure."""
+        LOGGER.exception("Project load failed during %s: %s", stage, path)
+        cause: BaseException = error
+        while cause.__cause__ is not None:
+            cause = cause.__cause__
+        korean = self.translator.language is Language.KOREAN
+        guidance = self._project_load_guidance(cause, korean)
+        traceback_text = "".join(
+            traceback_module.format_exception(type(error), error, error.__traceback__)
+        )
+        rollback_text = ""
+        if rollback_error is not None:
+            rollback_text = (
+                "\n\nWORKSPACE RESTORE ERROR\n" + "".join(
+                    traceback_module.format_exception(
+                        type(rollback_error), rollback_error, rollback_error.__traceback__
+                    )
+                )
+            )
+        resolved_path = path.expanduser().resolve()
+        report = (
+            f"Playlist Canvas {__version__}\n"
+            f"Project: {resolved_path}\n"
+            f"Stage: {stage}\n"
+            f"Exception: {type(error).__name__}: {error}\n"
+            f"Root cause: {type(cause).__name__}: {cause}\n"
+            f"Workspace restored: {'no' if rollback_error else 'yes'}\n\n"
+            f"TRACEBACK\n{traceback_text}{rollback_text}"
+        )
+        ProjectCrashReportDialog(
+            project_path=str(resolved_path),
+            stage=stage,
+            exception_type=type(error).__name__,
+            exception_message=str(error),
+            cause_type=type(cause).__name__,
+            cause_message=str(cause),
+            guidance=guidance,
+            report_text=report,
+            log_path=str(log_directory()),
+            korean=korean,
+            parent=self,
+        ).exec()
+
+    @staticmethod
+    def _project_load_guidance(error: BaseException, korean: bool) -> str:
+        """Return a practical explanation based on the deepest load exception."""
+        name = type(error).__name__
+        message = str(error).casefold()
+        if name == "JSONDecodeError":
+            return ("프로젝트 JSON 구조가 손상되었습니다. 백업 또는 자동 복구 파일을 사용해 보세요."
+                    if korean else "The project JSON is malformed. Try a backup or autosave recovery file.")
+        if name == "BadZipFile" or "zip" in message:
+            return ("프로젝트 패키지가 손상되었거나 올바른 .pvsproj 파일이 아닙니다. 다시 복사하거나 백업을 사용해 보세요."
+                    if korean else "The project package is damaged or is not a valid .pvsproj file. Copy it again or use a backup.")
+        if name in {"PermissionError", "FileNotFoundError"}:
+            return ("파일 위치와 읽기 권한을 확인한 뒤 다시 시도하세요."
+                    if korean else "Check the file location and read permission, then try again.")
+        if name in {"UnicodeDecodeError", "UnicodeError"}:
+            return ("프로젝트 문자가 UTF-8 형식이 아닙니다. 원본 프로그램에서 다시 저장해 보세요."
+                    if korean else "The project text is not valid UTF-8. Save it again from the original application.")
+        if name in {"ValueError", "TypeError", "KeyError"}:
+            return ("프로젝트 데이터가 지원 형식과 맞지 않습니다. 상세 보고서에서 잘못된 항목을 확인하세요."
+                    if korean else "The project data does not match the supported format. Check the detailed report for the invalid field.")
+        return ("상세 보고서를 복사해 문제 파일과 함께 개발자에게 전달하세요."
+                if korean else "Copy the detailed report and provide it with the problematic file to the developer.")
 
     def _resolve_project_media(self, document: ProjectDocument, project_path: Path) -> bool:
         """Relink missing project assets before the document changes the live workspace."""
@@ -2911,14 +3493,84 @@ class MainWindow(QMainWindow):
 
     def _show_project_settings(self) -> None:
         """Edit project-scoped identity, content policy, and thumbnail."""
+        artboard = self.canvas.scene_model.artboard_rect
+        original_canvas_size = (round(artboard.width()), round(artboard.height()))
         thumbnail = QPixmap.fromImage(self._project_thumbnail_image())
         dialog = ProjectSettingsDialog(
-            self.project_settings, self.translator, thumbnail, self
+            self.project_settings, self.translator, thumbnail, self,
+            canvas_size=original_canvas_size,
         )
         if dialog.exec() == dialog.DialogCode.Accepted:
             self.project_settings = dialog.selected_settings
+            if dialog.selected_canvas_size != original_canvas_size:
+                self._resize_project_canvas(
+                    original_canvas_size,
+                    dialog.selected_canvas_size,
+                    dialog.scale_canvas_content,
+                )
             self._schedule_history()
             self._update_project_status()
+
+    def _resize_project_canvas(
+        self, old_size: tuple[int, int], new_size: tuple[int, int],
+        scale_content: bool,
+    ) -> None:
+        """Resize the artboard while preserving or ratio-adapting current sources."""
+        old_width, old_height = old_size
+        new_width, new_height = new_size
+        selected_ids = self.store.selected_ids
+        active_id = self.store.selected.id if self.store.selected is not None else None
+        sources = self.store.sources()
+        if scale_content:
+            resized = self._adapt_sources_to_canvas(
+                sources, old_width, old_height, new_width, new_height,
+            )
+        else:
+            resized = [Source.from_dict(source.to_dict()) for source in sources]
+            for source in resized:
+                if (
+                    source.source_type is SourceType.BACKGROUND
+                    and abs(source.x) < 0.01 and abs(source.y) < 0.01
+                    and abs(source.width - old_width) < 0.01
+                    and abs(source.height - old_height) < 0.01
+                ):
+                    source.width = new_width
+                    source.height = new_height
+        self._history_restoring = True
+        try:
+            self.canvas.scene_model.set_artboard_size(new_width, new_height)
+            self.store.replace(resized, self.store.groups())
+            valid_selection = [
+                source_id for source_id in selected_ids
+                if self.store.get(source_id) is not None
+            ]
+            self.store.select_many(
+                valid_selection,
+                active_id if active_id in valid_selection else None,
+            )
+            self.canvas.fit_artboard()
+        finally:
+            self._history_restoring = False
+
+    def _show_lrc_generator(self) -> None:
+        """Open the audio-assisted LRC authoring workflow."""
+        dialog = LrcGeneratorDialog(
+            self.project_content_service.items,
+            self.translator,
+            self,
+            playlist_tracks=self.playlist_service.tracks,
+        )
+        dialog.exec()
+        if dialog.saved_paths and dialog.add_saved_files_to_project:
+            added = self.project_content_service.add_paths(dialog.saved_paths)
+            if added:
+                korean = self.translator.language is Language.KOREAN
+                self.statusBar().showMessage(
+                    f"저장한 LRC 파일 {added}개를 프로젝트 콘텐츠에 추가했습니다."
+                    if korean else
+                    f"Added {added} saved LRC file(s) to project content.",
+                    5000,
+                )
 
     def _offer_legacy_upgrade(self) -> None:
         """Offer a non-destructive package upgrade after a legacy JSON load."""
@@ -3052,6 +3704,10 @@ class MainWindow(QMainWindow):
         self.export_action.setText(text("export"))
         self.preview_action.setText("미리보기" if self.translator.language is Language.KOREAN else "Preview")
         self.settings_action.setText("설정" if self.translator.language is Language.KOREAN else "Settings")
+        self.lrc_generator_action.setText(
+            "LRC 파일 생성기" if self.translator.language is Language.KOREAN
+            else "LRC File Generator"
+        )
         self.file_menu.setTitle("파일" if self.translator.language is Language.KOREAN else "File")
         self.project_menu.setTitle("프로젝트" if self.translator.language is Language.KOREAN else "Project")
         self.edit_menu.setTitle("편집" if self.translator.language is Language.KOREAN else "Edit")
@@ -3069,6 +3725,10 @@ class MainWindow(QMainWindow):
         )
         self.shortcuts_action.setText(
             "단축키 안내" if self.translator.language is Language.KOREAN else "Keyboard shortcuts"
+        )
+        self.check_updates_action.setText(
+            "업데이트 확인" if self.translator.language is Language.KOREAN
+            else "Check for updates"
         )
         self.about_action.setText(
             "프로그램 정보" if self.translator.language is Language.KOREAN
@@ -3216,7 +3876,13 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(message, 5000)
             event.ignore()
             return
-        if self._project_dirty:
+        if self._update_download_worker and self._update_download_worker.isRunning():
+            self._update_download_worker.cancel()
+            message = "업데이트 다운로드를 취소하는 중입니다." if self.translator.language is Language.KOREAN else "Cancelling update download..."
+            self.statusBar().showMessage(message, 5000)
+            event.ignore()
+            return
+        if self._project_dirty and not self._update_install_authorized:
             korean = self.translator.language is Language.KOREAN
             response = QMessageBox.warning(
                 self,
@@ -3265,9 +3931,55 @@ class MainWindow(QMainWindow):
             "alternate": "#202733" if dark else "#F0F4F8",
             "shadow": "#000000" if dark else "#7C8A9A",
         }
-        self.setStyleSheet(
+        application = QApplication.instance()
+        effective_name = "dark" if dark else "light"
+        palette_changed = (
+            application is not None
+            and application.property("playlistCanvasEffectiveTheme") != effective_name
+        )
+        if application is not None and palette_changed:
+            palette = QPalette()
+            palette.setColor(QPalette.ColorRole.Window, QColor(colors["window"]))
+            palette.setColor(QPalette.ColorRole.WindowText, QColor(colors["text"]))
+            palette.setColor(QPalette.ColorRole.Base, QColor(colors["field"]))
+            palette.setColor(QPalette.ColorRole.AlternateBase, QColor(colors["alternate"]))
+            palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(colors["panel"]))
+            palette.setColor(QPalette.ColorRole.ToolTipText, QColor(colors["text"]))
+            palette.setColor(QPalette.ColorRole.Text, QColor(colors["text"]))
+            palette.setColor(QPalette.ColorRole.Button, QColor(colors["button"]))
+            palette.setColor(QPalette.ColorRole.ButtonText, QColor(colors["text"]))
+            palette.setColor(QPalette.ColorRole.BrightText, QColor("#FFFFFF"))
+            palette.setColor(QPalette.ColorRole.Highlight, QColor("#1685D1"))
+            palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+            palette.setColor(QPalette.ColorRole.Link, QColor("#1685D1"))
+            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(colors["muted"]))
+            palette.setColor(
+                QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,
+                QColor(colors["muted"]),
+            )
+            palette.setColor(
+                QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText,
+                QColor(colors["muted"]),
+            )
+            palette.setColor(
+                QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText,
+                QColor(colors["muted"]),
+            )
+            application.setPalette(palette)
+            application.setProperty("playlistCanvasEffectiveTheme", effective_name)
+
+        style_sheet = (
             f"""
             QMainWindow {{ background: {colors['window']}; color: {colors['text']}; }}
+            QDialog, QMessageBox {{ background: {colors['window']}; color: {colors['text']}; }}
+            QMenuBar {{ background: {colors['panel']}; color: {colors['text']}; border-bottom: 1px solid {colors['border']}; }}
+            QMenuBar::item:selected {{ background: {colors['hover']}; border-radius: 5px; }}
+            QMenu {{ background: {colors['panel']}; color: {colors['text']}; border: 1px solid {colors['border']}; padding: 5px; }}
+            QMenu::item {{ padding: 7px 30px 7px 24px; border-radius: 5px; }}
+            QMenu::item:selected {{ background: #1685D1; color: #FFFFFF; }}
+            QMenu::item:disabled {{ color: {colors['muted']}; }}
+            QMenu::separator {{ height: 1px; background: {colors['border']}; margin: 4px 8px; }}
+            QStatusBar {{ background: {colors['panel']}; color: {colors['muted']}; border-top: 1px solid {colors['border']}; }}
             QDialog#startupDialog {{ background: {colors['window']}; color: {colors['text']}; }}
             QDialog#startupDialog QFrame#card {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 12px; }}
             #startupTitle {{ color: {colors['text']}; }}
@@ -3283,6 +3995,7 @@ class MainWindow(QMainWindow):
             QToolTip {{ background: {colors['panel']}; color: {colors['text']}; border: 1px solid #55B8FF; border-radius: 7px; padding: 8px; }}
             QToolButton:checked {{ background: #1685D1; color: #FFFFFF; }}
             QToolButton:disabled {{ color: {colors['muted']}; background: {colors['disabled']}; }}
+            QPushButton:disabled {{ color: {colors['muted']}; background: {colors['disabled']}; border-color: {colors['border']}; }}
             QToolButton#exportButton {{ background: #1685D1; color: #FFFFFF; border-color: #1685D1; font-weight: 700; padding-left: 14px; padding-right: 14px; }}
             QToolButton#exportButton:hover {{ background: #0D72B8; border-color: #0D72B8; }}
             QToolButton#exportButton:disabled {{ background: {colors['disabled']}; border-color: {colors['border']}; color: {colors['muted']}; }}
@@ -3322,17 +4035,39 @@ class MainWindow(QMainWindow):
             #trackRow:hover {{ background: {colors['hover']}; }}
             QGroupBox {{ color: {colors['text']}; font-weight: 600; border: 1px solid {colors['border']}; border-radius: 8px; margin-top: 10px; padding: 10px 7px 7px 7px; }}
             QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}
-            QLineEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background: {colors['field']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 6px; padding: 5px; min-height: 18px; }}
-            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 2px solid #1685D1; padding: 4px; }}
+            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{ background: {colors['field']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 6px; padding: 5px; min-height: 18px; selection-background-color: #1685D1; selection-color: #FFFFFF; }}
+            QLineEdit:focus, QComboBox:focus {{ border: 2px solid #1685D1; padding: 4px; }}
+            QSpinBox, QDoubleSpinBox {{ background: {colors['field']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 6px; padding: 0px 28px 0px 5px; min-height: 30px; max-height: 30px; selection-background-color: #1685D1; selection-color: #FFFFFF; }}
+            QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid #1685D1; }}
+            QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; width: 24px; height: 15px; margin: 0px; background: {colors['button']}; border-left: 1px solid {colors['border']}; border-bottom: 1px solid {colors['border']}; border-top-right-radius: 5px; }}
+            QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; width: 24px; height: 15px; margin: 0px; background: {colors['button']}; border-left: 1px solid {colors['border']}; border-bottom-right-radius: 5px; }}
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url("assets/icons/spin_up.svg"); width: 9px; height: 6px; }}
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url("assets/icons/spin_down.svg"); width: 9px; height: 6px; }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{ background: {colors['hover']}; }}
+            QSpinBox::up-button:pressed, QSpinBox::down-button:pressed, QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed {{ background: #1685D1; }}
             QCheckBox, QLabel {{ color: {colors['text']}; padding: 3px; }}
+            QCheckBox:disabled, QLabel:disabled {{ color: {colors['muted']}; }}
+            QComboBox QAbstractItemView {{ background: {colors['panel']}; color: {colors['text']}; border: 1px solid {colors['border']}; selection-background-color: #1685D1; selection-color: #FFFFFF; outline: 0; }}
             QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px; }}
             QScrollBar::handle:vertical {{ background: {colors['border']}; min-height: 28px; border-radius: 5px; }}
             QScrollBar::handle:vertical:hover {{ background: {colors['muted']}; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 3px; }}
+            QScrollBar::handle:horizontal {{ background: {colors['border']}; min-width: 28px; border-radius: 5px; }}
+            QScrollBar::handle:horizontal:hover {{ background: {colors['muted']}; }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
             QSplitter::handle {{ background: {colors['border']}; width: 2px; height: 5px; }}
             QSplitter::handle:hover {{ background: #1685D1; }}
             """
         )
+        self.setStyleSheet("")
+        if application is not None:
+            style_changed = application.styleSheet() != style_sheet
+            if style_changed:
+                application.setStyleSheet(style_sheet)
+        else:
+            style_changed = True
+            self.setStyleSheet(style_sheet)
         for panel in (self.source_sidebar, self.layer_panel, self.playlist_editor):
             effect = QGraphicsDropShadowEffect(panel)
             effect.setBlurRadius(18)
@@ -3351,3 +4086,12 @@ class MainWindow(QMainWindow):
                 QColor("#E6EBF1"), QColor("#FFFFFF"), QColor(72, 91, 112, 30),
                 QColor("#9AA9BA"),
             )
+        if application is not None and (palette_changed or style_changed):
+            for widget in application.topLevelWidgets():
+                widget.setPalette(application.palette())
+                refresh_theme = getattr(widget, "refresh_theme", None)
+                if callable(refresh_theme):
+                    refresh_theme()
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+                widget.update()

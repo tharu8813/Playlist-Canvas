@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QSettings, Signal
 
+from app import __version__
 
 @dataclass(frozen=True, slots=True)
 class AIProjectPromptSettings:
@@ -429,12 +430,13 @@ Highest-priority rule: If the current message and “Project brief to execute no
     @staticmethod
     def _compatibility_korean(detailed: bool) -> str:
         if not detailed:
-            return """호환 규격 요약: 프로젝트 본문은 UTF-8 JSON 객체이며 `version: 2`, `canvas`, `settings`, `sources`, `playlist`, `groups`, `content_library`를 가진다. JSON 출력은 `.project.json`으로 저장한다. `.pvsproj` 출력은 이 JSON을 ZIP 루트의 `project.json`으로 넣은 ZIP 파일이며 확장자만 `.pvsproj`이다. 미디어를 포함할 때는 `assets/` 아래에 넣고 JSON 경로도 같은 상대 경로를 사용한다."""
+            return f"""호환 규격 요약: 프로젝트 본문은 UTF-8 JSON 객체이며 `version: 2`, `app_version: {__version__}`, `canvas`, `settings`, `sources`, `playlist`, `groups`, `content_library`를 가진다. JSON 출력은 `.project.json`으로 저장한다. `.pvsproj` 출력은 이 JSON을 ZIP 루트의 `project.json`으로 넣은 ZIP 파일이며 확장자만 `.pvsproj`이다. 미디어를 포함할 때는 `assets/` 아래에 넣고 JSON 경로도 같은 상대 경로를 사용한다."""
         return """### 내장 호환 규격(v2)
 프로젝트 루트 예시(주석 없이 유효한 JSON으로 생성):
 ```json
 {
   "version": 2,
+  "app_version": "__APP_VERSION__",
   "canvas": {"width": 1280, "height": 720, "show_grid": true, "snap_enabled": true, "zoom": 1.0},
   "theme": "dark",
   "language": "ko",
@@ -444,7 +446,7 @@ Highest-priority rule: If the current message and “Project brief to execute no
 ```
 - `sources` 항목 필수 키: `source_type`, `name`. 각 항목에는 고유 UUID 문자열 `id`를 권장한다. 나머지 키는 생략 시 앱 기본값이 적용된다.
 - 지원 `source_type`: `image`, `text`, `shape`, `progress_bar`, `time`, `album_cover`, `logo`, `watermark`, `background`, `audio_visualizer`, `lyrics`, `track_list`, `now_playing`, `audio_waveform`, `audio_level_meter`, `particle_overlay`.
-- 공통 소스 키: `id`, `x`, `y`, `width`, `height`, `rotation`, `scale`, `opacity`, `border_radius`, `z_index`, `visible`, `locked`, `fill_color`, `content_path`, `font_path`, `blur`, `outline_color`, `outline_width`, `group_id`, `animation_in`, `animation_out`, `animation_duration`, `timeline_start`, `timeline_duration`.
+- 공통 소스 키: `id`, `x`, `y`, `width`, `height`, `rotation`, `scale`, `opacity`, `border_radius`, `z_index`, `visible`, `locked`, `fill_color`, `content_path`, `font_path`, `blur`, `outline_color`, `outline_width`, `group_id`, `animation_in`, `animation_out`, `animation_in_duration`, `animation_out_duration`, `timeline_start`, `timeline_duration`. 애니메이션 시간은 초 단위이며 시작과 종료를 각각 지정한다.
 - `timeline_start`는 전체 영상 기준 표시 시작 초이며 `timeline_duration`은 표시 지속 초다. 지속시간이 `0`이면 시작 시각부터 영상 끝까지 표시한다. `time` 소스의 `text`에는 `%track_current_time% / %track_total_time%` 같은 시간 토큰을 사용한다.
 - 중첩 스타일: `shadow`는 `enabled,color,blur_radius,offset_x,offset_y,opacity`; `gradient`는 `enabled,start_color,end_color,angle`만 사용한다.
 - 텍스트/이미지 키: `text`, `font_family`, `font_size`, `font_weight`, `text_alignment`(`left|center|right`), `text_overflow`(`wrap|ellipsis|clip`), `image_fit_mode`(`cover|contain|stretch`), `shape_kind`(`rectangle|circle|line`).
@@ -458,17 +460,18 @@ Highest-priority rule: If the current message and “Project brief to execute no
 - `groups`: `[{"id": "UUID", "name": "그룹명"}]`. `content_library`: `[{"id": "UUID", "path": "경로", "media_type": "audio|image|font|lyrics", "name": "이름"}]`.
 - `.project.json`: 위 객체를 BOM 없는 UTF-8 JSON으로 저장한다.
 - `.pvsproj`: 표준 ZIP 파일이다. 루트에 위 JSON을 `project.json`이라는 이름으로 넣는다. 포함 모드에서는 실제 파일을 `assets/고유이름.확장자`로 넣고 `content_path`, `font_path`, `file_path`, `lyrics_path`, `content_library[].path`에 동일한 POSIX 상대 경로를 기록한다. 선택적으로 루트에 PNG `thumbnail.png`를 넣는다. ZIP 파일 확장자를 `.pvsproj`로 지정한다. 경로에 `..` 또는 절대 경로를 넣지 않는다.
-- 외부 참조 모드에서는 `settings.content_mode`를 `reference`로 하고 사용자가 제공한 실제 절대 경로만 기록한다."""
+- 외부 참조 모드에서는 `settings.content_mode`를 `reference`로 하고 사용자가 제공한 실제 절대 경로만 기록한다.""".replace("__APP_VERSION__", __version__)
 
     @staticmethod
     def _compatibility_english(detailed: bool) -> str:
         if not detailed:
-            return """Compatibility summary: the body is a UTF-8 JSON object with `version: 2`, `canvas`, `settings`, `sources`, `playlist`, `groups`, and `content_library`. Save JSON output as `.project.json`. A `.pvsproj` is a ZIP file containing that JSON as root-level `project.json`; embedded media goes under `assets/` and the JSON uses matching relative paths."""
+            return f"""Compatibility summary: the body is a UTF-8 JSON object with `version: 2`, `app_version: {__version__}`, `canvas`, `settings`, `sources`, `playlist`, `groups`, and `content_library`. Save JSON output as `.project.json`. A `.pvsproj` is a ZIP file containing that JSON as root-level `project.json`; embedded media goes under `assets/` and the JSON uses matching relative paths."""
         return """### Embedded compatibility contract (v2)
 Project root example (produce valid JSON without comments):
 ```json
 {
   "version": 2,
+  "app_version": "__APP_VERSION__",
   "canvas": {"width": 1280, "height": 720, "show_grid": true, "snap_enabled": true, "zoom": 1.0},
   "theme": "dark", "language": "en",
   "settings": {"title": "Title", "description": "", "author": "", "content_mode": "embed", "thumbnail_mode": "canvas", "thumbnail_path": "", "created_at": "ISO-8601 UTC", "modified_at": "ISO-8601 UTC"},
@@ -477,7 +480,7 @@ Project root example (produce valid JSON without comments):
 ```
 - Every `sources` item requires `source_type` and `name`; a unique UUID string `id` is recommended. Omitted optional keys receive application defaults.
 - Supported `source_type`: `image`, `text`, `shape`, `progress_bar`, `time`, `album_cover`, `logo`, `watermark`, `background`, `audio_visualizer`, `lyrics`, `track_list`, `now_playing`, `audio_waveform`, `audio_level_meter`, `particle_overlay`.
-- Common source keys: `id`, `x`, `y`, `width`, `height`, `rotation`, `scale`, `opacity`, `border_radius`, `z_index`, `visible`, `locked`, `fill_color`, `content_path`, `font_path`, `blur`, `outline_color`, `outline_width`, `group_id`, `animation_in`, `animation_out`, `animation_duration`, `timeline_start`, `timeline_duration`.
+- Common source keys: `id`, `x`, `y`, `width`, `height`, `rotation`, `scale`, `opacity`, `border_radius`, `z_index`, `visible`, `locked`, `fill_color`, `content_path`, `font_path`, `blur`, `outline_color`, `outline_width`, `group_id`, `animation_in`, `animation_out`, `animation_in_duration`, `animation_out_duration`, `timeline_start`, `timeline_duration`. Animation durations are seconds and are configured independently for entrance and exit.
 - `timeline_start` is the source's show time in whole-video seconds; `timeline_duration` is its visible duration. A zero duration means visible from its start through the end. For a `time` source, use time tokens such as `%track_current_time% / %track_total_time%` in `text`.
 - Nested style keys: `shadow` uses `enabled,color,blur_radius,offset_x,offset_y,opacity`; `gradient` uses `enabled,start_color,end_color,angle`.
 - Text/image keys: `text`, `font_family`, `font_size`, `font_weight`, `text_alignment` (`left|center|right`), `text_overflow` (`wrap|ellipsis|clip`), `image_fit_mode` (`cover|contain|stretch`), `shape_kind` (`rectangle|circle|line`).
@@ -491,4 +494,4 @@ Project root example (produce valid JSON without comments):
 - `groups`: `[{"id": "UUID", "name": "Group"}]`. `content_library`: `[{"id": "UUID", "path": "path", "media_type": "audio|image|font|lyrics", "name": "Name"}]`.
 - `.project.json`: save the root object as UTF-8 JSON without a BOM.
 - `.pvsproj`: create a standard ZIP with the JSON at root as `project.json`. In embed mode, put real files at `assets/unique-name.ext` and use the matching POSIX relative path in `content_path`, `font_path`, `file_path`, `lyrics_path`, and `content_library[].path`. Optionally add root-level PNG `thumbnail.png`. Give the ZIP a `.pvsproj` extension. Never use absolute paths or `..` inside the package.
-- For external references set `settings.content_mode` to `reference` and record only real absolute paths supplied by the user."""
+- For external references set `settings.content_mode` to `reference` and record only real absolute paths supplied by the user.""".replace("__APP_VERSION__", __version__)

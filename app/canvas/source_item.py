@@ -652,6 +652,7 @@ class SourceItem(QGraphicsObject):
             painter.drawRoundedRect(rect, self.source.border_radius, self.source.border_radius)
             lines = [line for line in (self.source.text or self.source.subtitle_fallback).splitlines() if line.strip()]
             current_line = self.source.subtitle_current_line
+            current_line_count = max(1, self.source.subtitle_current_line_count)
             has_current_line = 0 <= current_line < len(lines)
             if not has_current_line:
                 current_line = -1
@@ -662,7 +663,10 @@ class SourceItem(QGraphicsObject):
             transition = max(0.0, min(1.0, self._subtitle_transition_progress))
             transition_style = self.source.subtitle_animation
             for index, line in enumerate(lines):
-                is_current = has_current_line and index == current_line
+                is_current = (
+                    has_current_line
+                    and current_line <= index < current_line + current_line_count
+                )
                 is_previous = has_current_line and index < current_line
                 line_color = QColor(self.source.outline_color)
                 if is_current and transition_style in {"apple_music", "spotify", "blur_reveal"}:

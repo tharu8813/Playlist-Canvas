@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -55,11 +56,17 @@ class SourceInspector(QScrollArea):
         self._dirty_line_fields: set[str] = set()
         self._form_labels: dict[str, QLabel] = {}
         self._field_widgets: dict[str, QWidget] = {}
+        self.setMinimumWidth(290)
         self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setObjectName("sourceInspector")
         self._content = QWidget()
         self._content.setObjectName("inspectorContent")
+        self._content.setMinimumWidth(0)
+        self._content.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
         self.setWidget(self._content)
         self.empty_state = QLabel(self.viewport())
         self.empty_state.setObjectName("inspectorEmptyState")
@@ -403,7 +410,8 @@ class SourceInspector(QScrollArea):
                                  ("Slide right", "slide_right"), ("Slide up", "slide_up"),
                                  ("Slide down", "slide_down"), ("Zoom", "zoom")):
                 combo.addItem(label, value)
-        self.animation_duration_spin = self._spin(0.1, 3, 0.05)
+        self.animation_in_duration_spin = self._spin(0.1, 3, 0.05)
+        self.animation_out_duration_spin = self._spin(0.1, 3, 0.05)
         self.animation_preview_button = QPushButton()
         self.animation_preview_button.setObjectName("primaryButton")
         self.z_spin = QSpinBox()
@@ -421,8 +429,11 @@ class SourceInspector(QScrollArea):
             ("shadow", self.shadow_check), ("shadow_color", self.shadow_color_button),
             ("shadow_opacity", self.shadow_opacity_spin), ("shadow_blur", self.shadow_blur_spin),
             ("shadow_x", self.shadow_x_spin), ("shadow_y", self.shadow_y_spin),
-            ("animation_in", self.animation_in_combo), ("animation_out", self.animation_out_combo),
-            ("animation_duration", self.animation_duration_spin), ("layer", self.z_spin),
+            ("animation_in", self.animation_in_combo),
+            ("animation_in_duration", self.animation_in_duration_spin),
+            ("animation_out", self.animation_out_combo),
+            ("animation_out_duration", self.animation_out_duration_spin),
+            ("layer", self.z_spin),
         ):
             self._add_labeled_row(appearance, key, widget)
         appearance.addRow(self.visible_check)
@@ -483,10 +494,29 @@ class SourceInspector(QScrollArea):
             self.blur_spin, self.brightness_spin, self.contrast_spin, self.shadow_check,
             self.shadow_color_button, self.shadow_opacity_spin, self.shadow_blur_spin,
             self.shadow_x_spin, self.shadow_y_spin,
-            self.animation_in_combo, self.animation_out_combo, self.animation_duration_spin,
+            self.animation_in_combo, self.animation_in_duration_spin,
+            self.animation_out_combo, self.animation_out_duration_spin,
             self.animation_preview_button,
             self.visible_check, self.locked_check,
         ]
+        for form in self._content.findChildren(QFormLayout):
+            form.setFieldGrowthPolicy(
+                QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+            )
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            form.setLabelAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+            form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        for widget in self._field_widgets.values():
+            widget.setMinimumWidth(0)
+            if widget.sizePolicy().horizontalPolicy() in {
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum,
+            }:
+                widget.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    widget.sizePolicy().verticalPolicy(),
+                )
         self._connect_fields()
         self._set_enabled(False)
         self._update_source_specific_fields(None)
@@ -532,7 +562,7 @@ class SourceInspector(QScrollArea):
             "outline": ("요소 가장자리에 그리는 윤곽선의 두께입니다. 0이면 표시하지 않습니다.", "Width of the outline drawn around the source. Set to 0 to hide it."),
             "font_size": ("텍스트의 기준 글꼴 크기입니다. 요소 크기와 배율은 별도로 적용됩니다.", "Base text size. Source dimensions and scale are applied separately."),
             "font_family": ("텍스트에 사용할 글꼴입니다. 글꼴 추가 버튼으로 TTF 또는 OTF 파일을 등록할 수 있습니다.", "Font used for text. Add Font can register a TTF or OTF file."),
-            "fill_color": ("도형, 텍스트 또는 효과의 주 색상입니다. 요소 종류에 따라 적용되는 부분이 달라집니다.", "Primary color for the shape, text, or effect. Its use depends on source type."),
+            "fill_color": ("도형, 텍스트 또는 효과의 주 색상입니다. 색상 창에서 알파를 0으로 설정하면 요소 전체 투명도는 유지하면서 배경만 완전히 투명하게 만들 수 있습니다.", "Primary fill or background color. Set alpha to 0 in the color dialog to make the background fully transparent without changing overall source opacity."),
             "outline_color": ("윤곽선에 사용할 색상입니다. 윤곽선 두께가 0보다 클 때 보입니다.", "Outline color, visible when outline width is greater than zero."),
             "gradient": ("단색 대신 시작 색과 끝 색이 이어지는 그라데이션 채우기를 사용합니다.", "Uses a blend between start and end colors instead of a solid fill."),
             "gradient_start": ("그라데이션이 시작되는 쪽의 색상입니다.", "Color at the start of the gradient."),
@@ -548,7 +578,8 @@ class SourceInspector(QScrollArea):
             "shadow_y": ("그림자를 세로로 이동합니다. 양수는 아래, 음수는 위입니다.", "Vertical shadow offset. Positive moves down; negative moves up."),
             "animation_in": ("곡에서 이 요소가 나타날 때 재생할 등장 효과입니다.", "Entrance effect played when this source appears during a track."),
             "animation_out": ("곡에서 이 요소가 사라질 때 재생할 종료 효과입니다.", "Exit effect played when this source disappears during a track."),
-            "animation_duration": ("등장·종료 애니메이션 한 번이 재생되는 시간입니다.", "Duration of each entrance or exit animation."),
+            "animation_in_duration": ("곡 시작 애니메이션이 재생되는 시간입니다.", "Duration of the track-start animation."),
+            "animation_out_duration": ("곡 종료 애니메이션이 재생되는 시간입니다.", "Duration of the track-end animation."),
             "layer": ("요소의 쌓임 순서입니다. 값이 큰 요소가 값이 작은 요소 위에 표시됩니다.", "Stacking order. Sources with larger values are drawn above sources with smaller values."),
         }
         if key in common:
@@ -952,7 +983,12 @@ class SourceInspector(QScrollArea):
         self.animation_out_combo.currentIndexChanged.connect(lambda _index: self._update("animation_out", self.animation_out_combo.currentData()))
         self.animation_in_combo.currentIndexChanged.connect(self._update_animation_preview_button)
         self.animation_out_combo.currentIndexChanged.connect(self._update_animation_preview_button)
-        self.animation_duration_spin.valueChanged.connect(lambda _value: self._update("animation_duration", self.animation_duration_spin.value()))
+        self.animation_in_duration_spin.valueChanged.connect(
+            lambda value: self._update("animation_in_duration", value)
+        )
+        self.animation_out_duration_spin.valueChanged.connect(
+            lambda value: self._update("animation_out_duration", value)
+        )
         self.animation_preview_button.clicked.connect(self._request_animation_preview)
         for field, widget in (
             ("x", self.x_spin), ("y", self.y_spin), ("width", self.width_spin),
@@ -1100,9 +1136,15 @@ class SourceInspector(QScrollArea):
         source = self.store.get(self._source_id)
         if source is None:
             return
-        color = QColorDialog.getColor(QColor(str(getattr(source, field))), self)
+        korean = self.translator.language.value == "ko"
+        color = QColorDialog.getColor(
+            QColor(str(getattr(source, field))),
+            self,
+            "색상 및 투명도" if korean else "Color and transparency",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel,
+        )
         if color.isValid():
-            self._update(field, color.name(QColor.NameFormat.HexRgb))
+            self._update(field, self._serialized_color(color))
 
     def _update_gradient_enabled(self, enabled: bool) -> None:
         self._update_nested("gradient", "enabled", enabled)
@@ -1111,10 +1153,17 @@ class SourceInspector(QScrollArea):
         source = self.store.get(self._source_id)
         if source is None:
             return
-        color = QColorDialog.getColor(QColor(str(getattr(source.gradient, field))), self)
+        korean = self.translator.language.value == "ko"
+        color = QColorDialog.getColor(
+            QColor(str(getattr(source.gradient, field))),
+            self,
+            "그라데이션 색상 및 투명도" if korean
+            else "Gradient color and transparency",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel,
+        )
         if color.isValid():
             self._update_nested(
-                "gradient", field, color.name(QColor.NameFormat.HexRgb)
+                "gradient", field, self._serialized_color(color)
             )
 
     def _update_shadow(self, field: str, value: object) -> None:
@@ -1138,9 +1187,16 @@ class SourceInspector(QScrollArea):
         source = self.store.get(self._source_id)
         if source is None:
             return
-        color = QColorDialog.getColor(QColor(source.shadow.color), self)
+        color = QColorDialog.getColor(
+            QColor(source.shadow.color),
+            self,
+            "그림자 색상 및 투명도"
+            if self.translator.language.value == "ko"
+            else "Shadow color and transparency",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel,
+        )
         if color.isValid():
-            self._update_shadow("color", color.name(QColor.NameFormat.HexRgb))
+            self._update_shadow("color", self._serialized_color(color))
 
     def _set_enabled(self, enabled: bool) -> None:
         for editor in self._editors:
@@ -1203,7 +1259,8 @@ class SourceInspector(QScrollArea):
             "shadow_x": ("그림자 X", "Shadow X"), "shadow_y": ("그림자 Y", "Shadow Y"),
             "animation_in": ("곡 시작 애니메이션", "Track-start animation"),
             "animation_out": ("곡 종료 애니메이션", "Track-end animation"),
-            "animation_duration": ("애니메이션 시간", "Animation duration"),
+            "animation_in_duration": ("시작 애니메이션 시간", "Entrance duration"),
+            "animation_out_duration": ("종료 애니메이션 시간", "Exit duration"),
             "layer": ("레이어", "Layer"),
         }
         labels.update({
@@ -1672,7 +1729,8 @@ class SourceInspector(QScrollArea):
             "particle_seed": self.particle_seed_spin,
             "blur": self.blur_spin, "brightness": self.brightness_spin,
             "contrast": self.contrast_spin,
-            "animation_duration": self.animation_duration_spin,
+            "animation_in_duration": self.animation_in_duration_spin,
+            "animation_out_duration": self.animation_out_duration_spin,
             "shadow.opacity": self.shadow_opacity_spin,
             "shadow.blur_radius": self.shadow_blur_spin,
             "shadow.offset_x": self.shadow_x_spin,
@@ -1833,7 +1891,8 @@ class SourceInspector(QScrollArea):
             self.shadow_y_spin.setValue(source.shadow.offset_y)
             self.animation_in_combo.setCurrentIndex(max(0, self.animation_in_combo.findData(source.animation_in)))
             self.animation_out_combo.setCurrentIndex(max(0, self.animation_out_combo.findData(source.animation_out)))
-            self.animation_duration_spin.setValue(source.animation_duration)
+            self.animation_in_duration_spin.setValue(source.animation_in_duration)
+            self.animation_out_duration_spin.setValue(source.animation_out_duration)
             self.z_spin.setValue(source.z_index)
             self.visible_check.setChecked(source.visible)
             self.locked_check.setChecked(source.locked)
@@ -1842,12 +1901,29 @@ class SourceInspector(QScrollArea):
         self._update_animation_preview_button()
 
     @staticmethod
-    def _set_color_button(button: QPushButton, value: str) -> None:
+    def _serialized_color(color: QColor) -> str:
+        """Preserve alpha only when needed while keeping legacy RGB readable."""
+        name_format = (
+            QColor.NameFormat.HexRgb
+            if color.alpha() == 255 else QColor.NameFormat.HexArgb
+        )
+        return color.name(name_format).upper()
+
+    def _set_color_button(self, button: QPushButton, value: str) -> None:
         color = QColor(value)
         if not color.isValid():
             color = QColor("#FFFFFF")
         text_color = "#111111" if color.lightness() > 150 else "#FFFFFF"
-        button.setText(color.name(QColor.NameFormat.HexRgb).upper())
+        serialized = self._serialized_color(color)
+        if color.alpha() == 0:
+            button.setText(
+                "투명" if self.translator.language.value == "ko" else "Transparent"
+            )
+        elif color.alpha() < 255:
+            button.setText(f"{serialized} · {round(color.alphaF() * 100)}%")
+        else:
+            button.setText(serialized)
         button.setStyleSheet(
-            f"background: {color.name()}; color: {text_color}; border: 1px solid #7B8794;"
+            f"background: rgba({color.red()}, {color.green()}, {color.blue()}, "
+            f"{color.alpha()}); color: {text_color}; border: 1px solid #7B8794;"
         )

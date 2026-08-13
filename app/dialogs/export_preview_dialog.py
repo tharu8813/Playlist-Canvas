@@ -1226,7 +1226,7 @@ class ExportPreviewDialog(QDialog):
         intro = min(
             track.duration_seconds / 2,
             max(
-                (source.animation_duration for source in sources
+                (source.animation_in_duration for source in sources
                  if source.animation_in != "none"),
                 default=0.0,
             ),
@@ -1234,7 +1234,7 @@ class ExportPreviewDialog(QDialog):
         outro = min(
             max(0.0, track.duration_seconds - intro) / 2,
             max(
-                (source.animation_duration for source in sources
+                (source.animation_out_duration for source in sources
                  if source.animation_out != "none"),
                 default=0.0,
             ),
@@ -1366,6 +1366,10 @@ class ExportPreviewDialog(QDialog):
             QSlider::handle:horizontal {{ background: #1685D1; width: 14px; margin: -4px 0; border-radius: 7px; }}
             """
         )
+
+    def refresh_theme(self) -> None:
+        """Rebuild dialog-local cards when the application theme changes."""
+        self._apply_preview_style()
 
     @staticmethod
     def _finish_or_detach_worker(worker: QThread) -> None:

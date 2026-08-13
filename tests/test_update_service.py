@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+from hashlib import sha256
+from io import BytesIO
+from pathlib import Path
+import threading
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import patch
+
+from app.services.update_service import (
+    GitHubUpdateService,
+    ReleaseInfo,
+    UpdateError,
+    is_newer_version,
+    normalized_version,
+)
+
+
+class UpdateServiceTests(unittest.TestCase):
+    def _payload(self, data: bytes = b"signed setup bytes") -> dict[str, object]:
+        return {
+            "tag_name": "v1.2.0",
+            "name": "Playlist Canvas 1.2.0",
+            "body": "## Changes\n\n- Faster export",
+            "published_at": "2026-08-12T00:00:00Z",
+            "html_url": "https://github.com/tharu8813/Playlist-Canvas/releases/tag/v1.2.0",
+            "draft": False,
+            "prerelease": False,
+            "assets": [{
+                "name": "Playlist Canvas-1.2.0-setup.exe",
+                "browser_download_url": (
+                    "https://github.com/tharu8813/Playlist-Canvas/releases/download/"
+                    "v1.2.0/Playlist.Canvas-1.2.0-setup.exe"
+                ),
+                "state": "uploaded",
+                "size": len(data),
+                "digest": f"sha256:{sha256(data).hexdigest()}",
+            }],
+        }
+
+    def test_stable_versions_are_compared_numerically(self) -> None:
+        self.assertEqual(normalized_version("v1.10.2"), (1, 10, 2, 0))
+        self.assertEqual(normalized_version("1.0.0.0"), normalized_version("1.0.0"))
+        self.assertTrue(is_newer_version("1.10.0", "1.9.9"))
+        self.assertFalse(is_newer_version("1.0.0", "1.0.0"))
+
+    def test_release_notes_and_verified_setup_asset_are_parsed(self) -> None:
+        release = GitHubUpdateService.release_from_payload(self._payload())
+        self.assertEqual(release.version, "1.2.0")
+        self.assertIn("Faster export", release.body)
+        self.assertTrue(release.can_install)
+        self.assertEqual(len(release.asset_sha256), 64)
+
+    def test_foreign_release_asset_is_rejected(self) -> None:
+        payload = self._payload()
+        assets = payload["assets"]
+        assert isinstance(assets, list) and isinstance(assets[0], dict)
+        assets[0]["browser_download_url"] = (
+            "https://example.com/tharu8813/Playlist-Canvas/releases/download/evil.exe"
+        )
+        with self.assertRaises(UpdateError):
+            GitHubUpdateService.release_from_payload(payload)
+
+    def test_setup_download_requires_exact_size_and_sha256(self) -> None:
+        data = b"verified Playlist Canvas Setup"
+        release = GitHubUpdateService.release_from_payload(self._payload(data))
+        updates: list[tuple[float, str]] = []
+        with TemporaryDirectory(prefix="playlist-canvas-update-test-") as raw_directory:
+            with patch(
+                "app.services.update_service.urlopen",
+                return_value=BytesIO(data),
+            ):
+                destination = GitHubUpdateService().download_setup(
+                    release,
+                    Path(raw_directory),
+                    lambda fraction, message: updates.append((fraction, message)),
+                    threading.Event(),
+                )
+            self.assertEqual(destination.read_bytes(), data)
+            self.assertFalse(destination.with_suffix(".exe.download").exists())
+        self.assertEqual(updates[-1][0], 1.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

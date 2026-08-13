@@ -102,7 +102,10 @@ class CanvasSnapshot:
         lower: float | None = None
         for z_value in dynamic_z:
             bands.append((lower, z_value - 1e-6))
-            lower = z_value + 1e-6
+            # Put a static source sharing the same legacy Z value into the
+            # foreground band. The former +epsilon lower bound excluded it
+            # from every band, so it vanished only in the exported video.
+            lower = z_value
         bands.append((lower, None))
         static_z = [
             item.source.z_index for item in scene.items()
@@ -144,7 +147,7 @@ class CanvasSnapshot:
         original_backgrounds: list[tuple[SourceItem, QPixmap]] = []
         original_visibility: list[tuple[SourceItem, bool]] = []
         original_outline_colors: list[tuple[SourceItem, str]] = []
-        original_subtitle_lines: list[tuple[SourceItem, int]] = []
+        original_subtitle_lines: list[tuple[SourceItem, int, int]] = []
         original_subtitle_offsets: list[tuple[SourceItem, float]] = []
         original_subtitle_transitions: list[tuple[SourceItem, float]] = []
         original_track_list_rows: list[tuple[SourceItem, int]] = []
@@ -202,7 +205,10 @@ class CanvasSnapshot:
             if source.source_type is SourceType.LYRICS:
                 original_text.append((graphics_item, source.text))
                 original_outline_colors.append((graphics_item, source.outline_color))
-                original_subtitle_lines.append((graphics_item, source.subtitle_current_line))
+                original_subtitle_lines.append((
+                    graphics_item, source.subtitle_current_line,
+                    source.subtitle_current_line_count,
+                ))
                 original_subtitle_offsets.append((graphics_item, source.subtitle_scroll_offset))
                 original_subtitle_transitions.append((
                     graphics_item, graphics_item._subtitle_transition_progress,
@@ -218,20 +224,37 @@ class CanvasSnapshot:
                 )
                 cue_index = LyricsService.display_cue_index(track.lyrics, lyric_elapsed)
                 lyric_cue = track.lyrics[cue_index] if cue_index is not None else None
-                lyric = str(lyric_cue.get("text", "")) if lyric_cue else ""
+                lyric = LyricsService.decode_line_breaks(
+                    lyric_cue.get("text", "") if lyric_cue else ""
+                )
                 if cue_index is not None:
                     first = max(0, cue_index - max(0, source.subtitle_context_lines))
                     last = min(len(track.lyrics), cue_index + max(0, source.subtitle_next_lines) + 1)
-                    lines = [str(cue.get("text", "")).replace("\n", " ").strip()
-                             for cue in track.lyrics[first:last]]
-                    source.text = "\n".join(line for line in lines if line) or source.subtitle_fallback
-                    source.subtitle_current_line = (
-                        max(0, cue_index - first)
-                        if active_cue_index == cue_index else -1
-                    )
+                    blocks = [
+                        LyricsService.decode_line_breaks(cue.get("text", "")).strip()
+                        for cue in track.lyrics[first:last]
+                    ]
+                    source.text = "\n".join(block for block in blocks if block) or source.subtitle_fallback
+                    if active_cue_index == cue_index:
+                        relative_index = max(0, cue_index - first)
+                        source.subtitle_current_line = sum(
+                            len([line for line in block.splitlines() if line.strip()])
+                            for block in blocks[:relative_index]
+                        )
+                        source.subtitle_current_line_count = max(
+                            1,
+                            len([
+                                line for line in blocks[relative_index].splitlines()
+                                if line.strip()
+                            ]),
+                        )
+                    else:
+                        source.subtitle_current_line = -1
+                        source.subtitle_current_line_count = 1
                 else:
                     source.text = lyric or source.text or source.subtitle_fallback
                     source.subtitle_current_line = -1
+                    source.subtitle_current_line_count = 1
                 if source.subtitle_style == "karaoke":
                     source.outline_color = "#FFE08A"
                 elif source.subtitle_style == "minimal":
@@ -381,10 +404,15 @@ class CanvasSnapshot:
                 if style != "none":
                     stagger = min(0.28, (index % 5) * 0.055)
                     if animation_phase_duration is not None:
+                        configured_duration = (
+                            graphics_item.source.animation_in_duration
+                            if animation_phase == "in"
+                            else graphics_item.source.animation_out_duration
+                        )
                         effective_duration = max(
                             0.001,
                             min(
-                                graphics_item.source.animation_duration,
+                                configured_duration,
                                 animation_phase_duration,
                             ),
                         )
@@ -435,8 +463,9 @@ class CanvasSnapshot:
             for graphics_item, outline_color in original_outline_colors:
                 graphics_item.source.outline_color = outline_color
                 graphics_item.update()
-            for graphics_item, current_line in original_subtitle_lines:
+            for graphics_item, current_line, line_count in original_subtitle_lines:
                 graphics_item.source.subtitle_current_line = current_line
+                graphics_item.source.subtitle_current_line_count = line_count
                 graphics_item.update()
             for graphics_item, scroll_offset in original_subtitle_offsets:
                 graphics_item.source.subtitle_scroll_offset = scroll_offset

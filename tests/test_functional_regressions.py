@@ -19,7 +19,9 @@ from app.canvas.source_item import SourceItem
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.canvas_snapshot import CanvasSnapshot
-from app.renderer.ffmpeg_renderer import FFmpegRenderer
+from app.renderer.ffmpeg_renderer import (
+    FFmpegRenderer, RenderError, RenderFrame, RenderSettings, StaticOverlayLayer,
+)
 from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.services.playlist_export_service import PlaylistExportError, PlaylistExportService
 from app.services.playlist_service import PlaylistService
@@ -29,6 +31,7 @@ from app.ffmpeg.install_worker import FFmpegInstallWorker
 from app.ffmpeg.managed_installer import FFmpegInstallError, ManagedFFmpegInstaller
 from app.dialogs.about_dialog import AboutDialog
 from app.dialogs.export_preview_dialog import ExportPreviewDialog, TIMELINE_SCALE
+from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.utils.i18n import Translator
 from app import __version__
 
@@ -107,6 +110,83 @@ class FunctionalRegressionTests(unittest.TestCase):
         ]
         self.assertEqual(FFmpegRenderer._timeline_duration(tracks), 20.0)
 
+    def test_export_rejects_misaligned_visual_streams(self) -> None:
+        base = [(Path("one.png"), 1.0), (Path("two.png"), 1.0)]
+        aligned_layer = StaticOverlayLayer(
+            1.0, [RenderFrame(Path("layer.png"), 2.0)],
+        )
+        FFmpegRenderer._validate_visual_timeline(base, [aligned_layer], 2.0, 30)
+
+        with self.assertRaises(RenderError):
+            FFmpegRenderer._validate_visual_timeline(base, [], 3.0, 30)
+        with self.assertRaises(RenderError):
+            FFmpegRenderer._validate_visual_timeline(
+                base, [StaticOverlayLayer(1.0, [RenderFrame(Path("layer.png"), 1.5)])],
+                2.0, 30,
+            )
+
+    def test_audio_normalization_uses_exact_lossless_segments(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        commands: list[list[str]] = []
+        renderer._run = lambda arguments, **_kwargs: commands.append(arguments)  # type: ignore[method-assign]
+        track = PlaylistTrack(
+            "song.mp3", "Song", duration_seconds=2.75, start_time_seconds=0.4,
+        )
+        with TemporaryDirectory() as directory:
+            segments = renderer._normalize_audio(
+                [track], Path(directory), RenderSettings(), None, threading.Event(),
+            )
+            durations = renderer._insert_silence_for_gaps(
+                [track], segments, Path(directory), RenderSettings(), None,
+                threading.Event(),
+            )
+            manifest = Path(directory) / "audio.ffconcat"
+            renderer._write_concat_file(manifest, segments, durations)
+            manifest_text = manifest.read_text(encoding="utf-8")
+        self.assertEqual(segments[0].suffix, ".nut")
+        self.assertEqual(segments[1].suffix, ".nut")
+        self.assertEqual(durations, [0.4, 2.75])
+        self.assertIn("apad=whole_dur=2.750000", commands[0])
+        self.assertIn("2.750000", commands[0])
+        self.assertIn("pcm_s16le", commands[0])
+        self.assertIn("duration 0.400000", manifest_text)
+        self.assertIn("duration 2.750000", manifest_text)
+
+    def test_static_source_with_same_z_as_visualizer_is_not_dropped(self) -> None:
+        scene = CanvasScene()
+        dynamic = Source(SourceType.AUDIO_VISUALIZER, "Dynamic", z_index=4.0)
+        static = Source(SourceType.TEXT, "Static", z_index=4.0)
+        scene.addItem(SourceItem(dynamic))
+        scene.addItem(SourceItem(static))
+        bands = CanvasSnapshot.z_bands(scene, {dynamic.id})
+        self.assertEqual(len(bands), 2)
+        lower, upper = bands[1]
+        self.assertLessEqual(lower or 0.0, static.z_index)
+        self.assertTrue(upper is None or static.z_index <= upper)
+
+    def test_reactive_overlay_uses_track_animation_windows(self) -> None:
+        overlay = SimpleNamespace(
+            animation_in="fade", animation_out="zoom",
+            animation_in_duration=0.5, animation_out_duration=1.0,
+        )
+        windows = [(1.0, 3.0), (5.0, 2.0)]
+        self.assertEqual(
+            PythonVisualizerRenderer._animation_state(0.5, windows, overlay),
+            ("fade", 0.0, True),
+        )
+        self.assertEqual(
+            PythonVisualizerRenderer._animation_state(1.25, windows, overlay),
+            ("fade", 0.5, True),
+        )
+        self.assertEqual(
+            PythonVisualizerRenderer._animation_state(3.5, windows, overlay),
+            ("zoom", 0.5, False),
+        )
+        self.assertEqual(
+            PythonVisualizerRenderer._animation_state(4.5, windows, overlay),
+            ("zoom", 1.0, False),
+        )
+
     def test_preview_and_export_share_bounded_per_source_animation_timing(self) -> None:
         scene = CanvasScene()
         short = Source(
@@ -151,6 +231,39 @@ class FunctionalRegressionTests(unittest.TestCase):
             )
         self.assertAlmostEqual(observed["Short"], short.opacity)
         self.assertLess(observed["Long"], long.opacity)
+
+    def test_entrance_and_exit_animation_durations_are_independent(self) -> None:
+        legacy = Source.from_dict({
+            "source_type": "shape", "name": "Legacy",
+            "animation_duration": 0.7,
+        })
+        self.assertEqual(legacy.animation_in_duration, 0.7)
+        self.assertEqual(legacy.animation_out_duration, 0.7)
+
+        scene = CanvasScene()
+        source = Source(
+            SourceType.SHAPE, "Split timing", animation_in="fade",
+            animation_out="fade", animation_in_duration=0.2,
+            animation_out_duration=0.8,
+        )
+        scene.addItem(SourceItem(source))
+        track = PlaylistTrack("split.wav", "Split", duration_seconds=4.0)
+        preview = SimpleNamespace(scene=scene)
+
+        self.assertEqual(
+            ExportPreviewDialog._animation_state(preview, track, 0.1),
+            ("in", 0.5, 0.2),
+        )
+        phase, progress, duration = ExportPreviewDialog._animation_state(
+            preview, track, 3.6,
+        )
+        self.assertEqual(phase, "out")
+        self.assertAlmostEqual(progress, 0.5)
+        self.assertAlmostEqual(duration, 0.8)
+
+        restored = Source.from_dict(source.to_dict())
+        self.assertEqual(restored.animation_in_duration, 0.2)
+        self.assertEqual(restored.animation_out_duration, 0.8)
 
     def test_legacy_time_source_is_expanded_dynamically(self) -> None:
         scene = CanvasScene()
@@ -197,7 +310,7 @@ class FunctionalRegressionTests(unittest.TestCase):
 
     def test_track_with_lyrics_displays_first_line_from_playback_start(self) -> None:
         cues = [
-            {"start": 5.0, "end": 6.0, "text": "First line"},
+            {"start": 5.0, "end": 6.0, "text": "First line\ncontinued line"},
             {"start": 10.0, "end": 11.0, "text": "Second line"},
         ]
         self.assertEqual(LyricsService.display_cue_index(cues, 0.0), 0)
@@ -215,11 +328,14 @@ class FunctionalRegressionTests(unittest.TestCase):
         track = PlaylistTrack(
             "track.wav", "Track", duration_seconds=20.0, lyrics=cues,
         )
-        displayed: list[tuple[str, float, int]] = []
+        displayed: list[tuple[str, float, int, int]] = []
         original_capture = CanvasSnapshot.capture
 
         def observe_capture(*arguments: object, **keywords: object):
-            displayed.append((source.text, item.opacity(), source.subtitle_current_line))
+            displayed.append((
+                source.text, item.opacity(), source.subtitle_current_line,
+                source.subtitle_current_line_count,
+            ))
             return original_capture(*arguments, **keywords)
 
         with patch.object(CanvasSnapshot, "capture", side_effect=observe_capture):
@@ -234,10 +350,12 @@ class FunctionalRegressionTests(unittest.TestCase):
             )
 
         self.assertTrue(displayed[0][0].startswith("First line"))
+        self.assertIn("First line\ncontinued line", displayed[0][0])
         self.assertNotIn("Configured placeholder", displayed[0][0])
         self.assertAlmostEqual(displayed[0][1], source.opacity)
         self.assertEqual(displayed[0][2], -1)
         self.assertEqual(displayed[1][2], 0)
+        self.assertEqual(displayed[1][3], 2)
         self.assertEqual(displayed[2][2], -1)
         self.assertEqual(source.text, "Configured placeholder")
 
@@ -305,6 +423,108 @@ class FunctionalRegressionTests(unittest.TestCase):
             )
             cues = LyricsService.load(path)
         self.assertEqual([cue["text"] for cue in cues], ["First", "Second"])
+
+    def test_audio_import_detection_preserves_missing_tag_fields(self) -> None:
+        service = PlaylistService()
+        with TemporaryDirectory(prefix="audio-metadata-detection-") as raw_directory:
+            path = Path(raw_directory) / "untagged.mp3"
+            path.touch()
+            audio = SimpleNamespace(
+                tags={"title": ["Tagged title"]},
+                info=SimpleNamespace(length=42.5),
+            )
+            with patch(
+                "app.services.playlist_service.MutagenFile", return_value=audio,
+            ):
+                candidates = service.inspect_files([path])
+
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertEqual(candidate.track.title, "Tagged title")
+        self.assertEqual(candidate.track.artist, "Unknown Artist")
+        self.assertEqual(candidate.track.album, "Unknown Album")
+        self.assertEqual(candidate.missing_fields, ("artist", "album"))
+        self.assertAlmostEqual(candidate.track.duration_seconds, 42.5)
+
+    def test_lrc_generator_service_writes_metadata_and_round_trips_cues(self) -> None:
+        cues = [
+            {"start": 12.34, "end": 20.0, "text": "Second"},
+            {"start": 1.25, "end": 12.34, "text": "First\ncontinued"},
+        ]
+        rendered = LyricsService.format_lrc(
+            cues, title="Example", artist="Artist"
+        )
+        self.assertIn("[ti:Example]", rendered)
+        self.assertIn("[ar:Artist]", rendered)
+        self.assertIn(r"[00:01.25]First\ncontinued", rendered)
+        self.assertNotIn("[00:01.25]First\ncontinued", rendered)
+        self.assertLess(rendered.index("[00:01.25]First"), rendered.index("[00:12.34]Second"))
+        with TemporaryDirectory(prefix="pvs-lrc-writer-") as raw_directory:
+            saved = LyricsService.save_lrc(
+                Path(raw_directory) / "generated", cues,
+                title="Example", artist="Artist",
+            )
+            restored = LyricsService.load(saved)
+        self.assertEqual(saved.suffix, ".lrc")
+        self.assertEqual([cue["text"] for cue in restored], ["First\ncontinued", "Second"])
+        self.assertAlmostEqual(float(restored[0]["start"]), 1.25)
+
+    def test_lrc_generator_supports_blank_line_separated_multiline_units(self) -> None:
+        dialog = LrcGeneratorDialog([], Translator())
+        try:
+            multiline_index = dialog.input_mode_combo.findData("multiline")
+            dialog.input_mode_combo.setCurrentIndex(multiline_index)
+            dialog.lyrics_editor.setPlainText(
+                "First visual line\nSecond visual line\n\nNext timed lyric"
+            )
+            dialog._prepare_lines()
+            self.assertEqual(
+                dialog.lines,
+                ["First visual line\nSecond visual line", "Next timed lyric"],
+            )
+            self.assertEqual(dialog.timeline_table.rowCount(), 2)
+            self.assertIn("\n", dialog.timeline_table.item(0, 2).text())
+            dialog.timestamps = [1.0, 4.0]
+            rendered = LyricsService.format_lrc(dialog.timed_cues())
+            self.assertIn(r"[00:01.00]First visual line\nSecond visual line", rendered)
+            self.assertEqual(
+                LyricsService._parse_lrc(rendered)[0]["text"],
+                "First visual line\nSecond visual line",
+            )
+        finally:
+            dialog.close()
+
+    def test_lrc_generator_records_undoes_and_previews_partial_timing(self) -> None:
+        dialog = LrcGeneratorDialog([], Translator())
+        dialog.lyrics_editor.setPlainText("First line\nSecond line\nThird line")
+        dialog._prepare_lines()
+        dialog.audio_path = str(Path("test-audio.wav").resolve())
+        dialog.calibration_spin.setValue(-40)
+        with patch.object(dialog.media_player, "position", return_value=12_340):
+            dialog._record_timestamp()
+        self.assertAlmostEqual(float(dialog.timestamps[0] or 0.0), 12.30)
+        self.assertEqual(dialog.current_index, 1)
+        self.assertIn("First line", dialog.timeline_table.item(0, 2).text())
+        dialog._undo_record()
+        self.assertIsNone(dialog.timestamps[0])
+        self.assertEqual(dialog.current_index, 0)
+        dialog._redo_record()
+        self.assertAlmostEqual(float(dialog.timestamps[0] or 0.0), 12.30)
+        cues = dialog.timed_cues()
+        self.assertEqual(len(cues), 1)
+        dialog.pages.setCurrentIndex(2)
+        dialog.preview_mode_check.setChecked(True)
+        dialog._position_changed(12_500)
+        self.assertEqual(dialog._playback_highlight_row, 0)
+        self.assertTrue(dialog.timeline_table.item(0, 0).text().startswith("♪"))
+        self.assertFalse(dialog.record_button.isEnabled())
+        self.assertFalse(dialog.timeline_table.item(0, 0).text().startswith("▶"))
+        dialog._open_shortcuts()
+        self.assertIsNotNone(dialog._shortcuts_dialog)
+        assert dialog._shortcuts_dialog is not None
+        self.assertGreaterEqual(dialog._shortcuts_dialog.table.rowCount(), 6)
+        self.assertIn("F1", dialog._shortcuts_dialog.table.item(4, 0).text())
+        dialog.close()
 
     def test_ffprobe_is_used_as_duration_fallback(self) -> None:
         with TemporaryDirectory(prefix="pvs-probe-test-") as raw_directory:
@@ -409,6 +629,9 @@ class FunctionalRegressionTests(unittest.TestCase):
             diagnostics = dialog.diagnostic_text()
             self.assertIn(f"App version: {__version__}", diagnostics)
             self.assertIn(str(ffmpeg), diagnostics)
+            self.assertIn("https://github.com/tharu8813/Playlist-Canvas", diagnostics)
+            self.assertTrue(dialog.repository_link.openExternalLinks())
+            self.assertIn("github.com/tharu8813/Playlist-Canvas", dialog.repository_link.text())
             dialog._copy_diagnostics()
             self.assertEqual(QApplication.clipboard().text(), diagnostics)
             dialog.close()
