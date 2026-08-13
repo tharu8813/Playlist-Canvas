@@ -17,6 +17,8 @@ analysis = Analysis(
         (str(project_root / "app" / "resources" / "language-pack-template.json"), "app/resources"),
         (str(project_root / "app" / "resources" / "ko.json"), "app/resources"),
         (str(project_root / "app" / "resources" / "en.json"), "app/resources"),
+        (str(project_root / "app" / "assets" / "icons" / "spin_down.svg"), "assets/icons"),
+        (str(project_root / "app" / "assets" / "icons" / "spin_up.svg"), "assets/icons"),
         (str(project_root / "LICENSE.txt"), "."),
     ],
     hiddenimports=["PySide6.QtSvg", "PySide6.QtMultimedia", "PySide6.QtOpenGLWidgets"],
