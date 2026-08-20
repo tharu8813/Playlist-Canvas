@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QButtonGroup, QFileDialog, QHBoxLayout, QLabel, QListView,
+    QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from app.services.project_content_service import ProjectContentService
@@ -21,6 +22,7 @@ class ContentLibraryPanel(QWidget):
     """Import project content and reuse it without browsing repeatedly."""
 
     add_requested = Signal(str, str)
+    VIEW_MODES = ("list", "grid", "compact")
 
     def __init__(
         self, service: ProjectContentService, translator: Translator,
@@ -36,6 +38,28 @@ class ContentLibraryPanel(QWidget):
         self.help_label.setObjectName("mutedLabel")
         self.help_label.setWordWrap(True)
         layout.addWidget(self.help_label)
+        view_row = QHBoxLayout()
+        view_row.setContentsMargins(0, 0, 0, 0)
+        view_row.setSpacing(4)
+        self.view_label = QLabel()
+        self.view_label.setObjectName("mutedLabel")
+        view_row.addWidget(self.view_label)
+        view_row.addStretch()
+        self.view_button_group = QButtonGroup(self)
+        self.view_button_group.setExclusive(True)
+        self.view_buttons: dict[str, QToolButton] = {}
+        for mode in self.VIEW_MODES:
+            button = QToolButton(self)
+            button.setCheckable(True)
+            button.setAutoRaise(True)
+            button.setProperty("contentViewButton", True)
+            button.clicked.connect(
+                lambda _checked=False, selected=mode: self._set_view_mode(selected)
+            )
+            self.view_button_group.addButton(button)
+            self.view_buttons[mode] = button
+            view_row.addWidget(button)
+        layout.addLayout(view_row)
         self.list = QListWidget()
         self.list.setObjectName("projectContentList")
         self.list.setIconSize(QSize(38, 38))
@@ -60,8 +84,15 @@ class ContentLibraryPanel(QWidget):
         self.remove_button.clicked.connect(self._remove_selected)
         self.service.changed.connect(self.refresh)
         self.translator.language_changed.connect(self.retranslate)
+        saved_view = str(QSettings().value("project_content/view_mode", "list"))
+        self._view_mode = saved_view if saved_view in self.VIEW_MODES else "list"
+        self._apply_view_mode()
         self.retranslate()
         self.refresh()
+
+    @property
+    def view_mode(self) -> str:
+        return self._view_mode
 
     def retranslate(self) -> None:
         korean = self.translator.language is Language.KOREAN
@@ -72,10 +103,70 @@ class ContentLibraryPanel(QWidget):
             "Reusable images, audio, fonts, and lyrics. Double-click to add an item "
             "to the canvas or playlist."
         )
+        self.view_label.setText("보기" if korean else "View")
+        view_text = {
+            "list": "목록" if korean else "List",
+            "grid": "격자" if korean else "Grid",
+            "compact": "간단" if korean else "Compact",
+        }
+        view_help = {
+            "list": "파일 유형과 상세 정보를 함께 표시합니다."
+            if korean else "Show file type and details.",
+            "grid": "큰 썸네일을 격자로 표시합니다."
+            if korean else "Show large thumbnails in a grid.",
+            "compact": "더 많은 콘텐츠를 한 화면에 표시합니다."
+            if korean else "Fit more content on screen.",
+        }
+        for mode, button in self.view_buttons.items():
+            button.setText(view_text[mode])
+            button.setToolTip(view_help[mode])
+            button.setAccessibleName(view_text[mode])
         self.import_button.setText("콘텐츠 가져오기" if korean else "Import content")
         self.add_button.setText("프로젝트에 추가" if korean else "Add to project")
         self.remove_button.setText("목록에서 제거" if korean else "Remove")
         self.refresh()
+
+    def _set_view_mode(self, mode: str, *, persist: bool = True) -> None:
+        """Switch presentation without replacing the list model or its selection."""
+        if mode not in self.VIEW_MODES:
+            return
+        selected_id = self._selected_id()
+        self._view_mode = mode
+        self._apply_view_mode()
+        if persist:
+            settings = QSettings()
+            settings.setValue("project_content/view_mode", mode)
+            settings.sync()
+        self.refresh()
+        if selected_id:
+            self._select_content_id(selected_id)
+
+    def _apply_view_mode(self) -> None:
+        """Apply QListView geometry for detailed, thumbnail, or dense browsing."""
+        mode = self._view_mode
+        self.view_buttons[mode].setChecked(True)
+        if mode == "grid":
+            self.list.setViewMode(QListView.ViewMode.IconMode)
+            self.list.setFlow(QListView.Flow.LeftToRight)
+            self.list.setWrapping(True)
+            self.list.setResizeMode(QListView.ResizeMode.Adjust)
+            self.list.setMovement(QListView.Movement.Static)
+            self.list.setWordWrap(True)
+            self.list.setUniformItemSizes(True)
+            self.list.setIconSize(QSize(72, 72))
+            self.list.setGridSize(QSize(116, 112))
+            self.list.setSpacing(5)
+        else:
+            self.list.setViewMode(QListView.ViewMode.ListMode)
+            self.list.setFlow(QListView.Flow.TopToBottom)
+            self.list.setWrapping(False)
+            self.list.setResizeMode(QListView.ResizeMode.Adjust)
+            self.list.setMovement(QListView.Movement.Static)
+            self.list.setWordWrap(False)
+            self.list.setUniformItemSizes(True)
+            self.list.setGridSize(QSize())
+            self.list.setIconSize(QSize(22, 22) if mode == "compact" else QSize(38, 38))
+            self.list.setSpacing(0 if mode == "compact" else 2)
 
     def refresh(self) -> None:
         selected_id = self._selected_id()
@@ -95,9 +186,21 @@ class ContentLibraryPanel(QWidget):
             detail = f"{type_label} · {extension}" if extension else type_label
             if not available:
                 detail += " · " + ("파일 없음" if korean else "Missing file")
-            item = QListWidgetItem(f"{content.name}\n{detail}")
-            item.setIcon(self._content_icon(content.media_type, available))
-            item.setSizeHint(QSize(0, 54))
+            if self._view_mode == "compact":
+                item_text = f"{content.name}  ·  {detail}"
+                item_height = 32
+            elif self._view_mode == "grid":
+                item_text = content.name
+                item_height = 104
+            else:
+                item_text = f"{content.name}\n{detail}"
+                item_height = 54
+            item = QListWidgetItem(item_text)
+            item.setIcon(self._content_item_icon(path, content.media_type, available))
+            item.setSizeHint(
+                QSize(108, item_height) if self._view_mode == "grid"
+                else QSize(0, item_height)
+            )
             item.setData(Qt.ItemDataRole.UserRole, content.id)
             item.setData(Qt.ItemDataRole.UserRole + 1, content.path)
             item.setData(Qt.ItemDataRole.UserRole + 2, content.media_type)
@@ -121,6 +224,23 @@ class ContentLibraryPanel(QWidget):
             if content.id == selected_id:
                 self.list.setCurrentItem(item)
         self._update_buttons()
+
+    def _select_content_id(self, content_id: str) -> None:
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if str(item.data(Qt.ItemDataRole.UserRole)) == content_id:
+                self.list.setCurrentItem(item)
+                return
+
+    def _content_item_icon(
+        self, path: Path, media_type: str, available: bool,
+    ) -> QIcon:
+        """Use real image thumbnails in grid view and category icons elsewhere."""
+        if self._view_mode == "grid" and media_type == "image" and available:
+            preview = QIcon(str(path))
+            if not preview.isNull():
+                return preview
+        return self._content_icon(media_type, available)
 
     def _content_icon(self, media_type: str, available: bool) -> QIcon:
         """Create a crisp, theme-safe icon for a project content category."""

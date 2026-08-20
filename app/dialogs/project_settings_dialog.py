@@ -269,7 +269,7 @@ class ProjectSettingsDialog(QDialog):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
-            if answer is not QMessageBox.StandardButton.Yes:
+            if answer != QMessageBox.StandardButton.Yes:
                 return
         self.selected_settings.title = self.title_edit.text().strip() or "Untitled Project"
         self.selected_settings.author = self.author_edit.text().strip()

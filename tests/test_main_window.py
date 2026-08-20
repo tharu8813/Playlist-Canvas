@@ -4,18 +4,20 @@ from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import (QItemSelectionModel, QMimeData, QPoint, QPointF, QRectF,
-                            Qt)
-from PySide6.QtGui import QColor, QCloseEvent, QImage, QPalette, QPixmap, QWheelEvent
+from PySide6.QtCore import (QEvent, QItemSelectionModel, QMimeData, QPoint, QPointF, QRectF,
+                            QSettings, QSize, Qt, QTimer)
+from PySide6.QtGui import (QColor, QCloseEvent, QImage, QMouseEvent, QPalette,
+                           QPixmap, QWheelEvent)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QColorDialog, QDialog, QFileDialog,
-    QFormLayout, QGraphicsView, QMessageBox, QScrollArea, QStyle,
+    QFormLayout, QGraphicsView, QListView, QMessageBox, QScrollArea, QSizePolicy, QStyle,
     QStyleOptionSpinBox,
     QWidget,
 )
@@ -40,7 +42,7 @@ from app.dialogs.export_progress_dialog import ExportProgressDialog
 from app.dialogs.ffmpeg_install_progress_dialog import FFmpegInstallProgressDialog
 from app.ffmpeg.managed_installer import ManagedFFmpegInstallation
 from app.services.autosave_service import RecoverySnapshot
-from app.services.project_service import ProjectService
+from app.services.project_service import ProjectError, ProjectService
 from app.services.app_settings_service import AppSettings
 from app.services.update_service import ReleaseInfo
 from app.services.theme_service import Theme
@@ -61,13 +63,46 @@ class MainWindowSafetyTests(unittest.TestCase):
         cls.application.setOrganizationName("Playlist Canvas Tests")
 
     def setUp(self) -> None:
+        # Main-window UI assertions use the Korean baseline unless a test opts
+        # into another language. Translator changes persist through QSettings,
+        # so one English-specific test must not leak into every later test.
+        settings = QSettings()
+        self._original_language_setting = settings.value("language", None)
+        settings.setValue("language", Language.KOREAN.value)
         self.window = MainWindow()
         self.application.processEvents()
 
     def tearDown(self) -> None:
         self.window._project_dirty = False
         self.window.close()
+        settings = QSettings()
+        if self._original_language_setting is None:
+            settings.remove("language")
+        else:
+            settings.setValue("language", self._original_language_setting)
         self.application.processEvents()
+
+    def test_status_bar_activity_progress_tracks_multiple_operations(self) -> None:
+        progress = self.window.activity_progress
+        self.assertTrue(progress.isHidden())
+
+        progress.begin("save", "프로젝트 저장", detail="example.pvsproj")
+        self.assertFalse(progress.isHidden())
+        self.assertEqual(progress.progress_bar.minimum(), 0)
+        self.assertEqual(progress.progress_bar.maximum(), 0)
+        self.assertIn("프로젝트 저장", progress.toolTip())
+        self.assertIn("example.pvsproj", progress.toolTip())
+
+        progress.begin("update", "업데이트 다운로드", 0.42, "Setup 다운로드 중")
+        self.assertEqual(progress.label.text(), "업데이트 다운로드")
+        self.assertEqual(progress.progress_bar.value(), 420)
+        self.assertIn("42%", progress.toolTip())
+        self.assertIn("프로젝트 저장", progress.toolTip())
+
+        progress.finish("update")
+        self.assertEqual(progress.label.text(), "프로젝트 저장")
+        progress.finish("save")
+        self.assertTrue(progress.isHidden())
 
     def test_new_project_cancel_preserves_unsaved_workspace(self) -> None:
         marker = Source(SourceType.TEXT, "UNSAVED_TEST_MARKER")
@@ -127,6 +162,7 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertTrue(self.window._project_dirty)
         self.assertEqual(self.window.store.selected_ids, (marker.id,))
         self.assertTrue(self.window.isEnabled())
+        self.assertNotIn("project_load", self.window.activity_progress.active_keys)
 
     def test_project_apply_failure_rolls_back_partial_workspace_changes(self) -> None:
         marker = Source(SourceType.TEXT, "ROLLBACK_MARKER")
@@ -164,6 +200,7 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(self.window._project_document().to_dict(), before)
         self.assertTrue(self.window._project_dirty)
         self.assertEqual(self.window.store.selected_ids, (marker.id,))
+        self.assertNotIn("project_load", self.window.activity_progress.active_keys)
 
     def test_loading_project_from_different_app_version_warns_and_continues(self) -> None:
         incoming = ProjectDocument(app_version="9.8.7")
@@ -239,7 +276,7 @@ class MainWindowSafetyTests(unittest.TestCase):
         ) as dialog:
             self.window._update_release_found(release)
         warning.assert_called_once()
-        self.assertIn("1.0.1", warning.call_args.args[2])
+        self.assertIn(__version__, warning.call_args.args[2])
         dialog.assert_not_called()
 
     def test_stale_recovery_is_removed_instead_of_replacing_newer_project(self) -> None:
@@ -276,6 +313,83 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertTrue(self.window._project_dirty)
         self.assertIsNotNone(self.window.store.get(marker.id))
         self.assertTrue(self.window.smooth_scroll._installed)
+
+    def test_project_save_runs_in_background_and_preserves_newer_edits(self) -> None:
+        with TemporaryDirectory(prefix="pvs-background-save-") as raw_directory:
+            target = Path(raw_directory) / "many-tracks.pvsproj"
+            self.window.current_project_path = target
+            self.window._project_dirty = True
+            started = threading.Event()
+            release = threading.Event()
+
+            def delayed_save(path, _document, _thumbnail):
+                started.set()
+                release.wait(3)
+                return Path(path).resolve()
+
+            with patch.object(ProjectService, "save", side_effect=delayed_save):
+                self.assertTrue(self.window._save_project())
+                self.assertTrue(started.wait(1))
+                worker = self.window._project_save_worker
+                self.assertIsNotNone(worker)
+                self.assertTrue(worker.isRunning())
+                self.assertFalse(self.window.save_action.isEnabled())
+                self.assertIn("project_save", self.window.activity_progress.active_keys)
+
+                event_loop_responsive: list[bool] = []
+                QTimer.singleShot(0, lambda: event_loop_responsive.append(True))
+                self.application.processEvents()
+                self.assertEqual(event_loop_responsive, [True])
+
+                # This edit was not part of the frozen save snapshot and must not
+                # be incorrectly marked as saved when the worker completes.
+                self.window._schedule_history()
+                release.set()
+                self.window._wait_for_project_save(worker)
+
+            self.assertIsNone(self.window._project_save_worker)
+            self.assertNotIn("project_save", self.window.activity_progress.active_keys)
+            self.assertTrue(self.window._project_dirty)
+            self.assertTrue(self.window.save_action.isEnabled())
+            save_message = self.window.statusBar().currentMessage()
+            self.assertTrue(
+                "저장되지" in save_message or "unsaved" in save_message.lower()
+            )
+
+    def test_required_background_save_can_wait_without_losing_success_state(self) -> None:
+        with TemporaryDirectory(prefix="pvs-required-save-") as raw_directory:
+            target = Path(raw_directory) / "close-save.pvsproj"
+            self.window.current_project_path = target
+            self.window._project_dirty = True
+            with patch.object(
+                ProjectService, "save", return_value=target.resolve(),
+            ):
+                saved = self.window._save_project(wait_for_completion=True)
+
+            self.assertTrue(saved)
+            self.assertFalse(self.window._project_dirty)
+            self.assertIsNone(self.window._project_save_worker)
+            self.assertEqual(self.window.current_project_path, target.resolve())
+
+    def test_background_save_failure_keeps_project_dirty_and_reenables_save(self) -> None:
+        with TemporaryDirectory(prefix="pvs-failed-save-") as raw_directory:
+            self.window.current_project_path = Path(raw_directory) / "failed.pvsproj"
+            self.window._project_dirty = True
+            with (
+                patch.object(
+                    ProjectService, "save",
+                    side_effect=ProjectError("simulated save failure"),
+                ),
+                patch.object(self.window, "_show_project_error") as show_error,
+            ):
+                saved = self.window._save_project(wait_for_completion=True)
+
+            self.assertFalse(saved)
+            self.assertTrue(self.window._project_dirty)
+            self.assertIsNone(self.window._project_save_worker)
+            self.assertTrue(self.window.save_action.isEnabled())
+            self.assertTrue(self.window._autosave_debounce_timer.isActive())
+            show_error.assert_called_once()
 
     def test_design_presets_and_ai_builder_are_separate_tools(self) -> None:
         preset_dialog = DesignPresetDialog(self.window.translator, self.window)
@@ -669,6 +783,102 @@ class MainWindowSafetyTests(unittest.TestCase):
                 form.fieldGrowthPolicy(),
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow,
             )
+
+    def test_window_resize_changes_only_the_central_canvas_extent(self) -> None:
+        self.window.resize(1560, 920)
+        self.window.show()
+        self.application.processEvents()
+        horizontal_before = self.window.main_splitter.sizes()
+        vertical_before = self.window.workspace_splitter.sizes()
+
+        self.window.resize(1840, 1080)
+        self.application.processEvents()
+        horizontal_after = self.window.main_splitter.sizes()
+        vertical_after = self.window.workspace_splitter.sizes()
+
+        self.assertEqual(horizontal_after[0], horizontal_before[0])
+        self.assertEqual(horizontal_after[2], horizontal_before[2])
+        self.assertGreater(horizontal_after[1], horizontal_before[1])
+        self.assertEqual(vertical_after[1], vertical_before[1])
+        self.assertGreater(vertical_after[0], vertical_before[0])
+        self.assertEqual(
+            self.window.left_workspace.sizePolicy().horizontalPolicy(),
+            QSizePolicy.Policy.Preferred,
+        )
+        self.assertEqual(
+            self.window.inspector.sizePolicy().horizontalPolicy(),
+            QSizePolicy.Policy.Preferred,
+        )
+        self.assertEqual(
+            self.window.bottom_tabs.sizePolicy().verticalPolicy(),
+            QSizePolicy.Policy.Preferred,
+        )
+
+        self.window.resize(1560, 920)
+        self.application.processEvents()
+        self.assertEqual(
+            self.window.main_splitter.sizes(), horizontal_before,
+        )
+        self.assertEqual(
+            self.window.workspace_splitter.sizes(), vertical_before,
+        )
+
+        # A user-adjusted splitter position becomes the new fixed edge size.
+        total_width = sum(self.window.main_splitter.sizes())
+        self.window.main_splitter.setSizes([520, max(300, total_width - 860), 340])
+        total_height = sum(self.window.workspace_splitter.sizes())
+        self.window.workspace_splitter.setSizes([max(300, total_height - 240), 240])
+        self.application.processEvents()
+        user_horizontal = self.window.main_splitter.sizes()
+        user_vertical = self.window.workspace_splitter.sizes()
+        self.window.resize(1760, 1020)
+        self.application.processEvents()
+        resized_horizontal = self.window.main_splitter.sizes()
+        resized_vertical = self.window.workspace_splitter.sizes()
+        self.assertEqual(resized_horizontal[0], user_horizontal[0])
+        self.assertEqual(resized_horizontal[2], user_horizontal[2])
+        self.assertEqual(resized_vertical[1], user_vertical[1])
+
+    def test_canvas_hover_uses_directional_cursor_on_selected_resize_handles(self) -> None:
+        source = next(
+            source for source in self.window.store.sources() if not source.locked
+        )
+        self.window.store.select(source.id)
+        self.window.show()
+        self.window.canvas.fit_artboard()
+        self.application.processEvents()
+        item = self.window.canvas._items[source.id]
+        expected = {
+            "e": Qt.CursorShape.SizeHorCursor,
+            "n": Qt.CursorShape.SizeVerCursor,
+            "se": Qt.CursorShape.SizeFDiagCursor,
+        }
+        for handle, cursor_shape in expected.items():
+            with self.subTest(handle=handle):
+                scene_position = item.mapToScene(
+                    item.resize_handle_rects()[handle].center()
+                )
+                viewport_position = self.window.canvas.mapFromScene(scene_position)
+                # QTest.mouseMove relies on the process-global pointer and the
+                # offscreen backend may coalesce it across test modules. Send
+                # an explicit widget-local move to exercise the same event path
+                # deterministically.
+                global_position = self.window.canvas.viewport().mapToGlobal(
+                    viewport_position
+                )
+                move_event = QMouseEvent(
+                    QEvent.Type.MouseMove,
+                    QPointF(viewport_position),
+                    QPointF(global_position),
+                    Qt.MouseButton.NoButton,
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+                QApplication.sendEvent(self.window.canvas.viewport(), move_event)
+                self.application.processEvents()
+                self.assertEqual(
+                    self.window.canvas.viewport().cursor().shape(), cursor_shape,
+                )
 
     def test_undo_and_redo_keep_moved_source_selected(self) -> None:
         source = self.window.store.sources()[0]
@@ -1290,6 +1500,72 @@ class MainWindowSafetyTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_export_dialog_starts_with_beginner_recommended_mode(self) -> None:
+        dialog = ExportSettingsDialog(
+            AppSettings(), 3, 180.0, self.window.translator,
+            Path("beginner-export.mp4"), canvas_size=(1920, 1080),
+        )
+        try:
+            self.assertEqual(dialog.quality_mode_combo.currentData(), "balanced")
+            self.assertTrue(dialog.advanced_group.isHidden())
+            self.assertIn("권장", dialog.quality_mode_combo.currentText())
+            self.assertIn("예상 작업량", dialog.workload_label.text())
+            self.assertIn("잘 모른다면", dialog.beginner_hint_label.text())
+            settings = dialog.app_settings
+            self.assertEqual(settings.video_codec, "libx264")
+            self.assertEqual(
+                (settings.crf, settings.preset, settings.audio_bitrate),
+                ExportSettingsDialog.QUALITY_PROFILES["balanced"],
+            )
+        finally:
+            dialog.close()
+
+    def test_export_quality_modes_apply_plain_language_tradeoffs(self) -> None:
+        dialog = ExportSettingsDialog(
+            AppSettings(), 1, 60.0, self.window.translator,
+            Path("quality-mode.mp4"), canvas_size=(1920, 1080),
+        )
+        try:
+            dialog.quality_mode_combo.setCurrentIndex(
+                dialog.quality_mode_combo.findData("fast")
+            )
+            self.assertEqual(
+                (dialog.crf_spin.value(), dialog.preset_combo.currentText(),
+                 dialog.audio_bitrate_combo.currentText()),
+                ExportSettingsDialog.QUALITY_PROFILES["fast"],
+            )
+            self.assertIn("빠르게", dialog.quality_description_label.text())
+
+            dialog.quality_mode_combo.setCurrentIndex(
+                dialog.quality_mode_combo.findData("high")
+            )
+            self.assertEqual(
+                (dialog.crf_spin.value(), dialog.preset_combo.currentText(),
+                 dialog.audio_bitrate_combo.currentText()),
+                ExportSettingsDialog.QUALITY_PROFILES["high"],
+            )
+            self.assertIn("파일이 커", dialog.quality_description_label.text())
+
+            dialog.advanced_check.setChecked(True)
+            dialog.crf_spin.setValue(17)
+            self.assertEqual(dialog.quality_mode_combo.currentData(), "custom")
+            self.assertFalse(dialog.advanced_group.isHidden())
+        finally:
+            dialog.close()
+
+    def test_export_custom_gpu_defaults_reveal_advanced_settings(self) -> None:
+        dialog = ExportSettingsDialog(
+            AppSettings(video_codec="h264_nvenc"), 1, 60.0,
+            self.window.translator, Path("gpu-export.mp4"),
+        )
+        try:
+            self.assertEqual(dialog.quality_mode_combo.currentData(), "custom")
+            self.assertTrue(dialog.advanced_check.isChecked())
+            self.assertFalse(dialog.advanced_group.isHidden())
+            self.assertIn("GPU", dialog.quality_description_label.text())
+        finally:
+            dialog.close()
+
     def test_4k_export_selection_reaches_ffmpeg_dimensions(self) -> None:
         dialog = ExportSettingsDialog(
             AppSettings(), 1, 60.0, self.window.translator,
@@ -1315,6 +1591,45 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertIn("pad=3840:2160", scaling_filter)
         finally:
             dialog.close()
+
+    def test_export_existing_file_accepts_native_yes_button_value(self) -> None:
+        with TemporaryDirectory(prefix="pvs-export-overwrite-") as raw_directory:
+            output = Path(raw_directory) / "existing.mp4"
+            output.write_bytes(b"existing video")
+            dialog = ExportSettingsDialog(
+                AppSettings(), 1, 60.0, self.window.translator, output,
+            )
+            try:
+                with patch.object(
+                    QMessageBox, "question",
+                    return_value=QMessageBox.StandardButton.Yes.value,
+                ) as confirmation:
+                    dialog._accept_if_valid()
+
+                confirmation.assert_called_once()
+                self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+                self.assertEqual(dialog.output_path, output.resolve())
+            finally:
+                dialog.close()
+
+    def test_export_existing_file_no_keeps_settings_dialog_open(self) -> None:
+        with TemporaryDirectory(prefix="pvs-export-no-overwrite-") as raw_directory:
+            output = Path(raw_directory) / "existing.mp4"
+            output.write_bytes(b"existing video")
+            dialog = ExportSettingsDialog(
+                AppSettings(), 1, 60.0, self.window.translator, output,
+            )
+            try:
+                with patch.object(
+                    QMessageBox, "question",
+                    return_value=QMessageBox.StandardButton.No,
+                ):
+                    dialog._accept_if_valid()
+
+                self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
+                self.assertTrue(output.is_file())
+            finally:
+                dialog.close()
 
     def test_new_project_can_start_from_scaled_design_preset(self) -> None:
         preset = PresetService.all()[0]
@@ -1400,6 +1715,50 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.window.translator.set_language(original_language)
             self.application.processEvents()
 
+    def test_track_details_dialog_saves_edited_project_metadata_only_on_accept(self) -> None:
+        track = PlaylistTrack(
+            "track.wav", "Original title", artist="Original artist",
+            album="Original album", duration_seconds=20.0,
+        )
+        dialog = TrackDetailsDialog(track, self.window.translator, self.window)
+        try:
+            dialog.title_edit.setText("  Edited title  ")
+            dialog.artist_edit.setText("Edited artist")
+            dialog.album_edit.setText("Edited album")
+
+            self.assertEqual(track.title, "Original title")
+            dialog._accept()
+
+            self.assertEqual(dialog.selected_title, "Edited title")
+            self.assertEqual(dialog.selected_artist, "Edited artist")
+            self.assertEqual(dialog.selected_album, "Edited album")
+            self.assertEqual(track.title, "Original title")
+        finally:
+            dialog.close()
+
+    def test_track_settings_updates_playlist_metadata_after_save(self) -> None:
+        track = PlaylistTrack(
+            "track.wav", "Before", artist="Before artist", album="Before album",
+        )
+        self.window.playlist_service.replace([track])
+        dialog = MagicMock()
+        dialog.exec.return_value = QDialog.DialogCode.Accepted
+        dialog.selected_title = "After"
+        dialog.selected_artist = "After artist"
+        dialog.selected_album = "After album"
+        dialog.selected_lyrics_path = ""
+        dialog.selected_lyrics = []
+        dialog.selected_timing_offset = 0.0
+
+        with patch("app.ui.main_window.TrackDetailsDialog", return_value=dialog):
+            self.window._show_track_details(track.id)
+
+        updated = self.window.playlist_service.tracks[0]
+        self.assertEqual(
+            (updated.title, updated.artist, updated.album),
+            ("After", "After artist", "After album"),
+        )
+
     def test_track_lyrics_dialog_exports_registered_lyrics_as_lrc(self) -> None:
         track = PlaylistTrack(
             "track.wav", "Export Track", artist="Artist", duration_seconds=20.0,
@@ -1435,73 +1794,86 @@ class MainWindowSafetyTests(unittest.TestCase):
             dialog.close()
 
     def test_lrc_generator_loads_existing_cues_and_preserves_timing_for_text_edits(self) -> None:
-        audio_path = Path("generator-existing-song.wav").resolve()
-        with patch(
-            "app.dialogs.lrc_generator_dialog.Path.is_file", return_value=True,
-        ):
-            dialog = LrcGeneratorDialog(
-                [],
-                self.window.translator,
-                self.window,
-                initial_audio_path=str(audio_path),
-                initial_cues=[
-                    {"start": 1.25, "end": 3.0, "text": "First\nSecond"},
-                    {"start": 4.5, "end": 7.0, "text": "Next"},
-                ],
-                initial_title="Loaded title",
-                initial_artist="Loaded artist",
-            )
-            try:
-                self.assertEqual(dialog.audio_path, str(audio_path))
-                self.assertEqual(dialog.lines, ["First\nSecond", "Next"])
-                self.assertEqual(dialog.timestamps, [1.25, 4.5])
-                self.assertEqual(dialog.input_mode_combo.currentData(), "multiline")
-                self.assertEqual(dialog.title_edit.text(), "Loaded title")
-                self.assertEqual(dialog.artist_edit.text(), "Loaded artist")
+        with TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "generator-existing-song.wav"
+            audio_path.write_bytes(b"test")
+            candidate = AudioImportCandidate(PlaylistTrack(
+                str(audio_path), "Loaded title", "Loaded artist",
+                duration_seconds=8.0,
+            ))
+            with (
+                patch.object(PlaylistService, "inspect_files", return_value=[candidate]),
+                patch("app.dialogs.lrc_generator_dialog.QMediaPlayer.setSource"),
+            ):
+                dialog = LrcGeneratorDialog(
+                    [],
+                    self.window.translator,
+                    self.window,
+                    initial_audio_path=str(audio_path),
+                    initial_cues=[
+                        {"start": 1.25, "end": 3.0, "text": "First\nSecond"},
+                        {"start": 4.5, "end": 7.0, "text": "Next"},
+                    ],
+                    initial_title="Loaded title",
+                    initial_artist="Loaded artist",
+                )
+                try:
+                    self.assertEqual(dialog.audio_path, str(audio_path.resolve()))
+                    self.assertEqual(dialog.lines, ["First\nSecond", "Next"])
+                    self.assertEqual(dialog.timestamps, [1.25, 4.5])
+                    self.assertEqual(dialog.input_mode_combo.currentData(), "multiline")
+                    self.assertEqual(dialog.title_edit.text(), "Loaded title")
+                    self.assertEqual(dialog.artist_edit.text(), "Loaded artist")
 
-                dialog.lyrics_editor.setPlainText("Edited first\nSecond\n\nEdited next")
-                dialog._prepare_lines()
-                self.assertEqual(dialog.lines, ["Edited first\nSecond", "Edited next"])
-                self.assertEqual(dialog.timestamps, [1.25, 4.5])
-            finally:
-                dialog.done(QDialog.DialogCode.Rejected)
-                self.application.processEvents()
+                    dialog.lyrics_editor.setPlainText("Edited first\nSecond\n\nEdited next")
+                    dialog._prepare_lines()
+                    self.assertEqual(dialog.lines, ["Edited first\nSecond", "Edited next"])
+                    self.assertEqual(dialog.timestamps, [1.25, 4.5])
+                finally:
+                    dialog.done(QDialog.DialogCode.Rejected)
+                    self.application.processEvents()
 
     def test_lrc_generator_uses_four_step_wizard_navigation(self) -> None:
-        audio_path = Path("wizard-song.wav").resolve()
-        with patch(
-            "app.dialogs.lrc_generator_dialog.Path.is_file", return_value=True,
-        ):
-            dialog = LrcGeneratorDialog(
-                [],
-                self.window.translator,
-                self.window,
-                initial_audio_path=str(audio_path),
-                initial_cues=[
-                    {"start": 1.0, "end": 3.0, "text": "First"},
-                    {"start": 4.0, "end": 7.0, "text": "Second"},
-                ],
-            )
-            try:
-                self.assertEqual(dialog.pages.count(), 4)
-                self.assertEqual(dialog.pages.currentIndex(), 0)
-                self.assertTrue(dialog.back_button.isHidden())
+        with TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "wizard-song.wav"
+            audio_path.write_bytes(b"test")
+            candidate = AudioImportCandidate(PlaylistTrack(
+                str(audio_path), "Wizard song", duration_seconds=8.0,
+            ))
+            with (
+                patch.object(PlaylistService, "inspect_files", return_value=[candidate]),
+                patch("app.dialogs.lrc_generator_dialog.QMediaPlayer.setSource"),
+            ):
+                dialog = LrcGeneratorDialog(
+                    [],
+                    self.window.translator,
+                    self.window,
+                    initial_audio_path=str(audio_path),
+                    initial_cues=[
+                        {"start": 1.0, "end": 3.0, "text": "First"},
+                        {"start": 4.0, "end": 7.0, "text": "Second"},
+                    ],
+                )
+                try:
+                    self.assertEqual(dialog.pages.count(), 4)
+                    self.assertEqual(dialog.pages.currentIndex(), 0)
+                    self.assertTrue(dialog.back_button.isHidden())
 
-                dialog._next_step()
-                self.assertEqual(dialog.pages.currentIndex(), 1)
-                dialog._next_step()
-                self.assertEqual(dialog.pages.currentIndex(), 2)
-                self.assertEqual(dialog.timestamps, [1.0, 4.0])
-                dialog._next_step()
-                self.assertEqual(dialog.pages.currentIndex(), 3)
-                self.assertIn("[00:01.00]First", dialog.review_text.toPlainText())
-                self.assertTrue(dialog.next_button.isHidden())
-                self.assertFalse(dialog.finish_button.isHidden())
+                    dialog._next_step()
+                    self.assertEqual(dialog.pages.currentIndex(), 1)
+                    dialog._next_step()
+                    self.assertEqual(dialog.pages.currentIndex(), 2)
+                    self.assertEqual(dialog.timestamps, [1.0, 4.0])
+                    dialog._next_step()
+                    self.assertEqual(dialog.pages.currentIndex(), 3)
+                    self.assertIn("[00:01.00]First", dialog.review_text.toPlainText())
+                    self.assertTrue(dialog.next_button.isHidden())
+                    self.assertFalse(dialog.finish_button.isHidden())
 
-                dialog._previous_step()
-                self.assertEqual(dialog.pages.currentIndex(), 2)
-            finally:
-                dialog.close()
+                    dialog._previous_step()
+                    self.assertEqual(dialog.pages.currentIndex(), 2)
+                finally:
+                    dialog.done(QDialog.DialogCode.Rejected)
 
     def test_lrc_generator_wizard_blocks_progress_without_required_input(self) -> None:
         dialog = LrcGeneratorDialog([], self.window.translator, self.window)
@@ -2119,10 +2491,11 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertEqual(
                 [label.text() for label in dialog.info_labels],
                 [
-                    "Visible title", "Visible artist", "—",
+                    "Visible title", "Visible artist", "",
                     "C:/Music/long folder/song.m4a", "02:05",
                 ],
             )
+            self.assertEqual(dialog.album_edit.placeholderText(), "—")
             for label in (*dialog.info_name_labels, *dialog.info_labels):
                 self.assertTrue(label.isVisible() or not dialog.isVisible())
             self.assertTrue(
@@ -2448,6 +2821,37 @@ class MainWindowSafetyTests(unittest.TestCase):
             [action.data() for action in empty_menu.actions()], ["import"],
         )
 
+    def test_project_content_switches_between_list_grid_and_compact_views(self) -> None:
+        panel = self.window.content_library_panel
+        with TemporaryDirectory(prefix="pvs-content-views-") as raw_directory:
+            image_path = Path(raw_directory) / "thumbnail.png"
+            image = QImage(80, 60, QImage.Format.Format_ARGB32)
+            image.fill(QColor("#36A2EB"))
+            self.assertTrue(image.save(str(image_path)))
+            self.window.project_content_service.add_paths([image_path])
+            content_id = panel.list.item(0).data(Qt.ItemDataRole.UserRole)
+            panel.list.setCurrentRow(0)
+
+            panel._set_view_mode("grid", persist=False)
+            self.assertEqual(panel.view_mode, "grid")
+            self.assertEqual(panel.list.viewMode(), QListView.ViewMode.IconMode)
+            self.assertEqual(panel.list.iconSize(), QSize(72, 72))
+            self.assertTrue(panel.view_buttons["grid"].isChecked())
+            self.assertNotIn("\n", panel.list.item(0).text())
+            self.assertEqual(
+                panel.list.currentItem().data(Qt.ItemDataRole.UserRole), content_id,
+            )
+
+            panel._set_view_mode("compact", persist=False)
+            self.assertEqual(panel.list.viewMode(), QListView.ViewMode.ListMode)
+            self.assertEqual(panel.list.iconSize(), QSize(22, 22))
+            self.assertEqual(panel.list.item(0).sizeHint().height(), 32)
+
+            panel._set_view_mode("list", persist=False)
+            self.assertEqual(panel.view_mode, "list")
+            self.assertEqual(panel.list.iconSize(), QSize(38, 38))
+            self.assertIn("\n", panel.list.item(0).text())
+
     def test_about_action_opens_program_information(self) -> None:
         with patch("app.ui.main_window.AboutDialog") as about_dialog:
             self.window._show_about()
@@ -2662,6 +3066,35 @@ class MainWindowSafetyTests(unittest.TestCase):
         finally:
             self.window._unlock_main_form_after_export()
             self.window._export_dialog = None
+
+    def test_export_progress_can_minimize_and_restore_with_main_window(self) -> None:
+        dialog = ExportProgressDialog(self.window)
+        dialog.set_korean(True)
+        self.window._export_dialog = dialog
+        self.window._lock_main_form_for_export()
+        dialog.minimize_requested.connect(self.window._minimize_during_export)
+        try:
+            self.window.show()
+            dialog.show()
+            self.application.processEvents()
+            self.assertEqual(dialog.minimize_button.text(), "최소화")
+
+            QTest.mouseClick(dialog.minimize_button, Qt.MouseButton.LeftButton)
+            self.application.processEvents()
+            self.assertTrue(self.window.isMinimized())
+            self.assertFalse(dialog.isVisible())
+            self.assertTrue(self.window._export_restore_pending)
+
+            self.window.showNormal()
+            self.application.processEvents()
+            self.application.processEvents()
+            self.assertFalse(self.window.isMinimized())
+            self.assertTrue(dialog.isVisible())
+            self.assertFalse(self.window._export_restore_pending)
+        finally:
+            dialog.complete(False)
+            self.window._export_dialog = None
+            self.window._unlock_main_form_after_export()
             dialog.complete(False)
 
     def test_export_cancel_requires_confirmation(self) -> None:
@@ -2695,6 +3128,10 @@ class MainWindowSafetyTests(unittest.TestCase):
                 "Normalizing track.mp3": "오디오 정규화 중 · track.mp3",
                 "Inserted 2.5s of silence": "무음 구간 2.5s 추가",
                 "Encoding 12.0s / 60.0s": "영상 인코딩 중 · 12.0s / 60.0s",
+                "Combining audio 12.0s / 60.0s · 20%":
+                    "오디오 결합 중 · 12.0s / 60.0s · 20%",
+                "Preparing visual layer 1/2 · frame 8/20 · 40%":
+                    "시각 레이어 준비 중 · 1/2 · 프레임 8/20 · 40%",
                 "Downloaded 24.0 MB": "다운로드됨 · 24.0 MB",
                 "Checksum verified; extracting archive safely":
                     "체크섬 검증 완료 · 안전하게 압축 해제 중",
@@ -2712,6 +3149,52 @@ class MainWindowSafetyTests(unittest.TestCase):
                 dialog.detail_label.text(),
                 "오디오를 분석하고 비주얼라이저 프레임을 생성하는 중",
             )
+        finally:
+            dialog.complete(False)
+
+    def test_export_progress_shows_remaining_time_only_in_dedicated_label(self) -> None:
+        dialog = ExportProgressDialog(self.window)
+        dialog.set_korean(True)
+        try:
+            dialog.update_progress(
+                "Preparing visualizers", 0.7,
+                "Visualizer 1/2 · frame 120/300 · 20.0% · about 00:40 remaining",
+            )
+            self.assertNotIn("남은", dialog.stage_label.text())
+            self.assertNotIn("남은", dialog.detail_label.text())
+            self.assertNotIn("남은", dialog.log_output.toPlainText())
+            self.assertIn("남은 시간 약", dialog.time_label.text())
+            self.assertIn("비주얼라이저 1/2", dialog.detail_label.text())
+
+            dialog.set_busy("Preparing export", "Preparing temporary files")
+            self.assertIn("남은 시간 계산 중", dialog.time_label.text())
+        finally:
+            dialog.complete(False)
+
+    def test_export_progress_keeps_selected_settings_visible(self) -> None:
+        dialog = ExportProgressDialog(self.window)
+        dialog.set_korean(True)
+        try:
+            dialog.set_export_details(
+                12, 185.0,
+                "해상도 3840 × 2160 · 60 FPS\n"
+                "비디오 인코더 NVIDIA GPU · H.264 (NVENC)\n"
+                "화질 CRF 18 · 인코딩 속도 medium · 오디오 AAC 320k",
+                Path("C:/Videos/playlist.mp4"),
+            )
+            settings_text = dialog.export_settings_label.text()
+            dialog.set_busy("Preparing visual frames", "화면 프레임 준비 중")
+            dialog.update_progress("Combining audio", 0.6, "Combining audio 30.0s / 185.0s · 16%")
+
+            self.assertEqual(dialog.export_settings_label.text(), settings_text)
+            self.assertIn("3840 × 2160", settings_text)
+            self.assertIn("60 FPS", settings_text)
+            self.assertIn("NVENC", settings_text)
+            self.assertIn("CRF 18", settings_text)
+            self.assertIn("medium", settings_text)
+            self.assertIn("AAC 320k", settings_text)
+            self.assertIn("playlist.mp4", settings_text)
+            self.assertIn("오디오 결합 중", dialog.detail_label.text())
         finally:
             dialog.complete(False)
 

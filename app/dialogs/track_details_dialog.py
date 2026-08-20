@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -44,6 +45,9 @@ class TrackDetailsDialog(QDialog):
         self.selected_lyrics_path = track.lyrics_path
         self.selected_lyrics = [cue.copy() for cue in track.lyrics]
         self.selected_timing_offset = float(track.lyrics_timing_offset_seconds)
+        self.selected_title = track.title
+        self.selected_artist = track.artist
+        self.selected_album = track.album
         saved_volume = preview_volume()
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(saved_volume / 100.0)
@@ -66,10 +70,26 @@ class TrackDetailsDialog(QDialog):
         )
         info_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.info_name_labels: list[QLabel] = []
-        self.info_labels: list[QLabel] = []
-        for value in (
-            track.title, track.artist, track.album, track.file_path,
-            track.duration_label,
+        self.title_edit = QLineEdit(track.title)
+        self.artist_edit = QLineEdit(track.artist)
+        self.album_edit = QLineEdit(track.album)
+        self.metadata_edits = (self.title_edit, self.artist_edit, self.album_edit)
+        for field in self.metadata_edits:
+            field.setObjectName("trackMetadataEdit")
+            field.setClearButtonEnabled(True)
+            field.setPlaceholderText("—")
+            field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.file_label = QLabel(track.file_path.strip() or "—")
+        self.file_label.setToolTip(track.file_path)
+        self.duration_label = QLabel(track.duration_label)
+        self.info_labels = [
+            self.title_edit, self.artist_edit, self.album_edit,
+            self.file_label, self.duration_label,
+        ]
+        for value, field in zip(
+            (track.title, track.artist, track.album, track.file_path, track.duration_label),
+            self.info_labels,
         ):
             name_label = QLabel()
             name_label.setObjectName("trackInfoName")
@@ -77,15 +97,12 @@ class TrackDetailsDialog(QDialog):
             name_label.setAlignment(
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
             )
-            field = QLabel(value.strip() if isinstance(value, str) and value.strip() else "—")
-            field.setObjectName("trackInfoValue")
-            field.setWordWrap(True)
-            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            if value == track.file_path:
-                field.setToolTip(track.file_path)
+            if isinstance(field, QLabel):
+                field.setObjectName("trackInfoValue")
+                field.setWordWrap(True)
+                field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             self.info_name_labels.append(name_label)
-            self.info_labels.append(field)
             info_form.addRow(name_label, field)
         root.addWidget(self.info_group)
 
@@ -304,8 +321,8 @@ class TrackDetailsDialog(QDialog):
             track_edit_mode=True,
             initial_audio_path=self.track.file_path,
             initial_cues=self.selected_lyrics,
-            initial_title=self.track.title,
-            initial_artist=self.track.artist,
+            initial_title=self.title_edit.text().strip(),
+            initial_artist=self.artist_edit.text().strip(),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -351,8 +368,8 @@ class TrackDetailsDialog(QDialog):
             saved = LyricsService.save_lrc(
                 selected,
                 adjusted_cues,
-                title=self.track.title,
-                artist=self.track.artist,
+                title=self.title_edit.text().strip(),
+                artist=self.artist_edit.text().strip(),
             )
         except LyricsError as error:
             QMessageBox.critical(
@@ -372,7 +389,7 @@ class TrackDetailsDialog(QDialog):
         """Play or pause the selected track without leaving the settings form."""
         if not self._audio_available:
             return
-        if self.media_player.playbackState() is QMediaPlayer.PlaybackState.PlayingState:
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.media_player.pause()
         else:
             self.media_player.play()
@@ -411,7 +428,7 @@ class TrackDetailsDialog(QDialog):
 
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         korean = self.translator.language.value == "ko"
-        playing = state is QMediaPlayer.PlaybackState.PlayingState
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
         if playing:
             self.play_button.setText("일시정지" if korean else "Pause")
         else:
@@ -510,6 +527,19 @@ class TrackDetailsDialog(QDialog):
         self.preview.setPlainText("\n".join(lines))
 
     def _accept(self) -> None:
+        korean = self.translator.language.value == "ko"
+        title = self.title_edit.text().strip()
+        if not title:
+            QMessageBox.warning(
+                self,
+                "곡 제목 필요" if korean else "Track title required",
+                "곡 제목을 입력하세요." if korean else "Enter a title for this track.",
+            )
+            self.title_edit.setFocus()
+            return
+        self.selected_title = title
+        self.selected_artist = self.artist_edit.text().strip()
+        self.selected_album = self.album_edit.text().strip()
         self.selected_timing_offset = self.timing_offset_spin.value()
         self.accept()
 
@@ -528,6 +558,13 @@ class TrackDetailsDialog(QDialog):
         )
         for label, name in zip(self.info_name_labels, info_names):
             label.setText(name)
+        metadata_tip = (
+            "프로젝트에 저장할 곡 정보를 직접 수정할 수 있습니다. 원본 오디오 파일의 태그는 변경되지 않습니다."
+            if korean else
+            "Edit the track information stored in this project. The source audio file tags are not changed."
+        )
+        for field in self.metadata_edits:
+            field.setToolTip(metadata_tip)
         self.lyrics_group.setTitle("가사 / 자막" if korean else "Lyrics / subtitles")
         self.playback_group.setTitle("노래와 가사 미리보기" if korean else "Audio and lyrics preview")
         self.load_button.setText("파일 불러오기…" if korean else "Load file…")

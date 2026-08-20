@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QGraphicsObject,
     QGraphicsPixmapItem,
     QGraphicsScene,
+    QGraphicsSceneHoverEvent,
     QGraphicsSceneMouseEvent,
 )
 
@@ -55,6 +56,8 @@ class SourceItem(QGraphicsObject):
         # Preview/export assigns this transient value while a timed lyric cue
         # enters. Keeping it on the graphics item avoids serializing render state.
         self._subtitle_transition_progress = 1.0
+        self._subtitle_anchor_line = -1
+        self._subtitle_anchor_line_count = 1
         self.setFlags(
             QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemIsSelectable
@@ -94,14 +97,14 @@ class SourceItem(QGraphicsObject):
             for name, point in positions.items()
         }
 
-    def _resize_handle_at(self, position: QPointF) -> str | None:
+    def _resize_handle_at(self, position: QPointF, tolerance: float = 0.0) -> str | None:
         """Return the resize handle under *position*, if one is present."""
         for name, rect in self.resize_handle_rects().items():
-            if rect.contains(position):
+            if rect.adjusted(-tolerance, -tolerance, tolerance, tolerance).contains(position):
                 return name
         return None
 
-    def edit_handle_at(self, position: QPointF) -> str | None:
+    def edit_handle_at(self, position: QPointF, tolerance: float = 0.0) -> str | None:
         """Return the active edit handle at a local position.
 
         This public hit test is also used by the view so a selected handle can
@@ -109,9 +112,49 @@ class SourceItem(QGraphicsObject):
         """
         if self.source.locked or not self.isSelected():
             return None
-        if self.rotation_handle_rect().contains(position):
+        if self.rotation_handle_rect().adjusted(
+            -tolerance, -tolerance, tolerance, tolerance,
+        ).contains(position):
             return "rotate"
-        return self._resize_handle_at(position)
+        return self._resize_handle_at(position, tolerance)
+
+    @staticmethod
+    def cursor_for_edit_handle(
+        handle: str | None, rotation: float = 0.0,
+    ) -> Qt.CursorShape:
+        """Return the screen-direction cursor for a resize or rotation handle."""
+        if handle == "rotate":
+            return Qt.CursorShape.CrossCursor
+        handle_angles = {
+            "e": 0.0, "se": 45.0, "s": 90.0, "sw": 135.0,
+            "w": 180.0, "nw": 225.0, "n": 270.0, "ne": 315.0,
+        }
+        if handle not in handle_angles:
+            return Qt.CursorShape.ArrowCursor
+        # Standard resize cursors cover four undirected axes. Quantizing after
+        # adding item rotation keeps the cursor aligned with the actual on-screen
+        # resize direction for rotated sources as well.
+        axis = round((handle_angles[handle] + rotation) / 45.0) % 4
+        return {
+            0: Qt.CursorShape.SizeHorCursor,
+            1: Qt.CursorShape.SizeFDiagCursor,
+            2: Qt.CursorShape.SizeVerCursor,
+            3: Qt.CursorShape.SizeBDiagCursor,
+        }[axis]
+
+    def hoverMoveEvent(self, event: QGraphicsSceneHoverEvent) -> None:
+        """Preview the operation represented by the selection handle."""
+        handle = self.edit_handle_at(event.pos())
+        if handle is None:
+            self.unsetCursor()
+        else:
+            self.setCursor(self.cursor_for_edit_handle(handle, self.rotation()))
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event: QGraphicsSceneHoverEvent) -> None:
+        if not self._resizing and not self._rotating:
+            self.unsetCursor()
+        super().hoverLeaveEvent(event)
 
     @staticmethod
     def _anchor_point_for_size(handle: str, width: float, height: float) -> QPointF:
@@ -658,8 +701,23 @@ class SourceItem(QGraphicsObject):
                 current_line = -1
             base_size = max(10, min(96, int(self.source.font_size)))
             line_height = max(16.0, base_size + self.source.subtitle_line_spacing)
-            total_height = line_height * len(lines)
-            y = rect.center().y() - total_height / 2 + self.source.subtitle_scroll_offset
+            anchor_line = self._subtitle_anchor_line
+            anchor_count = max(1, self._subtitle_anchor_line_count)
+            if 0 <= anchor_line < len(lines):
+                # Keep the displayed cue vertically anchored. As the context
+                # window changes, CanvasSnapshot animates its old position into
+                # this one instead of re-centering the whole text block abruptly.
+                y = (
+                    rect.center().y()
+                    - (anchor_line + anchor_count / 2.0) * line_height
+                    + self.source.subtitle_scroll_offset
+                )
+            else:
+                total_height = line_height * len(lines)
+                y = (
+                    rect.center().y() - total_height / 2
+                    + self.source.subtitle_scroll_offset
+                )
             transition = max(0.0, min(1.0, self._subtitle_transition_progress))
             transition_style = self.source.subtitle_animation
             for index, line in enumerate(lines):
@@ -669,12 +727,21 @@ class SourceItem(QGraphicsObject):
                 )
                 is_previous = has_current_line and index < current_line
                 line_color = QColor(self.source.outline_color)
-                if is_current and transition_style in {"apple_music", "spotify", "blur_reveal"}:
+                animated_styles = {
+                    "fade", "scroll_up", "slide_up", "scroll_down", "pop",
+                    "apple_music", "spotify", "blur_reveal",
+                }
+                if is_current and transition_style in animated_styles:
                     start_alpha = {
-                        "apple_music": 0.42,
-                        "spotify": 0.62,
-                        "blur_reveal": 0.28,
-                    }[transition_style]
+                        "fade": 0.0,
+                        "scroll_up": 0.58,
+                        "slide_up": 0.58,
+                        "scroll_down": 0.58,
+                        "pop": 0.48,
+                        "apple_music": 0.52,
+                        "spotify": 0.70,
+                        "blur_reveal": 0.38,
+                    }.get(transition_style, 1.0)
                     line_color.setAlphaF(start_alpha + (1.0 - start_alpha) * transition)
                 elif not is_current:
                     line_color.setAlphaF(max(0.05, min(0.9, self.source.subtitle_previous_opacity)))
@@ -689,33 +756,56 @@ class SourceItem(QGraphicsObject):
                             round(rect.left() + 12 - blur_radius), round(y - blur_radius), ghost_pixmap,
                         )
                 lyric_font = QFont(self._lyric_fonts["current" if is_current else "regular"])
-                if is_current and transition_style in {"apple_music", "spotify", "blur_reveal"}:
+                current_y = y
+                line_transform_saved = False
+                if is_current and transition_style in animated_styles:
+                    reveal_offset = {
+                        "scroll_up": 10.0,
+                        "slide_up": 10.0,
+                        "scroll_down": -10.0,
+                        "pop": 5.0,
+                        "apple_music": 6.0,
+                        "spotify": 3.0,
+                        "blur_reveal": 4.0,
+                    }.get(transition_style, 0.0) * (1.0 - transition)
+                    current_y += reveal_offset
                     start_scale = {
-                        "apple_music": 0.94,
-                        "spotify": 0.975,
-                        "blur_reveal": 0.97,
-                    }[transition_style]
-                    lyric_font.setPointSizeF(
-                        max(1.0, lyric_font.pointSizeF() * (start_scale + (1.0 - start_scale) * transition))
-                    )
+                        "pop": 0.94,
+                        "apple_music": 0.985,
+                        "spotify": 0.995,
+                        "blur_reveal": 0.99,
+                    }.get(transition_style, 1.0)
+                    line_scale = start_scale + (1.0 - start_scale) * transition
+                    if line_scale < 0.9999:
+                        line_center = QPointF(
+                            rect.center().x(), current_y + line_height / 2.0,
+                        )
+                        painter.save()
+                        painter.translate(line_center)
+                        painter.scale(line_scale, line_scale)
+                        painter.translate(-line_center)
+                        line_transform_saved = True
                     reveal_blur = {
-                        "apple_music": 3.0,
-                        "spotify": 1.0,
-                        "blur_reveal": 7.0,
-                    }[transition_style] * (1.0 - transition)
+                        "apple_music": 2.0,
+                        "spotify": 0.0,
+                        "blur_reveal": 4.5,
+                    }.get(transition_style, 0.0) * (1.0 - transition)
                     if reveal_blur >= 0.75:
                         ghost = QColor(line_color)
-                        ghost.setAlpha(max(8, round(line_color.alpha() * 0.24)))
+                        ghost.setAlpha(max(8, round(line_color.alpha() * 0.18)))
                         ghost_pixmap = self._lyric_ghost_pixmap(
                             line, ghost, max(1, round(reveal_blur)), rect.width() - 24, line_height,
                         )
                         painter.drawPixmap(
-                            round(rect.left() + 12 - reveal_blur), round(y - reveal_blur), ghost_pixmap,
+                            round(rect.left() + 12 - reveal_blur),
+                            round(current_y - reveal_blur), ghost_pixmap,
                         )
                 painter.setFont(lyric_font)
                 painter.setPen(line_color)
-                painter.drawText(QRectF(rect.left() + 12, y, rect.width() - 24, line_height),
+                painter.drawText(QRectF(rect.left() + 12, current_y, rect.width() - 24, line_height),
                                  Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap, line)
+                if line_transform_saved:
+                    painter.restore()
                 y += line_height
         elif self.source.source_type is SourceType.TRACK_LIST:
             self._paint_track_list(painter, rect)
@@ -842,6 +932,7 @@ class SourceItem(QGraphicsObject):
         position = event.pos()
         edit_handle = self.edit_handle_at(position)
         if edit_handle == "rotate":
+            self.setCursor(self.cursor_for_edit_handle(edit_handle, self.rotation()))
             self._rotating = True
             self._begin_user_interaction()
             scene = self.scene()
@@ -853,6 +944,7 @@ class SourceItem(QGraphicsObject):
             event.accept()
             return
         if edit_handle is not None:
+            self.setCursor(self.cursor_for_edit_handle(edit_handle, self.rotation()))
             self._resizing = True
             self._begin_user_interaction()
             scene = self.scene()
@@ -868,13 +960,13 @@ class SourceItem(QGraphicsObject):
             )
             event.accept()
             return
-        if (not self.source.locked and event.button() is Qt.MouseButton.LeftButton
+        if (not self.source.locked and event.button() == Qt.MouseButton.LeftButton
                 and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             self._duplicate_on_release = True
             self._duplicate_dragged = False
             self._duplicate_origin = QPointF(self.pos())
         super().mousePressEvent(event)
-        if (not self.source.locked and event.button() is Qt.MouseButton.LeftButton
+        if (not self.source.locked and event.button() == Qt.MouseButton.LeftButton
                 and not self._rotating and not self._resizing):
             scene = self.scene()
             if scene is not None and hasattr(scene, "begin_item_interaction"):
@@ -929,6 +1021,7 @@ class SourceItem(QGraphicsObject):
         """Finish an active resize."""
         if self._rotating:
             self._rotating = False
+            self.unsetCursor()
             scene = self.scene()
             if scene is not None and hasattr(scene, "finish_item_interaction"):
                 scene.finish_item_interaction()  # type: ignore[attr-defined]
@@ -939,6 +1032,7 @@ class SourceItem(QGraphicsObject):
         if self._resizing:
             self._resizing = False
             self._resize_handle = None
+            self.unsetCursor()
             scene = self.scene()
             if scene is not None and hasattr(scene, "finish_item_interaction"):
                 scene.finish_item_interaction()  # type: ignore[attr-defined]

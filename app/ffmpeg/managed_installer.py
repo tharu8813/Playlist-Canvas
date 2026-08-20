@@ -45,6 +45,10 @@ class ManagedFFmpegInstaller:
     release_api_url = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
     archive_name = "ffmpeg-master-latest-win64-gpl.zip"
     checksum_name = "checksums.sha256"
+    max_text_bytes = 16 * 1024 * 1024
+    max_archive_bytes = 2 * 1024 * 1024 * 1024
+    max_extracted_bytes = 8 * 1024 * 1024 * 1024
+    max_archive_members = 100_000
 
     def __init__(self, install_root: Path | None = None) -> None:
         self.install_root = install_root or self.default_install_root()
@@ -166,7 +170,12 @@ class ManagedFFmpegInstaller:
         request = Request(url, headers={"User-Agent": f"PlaylistCanvas/{__version__}"})
         try:
             with urlopen(request, timeout=30) as response:
-                data = response.read()
+                declared_length = self._content_length(response.headers.get("Content-Length"))
+                if declared_length > self.max_text_bytes:
+                    raise FFmpegInstallError("The FFmpeg release manifest is unexpectedly large.")
+                data = response.read(self.max_text_bytes + 1)
+                if len(data) > self.max_text_bytes:
+                    raise FFmpegInstallError("The FFmpeg release manifest is unexpectedly large.")
         except OSError as error:
             raise FFmpegInstallError("The FFmpeg download could not be reached.") from error
         self._raise_if_cancelled(cancelled)
@@ -177,17 +186,30 @@ class ManagedFFmpegInstaller:
         request = Request(url, headers={"User-Agent": f"PlaylistCanvas/{__version__}"})
         try:
             with urlopen(request, timeout=30) as response, destination.open("wb") as stream:
-                length = int(response.headers.get("Content-Length", "0"))
+                length = self._content_length(response.headers.get("Content-Length"))
+                if length > self.max_archive_bytes:
+                    raise FFmpegInstallError("The FFmpeg archive is unexpectedly large.")
                 downloaded = 0
                 while chunk := response.read(1024 * 1024):
                     self._raise_if_cancelled(cancelled)
-                    stream.write(chunk)
                     downloaded += len(chunk)
+                    if downloaded > self.max_archive_bytes:
+                        raise FFmpegInstallError("The FFmpeg archive exceeded the safe download limit.")
+                    stream.write(chunk)
                     fraction = 0.08 + 0.72 * downloaded / length if length else 0.12
                     self._report(progress, "Downloading FFmpeg", min(0.80, fraction),
                                  f"Downloaded {downloaded / 1024 / 1024:.1f} MB")
+                if length and downloaded != length:
+                    raise FFmpegInstallError("The FFmpeg archive download ended before it was complete.")
         except OSError as error:
             raise FFmpegInstallError("The FFmpeg archive download failed.") from error
+
+    @staticmethod
+    def _content_length(value: object) -> int:
+        try:
+            return max(0, int(str(value))) if value is not None else 0
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _checksum_for_archive(manifest: str, archive_name: str) -> str | None:
@@ -205,13 +227,19 @@ class ManagedFFmpegInstaller:
                 digest.update(block)
         return digest.hexdigest()
 
-    @staticmethod
-    def _safe_extract(archive: Path, destination: Path) -> None:
+    def _safe_extract(self, archive: Path, destination: Path) -> None:
         destination.mkdir(parents=True, exist_ok=True)
         try:
             with zipfile.ZipFile(archive) as package:
                 root = destination.resolve()
-                for member in package.infolist():
+                members = package.infolist()
+                if len(members) > self.max_archive_members:
+                    raise FFmpegInstallError("The FFmpeg archive contains too many files.")
+                total_size = 0
+                for member in members:
+                    total_size += member.file_size
+                    if total_size > self.max_extracted_bytes:
+                        raise FFmpegInstallError("The FFmpeg archive expands beyond the safe size limit.")
                     resolved = (destination / member.filename).resolve()
                     if not resolved.is_relative_to(root):
                         raise FFmpegInstallError("Unsafe path found in FFmpeg archive.")
@@ -238,13 +266,16 @@ class ManagedFFmpegInstaller:
     def _activate(self, installation: ManagedFFmpegInstallation) -> None:
         manifest = self.install_root / "current.json"
         temporary = manifest.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps({
-            "version": installation.version,
-            "executable": str(installation.executable),
-            "source": "BtbN/FFmpeg-Builds",
-            "license": "GPL-3.0-or-later",
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(manifest)
+        try:
+            temporary.write_text(json.dumps({
+                "version": installation.version,
+                "executable": str(installation.executable),
+                "source": "BtbN/FFmpeg-Builds",
+                "license": "GPL-3.0-or-later",
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(manifest)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _safe_version(value: str) -> str:

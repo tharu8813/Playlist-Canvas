@@ -4,7 +4,7 @@
   <p>음악, 가사, 비주얼 요소를 하나의 캔버스에서 편집해 플레이리스트 영상을 만드는 Windows 데스크톱 편집기</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-1.0.1-1685D1" alt="Version 1.0.1">
+    <img src="https://img.shields.io/badge/version-1.0.2-1685D1" alt="Version 1.0.2">
     <img src="https://img.shields.io/badge/platform-Windows%2064--bit-0078D4" alt="Windows 64-bit">
     <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python 3.12">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
@@ -44,12 +44,31 @@ Playlist Canvas는 정적인 이미지와 음악을 합치는 수준을 넘어, 
 - FFmpeg 자동 다운로드, SHA-256 검증, 설치 및 즉시 적용
 - GitHub Releases 기반 자동 업데이트 확인, 릴리즈 노트 표시와 검증된 Setup 실행
 
+## 1.0.2 주요 변경 사항
+
+이번 패치는 1.0.1 이후의 편집 편의성, 내보내기 성능과 배포 안정성을 다듬은 업데이트입니다.
+
+- 곡이 많은 프로젝트도 UI를 멈추지 않고 저장하도록 백그라운드 저장을 추가했습니다.
+- 프로젝트 콘텐츠를 목록·격자·간단히 보기로 전환하고 우클릭 메뉴를 사용할 수 있습니다.
+- 이미 추가한 오디오의 제목·아티스트·앨범 등 메타데이터를 곡 설정에서 수정할 수 있습니다.
+- 창 크기를 바꿀 때 좌우·하단 패널 크기를 유지하고 중앙 캔버스 영역만 반응하도록 개선했습니다.
+- 캔버스 리사이즈 노브에 방향별 커서를 적용하고 낮은 확대 배율의 클릭 판정을 안정화했습니다.
+- 초보자용 내보내기 추천 설정과 화질 프리셋을 추가하고, 선택한 설정을 진행 창에서 계속 확인할 수 있습니다.
+- 내보내기 창을 최소화할 수 있으며 오디오 준비·결합·비주얼라이저·프레임·인코딩 진행 상황을 자세히 표시합니다.
+- 남은 예상 시간은 진행 창의 전용 시간 영역에만 일관되게 표시합니다.
+- 오디오 정규화와 비주얼라이저 레이어 처리를 제한적으로 병렬화하고 중복 오디오 인코딩을 제거했습니다.
+- 자막·가사와 요소 애니메이션을 부드럽게 다듬고 미리보기와 결과물의 타이밍 일치를 개선했습니다.
+- 파티클·노이즈·비주얼라이저가 레이어 순서를 무시하던 합성 문제를 수정했습니다.
+- 손상 프로젝트, 긴 미디어 파일명, 저장 실패, 덮어쓰기 확인, 취소 처리 등 예외 상황을 보강했습니다.
+- FFmpeg 자동 설치에 다운로드·압축 해제 크기 제한과 불완전 파일 검사를 추가했습니다.
+- `.pvsproj` 파일을 탐색기에서 더블클릭해 열 수 있으며 프로젝트 전용 파일 아이콘을 제공합니다.
+
 ## 사용자 설치
 
-1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.0.1-setup.exe`를 받습니다.
+1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.0.2-setup.exe`를 받습니다.
 2. Setup 파일을 실행하고 설치 언어를 선택합니다.
 3. 설치 위치와 바탕 화면 바로가기 생성 여부를 선택한 뒤 **설치**를 누릅니다.
-4. 설치가 완료되면 **Playlist Canvas 실행**을 선택하거나 시작 메뉴의 바로가기를 실행합니다.
+4. 설치가 완료되면 **Playlist Canvas 실행**을 선택하거나 시작 메뉴의 바로가기를 실행합니다. 설치 후에는 파일 탐색기의 `.pvsproj` 프로젝트를 더블클릭해 프로그램과 프로젝트를 바로 열 수도 있습니다.
 5. 처음 실행한 뒤 **도구 → 설정 → FFmpeg → FFmpeg 자동 다운로드 및 설치**를 선택합니다.
 6. 새 프로젝트를 만들고 음악과 화면 요소를 추가한 뒤 MP4로 내보냅니다.
 
@@ -138,14 +157,14 @@ python -m PyInstaller --noconfirm --clean playlist_canvas.spec
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 ```
 
-완성된 `output-setup\Playlist Canvas-1.0.1-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
+완성된 `output-setup\Playlist Canvas-1.0.2-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
 
 ## 프로젝트 구조
 
 ```text
 playlist_project/
 ├─ app/                    # 편집기 UI, 모델, 서비스와 렌더러
-├─ app/resources/          # 애플리케이션 아이콘
+├─ app/resources/          # 앱·프로젝트 파일 아이콘과 기본 언어팩
 ├─ docs/images/            # README 이미지
 ├─ tests/                  # 회귀 및 배포 계약 테스트
 ├─ tools/                  # 개발 보조 도구

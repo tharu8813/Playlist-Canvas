@@ -86,6 +86,14 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertTrue(icon.is_file())
         self.assertGreater(icon.stat().st_size, 1_000)
 
+    def test_project_file_icon_exists(self) -> None:
+        png = ROOT / "app" / "resources" / "project_file_icon.png"
+        icon = ROOT / "app" / "resources" / "project_file_icon.ico"
+        self.assertTrue(png.is_file())
+        self.assertGreater(png.stat().st_size, 1_000)
+        self.assertTrue(icon.is_file())
+        self.assertGreater(icon.stat().st_size, 1_000)
+
     def test_noncommercial_license_is_applied_to_repository_build_and_installer(self) -> None:
         license_path = ROOT / "LICENSE.txt"
         license_text = license_path.read_text(encoding="utf-8")
@@ -128,6 +136,18 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("python312.dll", packaging)
         self.assertIn("Python 3.12", lock_file.splitlines()[0])
         self.assertNotIn("python314.dll", packaging)
+
+    def test_installer_registers_pvsproj_file_association(self) -> None:
+        installer = (ROOT / "setup.iss").read_text(encoding="utf-8")
+        self.assertIn("ChangesAssociations=yes", installer)
+        self.assertIn('Software\\Classes\\.pvsproj', installer)
+        self.assertIn('ValueData: "PlaylistCanvas.Project"', installer)
+        self.assertIn('PlaylistCanvas.Project\\DefaultIcon', installer)
+        self.assertIn('#define ProjectIconPath "app\\resources\\project_file_icon.ico"', installer)
+        self.assertIn('DestName: "project_file_icon.ico"', installer)
+        self.assertIn('ValueData: "{app}\\project_file_icon.ico,0"', installer)
+        self.assertIn('PlaylistCanvas.Project\\shell\\open\\command', installer)
+        self.assertIn('""%1""', installer)
 
 
 if __name__ == "__main__":

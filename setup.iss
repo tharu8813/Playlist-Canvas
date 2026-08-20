@@ -1,11 +1,11 @@
 ; ============================================================================
-; Playlist Canvas 1.0.1 Windows 설치 프로그램
+; Playlist Canvas 1.0.2 Windows 설치 프로그램
 ; ChatGPT Codex를 이용해 제작한 Playlist Canvas의 Inno Setup 스크립트입니다.
 ; ============================================================================
 
 #define MyAppName "Playlist Canvas"
-#define MyAppVersion "1.0.1"
-#define MyAppFileVersion "1.0.1.0"
+#define MyAppVersion "1.0.2"
+#define MyAppFileVersion "1.0.2.0"
 #define MyAppPublisher "Ji Beak min(tharu8813)"
 #define MyAppCopyright "© 2026 Ji Beak min(tharu8813). All rights reserved."
 #define MyAppDescription "음악, 가사와 비주얼 요소를 편집해 플레이리스트 영상을 만드는 Windows 데스크톱 편집기"
@@ -18,6 +18,7 @@
 ; 선택적 설정 (필요시 수정)
 #define SourcePath "dist\Playlist Canvas"
 #define SetupIconPath "app\resources\app_icon.ico"
+#define ProjectIconPath "app\resources\project_file_icon.ico"
 #define LicenseFilePath "LICENSE.txt"
 #define ReadmeFilePath ""   ; Readme 파일 경로 (예: "readme.txt")
 
@@ -72,6 +73,7 @@ VersionInfoDescription={#MyAppDescription}
 VersionInfoCopyright={#MyAppCopyright}
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
+ChangesAssociations=yes
 
 [Languages]
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
@@ -82,12 +84,22 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#SourcePath}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb,*.log,*.tmp"
+Source: "{#ProjectIconPath}"; DestDir: "{app}"; DestName: "project_file_icon.ico"; Flags: ignoreversion
 Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Registry]
+; Windows 탐색기에서 .pvsproj를 더블클릭하면 설치된 앱으로 프로젝트를 엽니다.
+Root: HKA; Subkey: "Software\Classes\.pvsproj"; ValueType: string; ValueName: ""; ValueData: "PlaylistCanvas.Project"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\PlaylistCanvas.Project"; ValueType: string; ValueName: ""; ValueData: "Playlist Canvas Project"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\PlaylistCanvas.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\project_file_icon.ico,0"
+Root: HKA; Subkey: "Software\Classes\PlaylistCanvas.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExeName}\SupportedTypes"; ValueType: string; ValueName: ".pvsproj"; ValueData: ""; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExeName}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

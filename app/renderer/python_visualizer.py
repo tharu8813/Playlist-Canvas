@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+import os
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from time import monotonic
@@ -13,6 +15,9 @@ import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 
+from app.animation.curves import (
+    ease_in_quint, ease_out_quint, hidden_scale_factor, slide_distance,
+)
 from app.utils.level_meter_painter import paint_level_meter
 from app.utils.particle_painter import paint_particles
 from app.utils.subprocess_utils import hidden_process_kwargs
@@ -69,26 +74,59 @@ class PythonVisualizerRenderer:
                 self._analyze_rms(stereo[:, 0], fps, cancel_event),
                 self._analyze_rms(stereo[:, 1], fps, cancel_event),
             )
-        paths: list[Path] = []
+        paths: list[Path | None] = [None] * len(overlays)
         encoding_started_at = monotonic()
-        for index, overlay in enumerate(overlays):
+        layer_progress = [0.0] * len(overlays)
+        progress_lock = threading.Lock()
+
+        def encode_layer(index: int, overlay: object) -> tuple[int, Path]:
             if cancel_event.is_set():
                 raise PythonVisualizerError("Rendering was cancelled.")
             path = directory / f"python_visualizer_{index:02d}.mov"
             source_levels = waveform_levels if getattr(overlay, "kind", "") == "waveform" else levels
             if source_levels is None:
                 source_levels = levels
-            self._report(
-                progress_callback,
-                0.15 + 0.85 * index / len(overlays),
-                f"Preparing visualizer layer {index + 1}/{len(overlays)}",
+
+            def report_layer(fraction: float, message: str) -> None:
+                # _encode_layer reports its historical global fraction. Convert
+                # that value back to one layer's completion and aggregate all
+                # concurrent layers into a monotonic overall progress value.
+                local = ((fraction - 0.15) / 0.85 * len(overlays)) - index
+                with progress_lock:
+                    layer_progress[index] = max(
+                        layer_progress[index], min(1.0, max(0.0, local)),
+                    )
+                    aggregate = sum(layer_progress) / len(layer_progress)
+                    self._report(
+                        progress_callback, 0.15 + 0.85 * aggregate, message,
+                    )
+
+            self._encode_layer(
+                path, overlay, source_levels, fps, cancel_event, report_layer,
+                index, len(overlays), stereo_levels, encoding_started_at,
+                track_windows,
             )
-            self._encode_layer(path, overlay, source_levels, fps, cancel_event, progress_callback,
-                               index, len(overlays), stereo_levels, encoding_started_at,
-                               track_windows)
-            paths.append(path)
+            return index, path
+
+        worker_count = min(
+            len(overlays), max(1, min(2, (os.cpu_count() or 2) // 2)),
+        )
+        self._report(
+            progress_callback, 0.15,
+            f"Preparing {len(overlays)} visualizer layer(s)",
+        )
+        with ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="visualizer-layer",
+        ) as executor:
+            futures = [
+                executor.submit(encode_layer, index, overlay)
+                for index, overlay in enumerate(overlays)
+            ]
+            for future in as_completed(futures):
+                index, path = future.result()
+                paths[index] = path
         self._report(progress_callback, 1.0, "Visualizer frames complete")
-        return paths
+        return [path for path in paths if path is not None]
 
     @staticmethod
     def _report(
@@ -193,9 +231,16 @@ class PythonVisualizerRenderer:
             "-ss", f"{max(0.0, seconds):.3f}", "-t", "0.18", "-i", str(audio_path),
             "-vn", "-ac", "1", "-ar", str(self.sample_rate), "-f", "s16le", "-",
         ]
-        completed = subprocess.run(
-            command, capture_output=True, check=False, **hidden_process_kwargs()
-        )
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, check=False, timeout=10,
+                **hidden_process_kwargs(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            # Full Preview must remain recoverable when a damaged/network audio
+            # file or a broken FFmpeg process stops responding. The idle level
+            # is deliberately nonzero so the source remains visible for repair.
+            return np.full(max(4, bands), 0.08, dtype=np.float32)
         if completed.returncode != 0 or not completed.stdout:
             return np.full(max(4, bands), 0.08, dtype=np.float32)
         samples = np.frombuffer(completed.stdout, dtype="<i2").astype(np.float32) / 32768.0
@@ -347,6 +392,8 @@ class PythonVisualizerRenderer:
                     style, progress, entering = animation
                     frame_buffer = self._apply_animation(
                         frame_buffer, style, progress, entering,
+                        float(getattr(overlay, "width", width)),
+                        float(getattr(overlay, "height", height)),
                     )
             else:
                 image_format = QImage.Format.Format_RGBA8888
@@ -421,13 +468,14 @@ class PythonVisualizerRenderer:
     @staticmethod
     def _apply_animation(
         image: QImage, style: str, raw_progress: float, entering: bool,
+        source_width: float | None = None, source_height: float | None = None,
     ) -> QImage:
         """Apply Canvas-compatible opacity, slide, and zoom to a reactive layer."""
         raw_progress = max(0.0, min(1.0, raw_progress))
         if entering:
-            visible_progress = 1.0 - (1.0 - raw_progress) ** 3
+            visible_progress = ease_out_quint(raw_progress)
         else:
-            visible_progress = 1.0 - raw_progress ** 3
+            visible_progress = 1.0 - ease_in_quint(raw_progress)
         if visible_progress <= 0.0:
             transparent = QImage(image.size(), QImage.Format.Format_RGBA8888)
             transparent.fill(0)
@@ -436,15 +484,12 @@ class PythonVisualizerRenderer:
         result.fill(0)
         painter = QPainter(result)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.setOpacity(
-            visible_progress
-            if style in {"fade", "zoom"}
-            else 0.35 + 0.65 * visible_progress
-        )
+        painter.setOpacity(visible_progress)
         width = float(image.width())
         height = float(image.height())
         if style == "zoom":
-            scale = 0.76 + 0.24 * visible_progress
+            hidden_scale = hidden_scale_factor(style)
+            scale = hidden_scale + (1.0 - hidden_scale) * visible_progress
             target_width = width * scale
             target_height = height * scale
             target = QRectF(
@@ -454,7 +499,10 @@ class PythonVisualizerRenderer:
                 target_height,
             )
         else:
-            distance = min(180.0, max(72.0, max(width, height) * 0.22))
+            distance = slide_distance(
+                source_width if source_width is not None else width,
+                source_height if source_height is not None else height,
+            )
             remaining = distance * (1.0 - visible_progress)
             dx, dy = {
                 "slide_left": (-remaining, 0.0),

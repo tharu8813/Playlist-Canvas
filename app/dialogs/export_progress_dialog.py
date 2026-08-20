@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import re
 from time import monotonic
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -23,11 +25,12 @@ class ExportProgressDialog(QDialog):
     """Display a comprehensible in-flight FFmpeg export and allow safe cancellation."""
 
     cancel_requested = Signal()
+    minimize_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setModal(False)
-        self.setMinimumSize(560, 360)
+        self.setMinimumSize(600, 420)
         self._started_at = monotonic()
         self._cancelling = False
         self._allow_close = False
@@ -38,7 +41,19 @@ class ExportProgressDialog(QDialog):
             "Cancel the current export?\n"
             "Prepared temporary frames and the active render will be discarded."
         )
+        self._export_track_count = 0
+        self._export_duration_seconds = 0.0
+        self._export_settings_summary = ""
+        self._export_output_path = ""
         layout = QVBoxLayout(self)
+        self.export_settings_heading = QLabel("Export settings")
+        self.export_settings_heading.setObjectName("panelTitle")
+        self.export_settings_label = QLabel()
+        self.export_settings_label.setObjectName("infoCallout")
+        self.export_settings_label.setWordWrap(True)
+        self.export_settings_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         self.stage_label = QLabel("Preparing export")
         self.stage_label.setObjectName("panelTitle")
         self.progress_bar = QProgressBar()
@@ -56,11 +71,17 @@ class ExportProgressDialog(QDialog):
         self.log_output.setReadOnly(True)
         self.log_output.document().setMaximumBlockCount(200)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.minimize_button = self.buttons.addButton(
+            "Minimize", QDialogButtonBox.ButtonRole.ActionRole,
+        )
         self.cancel_button = self.buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        self.minimize_button.clicked.connect(self.minimize_requested.emit)
         self.cancel_button.clicked.connect(self.request_cancel)
         progress_row = QHBoxLayout()
         progress_row.addWidget(self.progress_bar, 1)
         progress_row.addWidget(self.percent_label)
+        layout.addWidget(self.export_settings_heading)
+        layout.addWidget(self.export_settings_label)
         layout.addWidget(self.stage_label)
         layout.addLayout(progress_row)
         layout.addWidget(self.detail_label)
@@ -80,7 +101,9 @@ class ExportProgressDialog(QDialog):
                 "준비된 임시 프레임과 진행 중인 렌더링이 중단됩니다."
             )
             self.setWindowTitle("내보내기 진행 상황")
+            self.export_settings_heading.setText("내보내기 설정")
             self.log_heading.setText("작업 내역")
+            self.minimize_button.setText("최소화")
             self.cancel_button.setText("취소")
             self.stage_label.setText("내보내기 준비")
             self.time_label.setText("경과 00:00 · 남은 시간 계산 중")
@@ -91,7 +114,9 @@ class ExportProgressDialog(QDialog):
                 "Prepared temporary frames and the active render will be discarded."
             )
             self.setWindowTitle("Export progress")
+            self.export_settings_heading.setText("Export settings")
             self.log_heading.setText("Activity")
+            self.minimize_button.setText("Minimize")
             self.cancel_button.setText("Cancel")
             self.stage_label.setText("Preparing export")
             self.time_label.setText("Elapsed 00:00 · Calculating remaining time")
@@ -101,13 +126,42 @@ class ExportProgressDialog(QDialog):
         self._cancel_title = title
         self._cancel_message = message
 
-    def set_export_details(self, track_count: int, duration_seconds: float, summary: str) -> None:
-        """Show the planned export at a glance before FFmpeg starts."""
+        self._refresh_export_details()
+
+    def set_export_details(
+        self, track_count: int, duration_seconds: float, summary: str,
+        output_path: str | Path | None = None,
+    ) -> None:
+        """Keep the selected render configuration visible throughout export."""
+        self._export_track_count = max(0, int(track_count))
+        self._export_duration_seconds = max(0.0, float(duration_seconds))
+        self._export_settings_summary = summary.strip()
+        self._export_output_path = str(output_path or "").strip()
+        self._refresh_export_details()
+
+    def _refresh_export_details(self) -> None:
+        """Render the persistent settings card in the active dialog language."""
+        if not self._export_settings_summary and not self._export_output_path:
+            self.export_settings_label.clear()
+            self.export_settings_label.hide()
+            return
         prefix = (
-            f"곡 {track_count}개 · 총 재생 시간 {self._format_time(duration_seconds)}"
-            if self._korean else f"{track_count} track(s) · {self._format_time(duration_seconds)}"
+            f"곡 {self._export_track_count}개 · 총 재생 시간 {self._format_time(self._export_duration_seconds)}"
+            if self._korean else
+            f"{self._export_track_count} track(s) · {self._format_time(self._export_duration_seconds)}"
         )
-        self.detail_label.setText(f"{prefix} · {summary}")
+        lines = [prefix]
+        if self._export_settings_summary:
+            lines.append(self._export_settings_summary)
+        if self._export_output_path:
+            lines.append(
+                f"저장 위치 · {self._export_output_path}"
+                if self._korean else f"Output · {self._export_output_path}"
+            )
+        display = "\n".join(lines)
+        self.export_settings_label.setText(display)
+        self.export_settings_label.setToolTip(display)
+        self.export_settings_label.show()
 
     def set_busy(self, stage: str, message: str) -> None:
         """Show activity before a measurable FFmpeg progress stream exists."""
@@ -116,6 +170,7 @@ class ExportProgressDialog(QDialog):
         self.progress_bar.setRange(0, 0)
         self.percent_label.setText("…")
         self.detail_label.setText(display_message)
+        self._update_time_label(None)
         if display_message and display_message != self._last_log:
             self.log_output.append(display_message)
             self._last_log = display_message
@@ -134,19 +189,26 @@ class ExportProgressDialog(QDialog):
         if display_message and display_message != self._last_log:
             self.log_output.append(display_message)
             self._last_log = display_message
-        if fraction > 0.02:
-            remaining = elapsed * (1.0 - fraction) / fraction
-            self.time_label.setText(
-                f"경과 {self._format_time(elapsed)} · 남은 시간 약 {self._format_time(remaining)}"
-                if self._korean else
-                f"Elapsed {self._format_time(elapsed)} · Remaining ~{self._format_time(remaining)}"
-            )
-        else:
+        remaining = elapsed * (1.0 - fraction) / fraction if fraction > 0.02 else None
+        self._update_time_label(remaining, elapsed)
+
+    def _update_time_label(
+        self, remaining: float | None, elapsed: float | None = None,
+    ) -> None:
+        """Keep the export ETA in its single dedicated label."""
+        elapsed = monotonic() - self._started_at if elapsed is None else elapsed
+        if remaining is None:
             self.time_label.setText(
                 f"경과 {self._format_time(elapsed)} · 남은 시간 계산 중"
                 if self._korean else
                 f"Elapsed {self._format_time(elapsed)} · Calculating remaining time"
             )
+            return
+        self.time_label.setText(
+            f"경과 {self._format_time(elapsed)} · 남은 시간 약 {self._format_time(remaining)}"
+            if self._korean else
+            f"Elapsed {self._format_time(elapsed)} · Remaining ~{self._format_time(remaining)}"
+        )
 
     def request_cancel(self) -> bool:
         """Confirm and emit a cancellation request exactly once."""
@@ -206,7 +268,9 @@ class ExportProgressDialog(QDialog):
             "Preparing audio": "오디오 준비",
             "Combining audio": "오디오 결합",
             "Preparing visualizers": "비주얼라이저 준비",
+            "Preparing visual layers": "시각 레이어 준비",
             "Encoding video": "영상 인코딩",
+            "Finalizing export": "내보내기 마무리",
             "Preparing download": "다운로드 준비",
             "Downloading FFmpeg": "FFmpeg 다운로드",
             "Extracting": "압축 해제 및 설치",
@@ -215,6 +279,15 @@ class ExportProgressDialog(QDialog):
 
     def _detail_text(self, message: str) -> str:
         """Translate visualizer progress details while retaining their live numbers."""
+        # Visualizer workers can provide a stage-local ETA, while this dialog
+        # calculates the overall export ETA. Showing both in different rows was
+        # visually inconsistent and the two estimates represented different
+        # scopes. Keep all remaining-time text in ``time_label`` only.
+        message = re.sub(
+            r"\s*·\s*about\s+[0-9:]+\s+remaining\s*$", "", message,
+            flags=re.IGNORECASE,
+        )
+        message = re.sub(r"\s*·\s*약\s+[0-9:]+\s+남음\s*$", "", message)
         if not self._korean:
             return message
         translated = {
@@ -231,6 +304,8 @@ class ExportProgressDialog(QDialog):
             "Rendering the final video": "최종 영상 렌더링 중",
             "Audio normalization complete": "오디오 정규화 완료",
             "Export completed": "내보내기 완료",
+            "Moving the completed video to the selected location":
+                "완성된 영상을 선택한 위치로 이동하는 중",
             "Reading the verified release manifest": "검증된 FFmpeg 배포 정보 확인 중",
             "Using the existing verified FFmpeg version": "기존에 검증된 FFmpeg 사용 중",
             "Downloading the checksum manifest": "SHA-256 체크섬 정보 다운로드 중",
@@ -252,11 +327,36 @@ class ExportProgressDialog(QDialog):
             return (
                 message.replace("Visualizer ", "비주얼라이저 ", 1)
                 .replace(" · frame ", " · 프레임 ")
-                .replace(" · about ", " · 약 ")
-                .replace(" remaining", " 남음")
+            )
+        if message.startswith("Normalizing audio "):
+            return (
+                message.replace("Normalizing audio ", "오디오 정규화 중 · ", 1)
+                .replace(" complete", " 완료")
+                .replace(" total", " 전체")
             )
         if message.startswith("Normalizing "):
             return "오디오 정규화 중 · " + message.removeprefix("Normalizing ")
+        if message.startswith("Combining audio "):
+            return message.replace("Combining audio ", "오디오 결합 중 · ", 1)
+        if message.startswith("Creating silence "):
+            return (
+                message.replace("Creating silence ", "무음 구간 생성 중 · ", 1)
+                .replace(" total", " 전체")
+            )
+        if message.startswith("Validating visual frames "):
+            return message.replace("Validating visual frames ", "화면 프레임 검사 중 · ", 1)
+        if message.startswith("Preparing visual layers "):
+            return message.replace("Preparing visual layers ", "시각 레이어 준비 중 · ", 1)
+        if message.startswith("Preparing visual layer "):
+            return (
+                message.replace("Preparing visual layer ", "시각 레이어 준비 중 · ", 1)
+                .replace(" · frame ", " · 프레임 ")
+            )
+        if message.startswith("Checking visual layer "):
+            return (
+                message.replace("Checking visual layer ", "시각 레이어 검사 중 · ", 1)
+                .replace(" · frame ", " · 프레임 ")
+            )
         if message.startswith("Inserted ") and message.endswith(" of silence"):
             duration = message.removeprefix("Inserted ").removesuffix(" of silence")
             return f"무음 구간 {duration} 추가"

@@ -126,13 +126,21 @@ class ProjectService:
     @staticmethod
     def _save_json(target: Path, document: ProjectDocument) -> Path:
         payload = json.dumps(document.to_dict(), ensure_ascii=False, indent=2)
-        with NamedTemporaryFile(
-            mode="w", encoding="utf-8", suffix=".tmp", dir=target.parent,
-            delete=False,
-        ) as temporary:
-            temporary.write(payload)
-            temporary_path = Path(temporary.name)
-        temporary_path.replace(target)
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="w", encoding="utf-8", suffix=".tmp", dir=target.parent,
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(payload)
+                temporary.flush()
+            temporary_path.replace(target)
+        finally:
+            # Antivirus, cloud sync, or a destination lock can make the atomic
+            # replace fail. Never leave an accumulating project-sized .tmp file.
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
         return target
 
     @classmethod

@@ -669,8 +669,8 @@ class LiveCanvas(QGraphicsView):
         """Pan the scene with middle mouse button or Space+left mouse."""
         button = event.button()  # type: ignore[union-attr]
         modifiers = event.modifiers()  # type: ignore[union-attr]
-        if button is Qt.MouseButton.MiddleButton or (
-            button is Qt.MouseButton.LeftButton and self._space_panning
+        if button == Qt.MouseButton.MiddleButton or (
+            button == Qt.MouseButton.LeftButton and self._space_panning
         ):
             self._panning = True
             self._pan_origin = event.pos()  # type: ignore[union-attr]
@@ -683,8 +683,7 @@ class LiveCanvas(QGraphicsView):
         # the selected item becomes the scene mouse grabber, move/release events
         # continue to reach it normally.
         handle_target: SourceItem | None = None
-        if button is Qt.MouseButton.LeftButton:
-            scene_position = self.mapToScene(event.pos())  # type: ignore[union-attr]
+        if button == Qt.MouseButton.LeftButton:
             selected = sorted(
                 (
                     item for item in self.scene_model.selectedItems()
@@ -696,7 +695,7 @@ class LiveCanvas(QGraphicsView):
             handle_target = next(
                 (
                     item for item in selected
-                    if item.edit_handle_at(item.mapFromScene(scene_position)) is not None
+                    if self._edit_handle_at_view_position(item, event.pos()) is not None  # type: ignore[union-attr]
                 ),
                 None,
             )
@@ -728,6 +727,53 @@ class LiveCanvas(QGraphicsView):
             event.accept()  # type: ignore[union-attr]
             return
         super().mouseMoveEvent(event)  # type: ignore[arg-type]
+        if (self._space_panning
+                or event.buttons() != Qt.MouseButton.NoButton):  # type: ignore[union-attr]
+            return
+        # Mirror the press-time handle priority so an overlapping, higher-Z item
+        # cannot hide the cursor of a selected source's visible edit handle.
+        selected = sorted(
+            (
+                item for item in self.scene_model.selectedItems()
+                if isinstance(item, SourceItem) and item.isVisible()
+            ),
+            key=lambda item: item.zValue(),
+            reverse=True,
+        )
+        hovered = next(
+            (
+                (item, handle)
+                for item in selected
+                if (handle := self._edit_handle_at_view_position(
+                    item, event.position().toPoint()  # type: ignore[union-attr]
+                )) is not None
+            ),
+            None,
+        )
+        if hovered is None:
+            self.viewport().unsetCursor()
+            return
+        item, handle = hovered
+        self.viewport().setCursor(
+            SourceItem.cursor_for_edit_handle(handle, item.rotation())
+        )
+
+    def _edit_handle_at_view_position(self, item: SourceItem, position: QPoint) -> str | None:
+        """Hit-test edit handles with a stable two-pixel screen tolerance.
+
+        A handle's item-space center can land between device pixels. At a low
+        canvas zoom, converting that rounded viewport point back to item space
+        may otherwise miss even though the pointer visibly covers the handle.
+        """
+        scene_position = self.mapToScene(position)
+        local_position = item.mapFromScene(scene_position)
+        local_x = item.mapFromScene(self.mapToScene(position + QPoint(2, 0)))
+        local_y = item.mapFromScene(self.mapToScene(position + QPoint(0, 2)))
+        tolerance = max(
+            QLineF(local_position, local_x).length(),
+            QLineF(local_position, local_y).length(),
+        )
+        return item.edit_handle_at(local_position, tolerance)
 
     def mouseReleaseEvent(self, event: object) -> None:
         """End panning."""
@@ -737,6 +783,7 @@ class LiveCanvas(QGraphicsView):
             event.accept()  # type: ignore[union-attr]
             return
         super().mouseReleaseEvent(event)  # type: ignore[arg-type]
+        self.viewport().unsetCursor()
 
     def keyPressEvent(self, event: object) -> None:
         """Enable familiar Space+drag hand-tool panning."""

@@ -49,9 +49,9 @@ class ThemeService(QObject):
             return self._preference
         style_hints = QGuiApplication.styleHints()
         scheme = style_hints.colorScheme() if hasattr(style_hints, "colorScheme") else Qt.ColorScheme.Unknown
-        if scheme is Qt.ColorScheme.Light:
+        if scheme == Qt.ColorScheme.Light:
             return Theme.LIGHT
-        if scheme is Qt.ColorScheme.Dark:
+        if scheme == Qt.ColorScheme.Dark:
             return Theme.DARK
         # The application installs its own palette for explicit themes. Using
         # that palette here would make Auto permanently inherit the last manual

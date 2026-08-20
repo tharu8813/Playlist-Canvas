@@ -9,6 +9,9 @@ from PySide6.QtCore import (
 
 from app.canvas.source_item import SourceItem
 from app.models.source import Source
+from app.animation.curves import (
+    hidden_opacity_factor, hidden_scale_factor, slide_distance,
+)
 
 
 class CanvasAnimationPreviewController(QObject):
@@ -75,7 +78,7 @@ class CanvasAnimationPreviewController(QObject):
     ) -> QParallelAnimationGroup:
         normal_position = QPointF(source.x, source.y)
         normal_scale = source.scale
-        distance = min(180.0, max(72.0, max(source.width, source.height) * 0.22))
+        distance = slide_distance(source.width, source.height)
         offset = {
             "slide_left": QPointF(-distance, 0.0),
             "slide_right": QPointF(distance, 0.0),
@@ -83,11 +86,12 @@ class CanvasAnimationPreviewController(QObject):
             "slide_down": QPointF(0.0, distance),
         }.get(style, QPointF())
         hidden_position = normal_position + offset
-        hidden_scale = normal_scale * 0.76 if style == "zoom" else normal_scale
-        normal_opacity = source.opacity
-        hidden_opacity = (
-            0.0 if style in {"fade", "zoom"} else normal_opacity * 0.35
-        )
+        hidden_scale = normal_scale * hidden_scale_factor(style)
+        # Source opacity is already applied inside SourceItem.paint(). Graphics
+        # opacity is only the animation multiplier; including source.opacity here
+        # would square semi-transparent elements during preview/export.
+        normal_opacity = 1.0
+        hidden_opacity = normal_opacity * hidden_opacity_factor(style)
 
         group = QParallelAnimationGroup()
         position = QPropertyAnimation(item, b"pos")
@@ -96,8 +100,8 @@ class CanvasAnimationPreviewController(QObject):
         for animation in (position, scale, opacity):
             animation.setDuration(duration)
             animation.setEasingCurve(
-                QEasingCurve.Type.OutCubic if entering
-                else QEasingCurve.Type.InCubic
+                QEasingCurve.Type.OutQuint if entering
+                else QEasingCurve.Type.InQuint
             )
         if entering:
             item.setPos(hidden_position)

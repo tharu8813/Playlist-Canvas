@@ -179,7 +179,7 @@ class PlaylistTimeline(QSlider):
         painter.end()
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() is Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
             self._set_value_from_position(event.position().x())
             event.accept()
@@ -194,7 +194,7 @@ class PlaylistTimeline(QSlider):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() is Qt.MouseButton.LeftButton and self._dragging:
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
             self._set_value_from_position(event.position().x())
             self._dragging = False
             self.sliderReleased.emit()
@@ -693,10 +693,9 @@ class ExportPreviewDialog(QDialog):
                     round(capture_rect.top() * self.preview_render_scale), buffer,
                 )
             painter.end()
-        # The preview stays fail-safe: it rasterizes every non-reactive source
-        # together, then adds dynamic audio layers.  The export renderer uses
-        # the full multi-band Z pipeline; this avoids a missing source in the
-        # interactive preview when projects contain legacy equal-Z layers.
+        # Dynamic audio layers are normally a cheap final composition.  When a
+        # Canvas source sits above one of them, the compositor automatically
+        # switches to the same multi-band Z pipeline used by export.
         self._composite_export_overlays(track, elapsed)
         self.time_label.setText(
             f"{format_timestamp(self.timeline.value() / TIMELINE_SCALE)} / "
@@ -846,30 +845,118 @@ class ExportPreviewDialog(QDialog):
             layers = self._overlay_layers_for_frame(track.id, frame_index, len(scaled_overlays))
             if not layers:
                 return
+            if self._requires_z_band_composition(active_overlays):
+                if self._composite_overlays_in_canvas_order(
+                    track, elapsed, active_overlays, layers,
+                ):
+                    return
             painter = QPainter(self._image)
             for overlay, layer in zip(active_overlays, layers, strict=True):
-                scaled_width = layer.width()
-                scaled_height = layer.height()
-                if overlay.rotation:
-                    center_x = round((overlay.x + overlay.width / 2) * self.preview_render_scale)
-                    center_y = round((overlay.y + overlay.height / 2) * self.preview_render_scale)
-                    painter.save()
-                    painter.translate(center_x, center_y)
-                    painter.rotate(overlay.rotation)
-                    painter.drawImage(-scaled_width // 2, -scaled_height // 2, layer)
-                    painter.restore()
-                else:
-                    painter.drawImage(
-                        round(overlay.x * self.preview_render_scale),
-                        round(overlay.y * self.preview_render_scale),
-                        layer,
-                    )
+                self._paint_overlay_layer(painter, overlay, layer)
             painter.end()
         except Exception:
             if not self._overlay_error_reported:
                 LOGGER.warning("Preview overlay compositing failed", exc_info=True)
                 self._overlay_error_reported = True
             return
+
+    def _requires_z_band_composition(
+        self, active_overlays: list[VisualizerOverlay],
+    ) -> bool:
+        """Return whether a Canvas source must be painted over an audio layer."""
+        if not active_overlays:
+            return False
+        lowest_dynamic_z = min(overlay.z_index for overlay in active_overlays)
+        audio_ids = set(self._cached_audio_dynamic_ids)
+        return any(
+            isinstance(item, SourceItem)
+            and item.isVisible() and item.source.visible
+            and item.source.id not in audio_ids
+            and item.source.z_index >= lowest_dynamic_z
+            for item in self.scene.items()
+        )
+
+    def _composite_overlays_in_canvas_order(
+        self, track: PlaylistTrack, elapsed: float,
+        active_overlays: list[VisualizerOverlay], layers: tuple[QImage, ...],
+    ) -> bool:
+        """Interleave preview overlays and Canvas bands exactly like export."""
+        selected = self._track_at(self.timeline.value() / TIMELINE_SCALE)
+        if selected is None:
+            return False
+        track_index, _selected_track, _selected_elapsed, start = selected
+        phase, phase_progress, phase_duration = self._animation_state(track, elapsed)
+        audio_ids = set(self._cached_audio_dynamic_ids)
+        z_bands = CanvasSnapshot.z_bands(self.scene, audio_ids)
+        if len(z_bands) < 2:
+            return False
+        common = dict(
+            elapsed_seconds=elapsed,
+            hide_visualizers=audio_ids,
+            playlist_duration_seconds=self._playlist_duration(),
+            playlist_tracks=self.tracks,
+            output_scale=self.preview_render_scale,
+            timeline_seconds=self.timeline.value() / TIMELINE_SCALE,
+            animation_phase_duration=phase_duration,
+        )
+        base = CanvasSnapshot.capture_track(
+            self.scene, track, track_index + 1, len(self.tracks), start,
+            phase, phase_progress, z_max=z_bands[0][1], **common,
+        )
+        foreground_bands: list[tuple[float, QImage]] = []
+        for z_min, z_max in z_bands[1:]:
+            foreground = CanvasSnapshot.capture_track(
+                self.scene, track, track_index + 1, len(self.tracks), start,
+                phase, phase_progress, z_min=z_min, z_max=z_max,
+                transparent=True, **common,
+            )
+            foreground_bands.append((
+                z_min if z_min is not None else -10_000.0, foreground,
+            ))
+        self._foreground_bands = foreground_bands
+        self._image = base
+        entries: list[tuple[float, int, int]] = [
+            (overlay.z_index, 0, index)
+            for index, overlay in enumerate(active_overlays)
+        ]
+        entries.extend(
+            (z_index, 1, index)
+            for index, (z_index, _image) in enumerate(foreground_bands)
+        )
+        painter = QPainter(self._image)
+        for _z_index, kind, index in sorted(entries):
+            if kind == 0:
+                self._paint_overlay_layer(
+                    painter, active_overlays[index], layers[index],
+                )
+            else:
+                painter.drawImage(0, 0, foreground_bands[index][1])
+        painter.end()
+        return True
+
+    def _paint_overlay_layer(
+        self, painter: QPainter, overlay: VisualizerOverlay, layer: QImage,
+    ) -> None:
+        """Paint one already-scaled audio-reactive layer at its Canvas transform."""
+        scaled_width = layer.width()
+        scaled_height = layer.height()
+        if overlay.rotation:
+            center_x = round(
+                (overlay.x + overlay.width / 2) * self.preview_render_scale
+            )
+            center_y = round(
+                (overlay.y + overlay.height / 2) * self.preview_render_scale
+            )
+            painter.save()
+            painter.translate(center_x, center_y)
+            painter.rotate(overlay.rotation)
+            painter.drawImage(-scaled_width // 2, -scaled_height // 2, layer)
+            painter.restore()
+        else:
+            painter.drawImage(
+                round(overlay.x * self.preview_render_scale),
+                round(overlay.y * self.preview_render_scale), layer,
+            )
 
     def _schedule_refresh(self) -> None:
         """Coalesce worker completions into one GUI-thread preview composition."""

@@ -6,14 +6,16 @@ import shutil
 import subprocess
 import sys
 import threading
+import os
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import cos, radians, sin
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QImageReader
 
 from app.models.playlist import PlaylistTrack
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
@@ -194,7 +196,18 @@ class FFmpegRenderer:
             raise RenderError("The number of Canvas frames does not match the enabled playlist tracks.")
         if len(frames) == 1 and len(active_tracks) > 1:
             frames *= len(active_tracks)
-        self._validate_frames(frames)
+        self._report(
+            progress_callback, "Preparing export", 0.005,
+            f"Validating visual frames 0/{len(frames)}",
+        )
+        self._validate_frames(
+            frames,
+            lambda completed, total: self._report(
+                progress_callback, "Preparing export",
+                0.005 + 0.015 * completed / max(1, total),
+                f"Validating visual frames {completed}/{total}",
+            ),
+        )
         missing = [track.file_path for track in active_tracks if not Path(track.file_path).is_file()]
         if missing:
             raise RenderError(f"Audio file is missing: {missing[0]}")
@@ -240,13 +253,37 @@ class FFmpegRenderer:
             concat_path = temporary / "playlist.ffconcat"
             self._write_concat_file(concat_path, segments, segment_durations)
             audio_path = temporary / "playlist_audio.m4a"
-            self._report(progress_callback, "Combining audio", 0.62, "Concatenating normalized tracks")
+            self._report(
+                progress_callback, "Combining audio", 0.56,
+                f"Combining audio 0.0s / {total_duration:.1f}s · 0%",
+            )
+
+            def combining_audio_progress(line: str) -> None:
+                seconds = self._parse_progress_seconds(line)
+                if seconds is None or total_duration <= 0.0:
+                    return
+                bounded = min(total_duration, max(0.0, seconds))
+                fraction = bounded / total_duration
+                self._report(
+                    progress_callback, "Combining audio", 0.56 + fraction * 0.08,
+                    self._timed_progress_message(
+                        "Combining audio", bounded, total_duration, fraction,
+                    ),
+                )
+
             self._run([
                 "-f", "concat", "-safe", "0", "-i", str(concat_path),
                 "-c:a", "aac", "-ar", "48000", "-ac", "2",
                 "-b:a", selected_settings.audio_bitrate,
-                "-movflags", "+faststart", str(audio_path),
-            ], cancel_event=cancel_event)
+                "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
+                "-y", str(audio_path),
+            ], progress_parser=combining_audio_progress, cancel_event=cancel_event)
+            self._report(
+                progress_callback, "Combining audio", 0.64,
+                self._timed_progress_message(
+                    "Combining audio", total_duration, total_duration, 1.0,
+                ),
+            )
             visualizer_paths: list[Path] = []
             if visualizers:
                 self._report(progress_callback, "Preparing visualizers", 0.64,
@@ -268,13 +305,45 @@ class FFmpegRenderer:
             encoding_start = 0.78 if visualizers else 0.66
             encoding_span = 0.21 if visualizers else 0.33
             static_concat_paths: list[tuple[float, Path]] = []
+            static_stage_start = 0.76 if visualizers else 0.64
+            static_stage_span = max(0.0, encoding_start - static_stage_start)
+            static_frame_total = sum(len(layer.frames) for layer in static_layers)
+            # Each static frame is first validated and then staged/registered.
+            # Counting both passes prevents the UI from appearing frozen during
+            # header validation on projects with thousands of PNG frames.
+            static_work_total = static_frame_total * 2
+            static_work_completed = 0
+            if static_frame_total:
+                self._report(
+                    progress_callback, "Preparing visual layers", static_stage_start,
+                    f"Preparing visual layers 0/{static_frame_total} frames",
+                )
             for layer_index, layer in enumerate(static_layers):
                 if cancel_event.is_set():
                     raise RenderCancelledError("Rendering was cancelled.")
                 if not layer.frames:
                     continue
                 layer_images = [frame.image for frame in layer.frames]
-                self._validate_frames(layer_images)
+                validation_completed = 0
+
+                def visual_validation_progress(
+                    completed: int, total: int, *, current_layer: int = layer_index,
+                ) -> None:
+                    nonlocal validation_completed, static_work_completed
+                    static_work_completed += max(0, completed - validation_completed)
+                    validation_completed = completed
+                    fraction = static_work_completed / max(1, static_work_total)
+                    self._report(
+                        progress_callback, "Preparing visual layers",
+                        static_stage_start + static_stage_span * fraction,
+                        (
+                            f"Checking visual layer {current_layer + 1}/{len(static_layers)}"
+                            f" · frame {completed}/{total}"
+                            f" · {round(fraction * 100)}%"
+                        ),
+                    )
+
+                self._validate_frames(layer_images, visual_validation_progress)
                 layer_paths: list[Path] = []
                 for frame_index, frame in enumerate(layer_images):
                     if cancel_event.is_set():
@@ -288,6 +357,19 @@ class FFmpegRenderer:
                     if not layer_path.is_file():
                         raise RenderError(f"A static overlay frame is missing: {layer_path}")
                     layer_paths.append(layer_path)
+                    static_work_completed += 1
+                    if (static_work_completed == static_work_total
+                            or static_work_completed % max(1, static_work_total // 100) == 0):
+                        fraction = static_work_completed / static_work_total
+                        self._report(
+                            progress_callback, "Preparing visual layers",
+                            static_stage_start + static_stage_span * fraction,
+                            (
+                                f"Preparing visual layer {layer_index + 1}/{len(static_layers)}"
+                                f" · frame {frame_index + 1}/{len(layer_images)}"
+                                f" · {round(fraction * 100)}%"
+                            ),
+                        )
                 layer_manifest = temporary / f"layer_{layer_index:02d}.ffconcat"
                 self._write_visual_concat(
                     layer_manifest,
@@ -319,7 +401,9 @@ class FFmpegRenderer:
                 # A single filter worker prevents QHD/60 FPS filter graphs from
                 # retaining many full-resolution RGBA frames at once. Encoding
                 # threads still use the available CPU cores (or the selected GPU).
-                "-threads", "0", "-filter_threads", "1", "-filter_complex_threads", "1",
+                "-threads", "0",
+                "-filter_threads", str(self._filter_worker_count(selected_settings)),
+                "-filter_complex_threads", str(self._filter_worker_count(selected_settings)),
                 "-f", "concat", "-safe", "0", "-i", str(video_concat_path),
                 "-i", str(audio_path),
             ]
@@ -346,13 +430,20 @@ class FFmpegRenderer:
                 "-fps_mode", "cfr", "-r", str(selected_settings.fps),
                 "-c:v", selected_settings.video_codec,
                 *self._video_encoding_arguments(selected_settings),
-                "-c:a", "aac", "-b:a", selected_settings.audio_bitrate,
+                # playlist_audio.m4a is already the final AAC stream. Copying it
+                # avoids a redundant lossy pass and preserves the prepared audio
+                # bytes and timing exactly.
+                "-c:a", "copy",
                 "-pix_fmt", "yuv420p", "-shortest", "-movflags", "+faststart",
                 "-progress", "pipe:1", "-nostats", "-y", str(temporary_video),
             ])
             self._run(video_arguments, progress_parser=encoding_progress, cancel_event=cancel_event)
             if cancel_event.is_set():
                 raise RenderCancelledError("Rendering was cancelled.")
+            self._report(
+                progress_callback, "Finalizing export", 0.995,
+                "Moving the completed video to the selected location",
+            )
             try:
                 temporary_video.replace(target)
             except OSError as error:
@@ -430,7 +521,19 @@ class FFmpegRenderer:
         static_offset = 2 + len(visualizers)
         entries.extend((z_index, index, "static") for index, (z_index, _path) in enumerate(static_layers))
         current = "[base]"
-        for order, (_z_value, index, kind) in enumerate(sorted(entries, key=lambda entry: (entry[0], entry[1], entry[2]))):
+        # A transparent static band is tagged with the Z value of the dynamic
+        # layer immediately below it.  Compare the layer kind before its input
+        # index so that the dynamic layer is always drawn first at that shared
+        # boundary.  Comparing input indices first made a later particle/noise
+        # layer cover a static foreground whenever an earlier empty band had
+        # been omitted.
+        ordered_entries = sorted(
+            entries,
+            key=lambda entry: (
+                entry[0], 0 if entry[2] == "dynamic" else 1, entry[1],
+            ),
+        )
+        for order, (_z_value, index, kind) in enumerate(ordered_entries):
             output = "[composited]" if order == len(entries) - 1 else f"[zlayer{order}]"
             if kind == "dynamic":
                 overlay = visualizers[index]
@@ -466,7 +569,10 @@ class FFmpegRenderer:
         )
 
     @staticmethod
-    def _validate_frames(frames: list[QImage | Path]) -> None:
+    def _validate_frames(
+        frames: list[QImage | Path],
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
         """Reject inconsistent or empty snapshots before FFmpeg can shift a layout."""
         if not frames:
             raise RenderError("The export canvas frame is empty.")
@@ -480,7 +586,14 @@ class FFmpegRenderer:
                     return cached
                 if not normalized.is_file():
                     raise RenderError(f"A staged export frame is missing: {frame}")
-                image = QImage(str(normalized))
+                reader = QImageReader(str(normalized))
+                size = reader.size()
+                if not size.isValid():
+                    raise RenderError(
+                        f"Could not read the staged export frame header: {frame}"
+                    )
+                path_size_cache[normalized] = size
+                return size
             else:
                 image = frame
             if image.isNull():
@@ -491,12 +604,18 @@ class FFmpegRenderer:
             return size
 
         reference_size = frame_size(frames[0])
+        if progress_callback:
+            progress_callback(1, len(frames))
         for index, frame in enumerate(frames[1:], start=2):
             if frame_size(frame) != reference_size:
                 raise RenderError(
                     "All export frames must use one canvas size. "
                     f"Frame {index} does not match the first canvas frame."
                 )
+            if (progress_callback and (
+                    index == len(frames)
+                    or index % max(1, len(frames) // 100) == 0)):
+                progress_callback(index, len(frames))
 
     @staticmethod
     def _validate_settings(settings: RenderSettings) -> None:
@@ -603,28 +722,91 @@ class FFmpegRenderer:
             ]
         return ["-crf", str(settings.crf), "-preset", settings.preset]
 
+    @staticmethod
+    def _filter_worker_count(settings: RenderSettings) -> int:
+        """Use modest filter parallelism without multiplying 4K frame memory."""
+        pixels_per_second = (
+            settings.output_width * settings.output_height * settings.fps
+        )
+        # Two filter workers improve the common 720p/1080p path. Higher-rate 4K
+        # work remains single-worker to avoid retaining several large RGBA frames.
+        return 2 if pixels_per_second <= 1920 * 1080 * 60 else 1
+
     def _normalize_audio(self, tracks: list[PlaylistTrack], directory: Path,
                          settings: RenderSettings,
                          progress_callback: Callable[[str, float, str], None] | None,
                          cancel_event: threading.Event) -> list[Path]:
         """Normalize every track to an exact-duration lossless segment."""
-        segments: list[Path] = []
-        for index, track in enumerate(tracks):
-            self._report(
-                progress_callback, "Preparing audio", 0.05 + 0.48 * index / len(tracks),
-                f"Normalizing {track.filename}",
-            )
+        segments: list[Path | None] = [None] * len(tracks)
+        completed = 0
+        progress_lock = threading.Lock()
+        track_seconds = [0.0] * len(tracks)
+        total_seconds = max(0.001, sum(track.duration_seconds for track in tracks))
+        self._report(
+            progress_callback, "Preparing audio", 0.05,
+            f"Normalizing audio 0/{len(tracks)} complete · 0% total",
+        )
+
+        def normalize(index: int, track: PlaylistTrack) -> tuple[int, Path]:
             output = directory / f"track_{index:04d}.nut"
             duration = f"{track.duration_seconds:.6f}"
+
+            def normalization_progress(line: str) -> None:
+                seconds = self._parse_progress_seconds(line)
+                if seconds is None:
+                    return
+                with progress_lock:
+                    track_seconds[index] = max(
+                        track_seconds[index],
+                        min(track.duration_seconds, max(0.0, seconds)),
+                    )
+                    fraction = min(1.0, sum(track_seconds) / total_seconds)
+                    self._report(
+                        progress_callback, "Preparing audio",
+                        0.05 + 0.48 * fraction,
+                        (
+                            f"Normalizing audio {completed}/{len(tracks)} complete"
+                            f" · {track.filename}"
+                            f" · {track_seconds[index]:.1f}s / {track.duration_seconds:.1f}s"
+                            f" · {round(fraction * 100)}% total"
+                        ),
+                    )
+
             self._run([
-                "-threads", "0", "-i", track.file_path, "-vn", "-map", "0:a:0",
+                # Independent tracks are normalized concurrently, so each small
+                # audio decode gets one FFmpeg worker instead of oversubscribing
+                # every CPU core. PCM output and ordering remain unchanged.
+                "-threads", "1", "-i", track.file_path, "-vn", "-map", "0:a:0",
                 "-af", f"apad=whole_dur={duration}", "-t", duration,
                 "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "nut",
-                "-y", str(output),
-            ], cancel_event=cancel_event)
-            segments.append(output)
+                "-progress", "pipe:1", "-nostats", "-y", str(output),
+            ], progress_parser=normalization_progress, cancel_event=cancel_event)
+            return index, output
+
+        worker_count = min(
+            len(tracks), max(1, min(3, (os.cpu_count() or 2) // 2)),
+        )
+        with ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="audio-normalize",
+        ) as executor:
+            futures = [
+                executor.submit(normalize, index, track)
+                for index, track in enumerate(tracks)
+            ]
+            for future in as_completed(futures):
+                index, output = future.result()
+                segments[index] = output
+                with progress_lock:
+                    track_seconds[index] = tracks[index].duration_seconds
+                    completed += 1
+                    timeline_fraction = min(1.0, sum(track_seconds) / total_seconds)
+                    self._report(
+                        progress_callback, "Preparing audio",
+                        0.05 + 0.48 * timeline_fraction,
+                        f"Normalized {completed}/{len(tracks)} tracks",
+                    )
         self._report(progress_callback, "Preparing audio", 0.53, "Audio normalization complete")
-        return segments
+        return [segment for segment in segments if segment is not None]
 
     def _insert_silence_for_gaps(self, tracks: list[PlaylistTrack], segments: list[Path],
                                  directory: Path, settings: RenderSettings,
@@ -635,6 +817,22 @@ class FFmpegRenderer:
             return [track.duration_seconds for track in tracks]
         combined: list[Path] = []
         combined_durations: list[float] = []
+        total_gap_seconds = 0.0
+        gap_count = 0
+        planning_cursor = 0.0
+        for track in tracks:
+            requested = (
+                track.start_time_seconds
+                if track.start_time_seconds is not None else planning_cursor
+            )
+            planned_start = max(planning_cursor, requested)
+            planned_gap = max(0.0, planned_start - planning_cursor)
+            total_gap_seconds += planned_gap
+            if planned_gap > 0.001:
+                gap_count += 1
+            planning_cursor = planned_start + track.duration_seconds
+        created_gap_seconds = 0.0
+        created_gap_count = 0
         cursor = 0.0
         for index, (track, segment) in enumerate(zip(tracks, segments, strict=True)):
             requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
@@ -642,15 +840,38 @@ class FFmpegRenderer:
             gap = max(0.0, start - cursor)
             if gap > 0.001:
                 silence = directory / f"silence_{index:04d}.nut"
+
+                def silence_progress(line: str, gap_seconds: float = gap) -> None:
+                    seconds = self._parse_progress_seconds(line)
+                    if seconds is None or total_gap_seconds <= 0.0:
+                        return
+                    current = min(gap_seconds, max(0.0, seconds))
+                    fraction = min(
+                        1.0, (created_gap_seconds + current) / total_gap_seconds,
+                    )
+                    self._report(
+                        progress_callback, "Preparing audio", 0.53 + 0.03 * fraction,
+                        (
+                            f"Creating silence {created_gap_count + 1}/{max(1, gap_count)}"
+                            f" · {current:.1f}s / {gap_seconds:.1f}s"
+                            f" · {round(fraction * 100)}% total"
+                        ),
+                    )
+
                 self._run([
                     "-f", "lavfi", "-t", f"{gap:.6f}", "-i", "anullsrc=r=48000:cl=stereo",
                     "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "nut",
-                    "-y", str(silence),
-                ], cancel_event=cancel_event)
+                    "-progress", "pipe:1", "-nostats", "-y", str(silence),
+                ], progress_parser=silence_progress, cancel_event=cancel_event)
                 combined.append(silence)
                 combined_durations.append(gap)
-                self._report(progress_callback, "Preparing audio", 0.56,
-                             f"Inserted {gap:.1f}s of silence")
+                created_gap_seconds += gap
+                created_gap_count += 1
+                fraction = min(1.0, created_gap_seconds / max(0.001, total_gap_seconds))
+                self._report(
+                    progress_callback, "Preparing audio", 0.53 + 0.03 * fraction,
+                    f"Inserted {gap:.1f}s of silence",
+                )
             combined.append(segment)
             combined_durations.append(track.duration_seconds)
             cursor = start + track.duration_seconds
@@ -783,3 +1004,13 @@ class FFmpegRenderer:
             except ValueError:
                 return None
         return None
+
+    @staticmethod
+    def _timed_progress_message(
+        action: str, seconds: float, total_seconds: float, fraction: float,
+    ) -> str:
+        """Build one consistent live FFmpeg progress detail."""
+        return (
+            f"{action} {seconds:.1f}s / {total_seconds:.1f}s"
+            f" · {round(min(1.0, max(0.0, fraction)) * 100)}%"
+        )

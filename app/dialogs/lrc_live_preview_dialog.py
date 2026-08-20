@@ -89,7 +89,7 @@ class LrcLivePreviewDialog(QDialog):
         self.media_player.play()
 
     def toggle_playback(self) -> None:
-        if self.media_player.playbackState() is QMediaPlayer.PlaybackState.PlayingState:
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.media_player.pause()
         else:
             self.media_player.play()
@@ -133,7 +133,7 @@ class LrcLivePreviewDialog(QDialog):
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         self.play_button.setText(
             ("일시정지" if self.translator.language is Language.KOREAN else "Pause")
-            if state is QMediaPlayer.PlaybackState.PlayingState
+            if state == QMediaPlayer.PlaybackState.PlayingState
             else ("재생" if self.translator.language is Language.KOREAN else "Play")
         )
 

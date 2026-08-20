@@ -1247,7 +1247,7 @@ class LrcGeneratorDialog(QDialog):
     def _toggle_playback(self) -> None:
         if not self.audio_path:
             return
-        if self.media_player.playbackState() is QMediaPlayer.PlaybackState.PlayingState:
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.media_player.pause()
         else:
             self.media_player.play()
@@ -1478,7 +1478,7 @@ class LrcGeneratorDialog(QDialog):
         self.volume_value.setText(f"{value}%")
 
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        playing = state is QMediaPlayer.PlaybackState.PlayingState
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
         self.play_button.setText(
             ("일시정지" if self._korean else "Pause")
             if playing else ("재생" if self._korean else "Play")

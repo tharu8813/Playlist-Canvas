@@ -41,19 +41,23 @@ class AutosaveService:
             "project_path": str(project_path.resolve()) if project_path else None,
             "document": document.to_dict(),
         }
+        temporary_path: Path | None = None
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
             with NamedTemporaryFile(
                 mode="w", encoding="utf-8", suffix=".tmp", dir=self.directory,
                 delete=False,
             ) as temporary:
+                temporary_path = Path(temporary.name)
                 json.dump(payload, temporary, ensure_ascii=False, indent=2)
                 temporary.flush()
-                temporary_path = Path(temporary.name)
             temporary_path.replace(target)
             return RecoverySnapshot(target, document, project_path, saved_at)
         except (OSError, TypeError, ValueError) as error:
             raise ProjectError(f"Could not save recovery snapshot: {error}") from error
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def latest_recovery(self) -> RecoverySnapshot | None:
         """Return the newest valid recovery snapshot, leaving it intact for retry."""

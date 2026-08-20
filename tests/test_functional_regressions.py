@@ -8,19 +8,24 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QImage
 
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
+from app.animation.curves import slide_distance
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.canvas_snapshot import CanvasSnapshot
 from app.renderer.ffmpeg_renderer import (
     FFmpegRenderer, RenderError, RenderFrame, RenderSettings, StaticOverlayLayer,
+    VisualizerOverlay,
 )
 from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.services.playlist_export_service import PlaylistExportError, PlaylistExportService
@@ -64,6 +69,17 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertNotEqual(before.pixelColor(60, 50), during.pixelColor(60, 50))
         self.assertEqual(before.pixelColor(60, 50), after.pixelColor(60, 50))
         self.assertTrue(item.isVisible())
+
+    def test_resize_handle_cursors_follow_item_screen_rotation(self) -> None:
+        cursor = SourceItem.cursor_for_edit_handle
+        self.assertEqual(cursor("e"), Qt.CursorShape.SizeHorCursor)
+        self.assertEqual(cursor("n"), Qt.CursorShape.SizeVerCursor)
+        self.assertEqual(cursor("nw"), Qt.CursorShape.SizeFDiagCursor)
+        self.assertEqual(cursor("ne"), Qt.CursorShape.SizeBDiagCursor)
+        self.assertEqual(cursor("e", 45.0), Qt.CursorShape.SizeFDiagCursor)
+        self.assertEqual(cursor("e", 90.0), Qt.CursorShape.SizeVerCursor)
+        self.assertEqual(cursor("n", 45.0), Qt.CursorShape.SizeBDiagCursor)
+        self.assertEqual(cursor("rotate"), Qt.CursorShape.CrossCursor)
 
     def test_playlist_preview_keeps_audio_stopped_during_leading_gap(self) -> None:
         track = PlaylistTrack(
@@ -152,6 +168,173 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertIn("duration 0.400000", manifest_text)
         self.assertIn("duration 2.750000", manifest_text)
 
+    def test_audio_tracks_normalize_concurrently_but_keep_playlist_order(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        running = 0
+        maximum_running = 0
+        lock = threading.Lock()
+
+        def fake_run(_arguments: list[str], **_kwargs: object) -> None:
+            nonlocal running, maximum_running
+            with lock:
+                running += 1
+                maximum_running = max(maximum_running, running)
+            time.sleep(0.04)
+            with lock:
+                running -= 1
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        tracks = [
+            PlaylistTrack(f"track-{index}.mp3", f"Track {index}", duration_seconds=2.0)
+            for index in range(3)
+        ]
+        with TemporaryDirectory() as directory, patch(
+            "app.renderer.ffmpeg_renderer.os.cpu_count", return_value=8,
+        ):
+            segments = renderer._normalize_audio(
+                tracks, Path(directory), RenderSettings(), None, threading.Event(),
+            )
+
+        self.assertGreaterEqual(maximum_running, 2)
+        self.assertEqual(
+            [path.name for path in segments],
+            ["track_0000.nut", "track_0001.nut", "track_0002.nut"],
+        )
+
+    def test_audio_normalization_reports_live_ffmpeg_time(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        messages: list[str] = []
+
+        def fake_run(_arguments: list[str], **kwargs: object) -> None:
+            parser = kwargs.get("progress_parser")
+            self.assertIsNotNone(parser)
+            parser("out_time_us=1000000")  # type: ignore[operator]
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        track = PlaylistTrack("song.mp3", "Song", duration_seconds=2.0)
+        with TemporaryDirectory() as directory:
+            renderer._normalize_audio(
+                [track], Path(directory), RenderSettings(),
+                lambda _stage, _fraction, message: messages.append(message),
+                threading.Event(),
+            )
+
+        self.assertTrue(any(
+            "song.mp3" in message and "1.0s / 2.0s" in message
+            for message in messages
+        ))
+
+    def test_timed_progress_message_includes_time_and_percent(self) -> None:
+        self.assertEqual(
+            FFmpegRenderer._timed_progress_message(
+                "Combining audio", 15.0, 60.0, 0.25,
+            ),
+            "Combining audio 15.0s / 60.0s · 25%",
+        )
+
+    def test_export_filter_parallelism_is_bounded_for_high_resolution(self) -> None:
+        self.assertEqual(
+            FFmpegRenderer._filter_worker_count(RenderSettings(
+                fps=60, output_width=1920, output_height=1080,
+            )),
+            2,
+        )
+        self.assertEqual(
+            FFmpegRenderer._filter_worker_count(RenderSettings(
+                fps=60, output_width=3840, output_height=2160,
+            )),
+            1,
+        )
+
+    def test_final_video_copies_prepared_aac_without_reencoding(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        renderer.executable = Path("ffmpeg.exe")
+        renderer.ensure_encoder_available = lambda _encoder: None  # type: ignore[method-assign]
+        commands: list[list[str]] = []
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> None:
+            commands.append(arguments)
+            output = Path(arguments[-1])
+            if output.suffix.lower() in {".nut", ".m4a", ".mp4"}:
+                output.touch()
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        frame = QImage(16, 16, QImage.Format.Format_RGB32)
+        frame.fill(0xFF336699)
+        with TemporaryDirectory(prefix="pvs-audio-copy-") as raw_directory:
+            directory = Path(raw_directory)
+            audio = directory / "song.wav"
+            audio.touch()
+            output = directory / "result.mp4"
+            renderer.render(
+                frame,
+                [PlaylistTrack(str(audio), "Song", duration_seconds=1.0)],
+                output,
+                RenderSettings(
+                    fps=30, output_width=16, output_height=16,
+                ),
+            )
+            self.assertTrue(output.is_file())
+
+        final_command = next(command for command in commands if "-c:v" in command)
+        audio_codec_index = final_command.index("-c:a")
+        self.assertEqual(final_command[audio_codec_index + 1], "copy")
+
+    def test_visualizer_layers_render_concurrently_and_return_in_z_input_order(self) -> None:
+        renderer = PythonVisualizerRenderer(Path("ffmpeg.exe"))
+        overlays = [
+            SimpleNamespace(kind="visualizer", bar_count=4),
+            SimpleNamespace(kind="visualizer", bar_count=4),
+        ]
+        running = 0
+        maximum_running = 0
+        lock = threading.Lock()
+        progress: list[float] = []
+
+        def fake_encode(*_args: object, **_kwargs: object) -> None:
+            nonlocal running, maximum_running
+            callback = _args[5]
+            with lock:
+                running += 1
+                maximum_running = max(maximum_running, running)
+            callback(0.575, "half complete")
+            time.sleep(0.04)
+            callback(1.0, "complete")
+            with lock:
+                running -= 1
+
+        with (
+            TemporaryDirectory() as directory,
+            patch.object(renderer, "_decode_mono_audio", return_value=np.zeros(8)),
+            patch.object(renderer, "_analyze_levels", return_value=np.zeros((2, 4))),
+            patch.object(renderer, "_encode_layer", side_effect=fake_encode),
+            patch("app.renderer.python_visualizer.os.cpu_count", return_value=8),
+        ):
+            paths = renderer.render_layers(
+                Path("audio.m4a"), overlays, 30, Path(directory), threading.Event(),
+                lambda fraction, _message: progress.append(fraction),
+            )
+
+        self.assertGreaterEqual(maximum_running, 2)
+        self.assertEqual(
+            [path.name for path in paths],
+            ["python_visualizer_00.mov", "python_visualizer_01.mov"],
+        )
+        self.assertTrue(all(
+            current <= following
+            for current, following in zip(progress, progress[1:])
+        ))
+
+    def test_preview_audio_analysis_falls_back_when_ffmpeg_cannot_start(self) -> None:
+        renderer = PythonVisualizerRenderer(Path("missing-ffmpeg.exe"))
+        with patch(
+            "app.renderer.python_visualizer.subprocess.run",
+            side_effect=OSError("cannot start"),
+        ):
+            levels = renderer.preview_levels(Path("damaged.mp3"), 2.0, 12)
+        self.assertEqual(levels.shape, (12,))
+        self.assertTrue(np.allclose(levels, 0.08))
+
     def test_static_source_with_same_z_as_visualizer_is_not_dropped(self) -> None:
         scene = CanvasScene()
         dynamic = Source(SourceType.AUDIO_VISUALIZER, "Dynamic", z_index=4.0)
@@ -163,6 +346,23 @@ class FunctionalRegressionTests(unittest.TestCase):
         lower, upper = bands[1]
         self.assertLessEqual(lower or 0.0, static.z_index)
         self.assertTrue(upper is None or static.z_index <= upper)
+
+    def test_static_foreground_stays_above_later_dynamic_layer(self) -> None:
+        """A skipped empty band must not make particles cover the foreground."""
+        overlays = [
+            VisualizerOverlay(0, 0, 16, 16, "bars", "#FFFFFF", z_index=1.0),
+            VisualizerOverlay(0, 0, 16, 16, "noise", "#FFFFFF",
+                              kind="particles", z_index=3.0),
+        ]
+        graph = FFmpegRenderer._layered_filter_graph(
+            overlays, [(3.0, Path("foreground.ffconcat"))], 30, 16, 16,
+        )
+
+        first_dynamic = graph.index("[base][2:v]overlay=")
+        second_dynamic = graph.index("[zlayer0][3:v]overlay=")
+        foreground = graph.index("[zlayer1][4:v]overlay=0:0")
+        self.assertLess(first_dynamic, second_dynamic)
+        self.assertLess(second_dynamic, foreground)
 
     def test_reactive_overlay_uses_track_animation_windows(self) -> None:
         overlay = SimpleNamespace(
@@ -186,6 +386,24 @@ class FunctionalRegressionTests(unittest.TestCase):
             PythonVisualizerRenderer._animation_state(4.5, windows, overlay),
             ("zoom", 1.0, False),
         )
+
+    def test_visualizer_layer_uses_same_soft_animation_endpoints(self) -> None:
+        image = QImage(320, 180, QImage.Format.Format_RGBA8888)
+        image.fill(0xFFFFFFFF)
+
+        entrance_start = PythonVisualizerRenderer._apply_animation(
+            image, "slide_left", 0.0, True, 500, 160,
+        )
+        entrance_end = PythonVisualizerRenderer._apply_animation(
+            image, "slide_left", 1.0, True, 500, 160,
+        )
+        exit_end = PythonVisualizerRenderer._apply_animation(
+            image, "slide_left", 1.0, False, 500, 160,
+        )
+
+        self.assertEqual(entrance_start.pixelColor(160, 90).alpha(), 0)
+        self.assertEqual(exit_end.pixelColor(160, 90).alpha(), 0)
+        self.assertEqual(entrance_end.pixelColor(160, 90).alpha(), 255)
 
     def test_preview_and_export_share_bounded_per_source_animation_timing(self) -> None:
         scene = CanvasScene()
@@ -229,8 +447,44 @@ class FunctionalRegressionTests(unittest.TestCase):
                 animation_phase="in", animation_progress=0.5,
                 elapsed_seconds=0.5, animation_phase_duration=1.0,
             )
-        self.assertAlmostEqual(observed["Short"], short.opacity)
-        self.assertLess(observed["Long"], long.opacity)
+        self.assertAlmostEqual(observed["Short"], 1.0)
+        self.assertLess(observed["Long"], 1.0)
+
+    def test_slide_animation_has_restrained_travel_and_no_end_frame_pop(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.SHAPE, "Slide", x=100, y=80, width=500, height=160,
+            opacity=0.82, animation_in="slide_left",
+            animation_out="slide_left", animation_in_duration=1.0,
+            animation_out_duration=1.0,
+        )
+        item = SourceItem(source)
+        scene.addItem(item)
+        track = PlaylistTrack("track.wav", "Track", duration_seconds=4.0)
+        observed: list[tuple[float, float]] = []
+
+        def inspect_state(*_args: object, **_kwargs: object) -> QImage:
+            observed.append((item.pos().x(), item.opacity()))
+            return QImage(1, 1, QImage.Format.Format_ARGB32)
+
+        with patch.object(CanvasSnapshot, "capture", side_effect=inspect_state):
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, animation_phase="in",
+                elapsed_seconds=0.0, animation_phase_duration=1.0,
+            )
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, animation_phase="out",
+                elapsed_seconds=4.0, animation_phase_duration=1.0,
+            )
+
+        expected_hidden_x = source.x - slide_distance(source.width, source.height)
+        self.assertAlmostEqual(observed[0][0], expected_hidden_x)
+        self.assertAlmostEqual(observed[1][0], expected_hidden_x)
+        self.assertAlmostEqual(observed[0][1], 0.0)
+        self.assertAlmostEqual(observed[1][1], 0.0)
+        self.assertLess(slide_distance(source.width, source.height), 100.0)
+        self.assertAlmostEqual(item.pos().x(), source.x)
+        self.assertAlmostEqual(item.opacity(), 1.0)
 
     def test_entrance_and_exit_animation_durations_are_independent(self) -> None:
         legacy = Source.from_dict({
@@ -369,15 +623,18 @@ class FunctionalRegressionTests(unittest.TestCase):
         scene.addItem(item)
         track = PlaylistTrack(
             "track.wav", "Track", duration_seconds=12.0,
-            lyrics=[{"start": 5.0, "end": 8.0, "text": "A softer lyric line"}],
+            lyrics=[
+                {"start": 1.0, "end": 4.0, "text": "Previous lyric line"},
+                {"start": 5.0, "end": 8.0, "text": "A softer lyric line"},
+            ],
         )
-        observed: list[tuple[float, float, float, float]] = []
+        observed: list[tuple[float, float, float, float, int]] = []
         original_capture = CanvasSnapshot.capture
 
         def observe_capture(*arguments: object, **keywords: object):
             observed.append((
                 item.opacity(), item.scale(), source.subtitle_scroll_offset,
-                item._subtitle_transition_progress,
+                item._subtitle_transition_progress, item._subtitle_anchor_line,
             ))
             return original_capture(*arguments, **keywords)
 
@@ -391,16 +648,71 @@ class FunctionalRegressionTests(unittest.TestCase):
             )
 
         apple, spotify = observed
-        self.assertLess(apple[0], source.opacity)
-        self.assertLess(apple[1], source.scale)
+        # Cue changes animate only lyric layout/paint. The containing card no
+        # longer pulses in opacity or scale on every line.
+        self.assertAlmostEqual(apple[0], 1.0)
+        self.assertAlmostEqual(apple[1], source.scale)
         self.assertGreater(apple[2], 0.0)
         self.assertGreater(apple[3], 0.0)
         self.assertLess(apple[3], 1.0)
-        self.assertGreater(apple[2], spotify[2])
-        self.assertAlmostEqual(item.opacity(), source.opacity)
+        self.assertEqual(apple[4], 1)
+        self.assertAlmostEqual(apple[2], spotify[2])
+        self.assertAlmostEqual(item.opacity(), 1.0)
         self.assertAlmostEqual(item.scale(), source.scale)
         self.assertAlmostEqual(source.subtitle_scroll_offset, 0.0)
         self.assertAlmostEqual(item._subtitle_transition_progress, 1.0)
+        self.assertEqual(item._subtitle_anchor_line, -1)
+
+    def test_lyric_context_starts_new_cue_from_previous_stable_position(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.LYRICS, "Lyrics", width=560, height=220,
+            font_size=30, subtitle_line_spacing=10,
+            subtitle_context_lines=1, subtitle_next_lines=1,
+            subtitle_animation="apple_music", subtitle_animation_duration=0.4,
+        )
+        item = SourceItem(source)
+        scene.addItem(item)
+        track = PlaylistTrack(
+            "track.wav", "Track", duration_seconds=12.0,
+            lyrics=[
+                {"start": 1.0, "end": 4.0, "text": "Previous"},
+                {"start": 5.0, "end": 8.0, "text": "Current"},
+                {"start": 9.0, "end": 11.0, "text": "Next"},
+            ],
+        )
+        observed: list[tuple[int, float, int, float, float]] = []
+
+        def inspect_layout(*_args: object, **_kwargs: object) -> QImage:
+            line_height = source.font_size + source.subtitle_line_spacing
+            visual_origin = (
+                -item._subtitle_anchor_line * line_height
+                + source.subtitle_scroll_offset
+            )
+            observed.append((
+                item._subtitle_anchor_line, source.subtitle_scroll_offset,
+                source.subtitle_current_line, item.opacity(), visual_origin,
+            ))
+            return QImage(1, 1, QImage.Format.Format_ARGB32)
+
+        with patch.object(CanvasSnapshot, "capture", side_effect=inspect_layout):
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=4.999,
+            )
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=5.0,
+            )
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=5.2,
+            )
+
+        before, transition_start, transition_middle = observed
+        self.assertEqual(before[0], 0)
+        self.assertEqual(transition_start[0], 1)
+        self.assertAlmostEqual(before[4], transition_start[4])
+        self.assertLess(transition_middle[1], transition_start[1])
+        self.assertEqual(transition_start[2], 1)
+        self.assertAlmostEqual(transition_start[3], 1.0)
 
     def test_lyric_font_and_blur_cache_survives_unrelated_source_edits(self) -> None:
         source = Source(SourceType.LYRICS, "Lyrics")
@@ -604,6 +916,17 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertTrue(checksum_url.endswith(installer.checksum_name))
         self.assertIn("/releases/download/latest/", archive_url)
         self.assertTrue(any("official latest" in message for _, _, message in updates))
+
+    def test_ffmpeg_safe_extract_rejects_oversized_expansion(self) -> None:
+        with TemporaryDirectory(prefix="pvs-ffmpeg-limit-test-") as raw_directory:
+            directory = Path(raw_directory)
+            archive = directory / "ffmpeg.zip"
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as package:
+                package.writestr("ffmpeg/bin/ffmpeg.exe", b"x" * 64)
+            installer = ManagedFFmpegInstaller(directory / "install")
+            installer.max_extracted_bytes = 32
+            with self.assertRaisesRegex(FFmpegInstallError, "safe size limit"):
+                installer._safe_extract(archive, directory / "extracted")
 
     def test_visualizer_progress_reports_frames_percent_and_eta(self) -> None:
         message = PythonVisualizerRenderer._frame_progress_message(

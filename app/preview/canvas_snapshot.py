@@ -9,6 +9,10 @@ from PySide6.QtGui import QImage, QPainter, QPixmap
 
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
+from app.animation.curves import (
+    ease_in_quint, ease_out_cubic, ease_out_quint, hidden_scale_factor,
+    slide_distance,
+)
 from app.models.playlist import PlaylistTrack
 from app.models.source import SourceType
 from app.preview.album_art import create_cached_ambient_background, extract_embedded_cover
@@ -150,6 +154,7 @@ class CanvasSnapshot:
         original_subtitle_lines: list[tuple[SourceItem, int, int]] = []
         original_subtitle_offsets: list[tuple[SourceItem, float]] = []
         original_subtitle_transitions: list[tuple[SourceItem, float]] = []
+        original_subtitle_anchors: list[tuple[SourceItem, int, int]] = []
         original_track_list_rows: list[tuple[SourceItem, int]] = []
         # Removed sources are deliberately retained as hidden Qt items for safe Undo.
         # They must never participate in preview/export captures after a preset swap.
@@ -173,7 +178,7 @@ class CanvasSnapshot:
             for item in source_items
         )
         embedded_cover = extract_embedded_cover(track.file_path) if needs_embedded_cover else QPixmap()
-        for index, graphics_item in enumerate(source_items):
+        for graphics_item in source_items:
             if not isinstance(graphics_item, SourceItem):
                 continue
             source = graphics_item.source
@@ -213,6 +218,10 @@ class CanvasSnapshot:
                 original_subtitle_transitions.append((
                     graphics_item, graphics_item._subtitle_transition_progress,
                 ))
+                original_subtitle_anchors.append((
+                    graphics_item, graphics_item._subtitle_anchor_line,
+                    graphics_item._subtitle_anchor_line_count,
+                ))
                 graphics_item._subtitle_transition_progress = 1.0
                 effective_lyric_offset = (
                     track.lyrics_timing_offset_seconds
@@ -234,20 +243,18 @@ class CanvasSnapshot:
                         LyricsService.decode_line_breaks(cue.get("text", "")).strip()
                         for cue in track.lyrics[first:last]
                     ]
+                    block_line_counts = [
+                        max(1, len([line for line in block.splitlines() if line.strip()]))
+                        for block in blocks
+                    ]
                     source.text = "\n".join(block for block in blocks if block) or source.subtitle_fallback
+                    relative_index = max(0, cue_index - first)
+                    anchor_line = sum(block_line_counts[:relative_index])
+                    graphics_item._subtitle_anchor_line = anchor_line
+                    graphics_item._subtitle_anchor_line_count = block_line_counts[relative_index]
                     if active_cue_index == cue_index:
-                        relative_index = max(0, cue_index - first)
-                        source.subtitle_current_line = sum(
-                            len([line for line in block.splitlines() if line.strip()])
-                            for block in blocks[:relative_index]
-                        )
-                        source.subtitle_current_line_count = max(
-                            1,
-                            len([
-                                line for line in blocks[relative_index].splitlines()
-                                if line.strip()
-                            ]),
-                        )
+                        source.subtitle_current_line = anchor_line
+                        source.subtitle_current_line_count = block_line_counts[relative_index]
                     else:
                         source.subtitle_current_line = -1
                         source.subtitle_current_line_count = 1
@@ -255,6 +262,8 @@ class CanvasSnapshot:
                     source.text = lyric or source.text or source.subtitle_fallback
                     source.subtitle_current_line = -1
                     source.subtitle_current_line_count = 1
+                    graphics_item._subtitle_anchor_line = -1
+                    graphics_item._subtitle_anchor_line_count = 1
                 if source.subtitle_style == "karaoke":
                     source.outline_color = "#FFE08A"
                 elif source.subtitle_style == "minimal":
@@ -270,43 +279,24 @@ class CanvasSnapshot:
                     progress = max(0.0, min(
                         1.0, (elapsed_seconds - cue_start) / max(0.05, source.subtitle_animation_duration)
                     ))
-                    eased = CanvasSnapshot._ease_out_cubic(progress)
+                    eased = ease_out_cubic(progress)
                     graphics_item._subtitle_transition_progress = eased
-                    original_transforms.append((
-                        graphics_item, graphics_item.pos(), graphics_item.scale(), graphics_item.opacity()
-                    ))
-                    graphics_item._suppress_position_sync = True
-                    if source.subtitle_animation == "fade":
-                        graphics_item.setOpacity(source.opacity * eased)
-                    elif source.subtitle_animation in {"scroll_up", "slide_up"}:
-                        source.subtitle_scroll_offset = (
-                            source.font_size + source.subtitle_line_spacing
-                        ) * (1.0 - eased)
-                        graphics_item.setOpacity(source.opacity * (0.32 + 0.68 * eased))
-                    elif source.subtitle_animation == "scroll_down":
-                        source.subtitle_scroll_offset = -(
-                            source.font_size + source.subtitle_line_spacing
-                        ) * (1.0 - eased)
-                        graphics_item.setOpacity(source.opacity * (0.32 + 0.68 * eased))
-                    elif source.subtitle_animation == "pop":
-                        graphics_item.setScale(source.scale * (0.90 + 0.10 * eased))
-                        graphics_item.setOpacity(source.opacity * (0.45 + 0.55 * eased))
-                    elif source.subtitle_animation == "apple_music":
-                        line_height = source.font_size + source.subtitle_line_spacing
-                        source.subtitle_scroll_offset = line_height * 0.30 * (1.0 - eased)
-                        graphics_item.setScale(source.scale * (0.975 + 0.025 * eased))
-                        graphics_item.setOpacity(source.opacity * (0.20 + 0.80 * eased))
-                    elif source.subtitle_animation == "spotify":
-                        # A shorter, snappier lift than the soft-focus music style.
-                        smooth = progress * progress * (3.0 - 2.0 * progress)
-                        graphics_item._subtitle_transition_progress = smooth
-                        line_height = source.font_size + source.subtitle_line_spacing
-                        source.subtitle_scroll_offset = line_height * 0.11 * (1.0 - smooth)
-                        graphics_item.setScale(source.scale * (0.988 + 0.012 * smooth))
-                        graphics_item.setOpacity(source.opacity * (0.48 + 0.52 * smooth))
-                    elif source.subtitle_animation == "blur_reveal":
-                        graphics_item.setScale(source.scale * (0.985 + 0.015 * eased))
-                        graphics_item.setOpacity(source.opacity * (0.26 + 0.74 * eased))
+                    # Keep the lyric card/background stable. Only its text layout
+                    # moves, so context lines no longer pulse and fade each time a
+                    # cue changes. A full previous-cue height compensates for the
+                    # new anchored layout and produces a continuous upward scroll.
+                    previous_line_count = 0
+                    if cue_index > 0 and source.subtitle_context_lines > 0:
+                        previous_text = LyricsService.decode_line_breaks(
+                            track.lyrics[cue_index - 1].get("text", "")
+                        )
+                        previous_line_count = max(
+                            1, len([line for line in previous_text.splitlines() if line.strip()])
+                        )
+                    line_height = source.font_size + source.subtitle_line_spacing
+                    source.subtitle_scroll_offset = (
+                        previous_line_count * line_height * (1.0 - eased)
+                    )
                 graphics_item.update()
             if source.source_type is SourceType.TRACK_LIST:
                 original_text.append((graphics_item, source.text))
@@ -356,21 +346,22 @@ class CanvasSnapshot:
                 exit_start = source.now_playing_duration - exit_duration
                 if visible and elapsed_seconds >= exit_start and exit_duration > 0:
                     exit_progress = max(0.0, min(1.0, (elapsed_seconds - exit_start) / exit_duration))
+                    exit_motion = ease_in_quint(exit_progress)
                     original_transforms.append((
                         graphics_item, graphics_item.pos(), graphics_item.scale(), graphics_item.opacity()
                     ))
                     graphics_item._suppress_position_sync = True
                     if source.now_playing_exit_animation == "fade":
-                        graphics_item.setOpacity(source.opacity * (1.0 - exit_progress))
+                        graphics_item.setOpacity(1.0 - exit_motion)
                     elif source.now_playing_exit_animation == "slide_up":
-                        graphics_item.setPos(graphics_item.pos().x(), graphics_item.pos().y() - 24.0 * exit_progress)
-                        graphics_item.setOpacity(source.opacity * (1.0 - exit_progress * 0.6))
+                        graphics_item.setPos(graphics_item.pos().x(), graphics_item.pos().y() - 24.0 * exit_motion)
+                        graphics_item.setOpacity(1.0 - exit_motion)
                     elif source.now_playing_exit_animation == "slide_down":
-                        graphics_item.setPos(graphics_item.pos().x(), graphics_item.pos().y() + 24.0 * exit_progress)
-                        graphics_item.setOpacity(source.opacity * (1.0 - exit_progress * 0.6))
+                        graphics_item.setPos(graphics_item.pos().x(), graphics_item.pos().y() + 24.0 * exit_motion)
+                        graphics_item.setOpacity(1.0 - exit_motion)
                     elif source.now_playing_exit_animation == "zoom":
-                        graphics_item.setScale(source.scale * (1.0 - exit_progress * 0.12))
-                        graphics_item.setOpacity(source.opacity * (1.0 - exit_progress))
+                        graphics_item.setScale(source.scale * (1.0 - exit_motion * 0.08))
+                        graphics_item.setOpacity(1.0 - exit_motion)
                 graphics_item.update()
             if source.source_type is SourceType.PROGRESS_BAR:
                 original_progress.append((graphics_item, source.progress_value))
@@ -402,7 +393,6 @@ class CanvasSnapshot:
             if animation_phase:
                 style = graphics_item.source.animation_in if animation_phase == "in" else graphics_item.source.animation_out
                 if style != "none":
-                    stagger = min(0.28, (index % 5) * 0.055)
                     if animation_phase_duration is not None:
                         configured_duration = (
                             graphics_item.source.animation_in_duration
@@ -430,21 +420,24 @@ class CanvasSnapshot:
                         # Backwards-compatible path for isolated callers that only
                         # provide normalized animation progress.
                         phase_progress = max(0.0, min(1.0, animation_progress))
-                    local_progress = max(0.0, min(1.0, (phase_progress - stagger) / (1.0 - stagger)))
+                    local_progress = max(0.0, min(1.0, phase_progress))
                     progress = (
-                        CanvasSnapshot._ease_out_cubic(local_progress)
-                        if animation_phase == "in"
-                        else 1.0 - CanvasSnapshot._ease_in_cubic(local_progress)
+                        ease_out_quint(local_progress)
+                        if animation_phase == "in" else
+                        1.0 - ease_in_quint(local_progress)
                     )
                     original_transforms.append((graphics_item, graphics_item.pos(), graphics_item.scale(), graphics_item.opacity()))
                     graphics_item._suppress_position_sync = True
-                    opacity = graphics_item.source.opacity * (
-                        progress if style in {"fade", "zoom"} else 0.35 + 0.65 * progress
-                    )
-                    graphics_item.setOpacity(opacity)
+                    graphics_item.setOpacity(progress)
                     if style == "zoom":
-                        graphics_item.setScale(graphics_item.source.scale * (0.76 + 0.24 * progress))
-                    distance = min(180.0, max(72.0, max(source.width, source.height) * 0.22)) * (1.0 - progress)
+                        hidden_scale = hidden_scale_factor(style)
+                        graphics_item.setScale(
+                            graphics_item.source.scale
+                            * (hidden_scale + (1.0 - hidden_scale) * progress)
+                        )
+                    distance = slide_distance(
+                        source.width, source.height,
+                    ) * (1.0 - progress)
                     offset = {
                         "slide_left": (-distance, 0.0), "slide_right": (distance, 0.0),
                         "slide_up": (0.0, -distance), "slide_down": (0.0, distance),
@@ -473,6 +466,10 @@ class CanvasSnapshot:
             for graphics_item, progress in original_subtitle_transitions:
                 graphics_item._subtitle_transition_progress = progress
                 graphics_item.update()
+            for graphics_item, anchor_line, anchor_count in original_subtitle_anchors:
+                graphics_item._subtitle_anchor_line = anchor_line
+                graphics_item._subtitle_anchor_line_count = anchor_count
+                graphics_item.update()
             for graphics_item, current_row in original_track_list_rows:
                 graphics_item.source.track_list_current_row = current_row
                 graphics_item.update()
@@ -492,13 +489,3 @@ class CanvasSnapshot:
                 graphics_item.setScale(scale)
                 graphics_item.setOpacity(opacity)
                 graphics_item._suppress_position_sync = False
-
-    @staticmethod
-    def _ease_out_cubic(value: float) -> float:
-        """Return a responsive but natural entrance easing value."""
-        return 1.0 - (1.0 - value) ** 3
-
-    @staticmethod
-    def _ease_in_cubic(value: float) -> float:
-        """Return a deliberate exit easing value."""
-        return value ** 3
