@@ -13,9 +13,38 @@ from app.models.playlist import PlaylistTrack
 from app.models.project import ProjectDocument, ProjectSettings
 from app.models.source import Source, SourceType
 from app.services.project_service import ProjectService
+from app.services.project_media_service import ProjectMediaService
 
 
 class ProjectServiceTests(unittest.TestCase):
+    def test_missing_custom_track_cover_can_be_relinked_or_cleared(self) -> None:
+        with TemporaryDirectory(prefix="pvs-cover-relink-") as raw_directory:
+            directory = Path(raw_directory)
+            audio = directory / "audio.wav"
+            audio.write_bytes(b"audio")
+            missing_cover = directory / "missing-cover.png"
+            document = ProjectDocument(playlist=[PlaylistTrack(
+                str(audio), "Track", cover_path=str(missing_cover),
+            )])
+            missing = ProjectMediaService.validate(
+                document, directory / "project.pvsproj",
+            )
+            self.assertEqual([entry.kind for entry in missing], ["cover"])
+
+            replacement = directory / "replacement.png"
+            image = QImage(32, 32, QImage.Format.Format_ARGB32)
+            image.fill(QColor("#2563EB"))
+            self.assertTrue(image.save(str(replacement)))
+            missing[0].replacement_path = str(replacement)
+            ProjectMediaService.apply_replacements(document, missing)
+            self.assertEqual(
+                document.playlist[0].cover_path, str(replacement.resolve()),
+            )
+
+            missing[0].replacement_path = ""
+            ProjectMediaService.apply_replacements(document, missing)
+            self.assertEqual(document.playlist[0].cover_path, "")
+
     def test_portable_package_embeds_and_reloads_content(self) -> None:
         with TemporaryDirectory(prefix="pvs-project-test-") as raw_directory:
             directory = Path(raw_directory)
@@ -25,12 +54,16 @@ class ProjectServiceTests(unittest.TestCase):
             self.assertTrue(image.save(str(cover), "PNG"))
             audio = directory / "audio.wav"
             audio.write_bytes(b"test-audio-fixture")
+            track_cover = directory / "track-cover.png"
+            self.assertTrue(image.save(str(track_cover), "PNG"))
             document = ProjectDocument(
                 sources=[Source(
                     SourceType.BACKGROUND, "Cover", content_path=str(cover),
                     background_mode="image",
                 )],
-                playlist=[PlaylistTrack(str(audio), "Track")],
+                playlist=[PlaylistTrack(
+                    str(audio), "Track", cover_path=str(track_cover),
+                )],
                 settings=ProjectSettings(title="Round trip", content_mode="embed"),
             )
             package = ProjectService.save(directory / "round-trip.pvsproj", document, image)
@@ -38,6 +71,11 @@ class ProjectServiceTests(unittest.TestCase):
             summary = ProjectService.inspect(package)
             self.assertTrue(Path(restored.sources[0].content_path).is_file())
             self.assertTrue(Path(restored.playlist[0].file_path).is_file())
+            self.assertTrue(Path(restored.playlist[0].cover_path).is_file())
+            self.assertEqual(
+                Path(restored.playlist[0].cover_path).read_bytes(),
+                track_cover.read_bytes(),
+            )
             self.assertEqual(summary.title, "Round trip")
             self.assertTrue(summary.thumbnail)
             with zipfile.ZipFile(package) as archive:

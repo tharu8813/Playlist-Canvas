@@ -9,7 +9,7 @@ from PySide6.QtGui import (
     QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QFileDialog, QHBoxLayout, QLabel, QListView,
+    QAbstractItemView, QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListView,
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -38,6 +38,20 @@ class ContentLibraryPanel(QWidget):
         self.help_label.setObjectName("mutedLabel")
         self.help_label.setWordWrap(True)
         layout.addWidget(self.help_label)
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        self.filter_label = QLabel()
+        self.filter_label.setObjectName("mutedLabel")
+        self.filter_combo = QComboBox()
+        self.filter_combo.setObjectName("projectContentFilter")
+        for value in ("all", "image", "audio", "lyrics", "font"):
+            self.filter_combo.addItem(value, value)
+        self.filter_count_label = QLabel()
+        self.filter_count_label.setObjectName("mutedLabel")
+        filter_row.addWidget(self.filter_label)
+        filter_row.addWidget(self.filter_combo, 1)
+        filter_row.addWidget(self.filter_count_label)
+        layout.addLayout(filter_row)
         view_row = QHBoxLayout()
         view_row.setContentsMargins(0, 0, 0, 0)
         view_row.setSpacing(4)
@@ -82,10 +96,19 @@ class ContentLibraryPanel(QWidget):
         self.import_button.clicked.connect(self._import_files)
         self.add_button.clicked.connect(self._add_selected)
         self.remove_button.clicked.connect(self._remove_selected)
+        self.filter_combo.currentIndexChanged.connect(self._filter_changed)
         self.service.changed.connect(self.refresh)
         self.translator.language_changed.connect(self.retranslate)
         saved_view = str(QSettings().value("project_content/view_mode", "list"))
         self._view_mode = saved_view if saved_view in self.VIEW_MODES else "list"
+        saved_filter = str(QSettings().value("project_content/filter", "all"))
+        self._filter = (
+            saved_filter if saved_filter in {"all", "image", "audio", "lyrics", "font"}
+            else "all"
+        )
+        self.filter_combo.setCurrentIndex(
+            max(0, self.filter_combo.findData(self._filter))
+        )
         self._apply_view_mode()
         self.retranslate()
         self.refresh()
@@ -93,6 +116,10 @@ class ContentLibraryPanel(QWidget):
     @property
     def view_mode(self) -> str:
         return self._view_mode
+
+    @property
+    def content_filter(self) -> str:
+        return self._filter
 
     def retranslate(self) -> None:
         korean = self.translator.language is Language.KOREAN
@@ -104,6 +131,17 @@ class ContentLibraryPanel(QWidget):
             "to the canvas or playlist."
         )
         self.view_label.setText("보기" if korean else "View")
+        self.filter_label.setText("필터" if korean else "Filter")
+        filter_text = {
+            "all": "전체" if korean else "All",
+            "image": "이미지" if korean else "Images",
+            "audio": "오디오" if korean else "Audio",
+            "lyrics": "가사 / 자막" if korean else "Lyrics / subtitles",
+            "font": "폰트" if korean else "Fonts",
+        }
+        for index in range(self.filter_combo.count()):
+            value = str(self.filter_combo.itemData(index))
+            self.filter_combo.setItemText(index, filter_text[value])
         view_text = {
             "list": "목록" if korean else "List",
             "grid": "격자" if korean else "Grid",
@@ -124,6 +162,16 @@ class ContentLibraryPanel(QWidget):
         self.import_button.setText("콘텐츠 가져오기" if korean else "Import content")
         self.add_button.setText("프로젝트에 추가" if korean else "Add to project")
         self.remove_button.setText("목록에서 제거" if korean else "Remove")
+        self.refresh()
+
+    def _filter_changed(self, _index: int) -> None:
+        selected = str(self.filter_combo.currentData() or "all")
+        if selected not in {"all", "image", "audio", "lyrics", "font"}:
+            selected = "all"
+        self._filter = selected
+        settings = QSettings()
+        settings.setValue("project_content/filter", selected)
+        settings.sync()
         self.refresh()
 
     def _set_view_mode(self, mode: str, *, persist: bool = True) -> None:
@@ -178,7 +226,12 @@ class ContentLibraryPanel(QWidget):
             "font": "폰트" if korean else "Font",
             "lyrics": "가사 / 자막" if korean else "Lyrics / subtitles",
         }
-        for content in self.service.items:
+        items = self.service.items
+        visible_items = [
+            content for content in items
+            if self._filter == "all" or content.media_type == self._filter
+        ]
+        for content in visible_items:
             path = Path(content.path)
             available = path.is_file()
             type_label = labels.get(content.media_type, content.media_type)
@@ -223,6 +276,7 @@ class ContentLibraryPanel(QWidget):
             self.list.addItem(item)
             if content.id == selected_id:
                 self.list.setCurrentItem(item)
+        self.filter_count_label.setText(f"{len(visible_items)} / {len(items)}")
         self._update_buttons()
 
     def _select_content_id(self, content_id: str) -> None:

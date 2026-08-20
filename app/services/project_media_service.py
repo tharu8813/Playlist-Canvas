@@ -72,6 +72,16 @@ class ProjectMediaService:
                     kind="audio", identifier=track.id,
                     display_name=f"{track.artist} - {track.title}", original_path=track.file_path,
                 ))
+            if track.cover_path:
+                cover = cls._resolve_existing_path(track.cover_path, directory)
+                if cover:
+                    track.cover_path = str(cover)
+                else:
+                    missing.append(MissingMedia(
+                        kind="cover", identifier=track.id,
+                        display_name=f"{track.title} cover",
+                        original_path=track.cover_path,
+                    ))
             if track.lyrics_path:
                 lyrics = cls._resolve_existing_path(track.lyrics_path, directory)
                 if lyrics:
@@ -113,6 +123,8 @@ class ProjectMediaService:
                 elif entry.kind == "audio" and entry.identifier in tracks:
                     tracks[entry.identifier].file_path = replacement_value
                     tracks[entry.identifier].enabled = True
+                elif entry.kind == "cover" and entry.identifier in tracks:
+                    tracks[entry.identifier].cover_path = replacement_value
                 elif entry.kind == "lyrics" and entry.identifier in tracks:
                     tracks[entry.identifier].lyrics_path = replacement_value
                 elif entry.kind.startswith("library:") and entry.identifier in contents:
@@ -126,6 +138,8 @@ class ProjectMediaService:
                 sources[entry.identifier].font_path = ""
             elif entry.kind == "audio" and entry.identifier in tracks:
                 tracks[entry.identifier].enabled = False
+            elif entry.kind == "cover" and entry.identifier in tracks:
+                tracks[entry.identifier].cover_path = ""
             elif entry.kind == "lyrics" and entry.identifier in tracks:
                 tracks[entry.identifier].lyrics_path = ""
                 tracks[entry.identifier].lyrics = []

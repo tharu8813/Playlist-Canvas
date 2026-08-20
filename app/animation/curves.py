@@ -25,6 +25,14 @@ def ease_in_quint(value: float) -> float:
     return progress ** 5
 
 
+def ease_in_out_cubic(value: float) -> float:
+    """Balanced motion that stays visible throughout an exit transition."""
+    progress = clamp_progress(value)
+    if progress < 0.5:
+        return 4.0 * progress ** 3
+    return 1.0 - ((-2.0 * progress + 2.0) ** 3) / 2.0
+
+
 def slide_distance(width: float, height: float) -> float:
     """Return restrained travel that scales without flying across the Canvas."""
     return min(96.0, max(24.0, max(float(width), float(height)) * 0.085))

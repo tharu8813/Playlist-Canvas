@@ -5,12 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -29,6 +32,7 @@ from app.models.playlist import PlaylistTrack
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.services.lyrics_service import LyricsError, LyricsService
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
+from app.preview.album_art import extract_track_cover
 from app.utils.i18n import Translator
 
 
@@ -48,6 +52,7 @@ class TrackDetailsDialog(QDialog):
         self.selected_title = track.title
         self.selected_artist = track.artist
         self.selected_album = track.album
+        self.selected_cover_path = track.cover_path
         saved_volume = preview_volume()
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(saved_volume / 100.0)
@@ -62,6 +67,13 @@ class TrackDetailsDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("trackDetailsTabs")
+        self.info_tab = QWidget()
+        self.lyrics_tab = QWidget()
+        info_tab_layout = QHBoxLayout(self.info_tab)
+        info_tab_layout.setContentsMargins(12, 12, 12, 12)
+        info_tab_layout.setSpacing(14)
 
         self.info_group = QGroupBox()
         info_form = QFormLayout(self.info_group)
@@ -104,7 +116,32 @@ class TrackDetailsDialog(QDialog):
                 field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             self.info_name_labels.append(name_label)
             info_form.addRow(name_label, field)
-        root.addWidget(self.info_group)
+        info_tab_layout.addWidget(self.info_group, 3)
+
+        self.cover_group = QGroupBox()
+        cover_layout = QVBoxLayout(self.cover_group)
+        cover_layout.setContentsMargins(12, 14, 12, 12)
+        cover_layout.setSpacing(8)
+        self.cover_preview = QLabel()
+        self.cover_preview.setObjectName("trackCoverPreview")
+        self.cover_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover_preview.setFixedSize(220, 220)
+        self.cover_preview.setFrameShape(QFrame.Shape.StyledPanel)
+        self.cover_preview.setScaledContents(False)
+        self.cover_source_label = QLabel()
+        self.cover_source_label.setObjectName("mutedLabel")
+        self.cover_source_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover_source_label.setWordWrap(True)
+        cover_actions = QHBoxLayout()
+        self.change_cover_button = QPushButton()
+        self.reset_cover_button = QPushButton()
+        cover_actions.addWidget(self.change_cover_button)
+        cover_actions.addWidget(self.reset_cover_button)
+        cover_layout.addWidget(self.cover_preview, 0, Qt.AlignmentFlag.AlignHCenter)
+        cover_layout.addWidget(self.cover_source_label)
+        cover_layout.addLayout(cover_actions)
+        cover_layout.addStretch(1)
+        info_tab_layout.addWidget(self.cover_group, 2)
 
         self.lyrics_group = QGroupBox()
         lyrics_layout = QVBoxLayout(self.lyrics_group)
@@ -252,7 +289,12 @@ class TrackDetailsDialog(QDialog):
         content_row.setSpacing(10)
         content_row.addWidget(self.lyrics_group, 5)
         content_row.addWidget(self.playback_group, 4)
-        root.addLayout(content_row, 1)
+        lyrics_tab_layout = QVBoxLayout(self.lyrics_tab)
+        lyrics_tab_layout.setContentsMargins(10, 10, 10, 10)
+        lyrics_tab_layout.addLayout(content_row, 1)
+        self.tabs.addTab(self.info_tab, "")
+        self.tabs.addTab(self.lyrics_tab, "")
+        root.addWidget(self.tabs, 1)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -266,6 +308,8 @@ class TrackDetailsDialog(QDialog):
         self.edit_lrc_button.clicked.connect(self._edit_in_lrc_generator)
         self.export_lrc_button.clicked.connect(self._export_current_lyrics_as_lrc)
         self.clear_button.clicked.connect(self._clear_lyrics)
+        self.change_cover_button.clicked.connect(self._choose_cover)
+        self.reset_cover_button.clicked.connect(self._reset_cover)
         self.earlier_button.clicked.connect(lambda: self._nudge_timing(-0.1))
         self.later_button.clicked.connect(lambda: self._nudge_timing(0.1))
         self.reset_button.clicked.connect(lambda: self.timing_offset_spin.setValue(0.0))
@@ -281,6 +325,7 @@ class TrackDetailsDialog(QDialog):
         self.media_player.errorOccurred.connect(self._playback_error)
         translator.language_changed.connect(self.retranslate)
         self.retranslate()
+        self._refresh_cover()
         self._refresh_preview()
         self._playback_duration_changed(round(track.duration_seconds * 1000))
 
@@ -310,6 +355,70 @@ class TrackDetailsDialog(QDialog):
         self.selected_lyrics_path = ""
         self.selected_lyrics = []
         self._refresh_preview()
+
+    def _choose_cover(self) -> None:
+        korean = self.translator.language.value == "ko"
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "앨범 커버 선택" if korean else "Choose album cover",
+            self.selected_cover_path,
+            "Images (*.jpg *.jpeg *.png *.webp *.svg)",
+        )
+        if not path:
+            return
+        pixmap = extract_track_cover("", path)
+        has_cover = not pixmap.isNull()
+        if not has_cover:
+            QMessageBox.warning(
+                self,
+                "이미지 불러오기 실패" if korean else "Could not load image",
+                "선택한 파일을 앨범 커버로 사용할 수 없습니다."
+                if korean else "The selected file cannot be used as album artwork.",
+            )
+            return
+        self.selected_cover_path = str(Path(path).resolve())
+        self._refresh_cover()
+
+    def _reset_cover(self) -> None:
+        self.selected_cover_path = ""
+        self._refresh_cover()
+
+    def _refresh_cover(self) -> None:
+        korean = self.translator.language.value == "ko"
+        pixmap = extract_track_cover(self.track.file_path, self.selected_cover_path)
+        has_cover = not pixmap.isNull()
+        if not has_cover:
+            self.cover_preview.setPixmap(QPixmap())
+            self.cover_preview.setText("앨범 커버 없음" if korean else "No album artwork")
+        else:
+            self.cover_preview.clear()
+            self.cover_preview.setPixmap(pixmap.scaled(
+                self.cover_preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        if self.selected_cover_path:
+            path = Path(self.selected_cover_path)
+            valid_override = path.is_file() and not extract_track_cover("", path).isNull()
+            self.cover_source_label.setText(
+                path.name if valid_override else
+                (
+                    "선택한 커버 없음 · 내장 커버 사용 중"
+                    if korean else "Selected artwork missing · using embedded artwork"
+                )
+            )
+            self.cover_source_label.setToolTip(str(path))
+        else:
+            self.cover_source_label.setText(
+                (
+                    "음원에 내장된 커버" if has_cover else "음원에 내장된 커버 없음"
+                ) if korean else (
+                    "Artwork embedded in the audio" if has_cover
+                    else "No artwork embedded in the audio"
+                )
+            )
+            self.cover_source_label.setToolTip(self.track.file_path)
+        self.reset_cover_button.setEnabled(bool(self.selected_cover_path))
 
     def _edit_in_lrc_generator(self) -> None:
         """Round-trip this track's timed lyrics through the LRC generator."""
@@ -528,6 +637,16 @@ class TrackDetailsDialog(QDialog):
 
     def _accept(self) -> None:
         korean = self.translator.language.value == "ko"
+        if (self.selected_cover_path
+                and extract_track_cover("", self.selected_cover_path).isNull()):
+            QMessageBox.warning(
+                self,
+                "앨범 커버 확인 필요" if korean else "Check album artwork",
+                "선택한 앨범 커버 파일을 찾거나 읽을 수 없습니다."
+                if korean else "The selected album artwork is missing or unreadable.",
+            )
+            self.tabs.setCurrentIndex(0)
+            return
         title = self.title_edit.text().strip()
         if not title:
             QMessageBox.warning(
@@ -550,8 +669,18 @@ class TrackDetailsDialog(QDialog):
 
     def retranslate(self) -> None:
         korean = self.translator.language.value == "ko"
-        self.setWindowTitle("곡/가사 설정" if korean else "Track and lyrics settings")
+        self.setWindowTitle("곡 정보/설정" if korean else "Track information/settings")
+        self.tabs.setTabText(0, "곡 정보" if korean else "Track information")
+        self.tabs.setTabText(1, "가사 설정" if korean else "Lyrics settings")
         self.info_group.setTitle("곡 정보" if korean else "Track information")
+        self.cover_group.setTitle("앨범 커버" if korean else "Album artwork")
+        self.change_cover_button.setText("이미지 변경…" if korean else "Change image…")
+        self.reset_cover_button.setText("내장 커버 사용" if korean else "Use embedded artwork")
+        self.cover_group.setToolTip(
+            "프로젝트에서 사용할 곡별 커버입니다. 원본 음원의 태그는 변경하지 않습니다."
+            if korean else
+            "Per-track artwork stored by the project. Source audio tags are not changed."
+        )
         info_names = (
             ("제목", "아티스트", "앨범", "파일", "재생 시간")
             if korean else ("Title", "Artist", "Album", "File", "Duration")
@@ -621,4 +750,5 @@ class TrackDetailsDialog(QDialog):
         cancel_button = self.buttons.button(QDialogButtonBox.StandardButton.Cancel)
         if cancel_button is not None:
             cancel_button.setText("취소" if korean else "Cancel")
+        self._refresh_cover()
         self._refresh_preview()

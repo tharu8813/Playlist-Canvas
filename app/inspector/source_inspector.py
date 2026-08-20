@@ -25,9 +25,11 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.source import Source, SourceType
+from app.dialogs.text_editor_dialog import TextEditorDialog
 from app.services.source_store import SourceStore
 from app.utils.font_loader import load_application_font
 from app.utils.i18n import Translator
+from app.widgets.token_text_editor import TokenLineEdit
 
 
 class SourceInspector(QScrollArea):
@@ -88,7 +90,15 @@ class SourceInspector(QScrollArea):
         self.content_group = QGroupBox()
         content_form = QFormLayout(self.content_group)
         self.name_edit = QLineEdit()
-        self.text_edit = QLineEdit()
+        self.text_edit = TokenLineEdit(translator)
+        self.expand_text_button = QPushButton()
+        self.expand_text_button.setObjectName("compactButton")
+        text_row = QWidget()
+        text_layout = QHBoxLayout(text_row)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(5)
+        text_layout.addWidget(self.text_edit, 1)
+        text_layout.addWidget(self.expand_text_button)
         self.file_path_edit = QLineEdit()
         self.file_path_edit.setReadOnly(True)
         self.file_button = QPushButton()
@@ -101,7 +111,7 @@ class SourceInspector(QScrollArea):
         file_layout.addWidget(self.file_button)
         file_layout.addWidget(self.clear_file_button)
         self._add_labeled_row(content_form, "name", self.name_edit)
-        self._add_labeled_row(content_form, "text", self.text_edit)
+        self._add_labeled_row(content_form, "text", text_row)
         self._add_labeled_row(content_form, "file", file_row)
 
         self.shape_kind_combo = QComboBox()
@@ -443,7 +453,8 @@ class SourceInspector(QScrollArea):
         layout.addStretch()
 
         self._editors = [
-            self.name_edit, self.text_edit, self.file_path_edit, self.file_button,
+            self.name_edit, self.text_edit, self.expand_text_button,
+            self.file_path_edit, self.file_button,
             self.clear_file_button, self.shape_kind_combo, self.progress_style_combo,
             self.visualizer_style_combo, self.visualizer_bars_spin, self.x_spin, self.y_spin,
             self.text_alignment_combo, self.text_overflow_combo,
@@ -820,12 +831,16 @@ class SourceInspector(QScrollArea):
     def _connect_fields(self) -> None:
         self.name_edit.textEdited.connect(lambda _value: self._dirty_line_fields.add("name"))
         self.text_edit.textEdited.connect(lambda _value: self._dirty_line_fields.add("text"))
+        self.text_edit.pairedTextEdited.connect(
+            lambda _value: self._dirty_line_fields.add("text")
+        )
         self.name_edit.editingFinished.connect(
             lambda: self._update_line("name", self.name_edit)
         )
         self.text_edit.editingFinished.connect(
             lambda: self._update_line("text", self.text_edit)
         )
+        self.expand_text_button.clicked.connect(self._open_expanded_text_editor)
         self.file_button.clicked.connect(self._choose_content_file)
         self.clear_file_button.clicked.connect(lambda: self._update("content_path", ""))
         self.shape_kind_combo.currentIndexChanged.connect(
@@ -1061,6 +1076,18 @@ class SourceInspector(QScrollArea):
             return
         self._dirty_line_fields.discard(field)
         self._update(field, editor.text())
+
+    def _open_expanded_text_editor(self) -> None:
+        """Edit the selected source text without constraining it to one line."""
+        if not self._source_ids:
+            return
+        dialog = TextEditorDialog(self.text_edit.text(), self.translator, self)
+        if not dialog.exec():
+            return
+        value = dialog.text()
+        self._dirty_line_fields.add("text")
+        self.text_edit.setText(value)
+        self._update_line("text", self.text_edit)
 
     def _apply_updates(self, changes: dict[str, object]) -> None:
         source_ids = tuple(self._source_ids)
@@ -1339,6 +1366,11 @@ class SourceInspector(QScrollArea):
         self.locked_check.setText("잠금" if korean else "Locked")
         self.file_button.setText("찾아보기" if korean else "Browse")
         self.clear_file_button.setText("제거" if korean else "Clear")
+        self.expand_text_button.setText("확장…" if korean else "Expand…")
+        self.expand_text_button.setToolTip(
+            "긴 텍스트를 별도의 창에서 편집합니다."
+            if korean else "Edit long text in a separate window."
+        )
         self.font_add_button.setText("글꼴 추가" if korean else "Add font")
         overflow_labels = (
             ("자동 줄바꿈", "말줄임표 (…)", "영역에서 자르기")
@@ -1478,6 +1510,13 @@ class SourceInspector(QScrollArea):
             "Supported: %title%, %artist%, %album%, %track%, %track_total%, %filename%, %current_time%, %total_time%, %track_current_time%, %track_total_time%, %video_current_time%, %video_total_time%"
         )
         self._install_property_tooltips()
+        self.expand_text_button.setToolTip(
+            "긴 텍스트를 별도의 창에서 편집합니다."
+            if korean else "Edit long text in a separate window."
+        )
+        self.expand_text_button.setAccessibleName(
+            "텍스트 확장 입력" if korean else "Expanded text editor"
+        )
         self.empty_state.setText(self.translator.text("select_object"))
         if self._source_id is None:
             self.title.setText(self.translator.text("inspector"))

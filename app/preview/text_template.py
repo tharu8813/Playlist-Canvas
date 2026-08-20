@@ -7,6 +7,24 @@ import re
 from app.models.playlist import PlaylistTrack
 
 
+# Keep the editor's completion list and the renderer's replacement contract in
+# one place.  Unknown tokens are intentionally preserved by the renderer.
+TEXT_TEMPLATE_TOKEN_NAMES = (
+    "title",
+    "artist",
+    "album",
+    "track",
+    "track_total",
+    "filename",
+    "current_time",
+    "total_time",
+    "track_current_time",
+    "track_total_time",
+    "video_current_time",
+    "video_total_time",
+)
+
+
 def expand_track_template(template: str, track: PlaylistTrack, track_number: int,
                           track_total: int, start_seconds: float,
                           track_elapsed_seconds: float = 0.0,

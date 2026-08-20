@@ -171,6 +171,7 @@ class ProjectService:
             for track in packaged.playlist:
                 track.file_path = register(track.file_path)
                 track.lyrics_path = register(track.lyrics_path)
+                track.cover_path = register(track.cover_path)
             for content in packaged.content_library:
                 content.path = register(content.path)
 
@@ -261,6 +262,7 @@ class ProjectService:
         for track in document.playlist:
             track.file_path = resolved(track.file_path)
             track.lyrics_path = resolved(track.lyrics_path)
+            track.cover_path = resolved(track.cover_path)
         for content in document.content_library:
             content.path = resolved(content.path)
         if (document.settings.thumbnail_mode == "custom"

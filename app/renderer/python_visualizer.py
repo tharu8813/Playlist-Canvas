@@ -251,11 +251,8 @@ class PythonVisualizerRenderer:
         frequencies = np.fft.rfftfreq(self.fft_size, 1 / self.sample_rate)
         edges = np.geomspace(35.0, self.sample_rate / 2, max(4, bands) + 1)
         spectrum = np.abs(np.fft.rfft(segment * window)) / (self.fft_size / 2)
-        return np.array([
-            float(np.max(spectrum[(frequencies >= edges[index]) & (frequencies < edges[index + 1])]))
-            if np.any((frequencies >= edges[index]) & (frequencies < edges[index + 1])) else 0.0
-            for index in range(len(edges) - 1)
-        ], dtype=np.float32)
+        bins, probes = self._frequency_band_layout(frequencies, edges)
+        return self._frequency_band_values(spectrum, frequencies, bins, probes)
 
     @staticmethod
     def preview_image(width: int, height: int, overlay: object, levels: np.ndarray,
@@ -284,8 +281,7 @@ class PythonVisualizerRenderer:
         window = np.hanning(self.fft_size).astype(np.float32)
         frequencies = np.fft.rfftfreq(self.fft_size, 1 / self.sample_rate)
         edges = np.geomspace(35.0, self.sample_rate / 2, bands + 1)
-        bins = [np.flatnonzero((frequencies >= edges[index]) & (frequencies < edges[index + 1]))
-                for index in range(bands)]
+        bins, probes = self._frequency_band_layout(frequencies, edges)
         result = np.zeros((frame_count, bands), dtype=np.float32)
         for frame_index in range(frame_count):
             if cancel_event.is_set():
@@ -303,13 +299,53 @@ class PythonVisualizerRenderer:
             # larger than audible amplitude and previously saturated almost every
             # bar, making quiet passages look like a solid rectangle.
             spectrum = np.abs(np.fft.rfft(segment * window)) / (self.fft_size / 2)
-            values = np.array([
-                # Preserve a clear musical peak within each logarithmic band while
-                # retaining the normalized amplitude ceiling below.
-                float(np.max(spectrum[band])) if len(band) else 0.0 for band in bins
-            ], dtype=np.float32)
+            values = self._frequency_band_values(
+                spectrum, frequencies, bins, probes,
+            )
             result[frame_index] = np.clip(values, 0.0, 2.0)
         return result
+
+    @staticmethod
+    def _frequency_band_layout(
+        frequencies: np.ndarray, edges: np.ndarray,
+    ) -> tuple[tuple[np.ndarray, ...], np.ndarray]:
+        """Prepare logarithmic bands without assuming each contains an FFT bin.
+
+        At 8 kHz with a 512-point FFT, low-frequency bins are 15.625 Hz apart.
+        A 36–96 band logarithmic layout has several narrower bands, so assigning
+        only whole FFT bins leaves deterministic holes. Five logarithmic probes
+        per band let those ranges interpolate the neighboring measured bins while
+        the real in-band maximum still preserves sharp musical peaks.
+        """
+        bins = tuple(
+            np.flatnonzero(
+                (frequencies >= edges[index])
+                & (frequencies < edges[index + 1])
+            )
+            for index in range(len(edges) - 1)
+        )
+        probes = np.stack([
+            np.geomspace(edges[index], edges[index + 1], 5)
+            for index in range(len(edges) - 1)
+        ]).astype(np.float32, copy=False)
+        return bins, probes
+
+    @staticmethod
+    def _frequency_band_values(
+        spectrum: np.ndarray,
+        frequencies: np.ndarray,
+        bins: tuple[np.ndarray, ...],
+        probes: np.ndarray,
+    ) -> np.ndarray:
+        """Measure every band using real peaks plus interpolated FFT samples."""
+        interpolated = np.interp(
+            probes.reshape(-1), frequencies, spectrum,
+        ).reshape(probes.shape)
+        values = np.max(interpolated, axis=1)
+        for index, band in enumerate(bins):
+            if len(band):
+                values[index] = max(values[index], float(np.max(spectrum[band])))
+        return values.astype(np.float32, copy=False)
 
     def _encode_layer(
         self,

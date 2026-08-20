@@ -10,12 +10,13 @@ from PySide6.QtGui import QImage, QPainter, QPixmap
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.animation.curves import (
-    ease_in_quint, ease_out_cubic, ease_out_quint, hidden_scale_factor,
+    ease_in_out_cubic, ease_in_quint, ease_out_cubic, ease_out_quint,
+    hidden_scale_factor,
     slide_distance,
 )
 from app.models.playlist import PlaylistTrack
 from app.models.source import SourceType
-from app.preview.album_art import create_cached_ambient_background, extract_embedded_cover
+from app.preview.album_art import create_cached_ambient_background, extract_track_cover
 from app.preview.text_template import expand_track_template
 from app.services.lyrics_service import LyricsService
 
@@ -177,7 +178,10 @@ class CanvasSnapshot:
             )
             for item in source_items
         )
-        embedded_cover = extract_embedded_cover(track.file_path) if needs_embedded_cover else QPixmap()
+        track_cover = (
+            extract_track_cover(track.file_path, track.cover_path)
+            if needs_embedded_cover else QPixmap()
+        )
         for graphics_item in source_items:
             if not isinstance(graphics_item, SourceItem):
                 continue
@@ -346,22 +350,28 @@ class CanvasSnapshot:
                 exit_start = source.now_playing_duration - exit_duration
                 if visible and elapsed_seconds >= exit_start and exit_duration > 0:
                     exit_progress = max(0.0, min(1.0, (elapsed_seconds - exit_start) / exit_duration))
-                    exit_motion = ease_in_quint(exit_progress)
+                    # The previous quintic exit stayed almost fully opaque
+                    # until the last few frames, which made moving cards look
+                    # as if they popped out. Couple position/scale and opacity
+                    # to a balanced curve so every exit style visibly fades
+                    # while its configured motion continues.
+                    exit_motion = ease_in_out_cubic(exit_progress)
+                    exit_opacity = 1.0 - exit_motion
                     original_transforms.append((
                         graphics_item, graphics_item.pos(), graphics_item.scale(), graphics_item.opacity()
                     ))
                     graphics_item._suppress_position_sync = True
                     if source.now_playing_exit_animation == "fade":
-                        graphics_item.setOpacity(1.0 - exit_motion)
+                        graphics_item.setOpacity(exit_opacity)
                     elif source.now_playing_exit_animation == "slide_up":
                         graphics_item.setPos(graphics_item.pos().x(), graphics_item.pos().y() - 24.0 * exit_motion)
-                        graphics_item.setOpacity(1.0 - exit_motion)
+                        graphics_item.setOpacity(exit_opacity)
                     elif source.now_playing_exit_animation == "slide_down":
                         graphics_item.setPos(graphics_item.pos().x(), graphics_item.pos().y() + 24.0 * exit_motion)
-                        graphics_item.setOpacity(1.0 - exit_motion)
+                        graphics_item.setOpacity(exit_opacity)
                     elif source.now_playing_exit_animation == "zoom":
                         graphics_item.setScale(source.scale * (1.0 - exit_motion * 0.08))
-                        graphics_item.setOpacity(1.0 - exit_motion)
+                        graphics_item.setOpacity(exit_opacity)
                 graphics_item.update()
             if source.source_type is SourceType.PROGRESS_BAR:
                 original_progress.append((graphics_item, source.progress_value))
@@ -378,7 +388,7 @@ class CanvasSnapshot:
                 graphics_item.update()
             if source.source_type is SourceType.ALBUM_COVER and not source.content_path:
                 original_covers.append((graphics_item, QPixmap(graphics_item._pixmap)))
-                graphics_item._pixmap = QPixmap(embedded_cover)
+                graphics_item._pixmap = QPixmap(track_cover)
                 graphics_item.update()
             if source.source_type is SourceType.BACKGROUND and source.background_mode == "album_art":
                 original_backgrounds.append((graphics_item, QPixmap(graphics_item._pixmap)))
@@ -386,8 +396,9 @@ class CanvasSnapshot:
                     create_cached_ambient_background(
                         track.file_path, max(1, round(source.width)),
                         max(1, round(source.height)), max(18.0, source.blur),
+                        track.cover_path,
                     )
-                    if source.background_ambient else QPixmap(embedded_cover)
+                    if source.background_ambient else QPixmap(track_cover)
                 )
                 graphics_item.update()
             if animation_phase:

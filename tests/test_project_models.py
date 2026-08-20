@@ -15,6 +15,7 @@ class ProjectModelValidationTests(unittest.TestCase):
             playlist=[PlaylistTrack(
                 "song.mp3", "Song", duration_seconds=12.5,
                 lyrics_timing_offset_seconds=0.35,
+                cover_path="cover.png",
             )],
             canvas=CanvasSettings(width=1920, height=1080, snap_enabled=False),
         )
@@ -23,6 +24,7 @@ class ProjectModelValidationTests(unittest.TestCase):
         self.assertFalse(restored.canvas.snap_enabled)
         self.assertEqual(restored.sources[0].text, "%title%")
         self.assertEqual(restored.playlist[0].lyrics_timing_offset_seconds, 0.35)
+        self.assertEqual(restored.playlist[0].cover_path, "cover.png")
         self.assertEqual(restored.app_version, __version__)
 
     def test_legacy_project_without_app_version_remains_compatible(self) -> None:
@@ -81,6 +83,13 @@ class ProjectModelValidationTests(unittest.TestCase):
         ).to_dict()
         payload["playlist"][0]["lyrics_timing_offset_seconds"] = float("nan")
         with self.assertRaisesRegex(ValueError, "lyric timing offset"):
+            ProjectDocument.from_dict(payload)
+
+        payload = ProjectDocument(
+            playlist=[PlaylistTrack("song.mp3", "Song")]
+        ).to_dict()
+        payload["playlist"][0]["cover_path"] = 123
+        with self.assertRaisesRegex(ValueError, "cover paths"):
             ProjectDocument.from_dict(payload)
 
 

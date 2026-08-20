@@ -124,7 +124,7 @@ class TrackRow(QWidget):
             )
             lyric_badge.setObjectName("mutedLabel")
             lyric_badge.setToolTip(
-                "더블클릭하거나 곡/가사 설정에서 타이밍을 조절합니다."
+                "더블클릭하거나 곡 정보/설정에서 메타데이터·커버·가사를 편집합니다."
                 if korean else
                 "Double-click or use Track/Lyrics Settings to adjust timing."
             )
@@ -231,7 +231,9 @@ class PlaylistEditor(QFrame):
         )
         self.add_button.setText("+ 음악 추가" if korean else "+ Add music")
         self.duplicate_button.setText("복제" if korean else "Duplicate")
-        self.details_button.setText("곡/가사 설정" if korean else "Track/Lyrics Settings")
+        self.details_button.setText(
+            "곡 정보/설정" if korean else "Track information/settings"
+        )
         self.remove_button.setText("삭제" if korean else "Remove")
         self.up_button.setToolTip("위로 이동" if korean else "Move up")
         self.down_button.setToolTip("아래로 이동" if korean else "Move down")

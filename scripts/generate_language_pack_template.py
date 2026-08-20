@@ -154,8 +154,8 @@ def _metadata(locale: str, name: str, native_name: str) -> dict[str, str]:
         "name": name,
         "native_name": native_name,
         "author": "Playlist Canvas",
-        "version": "1.0.1",
-        "minimum_app_version": "1.0.1",
+        "version": "1.0.2",
+        "minimum_app_version": "1.0.2",
     }
 
 
@@ -195,7 +195,7 @@ def main() -> None:
             "native_name": "",
             "author": "",
             "version": "1.0.0",
-            "minimum_app_version": "1.0.1",
+            "minimum_app_version": "1.0.2",
         },
         "instructions": {
             "en": "Copy this file, rename it to a locale such as fr-FR.json, and fill only the empty values.",

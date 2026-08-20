@@ -335,6 +335,30 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertEqual(levels.shape, (12,))
         self.assertTrue(np.allclose(levels, 0.08))
 
+    def test_visualizer_log_bands_have_no_structural_zero_holes(self) -> None:
+        renderer = PythonVisualizerRenderer(Path("ffmpeg.exe"))
+        rng = np.random.default_rng(20260821)
+        samples = rng.normal(0.0, 0.2, renderer.sample_rate).astype(np.float32)
+
+        for band_count in (36, 96):
+            levels = renderer._analyze_levels(
+                samples, 30, band_count, threading.Event(),
+            )
+            self.assertEqual(levels.shape, (30, band_count))
+            active = np.max(levels, axis=0)
+            self.assertTrue(
+                np.all(active > 0.0),
+                f"{band_count} bands contained fixed zero indices: "
+                f"{(np.flatnonzero(active == 0.0) + 1).tolist()}",
+            )
+            if band_count == 36:
+                self.assertTrue(np.all(active[[0, 1, 3, 5, 8]] > 0.0))
+                displayed = renderer.process_level_sequence(
+                    levels, SimpleNamespace(kind="visualizer"), 36,
+                )
+                displayed_active = np.max(displayed, axis=0)
+                self.assertTrue(np.all(displayed_active[[0, 1, 3, 5, 8]] > 0.0))
+
     def test_static_source_with_same_z_as_visualizer_is_not_dropped(self) -> None:
         scene = CanvasScene()
         dynamic = Source(SourceType.AUDIO_VISUALIZER, "Dynamic", z_index=4.0)
@@ -484,6 +508,46 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(observed[1][1], 0.0)
         self.assertLess(slide_distance(source.width, source.height), 100.0)
         self.assertAlmostEqual(item.pos().x(), source.x)
+        self.assertAlmostEqual(item.opacity(), 1.0)
+
+    def test_now_playing_motion_fades_smoothly_during_the_same_exit(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.NOW_PLAYING, "Now Playing",
+            x=120.0, y=180.0, width=440.0, height=170.0,
+            now_playing_duration=3.0,
+            now_playing_exit_animation="slide_up",
+            now_playing_exit_duration=1.0,
+        )
+        item = SourceItem(source)
+        scene.addItem(item)
+        track = PlaylistTrack("track.wav", "Track", duration_seconds=8.0)
+        observed: list[tuple[float, float]] = []
+
+        def inspect_state(*_args: object, **_kwargs: object) -> QImage:
+            observed.append((item.pos().y(), item.opacity()))
+            return QImage(1, 1, QImage.Format.Format_ARGB32)
+
+        with patch.object(CanvasSnapshot, "capture", side_effect=inspect_state):
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=2.25,
+            )
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=2.5,
+            )
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=2.75,
+            )
+
+        # Cubic ease-in-out produces a readable fade across the whole exit,
+        # instead of retaining full opacity until the final few frames.
+        self.assertAlmostEqual(observed[0][1], 0.9375)
+        self.assertAlmostEqual(observed[1][1], 0.5)
+        self.assertAlmostEqual(observed[2][1], 0.0625)
+        self.assertAlmostEqual(observed[1][0], source.y - 12.0)
+        self.assertGreater(observed[0][0], observed[1][0])
+        self.assertGreater(observed[1][0], observed[2][0])
+        self.assertAlmostEqual(item.pos().y(), source.y)
         self.assertAlmostEqual(item.opacity(), 1.0)
 
     def test_entrance_and_exit_animation_durations_are_independent(self) -> None:

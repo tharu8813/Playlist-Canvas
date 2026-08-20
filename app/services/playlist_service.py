@@ -169,7 +169,8 @@ class PlaylistService(QObject):
             if track.id in identifiers:
                 result.append(PlaylistTrack(
                     file_path=track.file_path, title=track.title, artist=track.artist,
-                    album=track.album, duration_seconds=track.duration_seconds,
+                    album=track.album, cover_path=track.cover_path,
+                    duration_seconds=track.duration_seconds,
                     enabled=track.enabled, lyrics_path=track.lyrics_path,
                     lyrics=[cue.copy() for cue in track.lyrics],
                     lyrics_timing_offset_seconds=track.lyrics_timing_offset_seconds,

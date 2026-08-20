@@ -9,8 +9,10 @@ from pathlib import Path
 
 from mutagen import File as MutagenFile
 from mutagen import MutagenError
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPixmap, QRadialGradient
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import (
+    QBrush, QColor, QImage, QImageReader, QPainter, QPixmap, QRadialGradient,
+)
 
 
 def extract_embedded_cover(audio_path: str | Path) -> QPixmap:
@@ -25,6 +27,24 @@ def extract_embedded_cover(audio_path: str | Path) -> QPixmap:
         return QPixmap()
     image = _cached_cover(str(path.resolve()))
     return QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+
+
+def extract_track_cover(
+    audio_path: str | Path, cover_path: str | Path = "",
+) -> QPixmap:
+    """Return a project override image, falling back to embedded audio art."""
+    override = Path(cover_path) if cover_path else None
+    if override is not None and override.is_file():
+        try:
+            stat = override.stat()
+            image = _cached_image_cover(
+                str(override.resolve()), stat.st_mtime_ns, stat.st_size,
+            )
+            if not image.isNull():
+                return QPixmap.fromImage(image)
+        except OSError:
+            pass
+    return extract_embedded_cover(audio_path)
 
 
 def create_ambient_background(cover: QPixmap, width: int, height: int,
@@ -68,13 +88,31 @@ def create_ambient_background(cover: QPixmap, width: int, height: int,
 
 
 def create_cached_ambient_background(audio_path: str | Path, width: int, height: int,
-                                     blur_radius: float = 24.0) -> QPixmap:
+                                     blur_radius: float = 24.0,
+                                     cover_path: str | Path = "") -> QPixmap:
     """Return a per-track ambient backdrop without rebuilding it every frame."""
-    path = Path(audio_path)
-    if not path.is_file() or width <= 0 or height <= 0:
+    audio = Path(audio_path)
+    override = Path(cover_path) if cover_path else None
+    if width <= 0 or height <= 0:
+        return QPixmap()
+    source_path = ""
+    direct_image = False
+    stat = None
+    try:
+        if override is not None and override.is_file():
+            stat = override.stat()
+            source_path = str(override.resolve())
+            direct_image = True
+        elif audio.is_file():
+            stat = audio.stat()
+            source_path = str(audio.resolve())
+    except OSError:
+        pass
+    if not source_path or stat is None:
         return QPixmap()
     image = _cached_ambient_background(
-        str(path.resolve()), width, height, round(max(0.0, blur_radius) * 10),
+        source_path, direct_image, stat.st_mtime_ns, stat.st_size, width, height,
+        round(max(0.0, blur_radius) * 10),
     )
     return QPixmap.fromImage(image) if not image.isNull() else QPixmap()
 
@@ -126,10 +164,29 @@ def _cached_cover(audio_path: str) -> QImage:
 
 
 @lru_cache(maxsize=128)
-def _cached_ambient_background(audio_path: str, width: int, height: int,
+def _cached_image_cover(
+    image_path: str, _modified_ns: int, _file_size: int,
+) -> QImage:
+    reader = QImageReader(image_path)
+    size = reader.size()
+    if size.isValid() and (size.width() > 4096 or size.height() > 4096):
+        reader.setScaledSize(size.scaled(
+            QSize(4096, 4096), Qt.AspectRatioMode.KeepAspectRatio,
+        ))
+    image = reader.read()
+    return image if not image.isNull() else QImage()
+
+
+@lru_cache(maxsize=128)
+def _cached_ambient_background(source_path: str, direct_image: bool,
+                               modified_ns: int, file_size: int,
+                               width: int, height: int,
                                blur_radius_tenths: int) -> QImage:
     """Cache the expensive palette extraction and radial-paint work as QImage."""
-    cover_image = _cached_cover(audio_path)
+    cover_image = (
+        _cached_image_cover(source_path, modified_ns, file_size) if direct_image
+        else _cached_cover(source_path)
+    )
     if cover_image.isNull():
         return QImage()
     ambient = create_ambient_background(

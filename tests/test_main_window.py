@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import (QEvent, QItemSelectionModel, QMimeData, QPoint, QPointF, QRectF,
                             QSettings, QSize, Qt, QTimer)
-from PySide6.QtGui import (QColor, QCloseEvent, QImage, QMouseEvent, QPalette,
+from PySide6.QtGui import (QColor, QCloseEvent, QDropEvent, QImage, QMouseEvent, QPalette,
                            QPixmap, QWheelEvent)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -38,8 +38,13 @@ from app.dialogs.export_settings_dialog import ExportSettingsDialog
 from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.dialogs.track_details_dialog import TrackDetailsDialog
+from app.dialogs.text_editor_dialog import TextEditorDialog
 from app.dialogs.export_progress_dialog import ExportProgressDialog
 from app.dialogs.ffmpeg_install_progress_dialog import FFmpegInstallProgressDialog
+from app.widgets.source_template_button import (
+    SourceTemplateButton,
+    read_source_template_mime,
+)
 from app.ffmpeg.managed_installer import ManagedFFmpegInstallation
 from app.services.autosave_service import RecoverySnapshot
 from app.services.project_service import ProjectError, ProjectService
@@ -51,6 +56,10 @@ from app.services.lrc_draft_service import LrcDraftService
 from app.ui.main_window import MainWindow
 from app.utils.i18n import Language
 from app.preview.canvas_snapshot import CanvasSnapshot
+from app.preview.album_art import (
+    create_cached_ambient_background, extract_track_cover,
+)
+from app.widgets.token_text_editor import TokenLineEdit, TokenPlainTextEdit
 from app.renderer.ffmpeg_renderer import FFmpegRenderer, RenderFrame
 from app.presets.preset_service import PresetService
 
@@ -623,7 +632,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertEqual(set(self.window._source_buttons), set(SourceType))
             for button in self.window._source_buttons.values():
                 self.assertIn("추가 후 설정", button.toolTip())
-                self.assertIn("클릭하면 캔버스에 추가됩니다.", button.toolTip())
+                self.assertIn("캔버스로 드래그하면 추가됩니다.", button.toolTip())
                 self.assertGreaterEqual(button.toolTipDuration(), 10_000)
                 self.assertTrue(button.accessibleDescription())
 
@@ -631,7 +640,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.application.processEvents()
             for button in self.window._source_buttons.values():
                 self.assertIn("Settings after adding", button.toolTip())
-                self.assertIn("Click to add it to the Canvas.", button.toolTip())
+                self.assertIn("drag it onto the Canvas", button.toolTip())
         finally:
             self.window.translator.set_language(original_language)
             self.application.processEvents()
@@ -685,6 +694,85 @@ class MainWindowSafetyTests(unittest.TestCase):
     def test_source_sidebar_has_no_footer_tip(self) -> None:
         self.assertFalse(hasattr(self.window, "sidebar_hint"))
         self.assertIs(self.window.source_cards_scroll.parent(), self.window.source_sidebar)
+
+    def test_image_variants_expand_under_parent_and_create_parent_sources(self) -> None:
+        toggle = self.window._source_variant_toggles[SourceType.IMAGE]
+        container = self.window._source_variant_containers[SourceType.IMAGE]
+        self.assertFalse(toggle.isChecked())
+        self.assertTrue(container.isHidden())
+
+        toggle.click()
+        self.application.processEvents()
+        self.assertTrue(toggle.isChecked())
+        self.assertFalse(container.isHidden())
+        self.assertIs(
+            self.window._source_variant_parents[SourceType.LOGO], SourceType.IMAGE
+        )
+        self.assertIs(
+            self.window._source_variant_parents[SourceType.TIME], SourceType.TEXT
+        )
+
+        before = len(self.window.store.sources())
+        self.window._source_buttons[SourceType.WATERMARK].click()
+        self.assertEqual(len(self.window.store.sources()), before + 1)
+        source = self.window.store.selected
+        self.assertIsNotNone(source)
+        self.assertIs(source.source_type, SourceType.IMAGE)
+        self.assertEqual(source.name, "Watermark")
+        self.assertEqual(source.image_fit_mode, "contain")
+        self.assertAlmostEqual(source.opacity, 0.45)
+
+        self.window._source_buttons[SourceType.TIME].click()
+        source = self.window.store.selected
+        self.assertIsNotNone(source)
+        self.assertIs(source.source_type, SourceType.TEXT)
+        self.assertEqual(source.text, "%current_time% / %total_time%")
+
+    def test_source_template_drag_payload_adds_parent_at_drop_position(self) -> None:
+        button = self.window._source_buttons[SourceType.LOGO]
+        self.assertIsInstance(button, SourceTemplateButton)
+        self.assertEqual(
+            read_source_template_mime(button.create_mime_data()),
+            (SourceType.LOGO.value, SourceType.IMAGE.value),
+        )
+
+        before = len(self.window.store.sources())
+        self.window.canvas.source_template_dropped.emit(
+            SourceType.LOGO.value, SourceType.IMAGE.value, QPointF(640.0, 360.0)
+        )
+        self.assertEqual(len(self.window.store.sources()), before + 1)
+        source = self.window.store.selected
+        self.assertIsNotNone(source)
+        self.assertIs(source.source_type, SourceType.IMAGE)
+        self.assertEqual((source.x, source.y), (550.0, 270.0))
+
+        self.window.canvas.source_template_dropped.emit(
+            SourceType.LOGO.value, SourceType.TEXT.value, QPointF(20.0, 20.0)
+        )
+        self.assertEqual(len(self.window.store.sources()), before + 1)
+
+    def test_canvas_accepts_source_template_drop_event(self) -> None:
+        button = self.window._source_buttons[SourceType.WATERMARK]
+        before = len(self.window.store.sources())
+        mime_data = button.create_mime_data()
+        event = QDropEvent(
+            QPointF(160.0, 140.0),
+            Qt.DropAction.CopyAction,
+            mime_data,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self.window.canvas.dropEvent(event)
+        self.assertTrue(event.isAccepted())
+        self.assertEqual(len(self.window.store.sources()), before + 1)
+        source = self.window.store.selected
+        self.assertIsNotNone(source)
+        self.assertIs(source.source_type, SourceType.IMAGE)
+        artboard = self.window.canvas.scene_model.artboard_rect
+        self.assertGreaterEqual(source.x, artboard.left())
+        self.assertGreaterEqual(source.y, artboard.top())
+        self.assertLessEqual(source.x + source.width, artboard.right())
+        self.assertLessEqual(source.y + source.height, artboard.bottom())
 
     def test_inspector_properties_show_localized_detailed_hover_help(self) -> None:
         original_language = self.window.translator.language
@@ -1047,6 +1135,75 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertTrue(inspector._field_widgets["font_family"].isHidden())
         self.assertTrue(inspector._field_widgets["font_size"].isHidden())
         self.assertTrue(inspector._field_widgets["text"].isHidden())
+
+    def test_token_editor_pairs_percent_and_inserts_completion_from_keyboard(self) -> None:
+        editor = TokenLineEdit(self.window.translator)
+        editor.show()
+        editor.setFocus()
+
+        QTest.keyClicks(editor, "%")
+        self.application.processEvents()
+        self.assertEqual(editor.text(), "%%")
+        self.assertEqual(editor.cursorPosition(), 1)
+        self.assertTrue(editor.token_popup.isVisible())
+        self.assertEqual(editor.token_popup.list.count(), 12)
+        self.assertEqual(editor.token_popup.current_token(), "title")
+        self.assertIn("%title%", editor.token_popup.description.text())
+
+        QTest.keyClick(editor, Qt.Key.Key_Down)
+        self.assertEqual(editor.token_popup.current_token(), "artist")
+        self.assertIn("아티스트", editor.token_popup.description.text())
+        QTest.keyClick(editor, Qt.Key.Key_Right)
+        self.assertEqual(editor.text(), "%artist%")
+        self.assertEqual(editor.cursorPosition(), len("%artist%"))
+        self.assertFalse(editor.token_popup.isVisible())
+
+        editor.clear()
+        QTest.keyClicks(editor, "%")
+        QTest.keyClick(editor, Qt.Key.Key_Backspace)
+        self.assertEqual(editor.text(), "")
+        editor.close()
+
+    def test_token_editor_filters_prefix_and_multiline_editor_wraps_selection(self) -> None:
+        editor = TokenPlainTextEdit(self.window.translator)
+        editor.show()
+        editor.setFocus()
+        editor.setPlainText("Track: ")
+        editor.moveCursor(editor.textCursor().MoveOperation.End)
+
+        QTest.keyClicks(editor, "%ti")
+        self.application.processEvents()
+        self.assertEqual(editor.toPlainText(), "Track: %ti%")
+        self.assertEqual(editor.token_popup.list.count(), 1)
+        self.assertEqual(editor.token_popup.current_token(), "title")
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+        self.assertEqual(editor.toPlainText(), "Track: %title%")
+
+        editor.selectAll()
+        QTest.keyClicks(editor, "%")
+        self.assertEqual(editor.toPlainText(), "%Track: %title%%")
+        editor.close()
+
+    def test_expanded_text_dialog_and_inspector_apply_long_text(self) -> None:
+        source = Source(SourceType.TEXT, "Long text", text="Short")
+        self.window.store.add(source)
+        self.application.processEvents()
+        inspector = self.window.inspector
+        self.assertFalse(inspector.expand_text_button.isHidden())
+
+        with patch("app.inspector.source_inspector.TextEditorDialog") as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.DialogCode.Accepted
+            dialog.text.return_value = "First line\n%artist% — second line"
+            inspector._open_expanded_text_editor()
+
+        self.assertEqual(source.text, "First line\n%artist% — second line")
+        self.assertEqual(inspector.text_edit.text(), source.text)
+
+        expanded = TextEditorDialog(source.text, self.window.translator)
+        self.assertEqual(expanded.editor.toPlainText(), source.text)
+        self.assertGreaterEqual(expanded.minimumWidth(), 480)
+        expanded.close()
 
     def test_layer_panel_drag_reorders_canvas_and_supports_group_drop(self) -> None:
         first = Source(SourceType.TEXT, "First", z_index=0)
@@ -1746,6 +1903,7 @@ class MainWindowSafetyTests(unittest.TestCase):
         dialog.selected_title = "After"
         dialog.selected_artist = "After artist"
         dialog.selected_album = "After album"
+        dialog.selected_cover_path = ""
         dialog.selected_lyrics_path = ""
         dialog.selected_lyrics = []
         dialog.selected_timing_offset = 0.0
@@ -2509,6 +2667,55 @@ class MainWindowSafetyTests(unittest.TestCase):
             dialog.close()
             self.window.translator.set_language(original_language)
 
+    def test_track_details_uses_information_and_lyrics_tabs_and_edits_cover(self) -> None:
+        with TemporaryDirectory(prefix="playlist-track-cover-") as raw_directory:
+            directory = Path(raw_directory)
+            cover_path = directory / "custom-cover.png"
+            cover = QImage(180, 180, QImage.Format.Format_ARGB32)
+            cover.fill(QColor("#7C3AED"))
+            self.assertTrue(cover.save(str(cover_path)))
+            track = PlaylistTrack("missing-audio.mp3", "Cover track")
+            dialog = TrackDetailsDialog(track, self.window.translator, self.window)
+            try:
+                self.assertEqual(dialog.windowTitle(), "곡 정보/설정")
+                self.assertEqual(dialog.tabs.count(), 2)
+                self.assertEqual(dialog.tabs.tabText(0), "곡 정보")
+                self.assertEqual(dialog.tabs.tabText(1), "가사 설정")
+                self.assertTrue(dialog.info_tab.isAncestorOf(dialog.info_group))
+                self.assertTrue(dialog.lyrics_tab.isAncestorOf(dialog.lyrics_group))
+                self.assertTrue(dialog.lyrics_tab.isAncestorOf(dialog.playback_group))
+
+                with patch.object(
+                    QFileDialog, "getOpenFileName",
+                    return_value=(str(cover_path), "Images (*.png)"),
+                ):
+                    dialog._choose_cover()
+                self.assertEqual(dialog.selected_cover_path, str(cover_path.resolve()))
+                self.assertFalse(dialog.cover_preview.pixmap().isNull())
+                self.assertEqual(dialog.cover_source_label.text(), cover_path.name)
+                self.assertTrue(dialog.reset_cover_button.isEnabled())
+
+                dialog._reset_cover()
+                self.assertEqual(dialog.selected_cover_path, "")
+                self.assertFalse(dialog.reset_cover_button.isEnabled())
+            finally:
+                dialog.close()
+
+    def test_custom_track_cover_drives_cover_and_ambient_rendering(self) -> None:
+        with TemporaryDirectory(prefix="playlist-render-cover-") as raw_directory:
+            cover_path = Path(raw_directory) / "render-cover.png"
+            image = QImage(96, 96, QImage.Format.Format_ARGB32)
+            image.fill(QColor("#16A34A"))
+            self.assertTrue(image.save(str(cover_path)))
+
+            cover = extract_track_cover("missing-audio.mp3", cover_path)
+            self.assertFalse(cover.isNull())
+            self.assertEqual(cover.toImage().pixelColor(20, 20), QColor("#16A34A"))
+            ambient = create_cached_ambient_background(
+                "missing-audio.mp3", 320, 180, 24.0, cover_path,
+            )
+            self.assertEqual(ambient.size(), QSize(320, 180))
+
     def test_track_lyrics_dialog_previews_audio_with_synchronized_lyrics(self) -> None:
         saved_volumes: list[int] = []
         volume_reader = patch(
@@ -2851,6 +3058,40 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertEqual(panel.view_mode, "list")
             self.assertEqual(panel.list.iconSize(), QSize(38, 38))
             self.assertIn("\n", panel.list.item(0).text())
+
+    def test_project_content_filters_all_supported_categories(self) -> None:
+        panel = self.window.content_library_panel
+        panel.filter_combo.setCurrentIndex(panel.filter_combo.findData("all"))
+        with TemporaryDirectory(prefix="pvs-content-filter-") as raw_directory:
+            directory = Path(raw_directory)
+            paths = [
+                directory / "cover.png",
+                directory / "song.mp3",
+                directory / "captions.lrc",
+                directory / "typeface.ttf",
+            ]
+            for path in paths:
+                path.write_bytes(b"fixture")
+            self.window.project_content_service.add_paths(paths)
+            self.assertEqual(panel.filter_combo.count(), 5)
+            self.assertEqual(panel.content_filter, "all")
+            self.assertEqual(panel.list.count(), 4)
+            self.assertEqual(panel.filter_count_label.text(), "4 / 4")
+
+            for media_type in ("image", "audio", "lyrics", "font"):
+                panel.filter_combo.setCurrentIndex(
+                    panel.filter_combo.findData(media_type)
+                )
+                self.assertEqual(panel.content_filter, media_type)
+                self.assertEqual(panel.list.count(), 1)
+                self.assertEqual(
+                    panel.list.item(0).data(Qt.ItemDataRole.UserRole + 2),
+                    media_type,
+                )
+                self.assertEqual(panel.filter_count_label.text(), "1 / 4")
+
+            panel.filter_combo.setCurrentIndex(panel.filter_combo.findData("all"))
+            self.assertEqual(panel.list.count(), 4)
 
     def test_about_action_opens_program_information(self) -> None:
         with patch("app.ui.main_window.AboutDialog") as about_dialog:

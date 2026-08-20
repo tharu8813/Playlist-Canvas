@@ -24,6 +24,7 @@ class PlaylistTrack:
     lyrics: list[dict[str, Any]] = field(default_factory=list)
     lyrics_timing_offset_seconds: float = 0.0
     id: str = field(default_factory=lambda: str(uuid4()))
+    cover_path: str = ""
 
     @property
     def filename(self) -> str:
@@ -50,6 +51,8 @@ class PlaylistTrack:
             raise ValueError("Every playlist track must have a non-empty string ID.")
         if not isinstance(track.file_path, str) or not isinstance(track.title, str):
             raise ValueError("Playlist file paths and titles must be strings.")
+        if not isinstance(track.cover_path, str):
+            raise ValueError("Playlist cover paths must be strings.")
         duration = track.duration_seconds
         if (not isinstance(duration, (int, float)) or isinstance(duration, bool)
                 or not isfinite(float(duration)) or duration < 0):

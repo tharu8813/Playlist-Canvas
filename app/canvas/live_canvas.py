@@ -15,6 +15,10 @@ from app.canvas.source_item import SourceItem
 from app.models.source import Source
 from app.services.source_store import SourceStore
 from app.utils.i18n import Translator
+from app.widgets.source_template_button import (
+    SOURCE_TEMPLATE_MIME,
+    read_source_template_mime,
+)
 
 
 class CanvasScene(QGraphicsScene):
@@ -330,6 +334,7 @@ class LiveCanvas(QGraphicsView):
     selection_changed = Signal(object)
     zoom_changed = Signal(float)
     files_dropped = Signal(list, object)
+    source_template_dropped = Signal(str, str, object)
     cut_requested = Signal()
     copy_requested = Signal()
     paste_requested = Signal()
@@ -491,7 +496,14 @@ class LiveCanvas(QGraphicsView):
         super().wheelEvent(event)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        """Accept Explorer file URLs so the main window can classify them."""
+        """Accept palette templates and Explorer files over the Canvas."""
+        if event.mimeData().hasFormat(SOURCE_TEMPLATE_MIME):
+            if read_source_template_mime(event.mimeData()) is not None:
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+            event.ignore()
+            return
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
             return
@@ -502,7 +514,17 @@ class LiveCanvas(QGraphicsView):
         self.dragEnterEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        """Forward dropped paths and their Canvas position to the workspace."""
+        """Forward dropped templates or paths with their Canvas position."""
+        template = read_source_template_mime(event.mimeData())
+        if template is not None:
+            source_type, parent_type = template
+            self.source_template_dropped.emit(
+                source_type, parent_type,
+                self.mapToScene(event.position().toPoint()),
+            )
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            return
         if not event.mimeData().hasUrls():
             event.ignore()
             return

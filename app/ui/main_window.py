@@ -85,6 +85,7 @@ from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
 from app.services.playlist_export_service import PlaylistExportError, PlaylistExportService
 from app.services.app_settings_service import AppSettingsService, VIDEO_ENCODERS
 from app.services.smooth_scroll_service import SmoothScrollService
+from app.widgets.source_template_button import SourceTemplateButton
 from app.services.update_service import (
     GitHubUpdateService,
     ReleaseInfo,
@@ -281,6 +282,9 @@ class MainWindow(QMainWindow):
         self._downloaded_update_path: Path | None = None
         self._update_install_authorized = False
         self._source_buttons: dict[SourceType, QPushButton] = {}
+        self._source_card_groups: dict[SourceType, QWidget] = {}
+        self._source_variant_containers: dict[SourceType, QWidget] = {}
+        self._source_variant_toggles: dict[SourceType, QToolButton] = {}
         self.setAcceptDrops(True)
         self.resize(1560, 920)
         self.setMinimumSize(1100, 680)
@@ -1181,6 +1185,7 @@ class MainWindow(QMainWindow):
         center_layout.setContentsMargins(10, 10, 10, 8)
         self.canvas = LiveCanvas(self.store, self.translator)
         self.canvas.files_dropped.connect(self._handle_dropped_files)
+        self.canvas.source_template_dropped.connect(self._handle_source_template_drop)
         self.canvas.cut_requested.connect(self._cut_selected_sources)
         self.canvas.copy_requested.connect(self._copy_selected_sources)
         self.canvas.paste_requested.connect(self._paste_sources)
@@ -1297,13 +1302,79 @@ class MainWindow(QMainWindow):
             ("audio_level_meter", SourceType.AUDIO_LEVEL_METER),
             ("particle_overlay", SourceType.PARTICLE_OVERLAY),
         ]
+        variant_parents = {
+            SourceType.TIME: SourceType.TEXT,
+            SourceType.LOGO: SourceType.IMAGE,
+            SourceType.WATERMARK: SourceType.IMAGE,
+        }
+        self._source_variant_parents = variant_parents
         self._source_search_terms: dict[SourceType, str] = {}
-        for _key, source_type in descriptions:
-            button = QPushButton()
-            button.clicked.connect(lambda checked=False, kind=source_type: self._add_source(kind))
+        description_keys = {source_type: key for key, source_type in descriptions}
+        top_level_types = [
+            source_type for _key, source_type in descriptions
+            if source_type not in variant_parents
+        ]
+        for source_type in top_level_types:
+            group = QFrame()
+            group.setObjectName("sourceTemplateGroup")
+            group_layout = QVBoxLayout(group)
+            group_layout.setContentsMargins(0, 0, 0, 0)
+            group_layout.setSpacing(4)
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
+            button = SourceTemplateButton(source_type.value, source_type.value)
+            button.clicked.connect(
+                lambda checked=False, kind=source_type: self._add_source(kind)
+            )
+            row_layout.addWidget(button, 1)
+            variants = [
+                child for child, parent in variant_parents.items()
+                if parent is source_type
+            ]
+            if variants:
+                toggle = QToolButton()
+                toggle.setObjectName("sourceVariantToggle")
+                toggle.setCheckable(True)
+                toggle.setFixedWidth(30)
+                toggle.setText("▸")
+                toggle.toggled.connect(
+                    lambda expanded, parent_type=source_type: self._set_source_variants_expanded(
+                        parent_type, expanded
+                    )
+                )
+                row_layout.addWidget(toggle)
+                self._source_variant_toggles[source_type] = toggle
+            group_layout.addWidget(row)
             self._source_buttons[source_type] = button
-            self._source_search_terms[source_type] = f"{_key} {source_type.value}".lower()
-            cards_layout.addWidget(button)
+            self._source_search_terms[source_type] = (
+                f"{description_keys[source_type]} {source_type.value}"
+            ).lower()
+            if variants:
+                variant_container = QWidget()
+                variant_container.setObjectName("sourceVariantContainer")
+                variant_layout = QVBoxLayout(variant_container)
+                variant_layout.setContentsMargins(18, 0, 0, 0)
+                variant_layout.setSpacing(4)
+                for child_type in variants:
+                    child_button = SourceTemplateButton(
+                        child_type.value, source_type.value
+                    )
+                    child_button.clicked.connect(
+                        lambda checked=False, kind=child_type: self._add_source(kind)
+                    )
+                    self._source_buttons[child_type] = child_button
+                    self._source_search_terms[child_type] = (
+                        f"{description_keys[child_type]} {child_type.value} "
+                        f"{description_keys[source_type]} {source_type.value}"
+                    ).lower()
+                    variant_layout.addWidget(child_button)
+                variant_container.hide()
+                group_layout.addWidget(variant_container)
+                self._source_variant_containers[source_type] = variant_container
+            self._source_card_groups[source_type] = group
+            cards_layout.addWidget(group)
         cards_layout.addStretch(1)
         self.source_cards_scroll.setWidget(cards_widget)
         layout.addWidget(self.source_cards_scroll, 1)
@@ -1312,9 +1383,45 @@ class MainWindow(QMainWindow):
     def _filter_source_cards(self, query: str) -> None:
         """Show only palette sources matching a user-facing name or source type."""
         normalized = query.strip().lower()
-        for source_type, button in self._source_buttons.items():
-            searchable = f"{self._source_search_terms.get(source_type, '')} {button.text()}".lower()
-            button.setVisible(not normalized or normalized in searchable)
+        for parent_type, group in self._source_card_groups.items():
+            parent_button = self._source_buttons[parent_type]
+            parent_text = (
+                f"{self._source_search_terms.get(parent_type, '')} "
+                f"{parent_button.text()}"
+            ).lower()
+            parent_match = not normalized or normalized in parent_text
+            child_types = [
+                child for child, parent in self._source_variant_parents.items()
+                if parent is parent_type
+            ]
+            child_matches: dict[SourceType, bool] = {}
+            for child_type in child_types:
+                child_button = self._source_buttons[child_type]
+                searchable = (
+                    f"{self._source_search_terms.get(child_type, '')} "
+                    f"{child_button.text()}"
+                ).lower()
+                child_matches[child_type] = not normalized or normalized in searchable
+                child_button.setVisible(child_matches[child_type])
+            group.setVisible(parent_match or any(child_matches.values()))
+            parent_button.setVisible(True)
+            container = self._source_variant_containers.get(parent_type)
+            if container is not None:
+                expanded = self._source_variant_toggles[parent_type].isChecked()
+                container.setVisible((expanded and not normalized) or (
+                    bool(normalized) and any(child_matches.values())
+                ))
+
+    def _set_source_variants_expanded(
+        self, parent_type: SourceType, expanded: bool,
+    ) -> None:
+        """Expand one parent's property-only template variants."""
+        toggle = self._source_variant_toggles.get(parent_type)
+        container = self._source_variant_containers.get(parent_type)
+        if toggle is not None:
+            toggle.setText("▾" if expanded else "▸")
+        if container is not None:
+            container.setVisible(expanded)
 
     def _source_hover_help(self, source_type: SourceType) -> tuple[str, str]:
         """Return a concise purpose and Inspector-setting summary for a source."""
@@ -1429,8 +1536,8 @@ class MainWindow(QMainWindow):
         korean = self.translator.language is Language.KOREAN
         settings_heading = "추가 후 설정" if korean else "Settings after adding"
         click_hint = (
-            "클릭하면 캔버스에 추가됩니다."
-            if korean else "Click to add it to the Canvas."
+            "클릭하거나 캔버스로 드래그하면 추가됩니다."
+            if korean else "Click or drag it onto the Canvas to add it."
         )
         button.setToolTip(
             f"<div style='width: 330px'><b>{label}</b><br>"
@@ -1460,11 +1567,14 @@ class MainWindow(QMainWindow):
                               y=progress_y, width=progress_width,
                               height=14, fill_color="#27D17F", border_radius=7, z_index=2))
 
-    def _add_source(self, source_type: SourceType) -> None:
+    def _add_source(self, source_type: SourceType, position: object | None = None) -> None:
+        """Add a base source or one of its property-only palette templates."""
         count = len(self.store.sources())
-        name = source_type.value.replace("_", " ").title()
+        template_type = source_type
+        source_type = self._source_variant_parents.get(source_type, source_type)
+        name = template_type.value.replace("_", " ").title()
         dimensions = (260.0, 90.0)
-        if source_type in {SourceType.ALBUM_COVER, SourceType.LOGO}:
+        if template_type in {SourceType.ALBUM_COVER, SourceType.LOGO}:
             dimensions = (180.0, 180.0)
         if source_type in {SourceType.AUDIO_VISUALIZER, SourceType.AUDIO_WAVEFORM}:
             dimensions = (460.0, 100.0)
@@ -1479,7 +1589,7 @@ class MainWindow(QMainWindow):
         if source_type is SourceType.BACKGROUND:
             dimensions = (1280.0, 720.0)
         default_text = name
-        if source_type is SourceType.TIME:
+        if template_type is SourceType.TIME:
             default_text = "%current_time% / %total_time%"
         elif source_type is SourceType.LYRICS:
             default_text = "Lyrics are not available for this track."
@@ -1487,11 +1597,23 @@ class MainWindow(QMainWindow):
             default_text = "▶ 01. Current track\n  02. Next track"
         elif source_type is SourceType.NOW_PLAYING:
             default_text = "NOW PLAYING\nTrack title\nArtist"
+        artboard = self.canvas.scene_model.artboard_rect
+        default_x = 170 + (count % 4) * 35
+        default_y = 190 + (count % 3) * 35
+        if position is not None and hasattr(position, "x") and hasattr(position, "y"):
+            default_x = max(
+                artboard.left(),
+                min(float(position.x()) - dimensions[0] / 2, artboard.right() - dimensions[0]),
+            )
+            default_y = max(
+                artboard.top(),
+                min(float(position.y()) - dimensions[1] / 2, artboard.bottom() - dimensions[1]),
+            )
         source = Source(
             source_type=source_type,
             name=name,
-            x=170 + (count % 4) * 35,
-            y=190 + (count % 3) * 35,
+            x=default_x,
+            y=default_y,
             width=dimensions[0], height=dimensions[1],
             border_radius=12 if source_type is not SourceType.PROGRESS_BAR else 8,
             fill_color="#1685D1" if source_type is not SourceType.BACKGROUND else "#263042",
@@ -1499,7 +1621,30 @@ class MainWindow(QMainWindow):
             z_index=count,
             locked=source_type is SourceType.BACKGROUND,
         )
+        if template_type is SourceType.LOGO:
+            source.image_fit_mode = "contain"
+            source.border_radius = 0.0
+            source.text = ""
+        elif template_type is SourceType.WATERMARK:
+            source.image_fit_mode = "contain"
+            source.opacity = 0.45
+            source.border_radius = 0.0
+            source.text = ""
         self.store.add(source)
+
+    def _handle_source_template_drop(
+        self, source_type_value: str, parent_type_value: str, position: object,
+    ) -> None:
+        """Create a palette template centered at its Canvas drop point."""
+        try:
+            source_type = SourceType(source_type_value)
+            parent_type = SourceType(parent_type_value)
+        except ValueError:
+            return
+        expected_parent = self._source_variant_parents.get(source_type, source_type)
+        if parent_type is not expected_parent:
+            return
+        self._add_source(source_type, position)
 
     def _show_track_details(self, track_id: str) -> None:
         """Open track metadata and timed-lyrics editing for a playlist card."""
@@ -1513,6 +1658,7 @@ class MainWindow(QMainWindow):
                 title=dialog.selected_title,
                 artist=dialog.selected_artist,
                 album=dialog.selected_album,
+                cover_path=dialog.selected_cover_path,
                 lyrics_path=dialog.selected_lyrics_path,
                 lyrics=dialog.selected_lyrics,
                 lyrics_timing_offset_seconds=dialog.selected_timing_offset,
@@ -4180,8 +4326,21 @@ class MainWindow(QMainWindow):
         )
         for source_type, button in self._source_buttons.items():
             label = self._source_type_label(source_type)
-            button.setText(f"+  {label}")
+            is_variant = source_type in self._source_variant_parents
+            suffix = " 템플릿" if korean else " template"
+            button.setText(
+                f"↳  {label}{suffix}" if is_variant else f"+  {label}"
+            )
             self._update_source_button_help(source_type, button, label)
+        for parent_type, toggle in self._source_variant_toggles.items():
+            expanded = toggle.isChecked()
+            toggle.setText("▾" if expanded else "▸")
+            parent_label = self._source_type_label(parent_type)
+            toggle.setToolTip(
+                f"{parent_label} 변형 템플릿 펼치기/접기"
+                if korean else f"Expand or collapse {parent_label} templates"
+            )
+            toggle.setAccessibleName(toggle.toolTip())
         self._filter_source_cards(self.source_search.text())
         self._update_project_status()
         self.snap_action.setToolTip(

@@ -88,10 +88,13 @@ class MissingMediaDialog(QDialog):
             "음원 찾기" if entry.is_audio and self._korean else
             "글꼴 찾기" if entry.is_font and self._korean else
             "가사 찾기" if entry.is_lyrics and self._korean else
+            "앨범 커버 찾기" if entry.kind == "cover" and self._korean else
             "콘텐츠 찾기" if entry.library_type and self._korean else
             "이미지 찾기" if self._korean else
             "Locate audio" if entry.is_audio else "Locate font" if entry.is_font else
-            "Locate lyrics" if entry.is_lyrics else "Locate content" if entry.library_type else
+            "Locate lyrics" if entry.is_lyrics else
+            "Locate album artwork" if entry.kind == "cover" else
+            "Locate content" if entry.library_type else
             "Locate image",
             str(Path(entry.original_path).parent),
             filter_text,
@@ -112,9 +115,9 @@ class MissingMediaDialog(QDialog):
         self.setWindowTitle("누락된 미디어" if korean else "Missing media")
         self.heading.setText("프로젝트에서 찾을 수 없는 파일" if korean else "Files missing from this project")
         self.description.setText(
-            "각 항목의 새 경로를 지정하세요. 경로를 지정하지 않고 계속하면 이미지 소스는 비워지고, 음원 트랙은 비활성화됩니다."
+            "각 항목의 새 경로를 지정하세요. 경로를 지정하지 않고 계속하면 이미지 소스와 사용자 커버는 비워지고, 음원 트랙은 비활성화됩니다."
             if korean else
-            "Choose a replacement for each item. Continuing without one clears image sources and disables audio tracks."
+            "Choose a replacement for each item. Continuing without one clears image sources and custom covers, and disables audio tracks."
         )
         self.table.setHorizontalHeaderLabels(
             ["종류", "이름", "저장된 경로", "동작"]
@@ -125,10 +128,13 @@ class MissingMediaDialog(QDialog):
                 "음원" if korean and entry.is_audio else
                 "글꼴" if korean and entry.is_font else
                 "가사" if korean and entry.is_lyrics else
+                "앨범 커버" if korean and entry.kind == "cover" else
                 "콘텐츠" if korean and entry.library_type else
                 "이미지" if korean else
                 "Audio" if entry.is_audio else "Font" if entry.is_font else
-                "Lyrics" if entry.is_lyrics else "Content" if entry.library_type else "Image"
+                "Lyrics" if entry.is_lyrics else
+                "Album artwork" if entry.kind == "cover" else
+                "Content" if entry.library_type else "Image"
             )
             self.table.item(row, 0).setText(label)
             button = self.table.cellWidget(row, 3).findChild(QPushButton)

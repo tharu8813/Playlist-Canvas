@@ -64,7 +64,11 @@ class ProjectContentService(QObject):
         for source in document.sources:
             paths.extend(path for path in (source.content_path, source.font_path) if path)
         for track in document.playlist:
-            paths.extend(path for path in (track.file_path, track.lyrics_path) if path)
+            paths.extend(
+                path for path in (
+                    track.file_path, track.lyrics_path, track.cover_path,
+                ) if path
+            )
         self.add_paths(paths)
 
     @staticmethod
