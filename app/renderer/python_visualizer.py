@@ -9,14 +9,14 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from time import monotonic
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 
 from app.animation.curves import (
-    ease_in_quint, ease_out_quint, hidden_scale_factor, slide_distance,
+    ease_in_out_cubic, ease_in_quint, ease_out_quint,
+    hidden_rotation_offset, hidden_scale_factor, slide_distance,
 )
 from app.utils.level_meter_painter import paint_level_meter
 from app.utils.particle_painter import paint_particles
@@ -75,8 +75,9 @@ class PythonVisualizerRenderer:
                 self._analyze_rms(stereo[:, 1], fps, cancel_event),
             )
         paths: list[Path | None] = [None] * len(overlays)
-        encoding_started_at = monotonic()
         layer_progress = [0.0] * len(overlays)
+        layer_frames = [0] * len(overlays)
+        layer_frame_totals = [len(levels)] * len(overlays)
         progress_lock = threading.Lock()
 
         def encode_layer(index: int, overlay: object) -> tuple[int, Path]:
@@ -87,24 +88,29 @@ class PythonVisualizerRenderer:
             if source_levels is None:
                 source_levels = levels
 
-            def report_layer(fraction: float, message: str) -> None:
-                # _encode_layer reports its historical global fraction. Convert
-                # that value back to one layer's completion and aggregate all
-                # concurrent layers into a monotonic overall progress value.
-                local = ((fraction - 0.15) / 0.85 * len(overlays)) - index
+            def report_layer(
+                local: float, completed: int, total: int,
+            ) -> None:
+                # Retain every concurrent layer's latest state and publish one
+                # combined message instead of letting worker messages overwrite
+                # one another in the progress dialog.
                 with progress_lock:
                     layer_progress[index] = max(
                         layer_progress[index], min(1.0, max(0.0, local)),
                     )
+                    layer_frames[index] = max(layer_frames[index], completed)
+                    layer_frame_totals[index] = max(1, total)
                     aggregate = sum(layer_progress) / len(layer_progress)
-                    self._report(
-                        progress_callback, 0.15 + 0.85 * aggregate, message,
+                    message = self._combined_layer_progress_message(
+                        layer_frames, layer_frame_totals,
                     )
+                self._report(
+                    progress_callback, 0.15 + 0.85 * aggregate, message,
+                )
 
             self._encode_layer(
                 path, overlay, source_levels, fps, cancel_event, report_layer,
-                index, len(overlays), stereo_levels, encoding_started_at,
-                track_windows,
+                stereo_levels, track_windows,
             )
             return index, path
 
@@ -166,6 +172,9 @@ class PythonVisualizerRenderer:
         while True:
             if cancel_event.is_set():
                 self._stop_process(process)
+                process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
                 raise PythonVisualizerError("Rendering was cancelled.")
             # ``read`` may wait for the full requested byte count on Windows.
             # ``read1`` returns currently available pipe data, keeping preview
@@ -175,7 +184,11 @@ class PythonVisualizerRenderer:
                 break
             raw.extend(block)
         stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
-        if process.wait() != 0:
+        return_code = process.wait()
+        process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        if return_code != 0:
             raise PythonVisualizerError(stderr.strip() or "Could not decode audio for the visualizer.")
         if not raw:
             return np.zeros(0, dtype=np.float32)
@@ -354,11 +367,8 @@ class PythonVisualizerRenderer:
         all_levels: np.ndarray,
         fps: int,
         cancel_event: threading.Event,
-        progress_callback: Callable[[float, str], None] | None,
-        overlay_index: int,
-        overlay_count: int,
+        progress_callback: Callable[[float, int, int], None] | None,
         stereo_levels: tuple[np.ndarray, np.ndarray] | None = None,
-        encoding_started_at: float | None = None,
         track_windows: Sequence[tuple[float, float]] = (),
     ) -> None:
         """Stream local RGBA frames into an alpha-capable MOV file."""
@@ -394,12 +404,13 @@ class PythonVisualizerRenderer:
                 raw_meter, overlay, fps,
             )
         frame_buffer = QImage()
-        progress_started_at = (
-            encoding_started_at if encoding_started_at is not None else monotonic()
-        )
         for frame_index, selected in enumerate(processed_levels):
             if cancel_event.is_set():
                 self._stop_process(process)
+                if process.stdin is not None:
+                    process.stdin.close()
+                if process.stderr is not None:
+                    process.stderr.close()
                 raise PythonVisualizerError("Rendering was cancelled.")
             channel_values = None
             peak_values = None
@@ -442,6 +453,10 @@ class PythonVisualizerRenderer:
             except (BrokenPipeError, OSError) as error:
                 self._stop_process(process)
                 stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
+                if process.stdin is not None:
+                    process.stdin.close()
+                if process.stderr is not None:
+                    process.stderr.close()
                 raise PythonVisualizerError(
                     stderr.strip() or f"Visualizer encoder stopped unexpectedly: {error}"
                 ) from error
@@ -451,23 +466,17 @@ class PythonVisualizerRenderer:
                 or completed_in_layer % 12 == 0
                 or completed_in_layer == len(processed_levels)
             ):
-                raw_fraction = (
-                    overlay_index + completed_in_layer / len(processed_levels)
-                ) / overlay_count
-                fraction = 0.15 + 0.85 * raw_fraction
-                total_frames = len(processed_levels) * overlay_count
-                completed_frames = overlay_index * len(processed_levels) + completed_in_layer
-                elapsed = max(0.0, monotonic() - progress_started_at)
                 progress_callback(
-                    fraction,
-                    self._frame_progress_message(
-                        overlay_index + 1, overlay_count, completed_in_layer,
-                        len(processed_levels), completed_frames, total_frames, elapsed,
-                    ),
+                    completed_in_layer / len(processed_levels),
+                    completed_in_layer,
+                    len(processed_levels),
                 )
         process.stdin.close()
         stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
-        if process.wait() != 0:
+        return_code = process.wait()
+        if process.stderr is not None:
+            process.stderr.close()
+        if return_code != 0:
             raise PythonVisualizerError(stderr.strip() or "Could not encode the Python visualizer layer.")
 
     @staticmethod
@@ -508,11 +517,15 @@ class PythonVisualizerRenderer:
     ) -> QImage:
         """Apply Canvas-compatible opacity, slide, and zoom to a reactive layer."""
         raw_progress = max(0.0, min(1.0, raw_progress))
-        if entering:
-            visible_progress = ease_out_quint(raw_progress)
-        else:
-            visible_progress = 1.0 - ease_in_quint(raw_progress)
-        if visible_progress <= 0.0:
+        motion_progress = (
+            ease_out_quint(raw_progress)
+            if entering else 1.0 - ease_in_quint(raw_progress)
+        )
+        opacity_progress = (
+            ease_in_out_cubic(raw_progress)
+            if entering else 1.0 - ease_in_out_cubic(raw_progress)
+        )
+        if opacity_progress <= 0.0:
             transparent = QImage(image.size(), QImage.Format.Format_RGBA8888)
             transparent.fill(0)
             return transparent
@@ -520,12 +533,12 @@ class PythonVisualizerRenderer:
         result.fill(0)
         painter = QPainter(result)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.setOpacity(visible_progress)
+        painter.setOpacity(opacity_progress)
         width = float(image.width())
         height = float(image.height())
-        if style == "zoom":
+        if style in {"zoom", "pop", "rotate"}:
             hidden_scale = hidden_scale_factor(style)
-            scale = hidden_scale + (1.0 - hidden_scale) * visible_progress
+            scale = hidden_scale + (1.0 - hidden_scale) * motion_progress
             target_width = width * scale
             target_height = height * scale
             target = QRectF(
@@ -539,7 +552,7 @@ class PythonVisualizerRenderer:
                 source_width if source_width is not None else width,
                 source_height if source_height is not None else height,
             )
-            remaining = distance * (1.0 - visible_progress)
+            remaining = distance * (1.0 - motion_progress)
             dx, dy = {
                 "slide_left": (-remaining, 0.0),
                 "slide_right": (remaining, 0.0),
@@ -547,6 +560,11 @@ class PythonVisualizerRenderer:
                 "slide_down": (0.0, remaining),
             }.get(style, (0.0, 0.0))
             target = QRectF(dx, dy, width, height)
+        if style == "rotate":
+            angle = hidden_rotation_offset(style, entering) * (1.0 - motion_progress)
+            painter.translate(width / 2.0, height / 2.0)
+            painter.rotate(angle)
+            painter.translate(-width / 2.0, -height / 2.0)
         painter.drawImage(target, image)
         painter.end()
         return result
@@ -567,6 +585,32 @@ class PythonVisualizerRenderer:
             remaining = max(0.0, total_frames - completed_frames) / max(0.001, rate)
             message += f" · about {PythonVisualizerRenderer._format_duration(remaining)} remaining"
         return message
+
+    @staticmethod
+    def _combined_layer_progress_message(
+        completed_frames: Sequence[int], total_frames: Sequence[int],
+    ) -> str:
+        """Show every parallel visualizer's latest state in one stable message."""
+        layer_count = len(total_frames)
+        lines = []
+        for index, (completed, total) in enumerate(
+            zip(completed_frames, total_frames, strict=True),
+        ):
+            bounded_total = max(1, total)
+            bounded_completed = min(bounded_total, max(0, completed))
+            percent = 100.0 * bounded_completed / bounded_total
+            lines.append(
+                f"Visualizer {index + 1}/{layer_count} · frame "
+                f"{bounded_completed:,}/{bounded_total:,} · {percent:.1f}%"
+            )
+        completed_total = sum(max(0, value) for value in completed_frames)
+        frame_total = sum(max(1, value) for value in total_frames)
+        overall_percent = 100.0 * completed_total / max(1, frame_total)
+        lines.append(
+            f"All visualizers · frame {completed_total:,}/{frame_total:,}"
+            f" · {overall_percent:.1f}%"
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def _format_duration(seconds: float) -> str:

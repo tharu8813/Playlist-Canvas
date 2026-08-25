@@ -52,12 +52,18 @@ class ShortcutsDialog(QDialog):
         korean = self.translator.language is Language.KOREAN
         self.setWindowTitle("단축키 안내" if korean else "Keyboard shortcuts")
         self.intro.setText(
-            "단축키는 캔버스에 포커스가 있을 때 적용됩니다. 텍스트 입력 중에는 일반 입력을 우선합니다."
+            "패널 단축키는 메인 창 전체에서 동작합니다. 캔버스 편집 단축키는 캔버스에 포커스가 있을 때 적용되며, 텍스트 입력 중에는 일반 입력을 우선합니다."
             if korean else
-            "Canvas shortcuts apply while the Canvas has focus. Text inputs keep their normal editing behavior."
+            "Panel shortcuts work throughout the main window. Canvas editing shortcuts apply while the Canvas has focus, and text inputs keep their normal behavior."
         )
         self.table.setHorizontalHeaderLabels(["키" if korean else "Key", "동작" if korean else "Action"])
         groups = [
+            ("작업 공간" if korean else "Workspace", [
+                ("Ctrl+Alt+L", "왼쪽 요소·콘텐츠·레이어 패널 표시 전환" if korean else "Toggle the left Sources, Content, and Layers panel"),
+                ("Ctrl+Alt+R", "오른쪽 속성 패널 표시 전환" if korean else "Toggle the right properties panel"),
+                ("Ctrl+Alt+B", "하단 작업 패널 표시 전환" if korean else "Toggle the bottom workspace"),
+                ("Ctrl+Alt+1 / 2", "플레이리스트 / 타임라인 열기" if korean else "Open Playlist / Timeline"),
+            ]),
             ("기본 편집" if korean else "Essential editing", [
                 ("Ctrl+X / Ctrl+C / Ctrl+V", "잘라내기 / 복사 / 붙여넣기" if korean else "Cut / copy / paste selected sources"),
                 ("Ctrl+D", "선택 요소 복제" if korean else "Duplicate selected sources"),

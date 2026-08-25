@@ -176,7 +176,7 @@ class ProjectDocument:
         for content in content_models:
             if not isinstance(content.path, str) or not isinstance(content.name, str):
                 raise ValueError("Project content paths and names must be strings.")
-            if content.media_type not in {"audio", "image", "font", "lyrics"}:
+            if content.media_type not in {"audio", "video", "image", "font", "lyrics"}:
                 raise ValueError("Project content media type is not supported.")
 
         theme = data.get("theme", "dark")

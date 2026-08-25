@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSettings, QSize, Qt, Signal
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF,
+    QColor, QDrag, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListView,
@@ -15,7 +15,26 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.project_content_service import ProjectContentService
+from app.dialogs.content_preview_dialog import ContentPreviewDialog
 from app.utils.i18n import Language, Translator
+
+
+class ContentListWidget(QListWidget):
+    """Expose library paths as file URLs so dropping is the only add gesture."""
+
+    def startDrag(self, supported_actions: Qt.DropAction) -> None:
+        item = self.currentItem()
+        if item is None:
+            return
+        path = Path(str(item.data(Qt.ItemDataRole.UserRole + 1)))
+        if not path.is_file():
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path))])
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(item.icon().pixmap(self.iconSize()))
+        drag.exec(Qt.DropAction.CopyAction)
 
 
 class ContentLibraryPanel(QWidget):
@@ -44,7 +63,7 @@ class ContentLibraryPanel(QWidget):
         self.filter_label.setObjectName("mutedLabel")
         self.filter_combo = QComboBox()
         self.filter_combo.setObjectName("projectContentFilter")
-        for value in ("all", "image", "audio", "lyrics", "font"):
+        for value in ("all", "image", "video", "audio", "lyrics", "font"):
             self.filter_combo.addItem(value, value)
         self.filter_count_label = QLabel()
         self.filter_count_label.setObjectName("mutedLabel")
@@ -74,27 +93,26 @@ class ContentLibraryPanel(QWidget):
             self.view_buttons[mode] = button
             view_row.addWidget(button)
         layout.addLayout(view_row)
-        self.list = QListWidget()
+        self.list = ContentListWidget()
         self.list.setObjectName("projectContentList")
         self.list.setIconSize(QSize(38, 38))
         self.list.setSpacing(2)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.list.setDragEnabled(True)
+        self.list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.list.itemDoubleClicked.connect(lambda _item: self._add_selected())
+        self.list.itemDoubleClicked.connect(lambda _item: self._preview_selected())
         self.list.itemSelectionChanged.connect(self._update_buttons)
         self.list.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.list, 1)
         row = QHBoxLayout()
         self.import_button = QPushButton()
-        self.add_button = QPushButton()
         self.remove_button = QPushButton()
         row.addWidget(self.import_button)
         row.addStretch()
         row.addWidget(self.remove_button)
-        row.addWidget(self.add_button)
         layout.addLayout(row)
         self.import_button.clicked.connect(self._import_files)
-        self.add_button.clicked.connect(self._add_selected)
         self.remove_button.clicked.connect(self._remove_selected)
         self.filter_combo.currentIndexChanged.connect(self._filter_changed)
         self.service.changed.connect(self.refresh)
@@ -103,7 +121,7 @@ class ContentLibraryPanel(QWidget):
         self._view_mode = saved_view if saved_view in self.VIEW_MODES else "list"
         saved_filter = str(QSettings().value("project_content/filter", "all"))
         self._filter = (
-            saved_filter if saved_filter in {"all", "image", "audio", "lyrics", "font"}
+            saved_filter if saved_filter in {"all", "image", "video", "audio", "lyrics", "font"}
             else "all"
         )
         self.filter_combo.setCurrentIndex(
@@ -124,17 +142,18 @@ class ContentLibraryPanel(QWidget):
     def retranslate(self) -> None:
         korean = self.translator.language is Language.KOREAN
         self.help_label.setText(
-            "프로젝트에서 재사용할 이미지·음원·폰트·가사 파일입니다. "
-            "더블클릭하면 캔버스 또는 플레이리스트에 추가됩니다."
+            "프로젝트에서 재사용할 이미지·영상·음원·폰트·가사 파일입니다. "
+            "더블클릭은 미리보기, 캔버스로 드래그하면 추가됩니다."
             if korean else
-            "Reusable images, audio, fonts, and lyrics. Double-click to add an item "
-            "to the canvas or playlist."
+            "Reusable images, videos, audio, fonts, and lyrics. Double-click to preview; "
+            "drag onto the Canvas to add."
         )
         self.view_label.setText("보기" if korean else "View")
         self.filter_label.setText("필터" if korean else "Filter")
         filter_text = {
             "all": "전체" if korean else "All",
             "image": "이미지" if korean else "Images",
+            "video": "영상" if korean else "Videos",
             "audio": "오디오" if korean else "Audio",
             "lyrics": "가사 / 자막" if korean else "Lyrics / subtitles",
             "font": "폰트" if korean else "Fonts",
@@ -160,13 +179,12 @@ class ContentLibraryPanel(QWidget):
             button.setToolTip(view_help[mode])
             button.setAccessibleName(view_text[mode])
         self.import_button.setText("콘텐츠 가져오기" if korean else "Import content")
-        self.add_button.setText("프로젝트에 추가" if korean else "Add to project")
         self.remove_button.setText("목록에서 제거" if korean else "Remove")
         self.refresh()
 
     def _filter_changed(self, _index: int) -> None:
         selected = str(self.filter_combo.currentData() or "all")
-        if selected not in {"all", "image", "audio", "lyrics", "font"}:
+        if selected not in {"all", "image", "video", "audio", "lyrics", "font"}:
             selected = "all"
         self._filter = selected
         settings = QSettings()
@@ -222,6 +240,7 @@ class ContentLibraryPanel(QWidget):
         korean = self.translator.language is Language.KOREAN
         labels = {
             "image": "이미지" if korean else "Image",
+            "video": "영상" if korean else "Video",
             "audio": "오디오" if korean else "Audio",
             "font": "폰트" if korean else "Font",
             "lyrics": "가사 / 자막" if korean else "Lyrics / subtitles",
@@ -300,6 +319,7 @@ class ContentLibraryPanel(QWidget):
         """Create a crisp, theme-safe icon for a project content category."""
         colors = {
             "image": QColor("#36A2EB"),
+            "video": QColor("#EC4899"),
             "audio": QColor("#8B5CF6"),
             "font": QColor("#F59E0B"),
             "lyrics": QColor("#14B8A6"),
@@ -330,6 +350,12 @@ class ContentLibraryPanel(QWidget):
                 QPointF(11.0, 27.0), QPointF(17.0, 20.0),
                 QPointF(21.0, 24.0), QPointF(24.0, 21.0),
                 QPointF(30.0, 27.0),
+            ]))
+        elif media_type == "video":
+            painter.drawRoundedRect(QRectF(8.0, 11.0, 19.0, 18.0), 3.0, 3.0)
+            painter.drawPolygon(QPolygonF([
+                QPointF(29.0, 16.0), QPointF(35.0, 13.0),
+                QPointF(35.0, 27.0), QPointF(29.0, 24.0),
             ]))
         elif media_type == "audio":
             painter.drawLine(QPointF(19.0, 12.0), QPointF(19.0, 26.0))
@@ -366,7 +392,7 @@ class ContentLibraryPanel(QWidget):
             self,
             "콘텐츠 가져오기" if self.translator.language is Language.KOREAN else "Import content",
             "",
-            "Supported content (*.jpg *.jpeg *.png *.webp *.svg *.mp3 *.wav *.flac "
+            "Supported content (*.jpg *.jpeg *.png *.webp *.svg *.mp4 *.mov *.mkv *.webm *.avi *.m4v *.mp3 *.wav *.flac "
             "*.aac *.m4a *.ogg *.ttf *.otf *.woff *.woff2 *.lrc *.srt *.vtt)",
         )
         if paths:
@@ -383,6 +409,18 @@ class ContentLibraryPanel(QWidget):
                 str(item.data(Qt.ItemDataRole.UserRole + 1)),
                 str(item.data(Qt.ItemDataRole.UserRole + 2)),
             )
+
+    def _preview_selected(self) -> None:
+        item = self.list.currentItem()
+        if item is None:
+            return
+        dialog = ContentPreviewDialog(
+            str(item.data(Qt.ItemDataRole.UserRole + 1)),
+            str(item.data(Qt.ItemDataRole.UserRole + 2)),
+            self.translator.language is Language.KOREAN,
+            self,
+        )
+        dialog.exec()
 
     def _remove_selected(self) -> None:
         content_id = self._selected_id()
@@ -402,13 +440,11 @@ class ContentLibraryPanel(QWidget):
         korean = self.translator.language is Language.KOREAN
         menu = QMenu(self)
         if item is not None:
-            add_action = menu.addAction(
-                "프로젝트에 추가" if korean else "Add to project",
-                self._add_selected,
+            preview_action = menu.addAction(
+                "미리보기" if korean else "Preview",
+                self._preview_selected,
             )
-            add_action.setData("add")
-            available = Path(str(item.data(Qt.ItemDataRole.UserRole + 1))).is_file()
-            add_action.setEnabled(available)
+            preview_action.setData("preview")
 
             remove_action = menu.addAction(
                 "목록에서 제거" if korean else "Remove from list",
@@ -482,5 +518,4 @@ class ContentLibraryPanel(QWidget):
 
     def _update_buttons(self) -> None:
         enabled = self.list.currentItem() is not None
-        self.add_button.setEnabled(enabled)
         self.remove_button.setEnabled(enabled)

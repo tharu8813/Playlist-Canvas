@@ -60,5 +60,21 @@ class HistoryService(QObject):
         self._emit_changed()
         return self._copy(self._snapshots[self._index])
 
+    def retained_source_ids(self) -> set[str]:
+        """Return source IDs reachable from any current Undo/redo snapshot."""
+        retained: set[str] = set()
+        for snapshot in self._snapshots:
+            sources = snapshot.get("sources", [])
+            if not isinstance(sources, list):
+                continue
+            retained.update(
+                source_id
+                for source in sources
+                if isinstance(source, dict)
+                for source_id in [source.get("id")]
+                if isinstance(source_id, str) and source_id
+            )
+        return retained
+
     def _emit_changed(self) -> None:
         self.changed.emit(self._index > 0, self._index < len(self._snapshots) - 1)

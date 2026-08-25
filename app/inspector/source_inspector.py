@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from app.models.source import Source, SourceType
 from app.dialogs.text_editor_dialog import TextEditorDialog
+from app.dialogs.video_source_dialog import VideoSourceDialog
 from app.services.source_store import SourceStore
 from app.utils.font_loader import load_application_font
 from app.utils.i18n import Translator
@@ -39,6 +41,7 @@ class SourceInspector(QScrollArea):
 
     IMAGE_BACKED_TYPES = {
         SourceType.IMAGE,
+        SourceType.VIDEO,
         SourceType.BACKGROUND,
         SourceType.ALBUM_COVER,
         SourceType.LOGO,
@@ -113,6 +116,8 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "name", self.name_edit)
         self._add_labeled_row(content_form, "text", text_row)
         self._add_labeled_row(content_form, "file", file_row)
+        self.video_settings_button = QPushButton()
+        self._add_labeled_row(content_form, "video_settings", self.video_settings_button)
 
         self.shape_kind_combo = QComboBox()
         for label, value in (("Rectangle", "rectangle"), ("Circle", "circle"), ("Line", "line")):
@@ -418,7 +423,8 @@ class SourceInspector(QScrollArea):
         for combo in (self.animation_in_combo, self.animation_out_combo):
             for label, value in (("None", "none"), ("Fade", "fade"), ("Slide left", "slide_left"),
                                  ("Slide right", "slide_right"), ("Slide up", "slide_up"),
-                                 ("Slide down", "slide_down"), ("Zoom", "zoom")):
+                                 ("Slide down", "slide_down"), ("Zoom", "zoom"),
+                                 ("Pop", "pop"), ("Rotate", "rotate")):
                 combo.addItem(label, value)
         self.animation_in_duration_spin = self._spin(0.1, 3, 0.05)
         self.animation_out_duration_spin = self._spin(0.1, 3, 0.05)
@@ -741,9 +747,11 @@ class SourceInspector(QScrollArea):
         )
         self._set_field_visible(
             "file", source_type in self.IMAGE_BACKED_TYPES
+            and source_type is not SourceType.VIDEO
             and (not is_background or (source is not None and source.background_mode == "image"))
         )
         self._set_field_visible("shape", source_type is SourceType.SHAPE)
+        self._set_field_visible("video_settings", source_type is SourceType.VIDEO)
         self._set_field_visible("progress_style", source_type is SourceType.PROGRESS_BAR)
         self._set_field_visible("visualizer_style", source_type is SourceType.AUDIO_VISUALIZER)
         self._set_field_visible("visualizer_bars", source_type is SourceType.AUDIO_VISUALIZER)
@@ -842,6 +850,7 @@ class SourceInspector(QScrollArea):
         )
         self.expand_text_button.clicked.connect(self._open_expanded_text_editor)
         self.file_button.clicked.connect(self._choose_content_file)
+        self.video_settings_button.clicked.connect(self._open_video_settings)
         self.clear_file_button.clicked.connect(lambda: self._update("content_path", ""))
         self.shape_kind_combo.currentIndexChanged.connect(
             lambda _index: self._update("shape_kind", self.shape_kind_combo.currentData())
@@ -1159,6 +1168,48 @@ class SourceInspector(QScrollArea):
         if path:
             self._update("content_path", path)
 
+    def _open_video_settings(self) -> None:
+        source = self.store.get(self._source_id)
+        if source is None or source.source_type is not SourceType.VIDEO:
+            return
+        dialog = VideoSourceDialog(
+            source, self.translator.language.value == "ko", self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._apply_updates(dialog.values)
+
+    def _update_video_settings_button(self, source: Source | None) -> None:
+        """Summarize the video's scope before opening its detailed settings."""
+        korean = self.translator.language.value == "ko"
+        if source is None or source.source_type is not SourceType.VIDEO:
+            self.video_settings_button.setText(
+                "영상 재생 설정…" if korean else "Video playback settings…"
+            )
+            return
+        if source.video_timing_mode == "track":
+            text = (
+                "곡마다 다른 영상 · 설정…"
+                if korean else "Different videos per track · Settings…"
+            )
+            description = (
+                "각 곡의 ‘이 곡의 영상’ 목록을 사용합니다."
+                if korean else "Uses each track's ‘Videos for this track’ list."
+            )
+        else:
+            count = len(source.video_paths)
+            text = (
+                f"전체에서 같은 영상 · {count}개 · 설정…"
+                if korean else f"Same videos for whole playlist · {count} · Settings…"
+            )
+            description = (
+                "곡이 바뀌어도 이 요소에 등록한 영상 목록을 이어서 사용합니다."
+                if korean else
+                "Continues using this source's video list when the track changes."
+            )
+        self.video_settings_button.setText(text)
+        self.video_settings_button.setToolTip(description)
+        self.video_settings_button.setAccessibleDescription(description)
+
     def _choose_color(self, field: str, _button: QPushButton) -> None:
         source = self.store.get(self._source_id)
         if source is None:
@@ -1257,6 +1308,7 @@ class SourceInspector(QScrollArea):
     def retranslate(self) -> None:
         labels = {
             "name": ("이름", "Name"), "text": ("텍스트", "Text"), "file": ("파일", "File"),
+            "video_settings": ("영상 사용 범위", "Video scope"),
             "shape": ("도형", "Shape"), "progress_style": ("진행 바 스타일", "Progress style"),
             "visualizer_style": ("비주얼라이저 스타일", "Visualizer style"),
             "visualizer_bars": ("막대 / 점 개수", "Bars / dots"),
@@ -1366,6 +1418,9 @@ class SourceInspector(QScrollArea):
         self.locked_check.setText("잠금" if korean else "Locked")
         self.file_button.setText("찾아보기" if korean else "Browse")
         self.clear_file_button.setText("제거" if korean else "Clear")
+        self._update_video_settings_button(
+            self.store.get(self._source_id) if self._source_id else None
+        )
         self.expand_text_button.setText("확장…" if korean else "Expand…")
         self.expand_text_button.setToolTip(
             "긴 텍스트를 별도의 창에서 편집합니다."
@@ -1379,6 +1434,16 @@ class SourceInspector(QScrollArea):
         )
         for index, label in enumerate(overflow_labels):
             self.text_overflow_combo.setItemText(index, label)
+        animation_labels = (
+            ("없음", "페이드", "왼쪽 슬라이드", "오른쪽 슬라이드",
+             "위쪽 슬라이드", "아래쪽 슬라이드", "줌", "팝", "회전")
+            if korean else
+            ("None", "Fade", "Slide left", "Slide right", "Slide up",
+             "Slide down", "Zoom", "Pop", "Rotate")
+        )
+        for combo in (self.animation_in_combo, self.animation_out_combo):
+            for index, label in enumerate(animation_labels):
+                combo.setItemText(index, label)
         track_style_labels = (
             ("컴팩트", "카드", "재생 대기열", "미니멀", "스크롤 / 페이드", "글래스", "필")
             if korean else
@@ -1811,6 +1876,7 @@ class SourceInspector(QScrollArea):
             self.name_edit.setText(source.name)
             self.text_edit.setText(source.text)
             self.file_path_edit.setText(source.content_path)
+            self._update_video_settings_button(source)
             self.x_spin.setValue(source.x)
             self.y_spin.setValue(source.y)
             self.width_spin.setValue(source.width)

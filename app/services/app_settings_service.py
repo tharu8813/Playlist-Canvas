@@ -32,6 +32,7 @@ ENCODING_PRESETS = (
     "slow", "slower", "veryslow",
 )
 AUDIO_BITRATES = ("128k", "192k", "256k", "320k")
+PREVIEW_BACKENDS = ("gpu_layers", "cpu")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +49,7 @@ class AppSettings:
     audio_bitrate: str = "192k"
     smooth_scrolling: bool = True
     smooth_scroll_duration_ms: int = 180
+    preview_backend: str = "gpu_layers"
     # Per-export dimensions derived from the active project ratio. They are not
     # persisted as app-wide defaults because every project can have a different ratio.
     render_width: int = 0
@@ -106,6 +108,10 @@ class AppSettingsService(QObject):
             smooth_scroll_duration_ms=max(
                 80, min(420, int(settings.smooth_scroll_duration_ms))
             ),
+            preview_backend=(
+                settings.preview_backend
+                if settings.preview_backend in PREVIEW_BACKENDS else "gpu_layers"
+            ),
         )
         self._settings.beginGroup("export")
         self._settings.setValue("ffmpeg_path", normalized.ffmpeg_path)
@@ -122,6 +128,7 @@ class AppSettingsService(QObject):
         self._settings.setValue(
             "smooth_scroll_duration_ms", normalized.smooth_scroll_duration_ms
         )
+        self._settings.setValue("preview_backend", normalized.preview_backend)
         self._settings.endGroup()
         self._current = normalized
         self.changed.emit(normalized)
@@ -146,8 +153,13 @@ class AppSettingsService(QObject):
             smooth_scroll_duration_ms=max(
                 80, min(420, self._int_value("smooth_scroll_duration_ms", 180))
             ),
+            preview_backend=str(
+                self._settings.value("preview_backend", "gpu_layers")
+            ),
         )
         self._settings.endGroup()
+        if values.preview_backend not in PREVIEW_BACKENDS:
+            values = replace(values, preview_backend="gpu_layers")
         return values
 
     def _int_value(self, key: str, default: int) -> int:

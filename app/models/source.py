@@ -13,6 +13,7 @@ class SourceType(str, Enum):
     """Kinds of visual source supported by the editor."""
 
     IMAGE = "image"
+    VIDEO = "video"
     TEXT = "text"
     SHAPE = "shape"
     PROGRESS_BAR = "progress_bar"
@@ -86,6 +87,16 @@ class Source:
     text_alignment: str = "center"
     text_overflow: str = "wrap"
     content_path: str = ""
+    video_paths: list[str] = field(default_factory=list)
+    video_timing_mode: str = "timeline"
+    video_repeat_mode: str = "once"
+    video_cycle_count: int = 1
+    video_cycle_unlimited: bool = False
+    video_speed: float = 1.0
+    video_muted: bool = True
+    video_saturation: float = 1.0
+    video_grayscale: bool = False
+    video_random_seed: int = 17
     image_fit_mode: str = "cover"
     background_mode: str = "color"
     background_ambient: bool = False
@@ -240,6 +251,20 @@ class Source:
             raise ValueError(f"Source '{source.name}' dimensions are unexpectedly large.")
         if source.timeline_start < 0 or source.timeline_duration < 0:
             raise ValueError(f"Source '{source.name}' timeline values cannot be negative.")
+        if source.video_timing_mode not in {"track", "timeline"}:
+            raise ValueError(f"Source '{source.name}' has an invalid video timing mode.")
+        if source.video_repeat_mode not in {"once", "loop_one", "sequence", "random"}:
+            raise ValueError(f"Source '{source.name}' has an invalid video repeat mode.")
+        if not isinstance(source.video_paths, list) or not all(
+            isinstance(path, str) for path in source.video_paths
+        ):
+            raise ValueError(f"Source '{source.name}' has invalid video paths.")
+        if source.video_cycle_count < 1 or source.video_cycle_count > 100_000:
+            raise ValueError(f"Source '{source.name}' video cycle count is out of range.")
+        if not 0.05 <= source.video_speed <= 8.0:
+            raise ValueError(f"Source '{source.name}' video speed is out of range.")
+        if not 0.0 <= source.video_saturation <= 3.0:
+            raise ValueError(f"Source '{source.name}' video saturation is out of range.")
         bounded_integers = {
             "visualizer_bars": (4, 96),
             "subtitle_context_lines": (0, 6),
@@ -248,6 +273,7 @@ class Source:
             "level_meter_segments": (3, 64),
             "particle_density": (4, 500),
             "particle_seed": (0, 999_999),
+            "video_random_seed": (0, 999_999),
         }
         for name, (minimum, maximum) in bounded_integers.items():
             value = getattr(source, name)

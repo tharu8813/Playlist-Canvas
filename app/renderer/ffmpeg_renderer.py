@@ -7,19 +7,23 @@ import subprocess
 import sys
 import threading
 import os
+import logging
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import cos, radians, sin
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkstemp
 
 from PySide6.QtGui import QImage, QImageReader
 
 from app.models.playlist import PlaylistTrack
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
 from app.utils.subprocess_utils import hidden_process_kwargs
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class FFmpegNotFoundError(RuntimeError):
@@ -64,11 +68,32 @@ class RenderFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedVideoInput:
+    """A CFR Canvas stream prepared without a PNG image sequence."""
+
+    path: Path
+    duration_seconds: float
+    width: int
+    height: int
+    fps: int
+    ready_for_mux: bool = False
+    encoded_codec: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class StaticOverlayLayer:
     """A transparent, time-synchronised Canvas Z band for compositing."""
 
     z_index: float
     frames: list[RenderFrame]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedStaticOverlayLayer:
+    """A lossless static Z band prepared as colour and alpha video tracks."""
+
+    z_index: float
+    video: PreparedVideoInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +158,43 @@ class VisualizerOverlay:
     animation_out_duration: float = 0.45
 
 
+@dataclass(frozen=True, slots=True)
+class VideoClipOverlay:
+    """One scheduled video-file interval composited as a Canvas source."""
+
+    path: Path
+    timeline_start: float
+    duration_seconds: float
+    media_start_seconds: float
+    x: int
+    y: int
+    width: int
+    height: int
+    z_index: float
+    rotation: float = 0.0
+    opacity: float = 1.0
+    fit_mode: str = "cover"
+    fill_color: str = "#000000"
+    border_radius: float = 0.0
+    brightness: float = 0.0
+    contrast: float = 0.0
+    saturation: float = 1.0
+    grayscale: bool = False
+    blur: float = 0.0
+    speed: float = 1.0
+    loop_input: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class VideoFileInput:
+    """One physical FFmpeg input shared by matching scheduled occurrences."""
+
+    path: Path
+    media_start_seconds: float
+    duration_seconds: float
+    loop_input: bool = False
+
+
 class FFmpegRenderer:
     """Normalizes tracks, concatenates them with FFmpeg, then renders an MP4."""
 
@@ -160,12 +222,14 @@ class FFmpegRenderer:
             return Path(found)
         raise FFmpegNotFoundError("FFmpeg executable was not found.")
 
-    def render(self, image: QImage | list[QImage] | list[RenderFrame], tracks: list[PlaylistTrack], output_path: str | Path,
+    def render(self, image: QImage | list[QImage] | list[RenderFrame] | PreparedVideoInput,
+               tracks: list[PlaylistTrack], output_path: str | Path,
                settings: RenderSettings | None = None,
                progress_callback: Callable[[str, float, str], None] | None = None,
                cancel_event: threading.Event | None = None,
                visualizers: list[VisualizerOverlay] | None = None,
-               static_layers: list[StaticOverlayLayer] | None = None) -> RenderResult:
+               static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer] | None = None,
+               video_clips: list[VideoClipOverlay] | None = None) -> RenderResult:
         """Create a static Canvas video whose audio is the ordered enabled playlist."""
         cancel_event = cancel_event or threading.Event()
         if cancel_event.is_set():
@@ -181,39 +245,96 @@ class FFmpegRenderer:
                 f"Audio duration could not be determined: {invalid_track.title}"
             )
         visualizers = visualizers or []
+        video_clips = video_clips or []
+        video_file_inputs, video_input_slots = self._video_input_plan(video_clips)
         static_layers = static_layers or []
-        supplied_frames = list(image) if isinstance(image, list) else [image]
-        if not supplied_frames:
+        prepared_video = image if isinstance(image, PreparedVideoInput) else None
+        supplied_frames = (
+            [] if prepared_video is not None
+            else list(image) if isinstance(image, list) else [image]
+        )
+        if prepared_video is None and not supplied_frames:
             raise RenderError("No Canvas frames were supplied for export.")
-        explicit_frames = bool(supplied_frames and isinstance(supplied_frames[0], RenderFrame))
-        if explicit_frames and not all(isinstance(frame, RenderFrame) for frame in supplied_frames):
+        explicit_frames = bool(
+            supplied_frames and isinstance(supplied_frames[0], RenderFrame)
+        )
+        if explicit_frames and not all(
+            isinstance(frame, RenderFrame) for frame in supplied_frames
+        ):
             raise RenderError("Export frames must use one consistent frame format.")
-        frames = [frame.image for frame in supplied_frames] if explicit_frames else supplied_frames
-        durations = [frame.duration_seconds for frame in supplied_frames] if explicit_frames else []
+        frames = (
+            [frame.image for frame in supplied_frames]
+            if explicit_frames else supplied_frames
+        )
+        durations = (
+            [frame.duration_seconds for frame in supplied_frames]
+            if explicit_frames else []
+        )
         if explicit_frames and any(duration <= 0 for duration in durations):
             raise RenderError("Each Canvas frame duration must be greater than zero.")
-        if not explicit_frames and len(frames) not in {1, len(active_tracks)}:
-            raise RenderError("The number of Canvas frames does not match the enabled playlist tracks.")
-        if len(frames) == 1 and len(active_tracks) > 1:
+        if (prepared_video is None and not explicit_frames
+                and len(frames) not in {1, len(active_tracks)}):
+            raise RenderError(
+                "The number of Canvas frames does not match the enabled playlist tracks."
+            )
+        if prepared_video is None and len(frames) == 1 and len(active_tracks) > 1:
             frames *= len(active_tracks)
         self._report(
             progress_callback, "Preparing export", 0.005,
-            f"Validating visual frames 0/{len(frames)}",
-        )
-        self._validate_frames(
-            frames,
-            lambda completed, total: self._report(
-                progress_callback, "Preparing export",
-                0.005 + 0.015 * completed / max(1, total),
-                f"Validating visual frames {completed}/{total}",
+            (
+                "Validating lossless Canvas stream"
+                if prepared_video is not None
+                else f"Validating visual frames 0/{len(frames)}"
             ),
         )
+        if prepared_video is not None:
+            if (not prepared_video.path.is_file()
+                    or prepared_video.duration_seconds <= 0.0
+                    or prepared_video.width <= 0 or prepared_video.height <= 0):
+                raise RenderError("The prepared Canvas video is missing or invalid.")
+        else:
+            self._validate_frames(
+                frames,
+                lambda completed, total: self._report(
+                    progress_callback, "Preparing export",
+                    0.005 + 0.015 * completed / max(1, total),
+                    f"Validating visual frames {completed}/{total}",
+                ),
+            )
         missing = [track.file_path for track in active_tracks if not Path(track.file_path).is_file()]
         if missing:
             raise RenderError(f"Audio file is missing: {missing[0]}")
         selected_settings = settings or RenderSettings()
         self._validate_settings(selected_settings)
-        self.ensure_encoder_available(selected_settings.video_codec)
+        if prepared_video is not None and prepared_video.fps != selected_settings.fps:
+            raise RenderError(
+                "The prepared Canvas video frame rate does not match export settings."
+            )
+        direct_mux = bool(
+            prepared_video is not None
+            and prepared_video.ready_for_mux
+            and not visualizers
+            and not video_clips
+            and not static_layers
+        )
+        if prepared_video is not None and prepared_video.ready_for_mux:
+            if not direct_mux:
+                raise RenderError(
+                    "A directly encoded Canvas stream cannot be used with additional visual layers."
+                )
+            if prepared_video.encoded_codec != selected_settings.video_codec:
+                raise RenderError(
+                    "The prepared Canvas video codec does not match the selected encoder."
+                )
+            if (
+                prepared_video.width != selected_settings.output_width
+                or prepared_video.height != selected_settings.output_height
+            ):
+                raise RenderError(
+                    "The prepared Canvas video resolution does not match the export settings."
+                )
+        if not direct_mux:
+            self.ensure_encoder_available(selected_settings.video_codec)
         if cancel_event.is_set():
             raise RenderCancelledError("Rendering was cancelled.")
         self._report(progress_callback, "Preparing export", 0.02, "Preparing temporary files")
@@ -223,23 +344,36 @@ class FFmpegRenderer:
         target.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix="playlist-video-") as temporary_directory:
             temporary = Path(temporary_directory)
-            frame_paths: list[Path] = []
-            for index, frame in enumerate(frames):
-                if cancel_event.is_set():
-                    raise RenderCancelledError("Rendering was cancelled.")
-                if isinstance(frame, Path):
-                    frame_path = frame.resolve()
-                    if not frame_path.is_file():
-                        raise RenderError(f"A staged export frame is missing: {frame_path}")
-                else:
-                    frame_path = temporary / f"canvas_{index:04d}.png"
-                    if not frame.save(str(frame_path), "PNG"):
-                        raise RenderError("Could not create a temporary Canvas image.")
-                frame_paths.append(frame_path)
-            visual_sequence = (
-                list(zip(frame_paths, durations, strict=True))
-                if explicit_frames else self._visual_sequence(active_tracks, frame_paths)
-            )
+            if prepared_video is not None:
+                prepared_path = prepared_video.path.resolve()
+                visual_sequence = [
+                    (prepared_path, prepared_video.duration_seconds),
+                ]
+                base_input_arguments = ["-i", str(prepared_path)]
+            else:
+                frame_paths: list[Path] = []
+                for index, frame in enumerate(frames):
+                    if cancel_event.is_set():
+                        raise RenderCancelledError("Rendering was cancelled.")
+                    if isinstance(frame, Path):
+                        frame_path = frame.resolve()
+                        if not frame_path.is_file():
+                            raise RenderError(
+                                f"A staged export frame is missing: {frame_path}"
+                            )
+                    else:
+                        frame_path = temporary / f"canvas_{index:04d}.png"
+                        if not frame.save(str(frame_path), "PNG"):
+                            raise RenderError(
+                                "Could not create a temporary Canvas image."
+                            )
+                    frame_paths.append(frame_path)
+                visual_sequence = (
+                    list(zip(frame_paths, durations, strict=True))
+                    if explicit_frames
+                    else self._visual_sequence(active_tracks, frame_paths)
+                )
+                base_input_arguments = []
             total_duration = self._timeline_duration(active_tracks)
             self._validate_visual_timeline(
                 visual_sequence, static_layers, total_duration, selected_settings.fps,
@@ -304,10 +438,14 @@ class FFmpegRenderer:
                     raise RenderError(str(error)) from error
             encoding_start = 0.78 if visualizers else 0.66
             encoding_span = 0.21 if visualizers else 0.33
-            static_concat_paths: list[tuple[float, Path]] = []
+            static_inputs: list[tuple[float, Path, str]] = []
             static_stage_start = 0.76 if visualizers else 0.64
             static_stage_span = max(0.0, encoding_start - static_stage_start)
-            static_frame_total = sum(len(layer.frames) for layer in static_layers)
+            static_frame_total = sum(
+                len(layer.frames)
+                for layer in static_layers
+                if isinstance(layer, StaticOverlayLayer)
+            )
             # Each static frame is first validated and then staged/registered.
             # Counting both passes prevents the UI from appearing frozen during
             # header validation on projects with thousands of PNG frames.
@@ -321,6 +459,22 @@ class FFmpegRenderer:
             for layer_index, layer in enumerate(static_layers):
                 if cancel_event.is_set():
                     raise RenderCancelledError("Rendering was cancelled.")
+                if isinstance(layer, PreparedStaticOverlayLayer):
+                    prepared_layer = layer.video
+                    if (not prepared_layer.path.is_file()
+                            or prepared_layer.width <= 0 or prepared_layer.height <= 0
+                            or prepared_layer.fps != selected_settings.fps
+                            or (prepared_video is not None and (
+                                prepared_layer.width != prepared_video.width
+                                or prepared_layer.height != prepared_video.height
+                            ))):
+                        raise RenderError(
+                            "A prepared static overlay video is missing or invalid."
+                        )
+                    static_inputs.append((
+                        layer.z_index, prepared_layer.path.resolve(), "alpha_pair",
+                    ))
+                    continue
                 if not layer.frames:
                     continue
                 layer_images = [frame.image for frame in layer.frames]
@@ -375,25 +529,51 @@ class FFmpegRenderer:
                     layer_manifest,
                     list(zip(layer_paths, [frame.duration_seconds for frame in layer.frames], strict=True)),
                 )
-                static_concat_paths.append((layer.z_index, layer_manifest))
-            video_concat_path = temporary / "video.ffconcat"
-            self._write_visual_concat(video_concat_path, visual_sequence)
+                static_inputs.append((layer.z_index, layer_manifest, "concat"))
+            if prepared_video is None:
+                video_concat_path = temporary / "video.ffconcat"
+                self._write_visual_concat(video_concat_path, visual_sequence)
+                base_input_arguments = [
+                    "-f", "concat", "-safe", "0", "-i", str(video_concat_path),
+                ]
 
             def encoding_progress(line: str) -> None:
                 seconds = self._parse_progress_seconds(line)
                 if seconds is not None and total_duration > 0:
                     fraction = min(1.0, seconds / total_duration)
                     self._report(
-                        progress_callback, "Encoding video",
+                        progress_callback,
+                        "Finalizing export" if direct_mux else "Encoding video",
                         encoding_start + fraction * encoding_span,
-                        f"Encoding {seconds:.1f}s / {total_duration:.1f}s",
+                        (
+                            f"Muxing {seconds:.1f}s / {total_duration:.1f}s"
+                            if direct_mux else
+                            f"Encoding {seconds:.1f}s / {total_duration:.1f}s"
+                        ),
                     )
 
             self._report(
-                progress_callback, "Encoding video", encoding_start,
-                "Rendering the final video",
+                progress_callback,
+                "Finalizing export" if direct_mux else "Encoding video",
+                encoding_start,
+                (
+                    "Muxing prepared video and audio"
+                    if direct_mux else "Rendering the final video"
+                ),
             )
-            temporary_video = temporary / "rendered_video.mp4"
+            try:
+                output_descriptor, output_staging_name = mkstemp(
+                    prefix=f".{target.stem}-",
+                    suffix=".rendering.mp4",
+                    dir=target.parent,
+                )
+                os.close(output_descriptor)
+            except OSError as error:
+                raise RenderError(
+                    "Could not create a temporary output video beside the selected "
+                    "destination. Check the destination folder and try again."
+                ) from error
+            temporary_video = Path(output_staging_name)
             video_arguments = [
                 # Let FFmpeg use all available CPU workers for PNG decoding,
                 # filtering and software encoding. Hardware encoders ignore this
@@ -404,18 +584,37 @@ class FFmpegRenderer:
                 "-threads", "0",
                 "-filter_threads", str(self._filter_worker_count(selected_settings)),
                 "-filter_complex_threads", str(self._filter_worker_count(selected_settings)),
-                "-f", "concat", "-safe", "0", "-i", str(video_concat_path),
+                *base_input_arguments,
                 "-i", str(audio_path),
             ]
             for visualizer_path in visualizer_paths:
                 video_arguments.extend(["-i", str(visualizer_path)])
-            for _z_index, layer_manifest in static_concat_paths:
-                video_arguments.extend(["-f", "concat", "-safe", "0", "-i", str(layer_manifest)])
-            if visualizer_paths or static_concat_paths:
+            for video_input in video_file_inputs:
+                if video_input.loop_input:
+                    video_arguments.extend(["-stream_loop", "-1"])
+                video_arguments.extend([
+                    "-ss", f"{video_input.media_start_seconds:.6f}",
+                    "-t", f"{video_input.duration_seconds:.6f}",
+                    "-i", str(video_input.path),
+                ])
+            for _z_index, layer_path, input_kind in static_inputs:
+                if input_kind == "concat":
+                    video_arguments.extend([
+                        "-f", "concat", "-safe", "0", "-i", str(layer_path),
+                    ])
+                else:
+                    video_arguments.extend(["-i", str(layer_path)])
+            if direct_mux:
+                video_arguments.extend([
+                    "-map", "0:v:0", "-map", "1:a:0",
+                ])
+            elif visualizer_paths or video_clips or static_inputs:
                 video_arguments.extend([
                     "-filter_complex", self._layered_filter_graph(
-                        visualizers, static_concat_paths, selected_settings.fps,
+                        visualizers, static_inputs, selected_settings.fps,
                         selected_settings.output_width, selected_settings.output_height,
+                        video_clips=video_clips,
+                        video_input_slots=video_input_slots,
                     ),
                     "-map", "[vout]", "-map", "1:a",
                 ])
@@ -424,33 +623,55 @@ class FFmpegRenderer:
                     "-vf", self._output_scaling_filter(selected_settings.fps, selected_settings.output_width,
                                                         selected_settings.output_height),
                 ])
-            video_arguments.extend([
-                # Keep presentation timestamps strictly CFR.  The Canvas concat input is
-                # intentionally variable-duration, while Python layers are FPS-based.
-                "-fps_mode", "cfr", "-r", str(selected_settings.fps),
-                "-c:v", selected_settings.video_codec,
-                *self._video_encoding_arguments(selected_settings),
-                # playlist_audio.m4a is already the final AAC stream. Copying it
-                # avoids a redundant lossy pass and preserves the prepared audio
-                # bytes and timing exactly.
-                "-c:a", "copy",
-                "-pix_fmt", "yuv420p", "-shortest", "-movflags", "+faststart",
-                "-progress", "pipe:1", "-nostats", "-y", str(temporary_video),
-            ])
-            self._run(video_arguments, progress_parser=encoding_progress, cancel_event=cancel_event)
-            if cancel_event.is_set():
-                raise RenderCancelledError("Rendering was cancelled.")
-            self._report(
-                progress_callback, "Finalizing export", 0.995,
-                "Moving the completed video to the selected location",
-            )
+            if direct_mux:
+                video_arguments.extend([
+                    # Both streams were already encoded once at their selected
+                    # final settings. This pass only writes the MP4 container.
+                    "-c:v", "copy", "-c:a", "copy",
+                    "-shortest", "-movflags", "+faststart",
+                    "-progress", "pipe:1", "-nostats", "-y", str(temporary_video),
+                ])
+            else:
+                video_arguments.extend([
+                    # Keep presentation timestamps strictly CFR.  The Canvas concat input is
+                    # intentionally variable-duration, while Python layers are FPS-based.
+                    "-fps_mode", "cfr", "-r", str(selected_settings.fps),
+                    "-c:v", selected_settings.video_codec,
+                    *self._video_encoding_arguments(selected_settings),
+                    # playlist_audio.m4a is already the final AAC stream. Copying it
+                    # avoids a redundant lossy pass and preserves the prepared audio
+                    # bytes and timing exactly.
+                    "-c:a", "copy",
+                    "-pix_fmt", "yuv420p", "-shortest", "-movflags", "+faststart",
+                    "-progress", "pipe:1", "-nostats", "-y", str(temporary_video),
+                ])
             try:
-                temporary_video.replace(target)
-            except OSError as error:
-                raise RenderError(
-                    "Could not replace the output video. Close any program using "
-                    f"'{target.name}', check the destination folder, and try again."
-                ) from error
+                self._run(
+                    video_arguments,
+                    progress_parser=encoding_progress,
+                    cancel_event=cancel_event,
+                )
+                if cancel_event.is_set():
+                    raise RenderCancelledError("Rendering was cancelled.")
+                self._report(
+                    progress_callback, "Finalizing export", 0.995,
+                    "Moving the completed video to the selected location",
+                )
+                try:
+                    temporary_video.replace(target)
+                except OSError as error:
+                    raise RenderError(
+                        "Could not replace the output video. Close any program using "
+                        f"'{target.name}', check the destination folder, and try again."
+                    ) from error
+            finally:
+                try:
+                    temporary_video.unlink(missing_ok=True)
+                except OSError:
+                    LOGGER.warning(
+                        "Could not remove incomplete output staging file: %s",
+                        temporary_video,
+                    )
         self._report(progress_callback, "Complete", 1.0, "Export completed")
         return RenderResult(target, len(active_tracks))
 
@@ -496,7 +717,8 @@ class FFmpegRenderer:
                 y = round(overlay.y - (rotated_height - overlay.height) / 2.0)
                 rotated_label = f"[rotated{index}]"
                 graph.append(
-                    f"{layer_input}rotate={radians_value:.12f}:ow=rotw(iw):oh=roth(ih){rotated_label}"
+                    f"{layer_input}rotate={radians_value:.12f}:ow=rotw(iw):"
+                    f"oh=roth(ih):fillcolor=none{rotated_label}"
                 )
                 layer_input = rotated_label
             graph.append(f"{current}{layer_input}overlay={x}:{y}:eof_action=pass{output}")
@@ -510,16 +732,43 @@ class FFmpegRenderer:
 
     @staticmethod
     def _layered_filter_graph(visualizers: list[VisualizerOverlay],
-                              static_layers: list[tuple[float, Path]], fps: int,
-                              output_width: int, output_height: int) -> str:
+                              static_layers: list[tuple[float, Path] | tuple[float, Path, str]], fps: int,
+                              output_width: int, output_height: int,
+                              video_clips: list[VideoClipOverlay] | None = None,
+                              video_input_slots: list[int] | None = None) -> str:
         """Interleave reactive video and transparent static Z bands in Canvas order."""
+        video_clips = video_clips or []
+        video_file_inputs, planned_slots = FFmpegRenderer._video_input_plan(video_clips)
+        if video_input_slots is None:
+            video_input_slots = planned_slots
+        if len(video_input_slots) != len(video_clips):
+            raise ValueError("Video input slots do not match scheduled clips.")
         graph: list[str] = [f"[0:v]fps={fps}:start_time=0,settb=AVTB,setpts=N/({fps}*TB)[base]"]
         entries: list[tuple[float, int, str]] = []
         # Inputs 0/1 are base canvas and audio. Dynamic video inputs precede
         # static concat inputs, preserving their independent source timing.
         entries.extend((overlay.z_index, index, "dynamic") for index, overlay in enumerate(visualizers))
-        static_offset = 2 + len(visualizers)
-        entries.extend((z_index, index, "static") for index, (z_index, _path) in enumerate(static_layers))
+        entries.extend((clip.z_index, index, "video") for index, clip in enumerate(video_clips))
+        video_offset = 2 + len(visualizers)
+        static_offset = video_offset + len(video_file_inputs)
+        video_layer_inputs = [""] * len(video_clips)
+        for slot in range(len(video_file_inputs)):
+            consumers = [
+                clip_index for clip_index, input_slot in enumerate(video_input_slots)
+                if input_slot == slot
+            ]
+            input_label = f"[{video_offset + slot}:v]"
+            if len(consumers) == 1:
+                video_layer_inputs[consumers[0]] = input_label
+                continue
+            outputs = [f"[vsrc{slot}_{branch}]" for branch in range(len(consumers))]
+            graph.append(f"{input_label}split={len(outputs)}{''.join(outputs)}")
+            for clip_index, output in zip(consumers, outputs, strict=True):
+                video_layer_inputs[clip_index] = output
+        entries.extend(
+            (layer[0], index, "static")
+            for index, layer in enumerate(static_layers)
+        )
         current = "[base]"
         # A transparent static band is tagged with the Z value of the dynamic
         # layer immediately below it.  Compare the layer kind before its input
@@ -530,7 +779,7 @@ class FFmpegRenderer:
         ordered_entries = sorted(
             entries,
             key=lambda entry: (
-                entry[0], 0 if entry[2] == "dynamic" else 1, entry[1],
+                entry[0], 0 if entry[2] in {"dynamic", "video"} else 1, entry[1],
             ),
         )
         for order, (_z_value, index, kind) in enumerate(ordered_entries):
@@ -547,15 +796,161 @@ class FFmpegRenderer:
                     x = round(x - (rotated_width - overlay.width) / 2.0)
                     y = round(y - (rotated_height - overlay.height) / 2.0)
                     rotated = f"[zrot{order}]"
-                    graph.append(f"{layer_input}rotate={angle:.12f}:ow=rotw(iw):oh=roth(ih){rotated}")
+                    graph.append(
+                        f"{layer_input}rotate={angle:.12f}:ow=rotw(iw):"
+                        f"oh=roth(ih):fillcolor=none{rotated}"
+                    )
                     layer_input = rotated
                 graph.append(f"{current}{layer_input}overlay={x}:{y}:eof_action=pass{output}")
+            elif kind == "video":
+                clip = video_clips[index]
+                source_input = video_layer_inputs[index]
+                layer_input = f"[vclip{order}]"
+                if clip.fit_mode == "stretch":
+                    geometry = f"scale={clip.width}:{clip.height}"
+                elif clip.fit_mode == "contain":
+                    fill_color = FFmpegRenderer._filter_color(clip.fill_color)
+                    geometry = (
+                        f"scale={clip.width}:{clip.height}:force_original_aspect_ratio=decrease,"
+                        f"pad={clip.width}:{clip.height}:(ow-iw)/2:(oh-ih)/2:"
+                        f"color={fill_color}"
+                    )
+                else:
+                    geometry = (
+                        f"scale={clip.width}:{clip.height}:force_original_aspect_ratio=increase,"
+                        f"crop={clip.width}:{clip.height}"
+                    )
+                filters = [
+                    f"{source_input}trim=duration="
+                    f"{clip.duration_seconds * max(0.05, clip.speed):.8f},"
+                    f"settb=AVTB,setpts=(PTS-STARTPTS)/{max(0.05, clip.speed):.8f}",
+                    geometry,
+                    # Canvas stores both controls as percentages. FFmpeg's eq
+                    # filter expects brightness in -1..1 and a contrast factor.
+                    f"eq=brightness={max(-1.0, min(1.0, clip.brightness / 100.0)):.4f}:"
+                    f"contrast={max(0.0, min(2.0, 1.0 + clip.contrast / 100.0)):.4f}:"
+                    f"saturation={max(0.0, min(3.0, clip.saturation)):.4f}",
+                ]
+                if clip.grayscale:
+                    filters.append("hue=s=0")
+                if clip.blur > 0.01:
+                    filters.append(f"boxblur={min(40.0, clip.blur):.3f}:1")
+                radius = max(
+                    0.0,
+                    min(float(clip.border_radius), clip.width / 2.0, clip.height / 2.0),
+                )
+                if radius >= 0.5:
+                    # Preserve the Canvas rounded-rectangle clip. This runs only
+                    # when a radius is configured, avoiding a per-pixel export
+                    # filter for the default square video element.
+                    dx = (
+                        f"max(max({radius:.4f}-X,X-(W-1-{radius:.4f})),0)"
+                    )
+                    dy = (
+                        f"max(max({radius:.4f}-Y,Y-(H-1-{radius:.4f})),0)"
+                    )
+                    filters.append(
+                        "format=rgba,"
+                        "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+                        f"a='if(lte(pow({dx},2)+pow({dy},2),"
+                        f"pow({radius:.4f},2)),alpha(X,Y),0)'"
+                    )
+                filters.extend((
+                    "format=rgba",
+                    f"colorchannelmixer=aa={max(0.0, min(1.0, clip.opacity)):.4f}",
+                    f"setpts=PTS+{max(0.0, clip.timeline_start):.8f}/TB{layer_input}",
+                ))
+                graph.append(",".join(filters))
+                rotation = float(clip.rotation) % 360.0
+                x, y = clip.x, clip.y
+                if rotation:
+                    angle = radians(rotation)
+                    rotated_width = (
+                        abs(clip.width * cos(angle))
+                        + abs(clip.height * sin(angle))
+                    )
+                    rotated_height = (
+                        abs(clip.width * sin(angle))
+                        + abs(clip.height * cos(angle))
+                    )
+                    x = round(x - (rotated_width - clip.width) / 2.0)
+                    y = round(y - (rotated_height - clip.height) / 2.0)
+                    rotated = f"[vrot{order}]"
+                    graph.append(
+                        f"{layer_input}rotate={angle:.12f}:ow=rotw(iw):"
+                        f"oh=roth(ih):fillcolor=none{rotated}"
+                    )
+                    layer_input = rotated
+                graph.append(
+                    f"{current}{layer_input}overlay={x}:{y}:eof_action=pass:shortest=0{output}"
+                )
             else:
-                layer_input = f"[{static_offset + index}:v]"
+                static_layer = static_layers[index]
+                input_kind = static_layer[2] if len(static_layer) == 3 else "concat"
+                input_index = static_offset + index
+                if input_kind == "alpha_pair":
+                    layer_input = f"[staticrgba{order}]"
+                    graph.append(
+                        f"[{input_index}:v:0][{input_index}:v:1]"
+                        f"alphamerge{layer_input}"
+                    )
+                else:
+                    layer_input = f"[{input_index}:v]"
                 graph.append(f"{current}{layer_input}overlay=0:0:eof_action=pass{output}")
             current = output
         graph.append(f"{current}{FFmpegRenderer._output_scaling_filter(fps, output_width, output_height, include_fps=False)}[vout]")
         return ";".join(graph)
+
+    @staticmethod
+    def _video_input_plan(
+        video_clips: list[VideoClipOverlay],
+    ) -> tuple[list[VideoFileInput], list[int]]:
+        """Deduplicate matching files while retaining per-occurrence filter branches."""
+        groups: list[dict[str, object]] = []
+        group_slots: dict[tuple[str, float], int] = {}
+        clip_slots: list[int] = []
+        for clip in video_clips:
+            resolved = clip.path.resolve()
+            key = (
+                os.path.normcase(str(resolved)),
+                round(max(0.0, clip.media_start_seconds), 6),
+            )
+            slot = group_slots.get(key)
+            raw_duration = max(
+                0.000001,
+                clip.duration_seconds * max(0.05, clip.speed),
+            )
+            if slot is None:
+                slot = len(groups)
+                group_slots[key] = slot
+                groups.append({
+                    "path": resolved,
+                    "media_start": key[1],
+                    "duration": raw_duration,
+                    "loop": bool(clip.loop_input),
+                })
+            else:
+                group = groups[slot]
+                group["duration"] = max(float(group["duration"]), raw_duration)
+                group["loop"] = bool(group["loop"]) or bool(clip.loop_input)
+            clip_slots.append(slot)
+        return [
+            VideoFileInput(
+                path=group["path"],  # type: ignore[arg-type]
+                media_start_seconds=float(group["media_start"]),
+                duration_seconds=float(group["duration"]),
+                loop_input=bool(group["loop"]),
+            )
+            for group in groups
+        ], clip_slots
+
+    @staticmethod
+    def _filter_color(value: str) -> str:
+        """Return an FFmpeg-safe opaque RGB literal for Canvas fill colors."""
+        color = value.strip().removeprefix("#")
+        if len(color) in {6, 8} and all(character in "0123456789abcdefABCDEF" for character in color):
+            return f"0x{color[:6]}"
+        return "0x000000"
 
     @staticmethod
     def _output_scaling_filter(fps: int, output_width: int, output_height: int,
@@ -634,7 +1029,7 @@ class FFmpegRenderer:
     @staticmethod
     def _validate_visual_timeline(
         visual_sequence: list[tuple[Path, float]],
-        static_layers: list[StaticOverlayLayer],
+        static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer],
         expected_duration: float,
         fps: int,
     ) -> None:
@@ -654,6 +1049,12 @@ class FFmpegRenderer:
 
         validate("The prepared Canvas video", [duration for _path, duration in visual_sequence])
         for index, layer in enumerate(static_layers, start=1):
+            if isinstance(layer, PreparedStaticOverlayLayer):
+                validate(
+                    f"Static overlay layer {index}",
+                    [layer.video.duration_seconds],
+                )
+                continue
             if not layer.frames:
                 continue
             validate(
@@ -679,6 +1080,106 @@ class FFmpegRenderer:
                 f"The selected video encoder '{encoder}' is unavailable in this FFmpeg build. "
                 "Choose a supported CPU/GPU encoder in Settings."
             )
+
+    def preflight_export(
+        self,
+        tracks: list[PlaylistTrack],
+        output_path: str | Path,
+        settings: RenderSettings,
+    ) -> None:
+        """Validate inputs, destination, and real encoder startup before capture."""
+        active_tracks = [track for track in tracks if track.enabled]
+        if not active_tracks:
+            raise RenderError("Select at least one playlist track before exporting.")
+        invalid_track = next(
+            (track for track in active_tracks if track.duration_seconds <= 0.0), None
+        )
+        if invalid_track is not None:
+            raise RenderError(
+                f"Audio duration could not be determined: {invalid_track.title}"
+            )
+        missing = next(
+            (Path(track.file_path) for track in active_tracks
+             if not Path(track.file_path).is_file()),
+            None,
+        )
+        if missing is not None:
+            raise RenderError(f"Audio file is missing: {missing}")
+
+        self._validate_settings(settings)
+        target = Path(output_path).expanduser().resolve()
+        if target.suffix.lower() != ".mp4":
+            target = target.with_suffix(".mp4")
+        if target.exists() and not target.is_file():
+            raise RenderError("The selected output path is not a video file.")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, probe_name = mkstemp(
+                prefix=".playlist-canvas-write-test-",
+                suffix=".tmp",
+                dir=target.parent,
+            )
+            os.close(descriptor)
+            Path(probe_name).unlink()
+        except OSError as error:
+            raise RenderError(
+                "The selected output folder is not writable. Choose another "
+                "folder and try again."
+            ) from error
+
+        self.ensure_encoder_available(settings.video_codec)
+        self.ensure_encoder_usable(settings)
+
+    def ensure_encoder_usable(self, settings: RenderSettings) -> None:
+        """Encode at the selected format so hardware startup checks are realistic."""
+        encoder = settings.video_codec
+        pixel_format = (
+            "nv12"
+            if encoder in {
+                "h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv",
+                "h264_amf", "hevc_amf",
+            }
+            else "yuv420p"
+        )
+        probe_source = (
+            f"color=c=black:s={settings.output_width}x{settings.output_height}"
+            f":r={settings.fps}"
+        )
+        try:
+            completed = subprocess.run(
+                [
+                    str(self.executable), "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", probe_source,
+                    "-frames:v", "1", "-an", "-c:v", encoder,
+                    *self._video_encoding_arguments(settings),
+                    "-pix_fmt", pixel_format, "-f", "null", "-",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+                **hidden_process_kwargs(),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RenderError(
+                f"The selected video encoder '{encoder}' did not respond during "
+                "the selected-format startup check."
+            ) from error
+        except OSError as error:
+            raise RenderError(
+                "Could not start FFmpeg for the video encoder check."
+            ) from error
+        if completed.returncode == 0:
+            return
+        details = completed.stderr.strip()
+        if len(details) > 1600:
+            details = details[-1600:]
+        suffix = f"\n\nFFmpeg: {details}" if details else ""
+        raise RenderError(
+            f"The selected video encoder '{encoder}' is installed but could not "
+            f"start on this computer. Check the GPU driver or choose CPU H.264."
+            f"{suffix}"
+        )
 
     @staticmethod
     def _video_encoding_arguments(settings: RenderSettings) -> list[str]:
@@ -944,19 +1445,39 @@ class FFmpegRenderer:
         while process.poll() is None:
             if cancel_event and cancel_event.is_set():
                 cancelled = True
-                process.terminate()
                 try:
-                    process.wait(timeout=3)
+                    process.terminate()
+                except OSError:
+                    pass
+                try:
+                    process.wait(timeout=3.0)
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=3)
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    try:
+                        process.wait(timeout=3.0)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
                 break
             try:
                 process.wait(timeout=0.1)
             except subprocess.TimeoutExpired:
                 pass
-        stdout_thread.join(timeout=1)
-        stderr_thread.join(timeout=1)
+        stdout_thread.join(timeout=1.0)
+        stderr_thread.join(timeout=1.0)
+        for stream in (process.stdout, process.stderr):
+            if stream is None or stream.closed:
+                continue
+            try:
+                stream.close()
+            except OSError:
+                pass
+        if stdout_thread.is_alive():
+            stdout_thread.join(timeout=1.0)
+        if stderr_thread.is_alive():
+            stderr_thread.join(timeout=1.0)
         if cancelled:
             raise RenderCancelledError("Rendering was cancelled.")
         if process.returncode != 0:

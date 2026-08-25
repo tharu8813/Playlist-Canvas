@@ -24,8 +24,8 @@ from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.canvas_snapshot import CanvasSnapshot
 from app.renderer.ffmpeg_renderer import (
-    FFmpegRenderer, RenderError, RenderFrame, RenderSettings, StaticOverlayLayer,
-    VisualizerOverlay,
+    FFmpegRenderer, PreparedVideoInput, RenderError, RenderFrame, RenderSettings,
+    StaticOverlayLayer, VideoClipOverlay, VisualizerOverlay,
 )
 from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.services.playlist_export_service import PlaylistExportError, PlaylistExportService
@@ -92,6 +92,81 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertIsNotNone(selection)
         self.assertFalse(ExportPreviewDialog._selection_has_audio(selection, 5.0))
         self.assertTrue(ExportPreviewDialog._selection_has_audio(selection, 10.0))
+
+    def test_playlist_gap_hides_track_video_but_keeps_timeline_video_running(self) -> None:
+        scene = CanvasScene()
+        track_source = Source(
+            SourceType.VIDEO, "Per-track", video_timing_mode="track",
+            video_repeat_mode="loop_one",
+        )
+        timeline_source = Source(
+            SourceType.VIDEO, "Timeline", video_timing_mode="timeline",
+            video_repeat_mode="loop_one", video_paths=["timeline.mp4"],
+        )
+        track_item = SourceItem(track_source)
+        timeline_item = SourceItem(timeline_source)
+        scene.addItem(track_item)
+        scene.addItem(timeline_item)
+        observed: dict[str, tuple[str | None, float]] = {}
+        track_item.set_video_preview_position = lambda path, seconds=0.0: observed.__setitem__(
+            "track", (path, seconds),
+        )
+        timeline_item.set_video_preview_position = lambda path, seconds=0.0: observed.__setitem__(
+            "timeline", (path, seconds),
+        )
+        preview = SimpleNamespace(
+            scene=scene,
+            timeline=SimpleNamespace(value=lambda: round(1.5 * TIMELINE_SCALE)),
+            _video_duration_cache={"track.mp4": 1.0, "timeline.mp4": 4.0},
+        )
+        track = PlaylistTrack(
+            "song.wav", "Track", duration_seconds=1.0,
+            video_paths=["track.mp4"],
+        )
+
+        ExportPreviewDialog._sync_video_sources(
+            preview, track, track.duration_seconds, track_active=False,
+        )
+
+        self.assertEqual(observed["track"], (None, 0.0))
+        self.assertEqual(observed["timeline"], ("timeline.mp4", 1.5))
+        track_item.release_video_decoder()
+        timeline_item.release_video_decoder()
+
+    def test_track_video_time_restarts_at_a_clipped_source_boundary(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.VIDEO, "Clipped track video",
+            video_timing_mode="track", video_repeat_mode="once",
+            timeline_start=2.0, timeline_duration=1.0,
+        )
+        item = SourceItem(source)
+        scene.addItem(item)
+        observed: list[tuple[str | None, float]] = []
+        item.set_video_preview_position = lambda path, seconds=0.0: observed.append(
+            (path, seconds),
+        )
+        timeline = SimpleNamespace(value=lambda: round(2.5 * TIMELINE_SCALE))
+        preview = SimpleNamespace(
+            scene=scene, timeline=timeline,
+            _video_duration_cache={"track.mp4": 4.0},
+        )
+        track = PlaylistTrack(
+            "song.wav", "Track", duration_seconds=5.0,
+            video_paths=["track.mp4"],
+        )
+
+        ExportPreviewDialog._sync_video_sources(
+            preview, track, 2.5, track_start=0.0, track_active=True,
+        )
+        self.assertEqual(observed[-1], ("track.mp4", 0.5))
+
+        timeline.value = lambda: round(3.0 * TIMELINE_SCALE)
+        ExportPreviewDialog._sync_video_sources(
+            preview, track, 3.0, track_start=0.0, track_active=True,
+        )
+        self.assertEqual(observed[-1], (None, 0.0))
+        item.release_video_decoder()
 
         class FakePlayer:
             def __init__(self) -> None:
@@ -246,6 +321,104 @@ class FunctionalRegressionTests(unittest.TestCase):
             1,
         )
 
+    def test_export_preflight_checks_inputs_destination_and_real_encoder(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        renderer.executable = Path("ffmpeg.exe")
+        with TemporaryDirectory(prefix="pvs-preflight-") as raw_directory:
+            directory = Path(raw_directory)
+            audio = directory / "song.wav"
+            audio.touch()
+            output = directory / "new-folder" / "result.mp4"
+            completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with (
+                patch.object(renderer, "ensure_encoder_available") as available,
+                patch(
+                    "app.renderer.ffmpeg_renderer.subprocess.run",
+                    return_value=completed,
+                ) as run,
+            ):
+                renderer.preflight_export(
+                    [PlaylistTrack(str(audio), "Song", duration_seconds=1.0)],
+                    output,
+                    RenderSettings(video_codec="h264_nvenc"),
+                )
+
+            available.assert_called_once_with("h264_nvenc")
+            command = run.call_args.args[0]
+            self.assertIn("color=c=black:s=1920x1080:r=30", command)
+            self.assertIn("h264_nvenc", command)
+            self.assertIn("nv12", command)
+            self.assertIn("-cq", command)
+            self.assertTrue(output.parent.is_dir())
+            self.assertEqual(
+                list(output.parent.glob(".playlist-canvas-write-test-*.tmp")),
+                [],
+            )
+
+    def test_export_preflight_rejects_missing_audio_before_encoder_probe(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        renderer.executable = Path("ffmpeg.exe")
+        with TemporaryDirectory(prefix="pvs-preflight-missing-") as raw_directory:
+            output = Path(raw_directory) / "result.mp4"
+            with (
+                patch.object(renderer, "ensure_encoder_available") as available,
+                patch("app.renderer.ffmpeg_renderer.subprocess.run") as run,
+                self.assertRaisesRegex(RenderError, "Audio file is missing"),
+            ):
+                renderer.preflight_export(
+                    [PlaylistTrack(
+                        str(Path(raw_directory) / "missing.wav"),
+                        "Missing", duration_seconds=1.0,
+                    )],
+                    output,
+                    RenderSettings(),
+                )
+
+            available.assert_not_called()
+            run.assert_not_called()
+
+    def test_export_preflight_reports_unusable_hardware_encoder(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        renderer.executable = Path("ffmpeg.exe")
+        failed = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="No capable devices found",
+        )
+        with patch(
+            "app.renderer.ffmpeg_renderer.subprocess.run",
+            return_value=failed,
+        ):
+            with self.assertRaises(RenderError) as raised:
+                renderer.ensure_encoder_usable(RenderSettings(
+                    video_codec="h264_nvenc",
+                ))
+        self.assertIn("installed but could not start", str(raised.exception))
+        self.assertIn("No capable devices", str(raised.exception))
+
+    def test_amf_preflight_uses_selected_format_and_amf_quality_arguments(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        renderer.executable = Path("ffmpeg.exe")
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        settings = RenderSettings(
+            video_codec="h264_amf", output_width=2560, output_height=1440,
+            fps=60, crf=17, preset="medium",
+        )
+        with patch(
+            "app.renderer.ffmpeg_renderer.subprocess.run",
+            return_value=completed,
+        ) as run:
+            renderer.ensure_encoder_usable(settings)
+
+        command = run.call_args.args[0]
+        self.assertIn("color=c=black:s=2560x1440:r=60", command)
+        self.assertIn("h264_amf", command)
+        self.assertIn("nv12", command)
+        self.assertIn("-quality", command)
+        self.assertIn("balanced", command)
+        self.assertIn("-qp_i", command)
+        self.assertIn("17", command)
+
     def test_final_video_copies_prepared_aac_without_reencoding(self) -> None:
         renderer = object.__new__(FFmpegRenderer)
         renderer.executable = Path("ffmpeg.exe")
@@ -276,9 +449,120 @@ class FunctionalRegressionTests(unittest.TestCase):
             )
             self.assertTrue(output.is_file())
 
-        final_command = next(command for command in commands if "-c:v" in command)
+            final_command = next(command for command in commands if "-c:v" in command)
+            output_staging = Path(final_command[-1])
+            self.assertEqual(output_staging.parent, output.parent)
+            self.assertTrue(output_staging.name.endswith(".rendering.mp4"))
+            self.assertFalse(output_staging.exists())
+
         audio_codec_index = final_command.index("-c:a")
         self.assertEqual(final_command[audio_codec_index + 1], "copy")
+
+    def test_failed_final_encode_keeps_existing_output_and_removes_staging(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        renderer.executable = Path("ffmpeg.exe")
+        renderer.ensure_encoder_available = lambda _encoder: None  # type: ignore[method-assign]
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> None:
+            output = Path(arguments[-1])
+            if "-c:v" in arguments:
+                output.write_bytes(b"incomplete replacement")
+                raise RenderError("simulated final encode failure")
+            if output.suffix.lower() in {".nut", ".m4a"}:
+                output.touch()
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        frame = QImage(16, 16, QImage.Format.Format_RGB32)
+        frame.fill(0xFF336699)
+        with TemporaryDirectory(prefix="pvs-output-staging-") as raw_directory:
+            directory = Path(raw_directory)
+            audio = directory / "song.wav"
+            audio.touch()
+            output = directory / "existing.mp4"
+            output.write_bytes(b"existing completed video")
+
+            with self.assertRaisesRegex(RenderError, "simulated final encode failure"):
+                renderer.render(
+                    frame,
+                    [PlaylistTrack(str(audio), "Song", duration_seconds=1.0)],
+                    output,
+                    RenderSettings(fps=30, output_width=16, output_height=16),
+                )
+
+            self.assertEqual(output.read_bytes(), b"existing completed video")
+            self.assertEqual(list(directory.glob(".*.rendering.mp4")), [])
+
+    def test_prepared_canvas_video_bypasses_png_concat_input(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        renderer.executable = Path("ffmpeg.exe")
+        renderer.ensure_encoder_available = lambda _encoder: None  # type: ignore[method-assign]
+        commands: list[list[str]] = []
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> None:
+            commands.append(arguments)
+            output = Path(arguments[-1])
+            if output.suffix.lower() in {".nut", ".m4a", ".mp4"}:
+                output.touch()
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        with TemporaryDirectory(prefix="pvs-prepared-video-") as raw_directory:
+            directory = Path(raw_directory)
+            audio = directory / "song.wav"
+            audio.touch()
+            prepared_path = directory / "canvas-stream.mkv"
+            prepared_path.touch()
+            output = directory / "result.mp4"
+            renderer.render(
+                PreparedVideoInput(prepared_path, 1.0, 16, 16, 30),
+                [PlaylistTrack(str(audio), "Song", duration_seconds=1.0)],
+                output,
+                RenderSettings(fps=30, output_width=16, output_height=16),
+            )
+
+        final_command = next(command for command in commands if "-c:v" in command)
+        self.assertIn(str(prepared_path.resolve()), final_command)
+        self.assertFalse(any("video.ffconcat" in value for value in final_command))
+
+    def test_directly_encoded_canvas_is_muxed_without_second_video_encode(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        renderer.executable = Path("ffmpeg.exe")
+        encoder_checks: list[str] = []
+        renderer.ensure_encoder_available = encoder_checks.append  # type: ignore[method-assign]
+        commands: list[list[str]] = []
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> None:
+            commands.append(arguments)
+            output = Path(arguments[-1])
+            if output.suffix.lower() in {".nut", ".m4a", ".mp4"}:
+                output.touch()
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        with TemporaryDirectory(prefix="pvs-direct-mux-") as raw_directory:
+            directory = Path(raw_directory)
+            audio = directory / "song.wav"
+            audio.touch()
+            prepared_path = directory / "canvas-final.mkv"
+            prepared_path.touch()
+            output = directory / "result.mp4"
+            renderer.render(
+                PreparedVideoInput(
+                    prepared_path, 1.0, 1920, 1080, 30,
+                    ready_for_mux=True, encoded_codec="h264_amf",
+                ),
+                [PlaylistTrack(str(audio), "Song", duration_seconds=1.0)],
+                output,
+                RenderSettings(
+                    fps=30, output_width=1920, output_height=1080,
+                    video_codec="h264_amf",
+                ),
+            )
+
+        final_command = next(command for command in commands if command[-1].endswith(".mp4"))
+        video_codec_index = final_command.index("-c:v")
+        self.assertEqual(final_command[video_codec_index + 1], "copy")
+        self.assertNotIn("-vf", final_command)
+        self.assertNotIn("-filter_complex", final_command)
+        self.assertEqual(encoder_checks, [])
 
     def test_visualizer_layers_render_concurrently_and_return_in_z_input_order(self) -> None:
         renderer = PythonVisualizerRenderer(Path("ffmpeg.exe"))
@@ -297,9 +581,9 @@ class FunctionalRegressionTests(unittest.TestCase):
             with lock:
                 running += 1
                 maximum_running = max(maximum_running, running)
-            callback(0.575, "half complete")
+            callback(0.5, 1, 2)
             time.sleep(0.04)
-            callback(1.0, "complete")
+            callback(1.0, 2, 2)
             with lock:
                 running -= 1
 
@@ -387,6 +671,129 @@ class FunctionalRegressionTests(unittest.TestCase):
         foreground = graph.index("[zlayer1][4:v]overlay=0:0")
         self.assertLess(first_dynamic, second_dynamic)
         self.assertLess(second_dynamic, foreground)
+
+    def test_streamed_static_foreground_merges_alpha_before_compositing(self) -> None:
+        overlays = [
+            VisualizerOverlay(0, 0, 16, 16, "bars", "#FFFFFF", z_index=1.0),
+        ]
+        graph = FFmpegRenderer._layered_filter_graph(
+            overlays, [(2.0, Path("foreground.mkv"), "alpha_pair")],
+            30, 16, 16,
+        )
+
+        dynamic = graph.index("[base][2:v]overlay=")
+        alpha_merge = graph.index("[3:v:0][3:v:1]alphamerge[staticrgba1]")
+        foreground = graph.index("[zlayer0][staticrgba1]overlay=0:0")
+        self.assertLess(dynamic, alpha_merge)
+        self.assertLess(alpha_merge, foreground)
+
+    def test_rotated_dynamic_layers_keep_expanded_corners_transparent(self) -> None:
+        overlay = VisualizerOverlay(
+            0, 0, 16, 16, "bars", "#FFFFFF", rotation=45.0,
+        )
+
+        layered = FFmpegRenderer._layered_filter_graph(
+            [overlay], [], 30, 16, 16,
+        )
+        legacy = FFmpegRenderer._python_visualizer_filter_graph(
+            [overlay], 30, 16, 16,
+        )
+
+        self.assertIn("rotate=0.785398163397", layered)
+        self.assertIn("fillcolor=none", layered)
+        self.assertIn("fillcolor=none", legacy)
+
+    def test_video_export_converts_canvas_effect_percentages(self) -> None:
+        clip = VideoClipOverlay(
+            Path("clip.mp4"), 0.0, 1.0, 0.0,
+            0, 0, 100, 50, 1.0,
+            brightness=50.0, contrast=-25.0, saturation=1.4,
+        )
+
+        graph = FFmpegRenderer._layered_filter_graph(
+            [], [], 30, 320, 180, video_clips=[clip],
+        )
+
+        self.assertIn(
+            "eq=brightness=0.5000:contrast=0.7500:saturation=1.4000",
+            graph,
+        )
+
+    def test_rotated_video_export_keeps_the_canvas_center(self) -> None:
+        clip = VideoClipOverlay(
+            Path("clip.mp4"), 0.0, 1.0, 0.0,
+            100, 50, 100, 50, 1.0, rotation=90.0,
+        )
+
+        graph = FFmpegRenderer._layered_filter_graph(
+            [], [], 30, 320, 180, video_clips=[clip],
+        )
+
+        self.assertIn("rotate=1.570796326795", graph)
+        self.assertIn("overlay=125:25:eof_action=pass", graph)
+
+    def test_video_export_preserves_contain_fill_and_rounded_clip(self) -> None:
+        clip = VideoClipOverlay(
+            Path("clip.mp4"), 0.0, 1.0, 0.0,
+            0, 0, 160, 90, 1.0, fit_mode="contain",
+            fill_color="#123ABC", border_radius=12.0,
+        )
+
+        graph = FFmpegRenderer._layered_filter_graph(
+            [], [], 30, 320, 180, video_clips=[clip],
+        )
+
+        self.assertIn("pad=160:90:(ow-iw)/2:(oh-ih)/2:color=0x123ABC", graph)
+        self.assertIn("geq=r='r(X,Y)'", graph)
+        self.assertIn("pow(12.0000,2)", graph)
+
+    def test_repeated_video_occurrences_share_one_physical_input(self) -> None:
+        clips = [
+            VideoClipOverlay(
+                Path("repeat.mp4"), 0.0, 1.0, 0.0,
+                0, 0, 32, 32, 1.0,
+            ),
+            VideoClipOverlay(
+                Path("repeat.mp4"), 2.0, 2.0, 0.0,
+                0, 0, 32, 32, 1.0, speed=1.5, loop_input=True,
+            ),
+            VideoClipOverlay(
+                Path("repeat.mp4"), 5.0, 1.0, 0.5,
+                0, 0, 32, 32, 1.0,
+            ),
+        ]
+
+        inputs, slots = FFmpegRenderer._video_input_plan(clips)
+
+        self.assertEqual(slots, [0, 0, 1])
+        self.assertEqual(len(inputs), 2)
+        self.assertEqual(inputs[0].duration_seconds, 3.0)
+        self.assertTrue(inputs[0].loop_input)
+        self.assertEqual(inputs[1].media_start_seconds, 0.5)
+
+    def test_shared_video_input_splits_and_trims_each_occurrence(self) -> None:
+        clips = [
+            VideoClipOverlay(
+                Path("repeat.mp4"), 0.0, 0.5, 0.0,
+                0, 0, 32, 32, 1.0,
+            ),
+            VideoClipOverlay(
+                Path("repeat.mp4"), 1.0, 0.25, 0.0,
+                0, 0, 32, 32, 1.0,
+            ),
+        ]
+
+        graph = FFmpegRenderer._layered_filter_graph(
+            [], [(2.0, Path("foreground.mkv"))], 10, 32, 32,
+            video_clips=clips,
+        )
+
+        self.assertIn("[2:v]split=2[vsrc0_0][vsrc0_1]", graph)
+        self.assertIn("[vsrc0_0]trim=duration=0.50000000", graph)
+        self.assertIn("[vsrc0_1]trim=duration=0.25000000", graph)
+        # Two logical occurrences use input 2; the static layer follows at 3.
+        self.assertIn("[3:v]", graph)
+        self.assertNotIn("[4:v]", graph)
 
     def test_reactive_overlay_uses_track_animation_windows(self) -> None:
         overlay = SimpleNamespace(
@@ -509,6 +916,83 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertLess(slide_distance(source.width, source.height), 100.0)
         self.assertAlmostEqual(item.pos().x(), source.x)
         self.assertAlmostEqual(item.opacity(), 1.0)
+
+    def test_moving_animation_fades_evenly_across_its_exit(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.SHAPE, "Smooth exit", x=100, y=80,
+            animation_out="slide_right", animation_out_duration=1.0,
+        )
+        item = SourceItem(source)
+        scene.addItem(item)
+        track = PlaylistTrack("track.wav", "Track", duration_seconds=4.0)
+        observed: list[float] = []
+
+        def inspect_opacity(*_args: object, **_kwargs: object) -> QImage:
+            observed.append(item.opacity())
+            return QImage(1, 1, QImage.Format.Format_ARGB32)
+
+        with patch.object(CanvasSnapshot, "capture", side_effect=inspect_opacity):
+            for elapsed in (3.25, 3.5, 3.75):
+                CanvasSnapshot.capture_track(
+                    scene, track, 1, 1, 0.0, animation_phase="out",
+                    elapsed_seconds=elapsed, animation_phase_duration=1.0,
+                )
+
+        self.assertEqual(len(observed), 3)
+        self.assertAlmostEqual(observed[0], 0.9375)
+        self.assertAlmostEqual(observed[1], 0.5)
+        self.assertAlmostEqual(observed[2], 0.0625)
+
+    def test_pop_and_rotate_animations_restore_source_transform(self) -> None:
+        scene = CanvasScene()
+        pop = Source(
+            SourceType.SHAPE, "Pop", scale=1.2, animation_in="pop",
+            animation_in_duration=1.0,
+        )
+        rotate = Source(
+            SourceType.SHAPE, "Rotate", rotation=20.0,
+            animation_out="rotate", animation_out_duration=1.0,
+        )
+        pop_item = SourceItem(pop)
+        rotate_item = SourceItem(rotate)
+        scene.addItem(pop_item)
+        scene.addItem(rotate_item)
+        track = PlaylistTrack("track.wav", "Track", duration_seconds=4.0)
+        observed: list[tuple[float, float, float]] = []
+
+        def inspect_transform(*_args: object, **_kwargs: object) -> QImage:
+            observed.append((pop_item.scale(), rotate_item.rotation(), rotate_item.opacity()))
+            return QImage(1, 1, QImage.Format.Format_ARGB32)
+
+        with patch.object(CanvasSnapshot, "capture", side_effect=inspect_transform):
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, animation_phase="in",
+                elapsed_seconds=0.5, animation_phase_duration=1.0,
+            )
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, animation_phase="out",
+                elapsed_seconds=3.5, animation_phase_duration=1.0,
+            )
+
+        self.assertGreater(observed[0][0], pop.scale * 0.76)
+        self.assertLess(observed[0][0], pop.scale)
+        self.assertGreater(observed[1][1], rotate.rotation)
+        self.assertLess(observed[1][1], rotate.rotation + 12.0)
+        self.assertAlmostEqual(observed[1][2], 0.5)
+        self.assertAlmostEqual(pop_item.scale(), pop.scale)
+        self.assertAlmostEqual(rotate_item.rotation(), rotate.rotation)
+        self.assertAlmostEqual(rotate_item.opacity(), 1.0)
+
+    def test_visualizer_moving_animation_uses_balanced_fade(self) -> None:
+        image = QImage(320, 180, QImage.Format.Format_RGBA8888)
+        image.fill(0xFFFFFFFF)
+
+        midway = PythonVisualizerRenderer._apply_animation(
+            image, "slide_right", 0.5, False, 500, 160,
+        )
+
+        self.assertAlmostEqual(midway.pixelColor(160, 90).alpha(), 128, delta=1)
 
     def test_now_playing_motion_fades_smoothly_during_the_same_exit(self) -> None:
         scene = CanvasScene()
@@ -1006,6 +1490,67 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertIn("frame 120/300", message)
         self.assertIn("20.0%", message)
         self.assertIn("00:40 remaining", message)
+
+    def test_parallel_visualizer_progress_combines_every_layer_status(self) -> None:
+        message = PythonVisualizerRenderer._combined_layer_progress_message(
+            [120, 96], [300, 300],
+        )
+
+        lines = message.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn("Visualizer 1/2 · frame 120/300 · 40.0%", lines[0])
+        self.assertIn("Visualizer 2/2 · frame 96/300 · 32.0%", lines[1])
+        self.assertEqual(
+            lines[2], "All visualizers · frame 216/600 · 36.0%",
+        )
+
+    def test_parallel_visualizer_workers_publish_one_combined_update(self) -> None:
+        renderer = PythonVisualizerRenderer(Path("ffmpeg.exe"))
+        overlays = [
+            SimpleNamespace(kind="visualizer", bar_count=8, width=16, height=16),
+            SimpleNamespace(kind="waveform", bar_count=8, width=16, height=16),
+        ]
+        updates: list[tuple[float, str]] = []
+
+        def fake_encode(
+            path: Path, _overlay: object, _levels: np.ndarray, _fps: int,
+            _cancel: threading.Event, report: object, *_arguments: object,
+        ) -> None:
+            report(0.5, 12, 24)
+            path.touch()
+
+        with TemporaryDirectory(prefix="visualizer-progress-test-") as raw_directory:
+            with (
+                patch.object(
+                    renderer, "_decode_mono_audio",
+                    return_value=np.zeros(24, dtype=np.float32),
+                ),
+                patch.object(
+                    renderer, "_analyze_levels",
+                    return_value=np.zeros((24, 8), dtype=np.float32),
+                ),
+                patch.object(
+                    renderer, "_analyze_waveform",
+                    return_value=np.zeros((24, 8), dtype=np.float32),
+                ),
+                patch.object(renderer, "_encode_layer", side_effect=fake_encode),
+            ):
+                paths = renderer.render_layers(
+                    Path("audio.m4a"), overlays, 30, Path(raw_directory),
+                    threading.Event(), lambda fraction, message: updates.append(
+                        (fraction, message)
+                    ),
+                )
+
+        combined = [message for _fraction, message in updates if "All visualizers" in message]
+        self.assertTrue(combined)
+        self.assertTrue(all(
+            "Visualizer 1/2" in message and "Visualizer 2/2" in message
+            for message in combined
+        ))
+        self.assertEqual(len(paths), 2)
+        fractions = [fraction for fraction, _message in updates]
+        self.assertEqual(fractions, sorted(fractions))
 
     def test_about_dialog_provides_copyable_diagnostics(self) -> None:
         with TemporaryDirectory(prefix="pvs-about-test-") as raw_directory:

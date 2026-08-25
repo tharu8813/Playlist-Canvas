@@ -1,0 +1,393 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import MagicMock, patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtGui import QColor, QImage
+from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoFrameFormat
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent
+import shiboken6
+
+from app.canvas.live_canvas import LiveCanvas
+from app.canvas.source_item import SourceItem
+from app.models.source import Source, SourceType
+from app.services.history_service import HistoryService
+from app.services.source_store import SourceStore
+from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
+
+
+class VideoFrameFilterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_scales_large_decoder_frame_to_display_budget(self) -> None:
+        image = QImage(3840, 2160, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(20, 40, 60, 255))
+        filtered = filter_video_frame(
+            image, VideoFrameFilterSettings(480, 270),
+        )
+        self.assertEqual((filtered.width(), filtered.height()), (480, 270))
+
+    def test_vector_color_math_matches_existing_percentage_semantics(self) -> None:
+        image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(100, 120, 140, 77))
+        filtered = filter_video_frame(
+            image,
+            VideoFrameFilterSettings(
+                8, 8, brightness=10.0, contrast=20.0,
+            ),
+        )
+        color = filtered.pixelColor(4, 4)
+        self.assertEqual(color.alpha(), 77)
+        self.assertAlmostEqual(color.red(), 119, delta=1)
+        self.assertAlmostEqual(color.green(), 143, delta=1)
+        self.assertAlmostEqual(color.blue(), 167, delta=1)
+
+    def test_grayscale_and_saturation_are_applied_without_losing_alpha(self) -> None:
+        image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(240, 40, 20, 123))
+        filtered = filter_video_frame(
+            image, VideoFrameFilterSettings(8, 8, grayscale=True),
+        )
+        color = filtered.pixelColor(2, 2)
+        self.assertAlmostEqual(color.red(), color.green(), delta=1)
+        self.assertAlmostEqual(color.green(), color.blue(), delta=1)
+        self.assertEqual(color.alpha(), 123)
+
+    def test_box_blur_spreads_an_impulse_and_preserves_dimensions(self) -> None:
+        image = QImage(9, 9, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(0, 0, 0, 255))
+        image.setPixelColor(4, 4, QColor(255, 255, 255, 255))
+        filtered = filter_video_frame(
+            image, VideoFrameFilterSettings(9, 9, blur=2.0),
+        )
+        self.assertEqual((filtered.width(), filtered.height()), (9, 9))
+        self.assertLess(filtered.pixelColor(4, 4).red(), 255)
+        self.assertGreater(filtered.pixelColor(4, 3).red(), 0)
+
+    def test_busy_item_keeps_only_the_newest_decoder_frame(self) -> None:
+        item = SourceItem(Source(SourceType.TEXT, "Frame queue"))
+        item._video_filter_busy = True
+        first = QImage(8, 8, QImage.Format.Format_RGBA8888)
+        first.fill(QColor(255, 0, 0))
+        second = QImage(8, 8, QImage.Format.Format_RGBA8888)
+        second.fill(QColor(0, 0, 255))
+
+        item._video_frame_changed(QVideoFrame(first))
+        item._video_frame_changed(QVideoFrame(second))
+
+        self.assertIsNotNone(item._video_pending_frame)
+        pending, _generation = item._video_pending_frame
+        self.assertEqual(pending.pixelColor(4, 4), QColor(0, 0, 255))
+        self.assertGreaterEqual(item.video_decoder_stats().dropped_frames, 1)
+
+    def test_completed_filtered_video_frame_announces_preview_refresh(self) -> None:
+        item = SourceItem(Source(SourceType.VIDEO, "Paused frame"))
+        image = QImage(16, 9, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(12, 34, 56))
+        ready: list[bool] = []
+        item.video_frame_ready.connect(lambda: ready.append(True))
+
+        item._video_filter_busy = True
+        item._video_filter_finished(item._video_filter_key(), image)
+
+        self.assertEqual(ready, [True])
+        self.assertEqual(item._pixmap.toImage().pixelColor(4, 4), QColor(12, 34, 56))
+        self.assertEqual(
+            item.video_preview_frame().pixelColor(4, 4), QColor(12, 34, 56),
+        )
+        self.assertFalse(item.video_preview_frame().isNull())
+        item.release_video_decoder()
+        self.assertTrue(item.video_preview_frame().isNull())
+
+    def test_supported_rhi_frame_is_retained_without_calling_to_image(self) -> None:
+        class RhiFrame(QVideoFrame):
+            def handleType(self) -> QVideoFrame.HandleType:
+                return QVideoFrame.HandleType.RhiTextureHandle
+
+            def pixelFormat(self) -> QVideoFrameFormat.PixelFormat:
+                return QVideoFrameFormat.PixelFormat.Format_RGBA8888
+
+            def toImage(self) -> QImage:
+                raise AssertionError("RHI preview frame must not call toImage()")
+
+        item = SourceItem(Source(SourceType.VIDEO, "Native GPU frame"))
+        item.set_video_direct_gpu_frame(True)
+        item._video_timeline_preview_active = True
+        source_image = QImage(16, 9, QImage.Format.Format_RGBA8888)
+        source_image.fill(QColor("#123456"))
+
+        item._video_frame_changed(RhiFrame(source_image))
+
+        gpu_frame, serial = item.video_preview_gpu_frame()
+        self.assertTrue(gpu_frame.isValid())
+        self.assertEqual(serial, 1)
+        self.assertTrue(item.video_preview_frame().isNull())
+        self.assertTrue(item.video_preview_active)
+        item.release_video_decoder()
+
+    def test_transport_pause_and_speed_are_applied_to_active_decoder(self) -> None:
+        item = SourceItem(Source(SourceType.TEXT, "Decoder clock"))
+        player = MagicMock()
+        item._video_player = player
+        item._video_timeline_preview_active = True
+
+        item.set_video_preview_playback(False, 1.5)
+        player.setPlaybackRate.assert_called_with(1.5)
+        player.pause.assert_called_once()
+
+        item.set_video_preview_playback(True, 2.0)
+        player.setPlaybackRate.assert_called_with(2.0)
+        player.play.assert_called_once()
+        item._video_player = None
+
+    def test_loading_decoder_coalesces_seek_requests_until_media_is_ready(self) -> None:
+        item = SourceItem(Source(SourceType.TEXT, "Deferred seek"))
+        item.source.source_type = SourceType.VIDEO
+        player = MagicMock()
+        player.mediaStatus.return_value = QMediaPlayer.MediaStatus.LoadingMedia
+        item._video_player = player
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.touch()
+            item.set_video_preview_playback(False, 1.25)
+            item.set_video_preview_position(str(path), 1.0)
+            item.set_video_preview_position(str(path), 2.0)
+
+        player.setPosition.assert_not_called()
+        self.assertEqual(item._video_pending_seek_ms, 2000)
+        item._video_media_status_changed(QMediaPlayer.MediaStatus.LoadedMedia)
+        player.setPosition.assert_called_once_with(2000)
+        self.assertIsNone(item._video_pending_seek_ms)
+        self.assertEqual(item.video_decoder_stats().seek_count, 1)
+        item._video_player = None
+
+    def test_playing_decoder_limits_corrective_seeks_when_position_stalls(self) -> None:
+        item = SourceItem(Source(SourceType.TEXT, "Stalled decoder"))
+        item.source.source_type = SourceType.VIDEO
+        player = MagicMock()
+        player.position.return_value = 0
+        player.playbackState.return_value = QMediaPlayer.PlaybackState.PlayingState
+        item._video_player = player
+        item._video_preview_path = "same.mp4"
+        item._video_timeline_preview_active = True
+        item._video_should_play = True
+        item._video_applied_playback_rate = 1.0
+
+        request_times = [10.0 + frame / 30.0 for frame in range(31)]
+        with patch("app.canvas.source_item.monotonic", side_effect=request_times):
+            for frame in range(31):
+                item.set_video_preview_position("same.mp4", frame / 30.0)
+
+        self.assertEqual(player.setPosition.call_count, 1)
+        self.assertEqual(item.video_decoder_stats().seek_count, 1)
+        item._video_player = None
+
+    def test_playing_decoder_seeks_immediately_for_real_timeline_jump(self) -> None:
+        item = SourceItem(Source(SourceType.TEXT, "Timeline jump"))
+        item.source.source_type = SourceType.VIDEO
+        player = MagicMock()
+        player.position.return_value = 0
+        player.playbackState.return_value = QMediaPlayer.PlaybackState.PlayingState
+        item._video_player = player
+        item._video_preview_path = "same.mp4"
+        item._video_timeline_preview_active = True
+        item._video_should_play = True
+        item._video_applied_playback_rate = 1.0
+
+        with patch("app.canvas.source_item.monotonic", side_effect=[10.0, 10.033]):
+            item.set_video_preview_position("same.mp4", 0.0)
+            item.set_video_preview_position("same.mp4", 5.0)
+
+        player.setPosition.assert_called_once_with(5000)
+        item._video_player = None
+
+    def test_explicit_playhead_seek_bypasses_normal_playback_cooldown(self) -> None:
+        item = SourceItem(Source(SourceType.TEXT, "Explicit seek"))
+        item.source.source_type = SourceType.VIDEO
+        player = MagicMock()
+        player.position.return_value = 0
+        player.playbackState.return_value = QMediaPlayer.PlaybackState.PlayingState
+        item._video_player = player
+        item._video_preview_path = "same.mp4"
+        item._video_timeline_preview_active = True
+        item._video_should_play = True
+        item._video_applied_playback_rate = 1.0
+        item._video_last_seek_time = 10.0
+
+        with patch("app.canvas.source_item.monotonic", return_value=10.1):
+            item.set_video_preview_position(
+                "same.mp4", 0.5, force_seek=True,
+            )
+
+        player.setPosition.assert_called_once_with(500)
+        item._video_player = None
+
+    def test_paused_decoder_keeps_precise_seek_behavior(self) -> None:
+        item = SourceItem(Source(SourceType.TEXT, "Paused seek"))
+        item.source.source_type = SourceType.VIDEO
+        player = MagicMock()
+        player.position.return_value = 0
+        item._video_player = player
+        item._video_preview_path = "same.mp4"
+        item._video_timeline_preview_active = True
+        item._video_should_play = False
+
+        with patch("app.canvas.source_item.monotonic", return_value=10.0):
+            item.set_video_preview_position("same.mp4", 0.25)
+
+        player.setPosition.assert_called_once_with(250)
+        item._video_player = None
+
+    def test_editor_video_accepts_one_poster_then_leaves_live_preview_off(self) -> None:
+        item = SourceItem(Source(SourceType.VIDEO, "Poster"))
+        item._video_filter_busy = True
+        item._video_editor_poster_pending = True
+        image = QImage(16, 9, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(30, 60, 90))
+
+        item._video_frame_changed(QVideoFrame(image))
+
+        self.assertFalse(item._video_editor_poster_pending)
+        self.assertFalse(item._video_timeline_preview_active)
+        self.assertIsNotNone(item._video_pending_frame)
+        item.release_video_decoder()
+
+    def test_live_video_filter_uses_preview_quality_budget(self) -> None:
+        source = Source(
+            SourceType.VIDEO, "Budgeted", width=1000, height=500, scale=1.0,
+        )
+        item = SourceItem(source)
+
+        item.set_video_preview_budget(0.55, 15)
+        key = item._video_filter_key()
+
+        self.assertEqual(key[2:4], (550, 275))
+        self.assertEqual(item._video_preview_fps, 15)
+        item.release_video_decoder()
+
+    def test_intentional_fps_throttle_is_not_decoder_pressure(self) -> None:
+        item = SourceItem(Source(SourceType.VIDEO, "Throttled"))
+        item._video_timeline_preview_active = True
+        item._video_preview_fps = 10
+        item._video_last_frame_accepted = float("inf")
+        image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+
+        item._video_frame_changed(QVideoFrame(image))
+
+        stats = item.video_decoder_stats()
+        self.assertEqual(stats.throttled_frames, 1)
+        self.assertEqual(stats.pressure_drops, 0)
+        self.assertFalse(stats.filter_pending)
+        item.release_video_decoder()
+
+    def test_fps_backpressure_does_not_invalidate_resolution_filter(self) -> None:
+        item = SourceItem(Source(SourceType.VIDEO, "Independent budgets"))
+        generation = item._video_filter_generation
+
+        item.set_video_preview_budget(item._video_display_scale, 15)
+
+        self.assertEqual(item._video_preview_fps, 15)
+        self.assertEqual(item._video_filter_generation, generation)
+        item.set_video_preview_budget(0.5, 15)
+        self.assertEqual(item._video_filter_generation, generation + 1)
+        item.release_video_decoder()
+
+    def test_gpu_color_filter_keeps_scaling_and_blur_on_cpu_only(self) -> None:
+        source = Source(
+            SourceType.VIDEO, "GPU color",
+            brightness=12.0, contrast=18.0, video_saturation=1.7,
+            video_grayscale=True, blur=3.0,
+        )
+        item = SourceItem(source)
+
+        cpu_settings = item._video_filter_settings(item._video_filter_key())
+        self.assertEqual(cpu_settings.brightness, 12.0)
+        self.assertEqual(cpu_settings.contrast, 18.0)
+        self.assertTrue(cpu_settings.grayscale)
+        item.set_video_gpu_color_filter(True)
+        gpu_settings = item._video_filter_settings(item._video_filter_key())
+
+        self.assertEqual(gpu_settings.brightness, 0.0)
+        self.assertEqual(gpu_settings.contrast, 0.0)
+        self.assertEqual(gpu_settings.saturation, 1.0)
+        self.assertFalse(gpu_settings.grayscale)
+        self.assertEqual(gpu_settings.blur, 3.0)
+        item.release_video_decoder()
+
+    def test_suspending_preview_invalidates_pending_filter_work(self) -> None:
+        item = SourceItem(Source(SourceType.TEXT, "Suspend"))
+        image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+        item._video_pending_frame = (image, item._video_filter_key())
+        generation = item._video_filter_generation
+
+        item.suspend_video_preview()
+
+        self.assertIsNone(item._video_pending_frame)
+        self.assertEqual(item._video_filter_generation, generation + 1)
+        self.assertEqual(item._video_preview_path, "")
+
+    def test_deleted_video_releases_decoder_and_undo_recreates_it(self) -> None:
+        store = SourceStore()
+        canvas = LiveCanvas(store, object())  # Translator is not used by this path.
+        source = Source(SourceType.VIDEO, "Deleted decoder")
+        store.add(source)
+        item = canvas._items[source.id]
+        player = item._video_player
+        sink = item._video_sink
+        self.assertIsNotNone(player)
+        self.assertIsNotNone(sink)
+
+        store.remove(source.id)
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+        self.assertIsNone(item._video_player)
+        self.assertIsNone(item._video_sink)
+        self.assertTrue(item._pixmap.isNull())
+        self.assertFalse(shiboken6.isValid(player))
+        self.assertFalse(shiboken6.isValid(sink))
+
+        store.add(source)
+        self.assertIs(canvas._items[source.id], item)
+        self.assertIsNotNone(item._video_player)
+        self.assertIsNot(item._video_player, player)
+        canvas.release_video_decoders()
+
+    def test_unreachable_retired_item_is_removed_from_the_scene(self) -> None:
+        store = SourceStore()
+        canvas = LiveCanvas(store, object())
+        source = Source(SourceType.VIDEO, "Pruned decoder")
+        store.add(source)
+        item = canvas._items[source.id]
+        store.remove(source.id)
+
+        canvas.prune_retired_items({source.id})
+        self.assertIn(source.id, canvas._retired_items)
+        canvas.prune_retired_items(set())
+
+        self.assertNotIn(source.id, canvas._retired_items)
+        self.assertNotIn(item, canvas.scene_model.items())
+
+    def test_history_reports_only_undo_reachable_source_ids(self) -> None:
+        history = HistoryService(max_entries=10)
+        history.reset({"sources": [{"id": "first"}]})
+        history.commit({"sources": [{"id": "second"}]})
+        self.assertEqual(history.retained_source_ids(), {"first", "second"})
+
+        history.undo()
+        history.commit({"sources": [{"id": "replacement"}]})
+
+        self.assertEqual(
+            history.retained_source_ids(), {"first", "replacement"},
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

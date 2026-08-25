@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 import json
 import logging
 from pathlib import Path
 import shutil
 import threading
+from time import monotonic
 import traceback as traceback_module
 from tempfile import TemporaryDirectory
 
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QStyle,
     QTabWidget,
     QToolBar,
@@ -68,7 +71,6 @@ from app.ffmpeg.install_worker import FFmpegInstallWorker
 from app.ffmpeg.managed_installer import ManagedFFmpegInstallation, ManagedFFmpegInstaller
 from app.inspector.source_inspector import SourceInspector
 from app.layers.layer_panel import LayerPanel
-from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.models.project import CanvasSettings, ProjectDocument, ProjectSettings
 from app.services.project_service import ProjectError, ProjectService
@@ -94,16 +96,29 @@ from app.services.update_service import (
 from app.services.update_worker import UpdateCheckWorker, UpdateDownloadWorker
 from app.presets.preset_service import PresetDefinition
 from app.preview.canvas_snapshot import CanvasSnapshot
+from app.preview.export_canvas_capture import ExportCanvasCapturer
+from app.preview.gpu_texture_surface import (
+    GPU_TEXTURE_SURFACE_AVAILABLE, GpuTexturePreviewSurface,
+)
+from app.renderer.export_timeline import ExportTimelinePlanner
+from app.renderer.static_video_stream import (
+    DirectVideoEncodingProfile,
+    StaticVideoStreamEncoder,
+    StaticVideoStreamError,
+)
 from app.renderer.ffmpeg_renderer import (
     FFmpegNotFoundError,
     FFmpegRenderer,
     RenderCancelledError,
     RenderError,
     RenderFrame,
+    PreparedVideoInput,
+    PreparedStaticOverlayLayer,
     RenderResult,
-    StaticOverlayLayer,
     VisualizerOverlay,
+    VideoClipOverlay,
 )
+from app.video.timeline import build_video_occurrences
 from app.renderer.render_worker import RenderWorker
 from app.timeline.timeline_panel import TimelinePanel
 from app.utils.i18n import Language, Translator
@@ -116,8 +131,51 @@ from app import __version__
 
 
 LOGGER = logging.getLogger(__name__)
+EXPORT_PREPARATION_PROGRESS_WEIGHT = 0.25
 
 SOURCE_CLIPBOARD_MIME = "application/x-playlist-video-studio-sources+json"
+
+
+@dataclass(slots=True)
+class ExportFrameStagingMetrics:
+    """Read-only export diagnostics collected without changing staged frames."""
+
+    started_at: float = field(default_factory=monotonic)
+    elapsed_seconds: float = 0.0
+    capture_count: int = 0
+    unique_file_count: int = 0
+    reused_frame_count: int = 0
+    total_bytes: int = 0
+    largest_file_bytes: int = 0
+    largest_width: int = 0
+    largest_height: int = 0
+    stream_file_counts: dict[str, int] = field(default_factory=dict)
+    stream_bytes: dict[str, int] = field(default_factory=dict)
+
+    def record_capture(self) -> None:
+        self.capture_count += 1
+
+    def record_reuse(self) -> None:
+        self.reused_frame_count += 1
+
+    def record_file(self, stream_key: str, image: QImage, byte_count: int) -> None:
+        self.unique_file_count += 1
+        self.total_bytes += byte_count
+        self.stream_file_counts[stream_key] = self.stream_file_counts.get(stream_key, 0) + 1
+        self.stream_bytes[stream_key] = self.stream_bytes.get(stream_key, 0) + byte_count
+        if byte_count > self.largest_file_bytes:
+            self.largest_file_bytes = byte_count
+            self.largest_width = image.width()
+            self.largest_height = image.height()
+
+    def snapshot(self) -> ExportFrameStagingMetrics:
+        """Freeze current counters for diagnostics after the temp directory is gone."""
+        return replace(
+            self,
+            elapsed_seconds=max(0.0, monotonic() - self.started_at),
+            stream_file_counts=dict(self.stream_file_counts),
+            stream_bytes=dict(self.stream_bytes),
+        )
 
 
 class CanvasCenteredSplitter(QSplitter):
@@ -133,11 +191,18 @@ class CanvasCenteredSplitter(QSplitter):
         self._restoring_edges = False
         self.splitterMoved.connect(self._remember_edge_sizes)
 
-    def lock_edge_sizes(self) -> None:
+    def lock_edge_sizes(self, sizes: dict[int, int] | None = None) -> None:
         """Use the current user-visible edge sizes for future window resizes."""
-        sizes = self.sizes()
+        if sizes is not None:
+            self._edge_sizes = {
+                int(index): max(0, int(size))
+                for index, size in sizes.items()
+                if int(index) != self._center_index
+            }
+            return
+        current = self.sizes()
         self._edge_sizes = {
-            index: size for index, size in enumerate(sizes)
+            index: size for index, size in enumerate(current)
             if index != self._center_index
         }
 
@@ -158,14 +223,12 @@ class CanvasCenteredSplitter(QSplitter):
             if self.orientation() == Qt.Orientation.Horizontal
             else old_size.height()
         )
-        remembered = (
-            {
+        remembered = dict(self._edge_sizes)
+        if not remembered and old_extent > 0 and sum(before_resize) > 0:
+            remembered = {
                 index: size for index, size in enumerate(before_resize)
                 if index != self._center_index
             }
-            if old_extent > 0 and sum(before_resize) > 0
-            else dict(self._edge_sizes)
-        )
         super().resizeEvent(event)
         if not remembered or self.count() <= self._center_index:
             return
@@ -194,7 +257,10 @@ class CanvasCenteredSplitter(QSplitter):
             super().setSizes(target)
         finally:
             self._restoring_edges = False
-        self.lock_edge_sizes()
+        # A temporarily small window may force Qt to compress edge panels.
+        # Keep the user's remembered sizes so expanding the window restores
+        # them instead of treating the temporary compression as a new choice.
+        self.lock_edge_sizes(remembered)
 
 
 class MainWindow(QMainWindow):
@@ -208,6 +274,11 @@ class MainWindow(QMainWindow):
         self.project_settings = ProjectSettings()
         self.playlist_export_service = PlaylistExportService()
         self.settings_service = AppSettingsService(self)
+        # Renderer selection is process-scoped. Saving a different backend does
+        # not mutate an already-created OpenGL/widget hierarchy mid-session.
+        self._preview_backend_for_session = (
+            self.settings_service.current.preview_backend
+        )
         self.smooth_scroll = SmoothScrollService(
             self.settings_service.current.smooth_scrolling,
             self.settings_service.current.smooth_scroll_duration_ms,
@@ -228,6 +299,12 @@ class MainWindow(QMainWindow):
             self._finish_canvas_animation_preview
         )
         self._animation_preview_active = False
+        self._inline_preview: ExportPreviewDialog | None = None
+        self._inline_preview_controls: QWidget | None = None
+        self._inline_preview_track_panel: QWidget | None = None
+        self._preview_ui_lock_state: dict[str, object] | None = None
+        self._bottom_tab_change_guard = False
+        self._last_edit_bottom_tab = 0
         self.history = HistoryService(self)
         recovery_directory = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppLocalDataLocation
@@ -260,15 +337,22 @@ class MainWindow(QMainWindow):
         # preferences or participate in project dirty/history state.
         self._project_theme_metadata = self.current_theme
         self._project_language_metadata = self.translator.language.value
-        self._sidebar_open_width = 220
+        self._sidebar_open_width = 260
+        self._inspector_open_width = 300
+        self._bottom_open_height = 270
         self._sidebar_transition = False
+        self._panel_transition_serial = {"left": 0, "right": 0, "bottom": 0}
         self._render_worker: RenderWorker | None = None
         self._export_frame_staging: TemporaryDirectory[str] | None = None
         self._export_frame_index = 0
         self._export_capture_count = 0
         self._export_frame_cache: dict[str, tuple[QImage, Path]] = {}
+        self._export_frame_metrics: ExportFrameStagingMetrics | None = None
+        self._last_export_frame_metrics: ExportFrameStagingMetrics | None = None
         self._export_dialog: ExportProgressDialog | None = None
         self._export_ui_lock_state: tuple[bool, bool, bool, bool, bool] | None = None
+        self._export_preparation_cancel: threading.Event | None = None
+        self._close_after_export_cancel = False
         self._export_restore_pending = False
         self._clipboard_paste_serial = 0
         self._ffmpeg_install_worker: FFmpegInstallWorker | None = None
@@ -436,10 +520,23 @@ class MainWindow(QMainWindow):
         self.panels_action = QAction(self)
         self.panels_action.setCheckable(True)
         self.panels_action.setChecked(True)
+        self.panels_action.setShortcut(QKeySequence("Ctrl+Alt+L"))
         self.panels_action.toggled.connect(self._set_sidebar_visible)
         self.panels_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMenuButton)
         )
+        self.inspector_panel_action = QAction(self)
+        self.inspector_panel_action.setCheckable(True)
+        self.inspector_panel_action.setChecked(True)
+        self.inspector_panel_action.setShortcut(QKeySequence("Ctrl+Alt+R"))
+        self.inspector_panel_action.toggled.connect(
+            self._set_inspector_panel_visible
+        )
+        self.bottom_panel_action = QAction(self)
+        self.bottom_panel_action.setCheckable(True)
+        self.bottom_panel_action.setChecked(True)
+        self.bottom_panel_action.setShortcut(QKeySequence("Ctrl+Alt+B"))
+        self.bottom_panel_action.toggled.connect(self._set_bottom_panel_visible)
         self.settings_action = QAction(self)
         self.settings_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
@@ -469,8 +566,7 @@ class MainWindow(QMainWindow):
         self.preview_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
         )
-        self.preview_action.triggered.connect(self._open_playlist_preview)
-        toolbar.addAction(self.preview_action)
+        self.preview_action.triggered.connect(lambda: self._show_bottom_panel(2))
         self.export_button = toolbar.widgetForAction(self.export_action)
         if self.export_button is not None:
             self.export_button.setObjectName("exportButton")
@@ -494,7 +590,6 @@ class MainWindow(QMainWindow):
             else "Current project name and save state"
         )
         toolbar.addWidget(self.project_status_label)
-        toolbar.addAction(self.preview_action)
         toolbar.addAction(self.export_action)
         self.export_button = toolbar.widgetForAction(self.export_action)
         if self.export_button is not None:
@@ -1072,7 +1167,7 @@ class MainWindow(QMainWindow):
 
         self.insert_menu = menu_bar.addMenu("")
         source_categories = (
-            ("basic", (SourceType.IMAGE, SourceType.TEXT, SourceType.SHAPE)),
+            ("basic", (SourceType.IMAGE, SourceType.VIDEO, SourceType.TEXT, SourceType.SHAPE)),
             ("playback", (
                 SourceType.PROGRESS_BAR, SourceType.TIME, SourceType.ALBUM_COVER,
                 SourceType.LYRICS, SourceType.TRACK_LIST, SourceType.NOW_PLAYING,
@@ -1103,6 +1198,8 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(self.grid_action)
         self.view_menu.addSeparator()
         self.view_menu.addAction(self.panels_action)
+        self.view_menu.addAction(self.inspector_panel_action)
+        self.view_menu.addAction(self.bottom_panel_action)
         self.view_menu.addSeparator()
         self.show_playlist_action = QAction(self)
         self.show_playlist_action.setShortcut(QKeySequence("Ctrl+Alt+1"))
@@ -1157,12 +1254,15 @@ class MainWindow(QMainWindow):
         )
         top_splitter.setChildrenCollapsible(False)
         self.main_splitter = top_splitter
-        left_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.left_workspace = left_splitter
-        left_splitter.setChildrenCollapsible(False)
-        left_splitter.setSizePolicy(
+        left_workspace = QFrame()
+        left_workspace.setObjectName("leftWorkspace")
+        self.left_workspace = left_workspace
+        left_workspace.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding,
         )
+        left_layout = QVBoxLayout(left_workspace)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
         self.source_sidebar = self._make_source_sidebar()
         self.content_library_panel = ContentLibraryPanel(
             self.project_content_service, self.translator
@@ -1172,11 +1272,12 @@ class MainWindow(QMainWindow):
         self.left_tabs.setObjectName("leftProjectTabs")
         self.left_tabs.addTab(self.source_sidebar, "")
         self.left_tabs.addTab(self.content_library_panel, "")
-        left_splitter.addWidget(self.left_tabs)
         self.layer_panel = LayerPanel(self.store, self.translator)
-        left_splitter.addWidget(self.layer_panel)
-        left_splitter.setSizes([345, 420])
-        top_splitter.addWidget(left_splitter)
+        self.left_tabs.addTab(self.layer_panel, "")
+        self.left_tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self.left_tabs.tabBar().setExpanding(True)
+        left_layout.addWidget(self.left_tabs)
+        top_splitter.addWidget(left_workspace)
         center = QWidget()
         center.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
@@ -1190,7 +1291,26 @@ class MainWindow(QMainWindow):
         self.canvas.copy_requested.connect(self._copy_selected_sources)
         self.canvas.paste_requested.connect(self._paste_sources)
         self.canvas.command_requested.connect(self._handle_canvas_context_command)
-        center_layout.addWidget(self.canvas, 1)
+        self.canvas_stack = QStackedWidget()
+        self.canvas_stack.setObjectName("canvasWorkspaceStack")
+        self.canvas_stack.addWidget(self.canvas)
+        self._preview_gpu_composition_anchor: QWidget | None = None
+        if (
+            self._preview_backend_for_session == "gpu_layers"
+            and GPU_TEXTURE_SURFACE_AVAILABLE
+            and GpuTexturePreviewSurface is not None
+        ):
+            # Adding the first QOpenGLWidget to an already-visible top-level
+            # window can make Qt recreate that native window. Register a hidden
+            # surface before MainWindow is shown so opening Preview never causes
+            # the visible close/reopen flash on Windows.
+            self._preview_gpu_composition_anchor = GpuTexturePreviewSurface()
+            self._preview_gpu_composition_anchor.setObjectName(
+                "previewGpuCompositionAnchor"
+            )
+            self.canvas_stack.addWidget(self._preview_gpu_composition_anchor)
+            self.canvas_stack.setCurrentWidget(self.canvas)
+        center_layout.addWidget(self.canvas_stack, 1)
         top_splitter.addWidget(center)
         self.inspector = SourceInspector(self.store, self.translator)
         self.inspector.setSizePolicy(
@@ -1199,12 +1319,49 @@ class MainWindow(QMainWindow):
         self.inspector.animation_preview_requested.connect(
             self._preview_source_animation
         )
-        top_splitter.addWidget(self.inspector)
+        self.inspector_stack = QStackedWidget()
+        self.inspector_stack.setObjectName("inspectorWorkspaceStack")
+        self.inspector_stack.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding,
+        )
+        self.preview_track_inspector = QFrame()
+        self.preview_track_inspector.setObjectName("previewTrackInspectorPage")
+        self.preview_track_inspector_layout = QVBoxLayout(
+            self.preview_track_inspector
+        )
+        self.preview_track_inspector_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview_track_inspector_layout.setSpacing(0)
+        self.inspector_stack.addWidget(self.inspector)
+        self.inspector_stack.addWidget(self.preview_track_inspector)
+        self.inspector_stack.setCurrentWidget(self.inspector)
+        top_splitter.addWidget(self.inspector_stack)
         top_splitter.setStretchFactor(0, 0)
         top_splitter.setStretchFactor(1, 1)
         top_splitter.setStretchFactor(2, 0)
-        top_splitter.setSizes([220, 1030, 300])
-        top_splitter.lock_edge_sizes()
+        settings = QSettings()
+
+        def saved_panel_size(
+            key: str, default: int, minimum: int, maximum: int,
+        ) -> int:
+            try:
+                value = int(settings.value(key, default))
+            except (TypeError, ValueError):
+                value = default
+            return max(minimum, min(maximum, value))
+
+        self._sidebar_open_width = saved_panel_size(
+            "workspace/left_panel_width", self._sidebar_open_width, 180, 1600,
+        )
+        self._inspector_open_width = saved_panel_size(
+            "workspace/right_panel_width", self._inspector_open_width, 220, 1600,
+        )
+        top_splitter.setSizes([
+            self._sidebar_open_width, 990, self._inspector_open_width,
+        ])
+        top_splitter.lock_edge_sizes({
+            0: self._sidebar_open_width,
+            2: self._inspector_open_width,
+        })
         self.workspace_splitter = CanvasCenteredSplitter(
             Qt.Orientation.Vertical, center_index=0,
         )
@@ -1229,24 +1386,36 @@ class MainWindow(QMainWindow):
             self.playlist_service, self.store, self.translator
         )
         self.bottom_tabs.addTab(self.timeline_panel, "")
-        self.workspace_splitter.addWidget(self.bottom_tabs)
+        self.preview_tab_page = QFrame()
+        self.preview_tab_page.setObjectName("previewWorkspaceTab")
+        self.preview_tab_layout = QVBoxLayout(self.preview_tab_page)
+        self.preview_tab_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview_tab_layout.setSpacing(0)
+        self.bottom_tabs.addTab(self.preview_tab_page, "")
+        self.bottom_workspace_stack = QStackedWidget()
+        self.bottom_workspace_stack.setObjectName("bottomWorkspaceStack")
+        self.bottom_workspace_stack.addWidget(self.bottom_tabs)
+        self.workspace_splitter.addWidget(self.bottom_workspace_stack)
         self.workspace_splitter.setStretchFactor(0, 1)
         self.workspace_splitter.setStretchFactor(1, 0)
-        saved_sizes = QSettings().value("workspace/vertical_splitter", [650, 270])
+        saved_sizes = settings.value("workspace/vertical_splitter", [650, 270])
         try:
             sizes = [max(120, int(value)) for value in saved_sizes]
         except (TypeError, ValueError):
             sizes = [650, 270]
-        self.workspace_splitter.setSizes(sizes if len(sizes) == 2 else [650, 270])
-        self.workspace_splitter.lock_edge_sizes()
+        legacy_bottom_height = sizes[1] if len(sizes) == 2 else self._bottom_open_height
+        self._bottom_open_height = saved_panel_size(
+            "workspace/bottom_panel_height", legacy_bottom_height, 180, 1200,
+        )
+        self.workspace_splitter.setSizes([650, self._bottom_open_height])
+        self.workspace_splitter.lock_edge_sizes({1: self._bottom_open_height})
         try:
             saved_tab = int(QSettings().value("workspace/bottom_tab", 0))
         except (TypeError, ValueError):
             saved_tab = 0
-        self.bottom_tabs.setCurrentIndex(max(0, min(1, saved_tab)))
-        self.bottom_tabs.currentChanged.connect(
-            lambda index: QSettings().setValue("workspace/bottom_tab", index)
-        )
+        self._last_edit_bottom_tab = max(0, min(1, saved_tab))
+        self.bottom_tabs.setCurrentIndex(self._last_edit_bottom_tab)
+        self.bottom_tabs.currentChanged.connect(self._bottom_workspace_tab_changed)
         self._workspace_settings_timer = QTimer(self)
         self._workspace_settings_timer.setSingleShot(True)
         self._workspace_settings_timer.setInterval(250)
@@ -1254,14 +1423,69 @@ class MainWindow(QMainWindow):
         self.workspace_splitter.splitterMoved.connect(
             lambda _position, _index: self._workspace_settings_timer.start()
         )
+        self.main_splitter.splitterMoved.connect(
+            lambda _position, _index: self._workspace_settings_timer.start()
+        )
         root_layout.addWidget(self.workspace_splitter, 1)
         self.setCentralWidget(root)
+        self._restore_workspace_panel_visibility()
 
     def _save_workspace_layout(self) -> None:
-        """Persist splitter geometry after resizing settles."""
-        QSettings().setValue(
-            "workspace/vertical_splitter", self.workspace_splitter.sizes()
+        """Persist each panel's last useful open size after resizing settles."""
+        horizontal = self.main_splitter.sizes()
+        if len(horizontal) == 3:
+            if not self.left_workspace.isHidden() and horizontal[0] >= 180:
+                self._sidebar_open_width = horizontal[0]
+            if not self.inspector_stack.isHidden() and horizontal[2] >= 220:
+                self._inspector_open_width = horizontal[2]
+        vertical = self.workspace_splitter.sizes()
+        if (len(vertical) == 2 and not self.bottom_workspace_stack.isHidden()
+                and vertical[1] >= 180):
+            self._bottom_open_height = vertical[1]
+
+        settings = QSettings()
+        settings.setValue("workspace/left_panel_width", self._sidebar_open_width)
+        settings.setValue("workspace/right_panel_width", self._inspector_open_width)
+        settings.setValue("workspace/bottom_panel_height", self._bottom_open_height)
+        # Retain the former key for compatibility with builds that only knew
+        # the vertical splitter pair. Never persist a hidden panel's zero size.
+        top_height = vertical[0] if len(vertical) == 2 else 650
+        settings.setValue(
+            "workspace/vertical_splitter",
+            [max(120, top_height), self._bottom_open_height],
         )
+        settings.sync()
+
+    def _restore_workspace_panel_visibility(self) -> None:
+        """Restore the three independent workspace panel visibility choices."""
+        settings = QSettings()
+
+        def preference(key: str) -> bool:
+            try:
+                return bool(settings.value(key, True, type=bool))
+            except TypeError:
+                value = settings.value(key, True)
+                return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+        entries = (
+            (
+                self.panels_action, self.left_workspace,
+                preference("workspace/left_panel_visible"),
+            ),
+            (
+                self.inspector_panel_action, self.inspector_stack,
+                preference("workspace/right_panel_visible"),
+            ),
+            (
+                self.bottom_panel_action, self.bottom_workspace_stack,
+                preference("workspace/bottom_panel_visible"),
+            ),
+        )
+        for action, widget, visible in entries:
+            previous = action.blockSignals(True)
+            action.setChecked(visible)
+            action.blockSignals(previous)
+            widget.setVisible(visible)
 
     def _make_source_sidebar(self) -> QWidget:
         """Build the source palette with a scrollable source-card area."""
@@ -1292,7 +1516,7 @@ class MainWindow(QMainWindow):
         cards_layout.setContentsMargins(0, 0, 0, 0)
         cards_layout.setSpacing(8)
         descriptions = [
-            ("image", SourceType.IMAGE), ("text", SourceType.TEXT), ("shape", SourceType.SHAPE),
+            ("image", SourceType.IMAGE), ("video", SourceType.VIDEO), ("text", SourceType.TEXT), ("shape", SourceType.SHAPE),
             ("progress_bar", SourceType.PROGRESS_BAR), ("album_cover", SourceType.ALBUM_COVER),
             ("time", SourceType.TIME), ("logo", SourceType.LOGO), ("watermark", SourceType.WATERMARK),
             ("background", SourceType.BACKGROUND), ("audio_visualizer", SourceType.AUDIO_VISUALIZER),
@@ -1431,6 +1655,10 @@ class MainWindow(QMainWindow):
                 "사진이나 그래픽 파일을 캔버스에 표시합니다.",
                 "이미지 파일 · 맞춤 방식 · 밝기 · 대비 · 흐림 · 그림자",
             ),
+            SourceType.VIDEO: (
+                "곡별 또는 전체 타임라인에 맞춰 영상 파일을 재생합니다.",
+                "실행 타이밍 · 영상 목록 · 반복 방식 · 사이클 · 속도 · 필터 · 흐림",
+            ),
             SourceType.TEXT: (
                 "제목과 설명 또는 동적 트랙 정보를 표시합니다.",
                 "텍스트 · 글꼴 · 크기 · 정렬 · 줄바꿈 · 색상 · 외곽선",
@@ -1494,6 +1722,7 @@ class MainWindow(QMainWindow):
         }
         english_help = {
             SourceType.IMAGE: ("Display a photo or graphic file on the Canvas.", "Image file · fit mode · brightness · contrast · blur · shadow"),
+            SourceType.VIDEO: ("Play video files per track or across the whole timeline.", "Timing · media list · repeat mode · cycles · speed · filters · blur"),
             SourceType.TEXT: ("Display a title, description, or dynamic track information.", "Text · font · size · alignment · wrapping · color · outline"),
             SourceType.SHAPE: ("Add a shape or color surface to the design.", "Shape · fill · gradient · outline · corner radius"),
             SourceType.PROGRESS_BAR: ("Show current-track or playlist progress.", "Progress mode · style · value · track color · fill color"),
@@ -1525,6 +1754,7 @@ class MainWindow(QMainWindow):
                 SourceType.AUDIO_WAVEFORM: "오디오 파형" if korean else "Audio waveform",
                 SourceType.AUDIO_LEVEL_METER: "오디오 레벨 미터" if korean else "Audio level meter",
                 SourceType.PARTICLE_OVERLAY: "파티클 / 노이즈" if korean else "Particles / noise",
+                SourceType.VIDEO: "영상" if korean else "Video",
             }
             return labels.get(source_type, source_type.value.replace("_", " ").title())
 
@@ -1576,6 +1806,8 @@ class MainWindow(QMainWindow):
         dimensions = (260.0, 90.0)
         if template_type in {SourceType.ALBUM_COVER, SourceType.LOGO}:
             dimensions = (180.0, 180.0)
+        if source_type is SourceType.VIDEO:
+            dimensions = (480.0, 270.0)
         if source_type in {SourceType.AUDIO_VISUALIZER, SourceType.AUDIO_WAVEFORM}:
             dimensions = (460.0, 100.0)
         if source_type is SourceType.AUDIO_LEVEL_METER:
@@ -1659,6 +1891,7 @@ class MainWindow(QMainWindow):
                 artist=dialog.selected_artist,
                 album=dialog.selected_album,
                 cover_path=dialog.selected_cover_path,
+                video_paths=dialog.selected_video_paths,
                 lyrics_path=dialog.selected_lyrics_path,
                 lyrics=dialog.selected_lyrics,
                 lyrics_timing_offset_seconds=dialog.selected_timing_offset,
@@ -1730,6 +1963,8 @@ class MainWindow(QMainWindow):
             self._add_dropped_images([content_path], None)
         elif media_type == "audio":
             self._import_audio_files([content_path])
+        elif media_type == "video":
+            self._add_dropped_videos([content_path], None)
         elif media_type == "font":
             font_id = QFontDatabase.addApplicationFont(str(content_path))
             families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
@@ -1805,22 +2040,25 @@ class MainWindow(QMainWindow):
             return
         image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".svg"}
         image_paths = [path for path in paths if path.suffix.lower() in image_extensions]
+        video_extensions = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+        video_paths = [path for path in paths if path.suffix.lower() in video_extensions]
         audio_paths = [path for path in paths if path.suffix.lower() in AUDIO_EXTENSIONS]
         image_count = self._add_dropped_images(image_paths, position)
+        video_count = self._add_dropped_videos(video_paths, position)
         audio_count, accepted_audio_paths = self._import_audio_files(audio_paths)
-        self.project_content_service.add_paths([*image_paths, *accepted_audio_paths])
-        if image_count or audio_count:
+        self.project_content_service.add_paths([*image_paths, *video_paths, *accepted_audio_paths])
+        if image_count or video_count or audio_count:
             korean = self.translator.language is Language.KOREAN
             message = (
-                f"이미지 {image_count}개, 음악 {audio_count}개를 추가했습니다."
-                if korean else f"Added {image_count} image(s) and {audio_count} music file(s)."
+                f"이미지 {image_count}개, 영상 {video_count}개, 음악 {audio_count}개를 추가했습니다."
+                if korean else f"Added {image_count} image(s), {video_count} video source(s), and {audio_count} music file(s)."
             )
             self.statusBar().showMessage(message, 6000)
             return
         korean = self.translator.language is Language.KOREAN
         self.statusBar().showMessage(
-            "지원되는 이미지, 음악 또는 프로젝트 파일을 놓아 주세요."
-            if korean else "Drop supported image, music, or project files.",
+            "지원되는 이미지, 영상, 음악 또는 프로젝트 파일을 놓아 주세요."
+            if korean else "Drop supported image, video, music, or project files.",
             5000,
         )
 
@@ -1901,6 +2139,32 @@ class MainWindow(QMainWindow):
         if response == QMessageBox.StandardButton.Yes:
             self._load_project_path(path)
 
+    def _add_dropped_videos(self, paths: list[Path], position: object | None) -> int:
+        """Create one video element whose ordered media list is the dropped files."""
+        valid = [path.resolve() for path in paths if path.is_file()]
+        if not valid:
+            return 0
+        artboard = self.canvas.scene_model.artboard_rect
+        point = position if hasattr(position, "x") and hasattr(position, "y") else artboard.center()
+        width, height = 480.0, 270.0
+        source = Source(
+            SourceType.VIDEO,
+            valid[0].stem if len(valid) == 1 else f"Video playlist ({len(valid)})",
+            x=max(0.0, min(float(point.x()) - width / 2, artboard.width() - width)),
+            y=max(0.0, min(float(point.y()) - height / 2, artboard.height() - height)),
+            width=width,
+            height=height,
+            content_path=str(valid[0]),
+            video_paths=[str(path) for path in valid],
+            video_repeat_mode="once" if len(valid) == 1 else "sequence",
+            text="",
+            border_radius=0.0,
+            z_index=len(self.store.sources()),
+        )
+        self.store.add(source)
+        self.store.select(source.id)
+        return 1
+
     def _stage_export_frame(
         self, image: QImage, duration_seconds: float, stream_key: str = "base",
     ) -> RenderFrame:
@@ -1910,8 +2174,12 @@ class MainWindow(QMainWindow):
         if image.isNull():
             raise RenderError("Could not stage an empty export frame on disk.")
         self._export_capture_count += 1
+        if self._export_frame_metrics is None:
+            self._export_frame_metrics = ExportFrameStagingMetrics()
+        self._export_frame_metrics.record_capture()
         previous = self._export_frame_cache.get(stream_key)
         if previous is not None and image == previous[0]:
+            self._export_frame_metrics.record_reuse()
             return RenderFrame(previous[1], max(0.001, duration_seconds))
         # Disk usage queries are surprisingly expensive on synced/network-backed
         # Windows temp drives. Check periodically instead of once per PNG.
@@ -1934,6 +2202,14 @@ class MainWindow(QMainWindow):
             raise RenderError(
                 f"Could not stage an export frame on disk: {writer.errorString()}"
             )
+        try:
+            staged_bytes = path.stat().st_size
+        except OSError as error:
+            # Diagnostics must never turn a successfully written export frame
+            # into an export failure on an unusual or transient filesystem.
+            LOGGER.warning("Could not measure staged export frame %s: %s", path, error)
+            staged_bytes = 0
+        self._export_frame_metrics.record_file(stream_key, image, staged_bytes)
         self._export_frame_cache[stream_key] = (image.copy(), path)
         return RenderFrame(path, max(0.001, duration_seconds))
 
@@ -1944,12 +2220,35 @@ class MainWindow(QMainWindow):
 
     def _clear_export_frame_staging(self) -> None:
         """Release disk-backed captured frames after every export completion path."""
+        if self._export_frame_metrics is not None:
+            summary = self._export_frame_metrics.snapshot()
+            self._last_export_frame_metrics = summary
+            LOGGER.info(
+                "Export frame staging summary: captures=%d files=%d reused=%d "
+                "bytes=%d largest=%d (%dx%d) elapsed=%.3fs streams=%s",
+                summary.capture_count,
+                summary.unique_file_count,
+                summary.reused_frame_count,
+                summary.total_bytes,
+                summary.largest_file_bytes,
+                summary.largest_width,
+                summary.largest_height,
+                summary.elapsed_seconds,
+                {
+                    key: {
+                        "files": summary.stream_file_counts[key],
+                        "bytes": summary.stream_bytes.get(key, 0),
+                    }
+                    for key in sorted(summary.stream_file_counts)
+                },
+            )
         if self._export_frame_staging is not None:
             self._export_frame_staging.cleanup()
             self._export_frame_staging = None
         self._export_frame_index = 0
         self._export_capture_count = 0
         self._export_frame_cache.clear()
+        self._export_frame_metrics = None
 
     def _lock_main_form_for_export(self) -> None:
         """Block every main-form interaction while an export is in flight."""
@@ -2038,8 +2337,6 @@ class MainWindow(QMainWindow):
         selected_app_settings = export_options.app_settings
         quality_profile_name = export_options.quality_mode_combo.currentText()
         output = str(export_options.output_path)
-        if export_options.save_as_default:
-            self.settings_service.save(selected_app_settings)
         active_tracks = [track for track in self.playlist_service.tracks if track.enabled]
         if not active_tracks:
             QMessageBox.warning(
@@ -2050,6 +2347,16 @@ class MainWindow(QMainWindow):
             )
             return
         render_settings = selected_app_settings.render_settings()
+        try:
+            renderer.preflight_export(active_tracks, output, render_settings)
+        except RenderError as error:
+            QMessageBox.critical(
+                self, "내보내기 사전 검사 실패" if korean else "Export preflight failed",
+                str(error),
+            )
+            return
+        if export_options.save_as_default:
+            self.settings_service.save(selected_app_settings)
         encoder_name = next(
             (
                 label for label, codec in VIDEO_ENCODERS.items()
@@ -2077,6 +2384,7 @@ class MainWindow(QMainWindow):
             )
         )
         preparation_cancel = threading.Event()
+        self._export_preparation_cancel = preparation_cancel
         self._export_dialog = ExportProgressDialog(self)
         self._export_dialog.set_korean(korean)
         self._export_dialog.set_export_details(
@@ -2111,6 +2419,7 @@ class MainWindow(QMainWindow):
             )
             self._export_frame_index = 0
         except Exception as error:
+            self._export_preparation_cancel = None
             self._clear_export_frame_staging()
             if self._export_dialog:
                 self._export_dialog.complete(False)
@@ -2121,279 +2430,277 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self, "내보내기 오류" if korean else "Export error", str(error)
             )
+            self._resume_close_after_export_cancel()
             return
+        active_stream_encoder: StaticVideoStreamEncoder | None = None
+        active_stream_key: str | None = None
+
+        def cancel_static_streams() -> None:
+            if active_stream_encoder is not None:
+                active_stream_encoder.cancel()
+
         try:
             animation_fps = self._export_animation_sample_rate(render_settings.fps)
             playlist_duration = self._playlist_duration(active_tracks)
             visualizers = self._export_visualizers()
-            dynamic_visualizer_ids = {source.id for source in self.store.sources()
+            video_clips = self._export_video_clips(active_tracks, playlist_duration)
+            sources = self.store.sources()
+            dynamic_visualizer_ids = {source.id for source in sources
                                       if source.source_type in {
                                           SourceType.AUDIO_VISUALIZER, SourceType.AUDIO_WAVEFORM,
                                           SourceType.AUDIO_LEVEL_METER, SourceType.PARTICLE_OVERLAY,
+                                          SourceType.VIDEO,
                                       } and source.visible}
-            frames: list[RenderFrame] = []
             z_bands = CanvasSnapshot.z_bands(self.canvas.scene_model, dynamic_visualizer_ids)
-            base_z_max = z_bands[0][1]
-            static_band_frames: list[list[RenderFrame]] = [[] for _band in z_bands[1:]]
+            direct_final_stream = (
+                len(z_bands) == 1 and not visualizers and not video_clips
+            )
+            use_streamed_visuals = True
+            required_stream_encoders = [] if direct_final_stream else ["libx264rgb"]
+            if len(z_bands) > 1:
+                required_stream_encoders.append("ffv1")
+            for stream_encoder_name in required_stream_encoders:
+                try:
+                    renderer.ensure_encoder_available(stream_encoder_name)
+                except RenderError as error:
+                    # Custom FFmpeg builds may omit the lossless RGB encoder.
+                    # Preserve the known-good PNG path instead of making those
+                    # installations unable to export otherwise supported videos.
+                    LOGGER.warning(
+                        "Lossless Canvas streaming unavailable; using PNG staging: %s",
+                        error,
+                    )
+                    use_streamed_visuals = False
+                    break
+            stream_specs: list[tuple[str, Path, bool, int]] = []
+            if use_streamed_visuals:
+                assert self._export_frame_staging is not None
+                stream_root = Path(self._export_frame_staging.name)
+                stream_specs.append(("base", stream_root / "canvas-base.mkv", False, 3))
+                stream_specs.extend(
+                    (
+                        f"layer:{index}",
+                        stream_root / f"canvas-layer-{index:02d}.mkv",
+                        True,
+                        2,
+                    )
+                    for index, _band in enumerate(z_bands[1:])
+                )
 
-            def pump_preparation_ui(track_number: int) -> None:
-                """Keep the preparation dialog responsive during PNG staging."""
-                if self._export_capture_count % 4 != 0 or self._export_dialog is None:
+            timeline_samples = ExportTimelinePlanner.build(
+                active_tracks, sources, animation_fps,
+            )
+            total_preparation_captures = max(
+                1, len(timeline_samples) * len(z_bands),
+            )
+
+            def pump_preparation_ui(track_number: int, stream_key: str) -> None:
+                """Keep the preparation dialog responsive during visual staging."""
+                completed_captures = min(
+                    self._export_capture_count, total_preparation_captures,
+                )
+                if (
+                    completed_captures % 4 != 0
+                    and completed_captures != total_preparation_captures
+                ) or self._export_dialog is None:
                     return
                 track_position = f"{track_number}/{len(active_tracks)}"
-                self._export_dialog.set_busy(
-                    "Preparing visual frames",
-                    (
-                        f"{track_position}번 곡 화면 준비 중 · 임시 프레임 "
+                if stream_key == "base":
+                    stream_index = 1
+                    korean_stream = "기본 화면"
+                    english_stream = "Base Canvas"
+                else:
+                    layer_index = int(stream_key.removeprefix("layer:")) + 1
+                    stream_index = layer_index + 1
+                    korean_stream = f"Z 레이어 {layer_index}"
+                    english_stream = f"Z layer {layer_index}"
+                preparation_fraction = (
+                    completed_captures / total_preparation_captures
+                )
+                overall_fraction = (
+                    preparation_fraction * EXPORT_PREPARATION_PROGRESS_WEIGHT
+                )
+                preparation_percent = round(preparation_fraction * 100)
+                stream_position = f"{stream_index}/{len(z_bands)}"
+                if use_streamed_visuals:
+                    korean_detail = (
+                        f"{korean_stream} {stream_position} · {track_position}번 곡 · "
+                        f"화면 준비 {preparation_percent}% · "
+                        f"캡처 {completed_captures:,}/{total_preparation_captures:,}"
+                    )
+                    english_detail = (
+                        f"{english_stream} {stream_position} · track {track_position} · "
+                        f"visual preparation {preparation_percent}% · "
+                        f"capture {completed_captures:,}/{total_preparation_captures:,}"
+                    )
+                else:
+                    korean_detail = (
+                        f"{korean_stream} {stream_position} · {track_position}번 곡 · "
+                        f"화면 준비 {preparation_percent}% · 임시 프레임 "
                         f"{self._export_frame_index:,}개"
-                        if korean else
-                        f"Preparing track {track_position} · "
-                        f"{self._export_capture_count:,} capture(s) · "
+                    )
+                    english_detail = (
+                        f"{english_stream} {stream_position} · track {track_position} · "
+                        f"visual preparation {preparation_percent}% · "
                         f"{self._export_frame_index:,} temporary file(s)"
-                    ),
+                    )
+                self._export_dialog.update_progress(
+                    "Preparing visual frames",
+                    overall_fraction,
+                    korean_detail if korean else english_detail,
                 )
                 self.activity_progress.update(
-                    "export", detail=(
-                        f"{track_position}번 곡 화면 준비 중 · 임시 프레임 "
-                        f"{self._export_frame_index:,}개"
-                        if korean else
-                        f"Preparing track {track_position} · "
-                        f"{self._export_frame_index:,} temporary file(s)"
-                    ),
+                    "export", overall_fraction,
+                    korean_detail if korean else english_detail,
                 )
                 QApplication.processEvents()
                 if preparation_cancel.is_set():
                     raise RenderCancelledError("Export preparation was cancelled.")
 
-            def capture_composed_frame(
-                capture_track: PlaylistTrack, capture_number: int, capture_start: float,
-                frame_duration: float, **state: object,
-            ) -> RenderFrame:
-                """Stage one lower Canvas frame plus every transparent foreground Z band."""
+            def ensure_preparation_not_cancelled() -> None:
                 if preparation_cancel.is_set():
                     raise RenderCancelledError("Export preparation was cancelled.")
-                elapsed = float(state.pop("elapsed_seconds", 0.0))
-                common = dict(
-                    elapsed_seconds=elapsed,
-                    hide_visualizers=dynamic_visualizer_ids,
-                    playlist_duration_seconds=playlist_duration,
-                    playlist_tracks=active_tracks,
-                    timeline_seconds=float(
-                        state.pop("timeline_seconds", capture_start + elapsed)
+            def stage_streamed_frame(
+                image: QImage, duration_seconds: float, stream_key: str,
+            ) -> RenderFrame:
+                encoder = active_stream_encoder
+                if encoder is None or stream_key != active_stream_key:
+                    raise RenderError("Invalid streamed Canvas frame configuration.")
+                self._export_capture_count += 1
+                try:
+                    encoder.submit(image, duration_seconds)
+                except StaticVideoStreamError as error:
+                    if preparation_cancel.is_set():
+                        raise RenderCancelledError(
+                            "Export preparation was cancelled."
+                        ) from error
+                    raise RenderError(str(error)) from error
+                return RenderFrame(
+                    encoder.output_path,
+                    max(0.001, duration_seconds),
+                )
+
+            capturer = ExportCanvasCapturer(
+                self.canvas.scene_model,
+                active_tracks,
+                playlist_duration,
+                dynamic_visualizer_ids,
+                z_bands,
+                (
+                    stage_streamed_frame
+                    if use_streamed_visuals
+                    else self._stage_export_frame
+                ),
+                ensure_preparation_not_cancelled,
+                pump_preparation_ui,
+                retain_static_frames=not use_streamed_visuals,
+            )
+            if use_streamed_visuals:
+                duration_tolerance = 1e-6 * max(1.0, playlist_duration)
+                streamed_results = {}
+                for stream_key, output_path, preserve_alpha, queue_capacity in stream_specs:
+                    encoder = StaticVideoStreamEncoder(
+                        renderer.executable,
+                        output_path,
+                        render_settings.fps,
+                        queue_capacity=queue_capacity,
+                        preserve_alpha=preserve_alpha,
+                        producer_cancel_event=preparation_cancel,
+                        producer_wait_callback=QApplication.processEvents,
+                        direct_profile=(
+                            DirectVideoEncodingProfile(
+                                render_settings.output_width,
+                                render_settings.output_height,
+                                render_settings.video_codec,
+                                tuple(renderer._video_encoding_arguments(render_settings)),
+                            )
+                            if direct_final_stream and stream_key == "base"
+                            else None
+                        ),
+                    )
+                    active_stream_encoder = encoder
+                    active_stream_key = stream_key
+                    try:
+                        for sample in timeline_samples:
+                            capturer.capture_stream(sample, stream_key)
+                        streamed = encoder.finish()
+                    except StaticVideoStreamError as error:
+                        encoder.cancel()
+                        if preparation_cancel.is_set():
+                            raise RenderCancelledError(
+                                "Export preparation was cancelled."
+                            ) from error
+                        raise RenderError(str(error)) from error
+                    except Exception:
+                        encoder.cancel()
+                        raise
+                    finally:
+                        active_stream_encoder = None
+                        active_stream_key = None
+                    if abs(streamed.duration_seconds - playlist_duration) > duration_tolerance:
+                        difference = streamed.duration_seconds - playlist_duration
+                        raise RenderError(
+                            "A streamed Canvas timeline does not match the playlist "
+                            f"duration (expected {playlist_duration:.6f}s, got "
+                            f"{streamed.duration_seconds:.6f}s, difference "
+                            f"{difference:+.6f}s)."
+                        )
+                    expected_alpha = stream_key != "base"
+                    if streamed.has_alpha_stream != expected_alpha:
+                        raise RenderError(
+                            "A streamed Canvas layer has an invalid alpha configuration."
+                        )
+                    streamed_results[stream_key] = streamed
+                streamed = streamed_results["base"]
+                frames: list[RenderFrame] | PreparedVideoInput = PreparedVideoInput(
+                    streamed.path,
+                    playlist_duration,
+                    streamed.width,
+                    streamed.height,
+                    streamed.fps,
+                    ready_for_mux=direct_final_stream,
+                    encoded_codec=(
+                        render_settings.video_codec if direct_final_stream else ""
                     ),
                 )
-                phase = state.pop("animation_phase", None)
-                progress = float(state.pop("animation_progress", 1.0))
-                if phase is not None:
-                    common["animation_phase"] = phase
-                    common["animation_progress"] = progress
-                    common["animation_phase_duration"] = float(
-                        state.pop("animation_phase_duration", 0.0)
-                    )
-                base = self._stage_export_frame(CanvasSnapshot.capture_track(
-                    self.canvas.scene_model, capture_track, capture_number, len(active_tracks), capture_start,
-                    z_max=base_z_max, **common,
-                ), frame_duration, "base")
-                pump_preparation_ui(capture_number)
-                for index, (z_min, z_max) in enumerate(z_bands[1:]):
-                    if preparation_cancel.is_set():
-                        raise RenderCancelledError("Export preparation was cancelled.")
-                    static_band_frames[index].append(self._stage_export_frame(CanvasSnapshot.capture_track(
-                        self.canvas.scene_model, capture_track, capture_number, len(active_tracks), capture_start,
-                        z_min=z_min, z_max=z_max, transparent=True, **common,
-                    ), frame_duration, f"layer:{index}"))
-                    pump_preparation_ui(capture_number)
-                return base
-            cursor = 0.0
-            previous_track: PlaylistTrack | None = None
-            previous_start = 0.0
-            previous_number = 1
-            for number, track in enumerate(active_tracks, start=1):
-                requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-                start = max(cursor, requested)
-                sources = self.store.sources()
-                intro = min(track.duration_seconds / 2, max((source.animation_in_duration for source in sources if source.animation_in != "none"), default=0.0))
-                outro = min((track.duration_seconds - intro) / 2, max((source.animation_out_duration for source in sources if source.animation_out != "none"), default=0.0))
-                gap = max(0.0, start - cursor)
-                if gap > 0.001:
-                    # Explicit-frame exports need a visual frame for every silent
-                    # timeline gap as well.  Without it FFmpeg kept the previous
-                    # frame while audio advanced, shifting all later metadata.
-                    gap_track = previous_track or track
-                    gap_elapsed = gap_track.duration_seconds if previous_track else 0.0
-                    gap_points = {cursor, start}
-                    for source in sources:
-                        for boundary in (
-                            source.timeline_start,
-                            source.timeline_start + source.timeline_duration,
-                        ):
-                            if cursor < boundary < start and (
-                                boundary == source.timeline_start or source.timeline_duration > 0.0
-                            ):
-                                gap_points.add(boundary)
-                    ordered_gap_points = sorted(gap_points)
-                    gap_phase = "out" if previous_track is not None else "in"
-                    if previous_track is not None:
-                        previous_intro = min(
-                            previous_track.duration_seconds / 2,
-                            max((source.animation_in_duration for source in sources
-                                 if source.animation_in != "none"), default=0.0),
-                        )
-                        gap_phase_duration = min(
-                            (previous_track.duration_seconds - previous_intro) / 2,
-                            max((source.animation_out_duration for source in sources
-                                 if source.animation_out != "none"), default=0.0),
-                        )
-                    else:
-                        gap_phase_duration = intro
-                    for point, next_point in zip(
-                        ordered_gap_points, ordered_gap_points[1:]
-                    ):
-                        animation_state = {}
-                        if gap_phase_duration > 0.0:
-                            animation_state = {
-                                "animation_phase": gap_phase,
-                                "animation_progress": 1.0 if gap_phase == "out" else 0.0,
-                                "animation_phase_duration": gap_phase_duration,
-                            }
-                        frames.append(capture_composed_frame(
-                            gap_track, previous_number if previous_track else number,
-                            previous_start if previous_track else start,
-                            max(0.001, next_point - point),
-                            elapsed_seconds=gap_elapsed,
-                            timeline_seconds=min(next_point - 0.0005, point + 0.0005),
-                            **animation_state,
-                        ))
-
-                def capture_animation_frames(
-                    phase: str, duration: float,
-                ) -> list[RenderFrame]:
-                    """Capture animation frames only when their timeline segment is due.
-
-                    Foreground Z bands are staged as a side effect of each capture.
-                    Capturing outro frames before the stable segment therefore shifts
-                    those bands to the track start even if their base frames are held
-                    in a temporary list.  Keeping capture and append order identical
-                    prevents the base and transparent streams from drifting apart.
-                    """
-                    captured: list[RenderFrame] = []
-                    if duration <= 0:
-                        return captured
-                    steps = max(2, round(duration * animation_fps))
-                    for step in range(steps):
-                        progress = step / steps
-                        elapsed = (
-                            duration * step / steps
-                            if phase == "in"
-                            else intro + max(0.0, track.duration_seconds - intro - outro)
-                            + duration * step / steps
-                        )
-                        captured.append(capture_composed_frame(
-                            track, number, start, duration / steps,
-                            animation_phase=phase, animation_progress=progress,
-                            animation_phase_duration=duration,
-                            elapsed_seconds=elapsed,
-                        ))
-                    return captured
-
-                stable = max(0.01, track.duration_seconds - intro - outro)
-                frames.extend(capture_animation_frames("in", intro))
-                has_progress_bar = any(source.source_type is SourceType.PROGRESS_BAR for source in sources)
-                has_lyrics = any(source.source_type is SourceType.LYRICS for source in sources)
-                has_time_text = any(
-                    source.source_type is SourceType.TIME
-                    or (source.source_type is SourceType.TEXT and any(
-                        token in source.text.lower() for token in (
-                            "%current_time%", "%track_current_time%",
-                            "%video_current_time%",
-                        )
-                    ))
-                    for source in sources
+                try:
+                    stream_bytes = streamed.path.stat().st_size
+                except OSError:
+                    stream_bytes = -1
+                LOGGER.info(
+                    "Streamed Canvas summary: frames=%d duration=%.3fs "
+                    "resolution=%dx%d queue_peak=%d file_bytes=%d",
+                    streamed.frame_count,
+                    streamed.duration_seconds,
+                    streamed.width,
+                    streamed.height,
+                    streamed.peak_buffered_frames,
+                    stream_bytes,
                 )
-                sample_points = {intro, intro + stable}
-                for source in sources:
-                    boundaries = [source.timeline_start]
-                    if source.timeline_duration > 0.0:
-                        boundaries.append(source.timeline_start + source.timeline_duration)
-                    for boundary in boundaries:
-                        local_point = boundary - start
-                        if intro < local_point < intro + stable:
-                            sample_points.add(local_point)
-                if has_progress_bar:
-                    progress_steps = min(180, max(1, round(stable)))
-                    sample_points.update(intro + stable * step / progress_steps for step in range(progress_steps + 1))
-                if has_time_text:
-                    # Timestamp templates change at whole-second boundaries. A
-                    # time-only project previously captured just one stable
-                    # frame, leaving its clock frozen for the rest of the song.
-                    first_local_second = max(1, int(intro) + 1)
-                    last_local_second = int(intro + stable)
-                    sample_points.update(
-                        float(second)
-                        for second in range(first_local_second, last_local_second + 1)
-                        if intro < second < intro + stable
+                static_layers = [
+                    PreparedStaticOverlayLayer(
+                        z_min if z_min is not None else -10_000.0,
+                        PreparedVideoInput(
+                            streamed_layer.path,
+                            playlist_duration,
+                            streamed_layer.width,
+                            streamed_layer.height,
+                            streamed_layer.fps,
+                        ),
                     )
-                    first_global_second = max(1, int(start + intro) + 1)
-                    last_global_second = int(start + intro + stable)
-                    sample_points.update(
-                        float(second) - start
-                        for second in range(first_global_second, last_global_second + 1)
-                        if intro < float(second) - start < intro + stable
-                    )
-                if has_lyrics:
-                    lyric_sources = [
-                        source for source in sources
-                        if source.source_type is SourceType.LYRICS
-                    ]
-                    track_offset = track.lyrics_timing_offset_seconds
-                    for cue in track.lyrics:
-                        for point in (float(cue.get("start", 0.0)), float(cue.get("end", 0.0))):
-                            for lyric_source in lyric_sources:
-                                adjusted_point = (
-                                    point - track_offset
-                                    - lyric_source.subtitle_timing_offset
-                                )
-                                if intro < adjusted_point < intro + stable:
-                                    sample_points.add(adjusted_point)
-                        cue_start = float(cue.get("start", 0.0))
-                        for lyric_source in lyric_sources:
-                            if lyric_source.subtitle_animation == "none":
-                                continue
-                            steps = max(1, round(lyric_source.subtitle_animation_duration * animation_fps))
-                            for step in range(steps + 1):
-                                point = (cue_start - track_offset
-                                         - lyric_source.subtitle_timing_offset
-                                         + lyric_source.subtitle_animation_duration * step / steps)
-                                if intro < point < intro + stable:
-                                    sample_points.add(point)
-                for now_source in (source for source in sources if source.source_type is SourceType.NOW_PLAYING):
-                    exit_start = max(0.0, now_source.now_playing_duration - now_source.now_playing_exit_duration)
-                    steps = max(1, round(now_source.now_playing_exit_duration * animation_fps))
-                    for step in range(steps + 1):
-                        point = exit_start + now_source.now_playing_exit_duration * step / steps
-                        if intro < point < intro + stable:
-                            sample_points.add(point)
-                ordered_points = sorted(sample_points)
-                for point_index, point in enumerate(ordered_points[:-1]):
-                    next_point = ordered_points[point_index + 1]
-                    elapsed = min(next_point - 0.0005, point + 0.0005)
-                    frames.append(capture_composed_frame(
-                        track, number, start, max(0.001, next_point - point),
-                        elapsed_seconds=elapsed,
-                    ))
-                frames.extend(capture_animation_frames("out", outro))
-                cursor = start + track.duration_seconds
-                previous_track = track
-                previous_start = start
-                previous_number = number
-            static_layers = [
-                StaticOverlayLayer(z_min if z_min is not None else -10_000.0, layer_frames)
-                for (z_min, _z_max), layer_frames in zip(z_bands[1:], static_band_frames, strict=True)
-                if layer_frames
-            ]
+                    for index, (z_min, _z_max) in enumerate(z_bands[1:])
+                    for streamed_layer in [streamed_results[f"layer:{index}"]]
+                ]
+            else:
+                frames = [
+                    capturer.capture(sample) for sample in timeline_samples
+                ]
+                static_layers = capturer.static_layers()
             if preparation_cancel.is_set():
                 raise RenderCancelledError("Export preparation was cancelled.")
         except RenderCancelledError:
+            cancel_static_streams()
+            self._export_preparation_cancel = None
             self._clear_export_frame_staging()
             if self._export_dialog:
                 self._export_dialog.complete(False)
@@ -2403,8 +2710,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "내보내기를 취소했습니다." if korean else "Export cancelled.", 5000
             )
+            self._resume_close_after_export_cancel()
             return
         except RenderError as error:
+            cancel_static_streams()
+            self._export_preparation_cancel = None
             self._clear_export_frame_staging()
             if self._export_dialog:
                 self._export_dialog.complete(False)
@@ -2414,8 +2724,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self, "내보내기 오류" if korean else "Export error", str(error)
             )
+            self._resume_close_after_export_cancel()
             return
         except Exception as error:
+            cancel_static_streams()
+            self._export_preparation_cancel = None
             self._clear_export_frame_staging()
             if self._export_dialog:
                 self._export_dialog.complete(False)
@@ -2426,7 +2739,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self, "내보내기 오류" if korean else "Export error", str(error)
             )
+            self._resume_close_after_export_cancel()
             return
+        self._export_preparation_cancel = None
         try:
             self._export_dialog.cancel_requested.disconnect(request_preparation_cancel)
         except (RuntimeError, TypeError):
@@ -2443,11 +2758,24 @@ class MainWindow(QMainWindow):
             render_settings,
             visualizers,
             static_layers,
+            video_clips,
         )
-        self._render_worker.progress.connect(self._export_dialog.update_progress)
+        export_dialog = self._export_dialog
+        self._render_worker.progress.connect(
+            lambda stage, fraction, message: export_dialog.update_progress(
+                stage,
+                EXPORT_PREPARATION_PROGRESS_WEIGHT
+                + (1.0 - EXPORT_PREPARATION_PROGRESS_WEIGHT) * fraction,
+                message,
+            )
+        )
+
         self._render_worker.progress.connect(
             lambda stage, fraction, message: self.activity_progress.update(
-                "export", fraction, f"{stage} · {message}",
+                "export",
+                EXPORT_PREPARATION_PROGRESS_WEIGHT
+                + (1.0 - EXPORT_PREPARATION_PROGRESS_WEIGHT) * fraction,
+                f"{stage} · {message}",
             )
         )
         self._render_worker.succeeded.connect(self._export_succeeded)
@@ -2485,17 +2813,61 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._restore_export_dialog_after_minimize)
 
     def _open_playlist_preview(self) -> None:
-        """Open the independent full-playlist playback preview."""
+        """Select the bottom Preview tab and start its embedded playback mode."""
+        preview_index = 2
+        if self.bottom_tabs.currentIndex() != preview_index:
+            self._show_bottom_panel(preview_index)
+            return
+        if self._inline_preview is not None:
+            self.canvas_stack.setCurrentWidget(self._inline_preview)
+            self._inline_preview.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
         tracks = [track for track in self.playlist_service.tracks if track.enabled]
         if not tracks:
             QMessageBox.warning(
-                self, "Preview", "Select at least one music track before opening Preview."
+                self,
+                "미리보기" if self.translator.language is Language.KOREAN else "Preview",
+                (
+                    "미리보기를 시작하려면 활성화된 곡을 한 개 이상 추가해 주세요."
+                    if self.translator.language is Language.KOREAN else
+                    "Add at least one enabled track before opening Preview."
+                ),
             )
+            self._select_edit_bottom_tab(self._last_edit_bottom_tab)
             return
         self._show_export_preview(tracks)
 
+    def _bottom_workspace_tab_changed(self, index: int) -> None:
+        """Enter Preview from its tab and restore editing from either edit tab."""
+        if self._bottom_tab_change_guard:
+            return
+        if index == 2:
+            self._open_playlist_preview()
+            return
+        if index not in {0, 1}:
+            return
+        self._last_edit_bottom_tab = index
+        QSettings().setValue("workspace/bottom_tab", index)
+        if self._inline_preview is not None:
+            self._finish_inline_preview()
+
+    def _select_edit_bottom_tab(self, index: int | None = None) -> None:
+        """Select one persisted editing tab without recursively changing modes."""
+        selected = max(0, min(1, self._last_edit_bottom_tab if index is None else index))
+        self._last_edit_bottom_tab = selected
+        self._bottom_tab_change_guard = True
+        try:
+            self.bottom_tabs.setCurrentIndex(selected)
+        finally:
+            self._bottom_tab_change_guard = False
+        QSettings().setValue("workspace/bottom_tab", selected)
+
     def _show_export_preview(self, tracks: list) -> None:
-        """Open a track-aware Canvas preview without beginning an FFmpeg export."""
+        """Show a track-aware playback preview in the main Canvas workspace."""
+        if self._inline_preview is not None:
+            self.canvas_stack.setCurrentWidget(self._inline_preview)
+            self._inline_preview.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
         executable = None
         try:
             executable = FFmpegRenderer(
@@ -2506,8 +2878,139 @@ class MainWindow(QMainWindow):
         preview = ExportPreviewDialog(
             self.canvas.scene_model, tracks, self.translator,
             self._export_visualizers(), executable, self, source_store=self.store,
+            embedded=True,
+            preferred_backend=self._preview_backend_for_session,
         )
-        preview.exec()
+        controls_page = preview.build_embedded_controls_page()
+        self._inline_preview = preview
+        self._inline_preview_controls = controls_page
+        preview.finished.connect(self._finish_inline_preview)
+        self.canvas_stack.addWidget(preview)
+        self.preview_tab_layout.addWidget(controls_page)
+        self.canvas_stack.setCurrentWidget(preview)
+        self._lock_editor_for_inline_preview()
+        track_panel = getattr(preview, "track_list_panel", None)
+        if isinstance(track_panel, QWidget):
+            self._inline_preview_track_panel = track_panel
+            track_panel.setMinimumWidth(0)
+            track_panel.setMaximumWidth(16_777_215)
+            track_panel.setStyleSheet(controls_page.styleSheet())
+            self.preview_track_inspector_layout.addWidget(track_panel)
+        self.inspector_stack.setCurrentWidget(self.preview_track_inspector)
+        self.activity_progress.begin(
+            "inline_preview",
+            "캔버스 미리보기" if self.translator.language is Language.KOREAN
+            else "Canvas preview",
+            detail=(
+                "미리보기 중에는 편집 기능이 잠깁니다."
+                if self.translator.language is Language.KOREAN else
+                "Editing is locked during playback preview."
+            ),
+        )
+        self.statusBar().showMessage(
+            "캔버스에서 전체 미리보기를 재생합니다 · 편집 기능이 잠겼습니다."
+            if self.translator.language is Language.KOREAN else
+            "Playing the full preview on the Canvas · Editing is locked."
+        )
+        preview.show()
+        preview.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _lock_editor_for_inline_preview(self) -> None:
+        """Lock project mutation while keeping bottom mode tabs interactive."""
+        if self._preview_ui_lock_state is not None:
+            return
+        widgets = (self.canvas,)
+        actions = tuple(
+            (action, action.isEnabled()) for action in self.findChildren(QAction)
+        )
+        self._preview_ui_lock_state = {
+            "widgets": tuple((widget, widget.isEnabled()) for widget in widgets),
+            "menu": self.menuBar().isEnabled(),
+            "toolbar": self.toolbar.isEnabled(),
+            "toolbar_visible": not self.toolbar.isHidden(),
+            "drops": self.acceptDrops(),
+            "actions": actions,
+            "left_visible": not self.left_workspace.isHidden(),
+            "inspector_visible": not self.inspector_stack.isHidden(),
+            "inspector_page": self.inspector_stack.currentWidget(),
+            "workspace_sizes": tuple(self.workspace_splitter.sizes()),
+        }
+        for widget in widgets:
+            widget.setEnabled(False)
+        for action, _enabled in actions:
+            action.setEnabled(False)
+        self.menuBar().setEnabled(False)
+        self.toolbar.setEnabled(False)
+        self._set_sidebar_visible(False, persist=False, sync_action=False)
+        sizes = self.workspace_splitter.sizes()
+        if len(sizes) == 2:
+            total = max(600, sum(sizes))
+            controls_height = min(250, max(210, round(total * 0.27)))
+            self.workspace_splitter.setSizes([
+                max(280, total - controls_height), controls_height,
+            ])
+        self.setAcceptDrops(False)
+
+    def _finish_inline_preview(self, _result: int = 0) -> None:
+        """Return from the embedded playback page to the editable Canvas."""
+        preview = self._inline_preview
+        if preview is None:
+            return
+        controls_page = self._inline_preview_controls
+        track_panel = self._inline_preview_track_panel
+        self._inline_preview = None
+        self._inline_preview_controls = None
+        self._inline_preview_track_panel = None
+        preview._stop_preview()
+        self.canvas_stack.setCurrentWidget(self.canvas)
+        self.canvas_stack.removeWidget(preview)
+        if track_panel is not None:
+            self.preview_track_inspector_layout.removeWidget(track_panel)
+            track_panel.setParent(preview)
+        if controls_page is not None:
+            self.preview_tab_layout.removeWidget(controls_page)
+            controls_page.deleteLater()
+        preview.deleteLater()
+        self._unlock_editor_after_inline_preview()
+        if self.bottom_tabs.currentIndex() == 2:
+            self._select_edit_bottom_tab()
+        self.activity_progress.finish("inline_preview")
+        self.statusBar().showMessage(
+            "미리보기를 종료하고 캔버스 편집으로 돌아왔습니다."
+            if self.translator.language is Language.KOREAN else
+            "Preview closed; returned to Canvas editing.",
+            2500,
+        )
+        self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _unlock_editor_after_inline_preview(self) -> None:
+        """Restore exactly the interaction state that preceded inline preview."""
+        state = self._preview_ui_lock_state
+        if state is None:
+            return
+        self._preview_ui_lock_state = None
+        for widget, enabled in state["widgets"]:
+            widget.setEnabled(enabled)
+        for action, enabled in state["actions"]:
+            action.setEnabled(enabled)
+        self.menuBar().setEnabled(bool(state["menu"]))
+        self.toolbar.setEnabled(bool(state["toolbar"]))
+        self.toolbar.setVisible(bool(state["toolbar_visible"]))
+        self._set_sidebar_visible(
+            bool(state["left_visible"]), persist=False, sync_action=False,
+        )
+        inspector_page = state.get("inspector_page", self.inspector)
+        if isinstance(inspector_page, QWidget):
+            self.inspector_stack.setCurrentWidget(inspector_page)
+        else:
+            self.inspector_stack.setCurrentWidget(self.inspector)
+        self.inspector_stack.setVisible(bool(state["inspector_visible"]))
+        workspace_sizes = list(state["workspace_sizes"])
+        if len(workspace_sizes) == 2:
+            self.workspace_splitter.setSizes(workspace_sizes)
+        self.setAcceptDrops(bool(state["drops"]))
+        self._sync_canvas_shortcut_actions(None, self.canvas)
+        self._update_alignment_toolbar_actions()
 
     def _preview_source_animation(self, source_id: str) -> None:
         """Play one source's configured animation directly on the Canvas."""
@@ -2647,6 +3150,112 @@ class MainWindow(QMainWindow):
         # FFmpeg overlays later inputs on top.  Preserve the Canvas stacking
         # order when two reactive sources overlap.
         return sorted(overlays, key=lambda overlay: (overlay.z_index, overlay.y, overlay.x))
+
+    def _export_video_clips(self, tracks: list, playlist_duration: float) -> list[VideoClipOverlay]:
+        """Expand visible video elements into deterministic FFmpeg clip intervals."""
+        clips: list[VideoClipOverlay] = []
+        duration_cache: dict[str, float] = {}
+
+        track_windows: list[tuple[object, float]] = []
+        cursor = 0.0
+        for track in tracks:
+            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
+            start = max(cursor, requested)
+            track_windows.append((track, start))
+            cursor = start + track.duration_seconds
+
+        planned_sources: list[tuple[Source, list[tuple[list[str], float, float]]]] = []
+        ordered_paths: list[str] = []
+        seen_paths: set[str] = set()
+        for source in self.store.sources():
+            if source.source_type is not SourceType.VIDEO or not source.visible:
+                continue
+            raw_schedules: list[tuple[list[str], float, float]] = []
+            if source.video_timing_mode == "track":
+                raw_schedules.extend(
+                    (list(track.video_paths), start, track.duration_seconds)
+                    for track, start in track_windows if track.video_paths
+                )
+            else:
+                start = min(playlist_duration, max(0.0, source.timeline_start))
+                available = (
+                    min(source.timeline_duration, playlist_duration - start)
+                    if source.timeline_duration > 0.0 else playlist_duration - start
+                )
+                raw_schedules.append((list(source.video_paths), start, available))
+            schedules: list[tuple[list[str], float, float]] = []
+            for paths, start, available in raw_schedules:
+                visibility_start = max(start, source.timeline_start)
+                visibility_end = start + available
+                if source.timeline_duration > 0.0:
+                    visibility_end = min(
+                        visibility_end,
+                        source.timeline_start + source.timeline_duration,
+                    )
+                start = visibility_start
+                available = max(0.0, visibility_end - visibility_start)
+                if available <= 0.0 or not paths:
+                    continue
+                schedules.append((paths, start, available))
+                for path in paths:
+                    if path not in seen_paths:
+                        seen_paths.add(path)
+                        ordered_paths.append(path)
+            if schedules:
+                planned_sources.append((source, schedules))
+
+        media_paths: list[Path] = []
+        for path in ordered_paths:
+            media_path = Path(path)
+            if not media_path.is_file():
+                raise RenderError(f"Video file is missing: {path}")
+            media_paths.append(media_path)
+        # FFprobe startup dominates projects with several per-track videos.
+        # Probe independent files concurrently, while keeping the small global
+        # cap used by the rest of the export pipeline.
+        worker_count = min(3, len(media_paths))
+        if worker_count:
+            with ThreadPoolExecutor(
+                max_workers=worker_count, thread_name_prefix="export-video-probe",
+            ) as executor:
+                probed = list(executor.map(PlaylistService._probe_duration, media_paths))
+            for path, probed_duration in zip(ordered_paths, probed, strict=True):
+                if probed_duration <= 0.0:
+                    raise RenderError(f"Video duration could not be determined: {path}")
+                duration_cache[path] = probed_duration
+
+        for source, schedules in planned_sources:
+            for paths, start, available in schedules:
+                durations = {path: duration_cache[path] for path in paths}
+                for occurrence in build_video_occurrences(
+                    source, paths, durations, start, available,
+                ):
+                    overlay_width = max(8, round(source.width * source.scale))
+                    overlay_height = max(8, round(source.height * source.scale))
+                    clips.append(VideoClipOverlay(
+                        path=Path(occurrence.path),
+                        timeline_start=occurrence.timeline_start,
+                        duration_seconds=occurrence.duration_seconds,
+                        media_start_seconds=occurrence.media_start_seconds,
+                        x=round(source.x + (source.width - overlay_width) / 2.0),
+                        y=round(source.y + (source.height - overlay_height) / 2.0),
+                        width=overlay_width,
+                        height=overlay_height,
+                        z_index=source.z_index,
+                        rotation=source.rotation,
+                        opacity=source.opacity,
+                        fit_mode=source.image_fit_mode,
+                        fill_color=source.fill_color,
+                        border_radius=source.border_radius * source.scale,
+                        brightness=source.brightness,
+                        contrast=source.contrast,
+                        saturation=source.video_saturation,
+                        grayscale=source.video_grayscale,
+                        blur=source.blur,
+                        speed=source.video_speed,
+                        loop_input=occurrence.loop_media,
+                    ))
+        return sorted(clips, key=lambda clip: (clip.z_index, clip.timeline_start))
 
     def _show_shortcuts(self) -> None:
         """Open the dedicated, grouped keyboard shortcut reference."""
@@ -2928,19 +3537,31 @@ class MainWindow(QMainWindow):
             self.theme_service.preference,
             self.translator,
             self,
+            active_preview_backend=self._preview_backend_for_session,
         )
         self._settings_dialog = dialog
         dialog.download_requested.connect(lambda: self._start_ffmpeg_install(dialog))
         if dialog.exec() != dialog.DialogCode.Accepted:
             self._settings_dialog = None
             return
-        self.settings_service.save(dialog.app_settings)
+        selected_settings = dialog.app_settings
+        self.settings_service.save(selected_settings)
         self.theme_service.set_preference(dialog.selected_theme)
         self.translator.set_language(dialog.selected_language)
         self._settings_dialog = None
         korean = self.translator.language is Language.KOREAN
+        renderer_changed = (
+            selected_settings.preview_backend != self._preview_backend_for_session
+        )
         self.statusBar().showMessage(
-            "설정을 저장했습니다." if korean else "Settings saved.", 4000
+            (
+                "설정을 저장했습니다. 미리보기 렌더러는 프로그램 재시작 후 적용됩니다."
+                if korean else
+                "Settings saved. The preview renderer takes effect after restarting the program."
+            )
+            if renderer_changed else
+            ("설정을 저장했습니다." if korean else "Settings saved."),
+            7000 if renderer_changed else 4000,
         )
 
     def _start_ffmpeg_install(self, settings_dialog: SettingsDialog) -> None:
@@ -3158,6 +3779,14 @@ class MainWindow(QMainWindow):
         self._unlock_main_form_after_export()
         self._clear_export_frame_staging()
         QTimer.singleShot(0, self._release_render_worker)
+        self._resume_close_after_export_cancel()
+
+    def _resume_close_after_export_cancel(self) -> None:
+        """Continue a window-close request only after export resources stop."""
+        if not self._close_after_export_cancel:
+            return
+        self._close_after_export_cancel = False
+        QTimer.singleShot(0, self.close)
 
     def _release_render_worker(self) -> None:
         """Delete the completed worker after its queued result signal is delivered."""
@@ -3352,6 +3981,11 @@ class MainWindow(QMainWindow):
         self.project_content_service.changed.connect(self._schedule_history)
         self.canvas.zoom_changed.connect(lambda _zoom: self._schedule_history())
         self.history.changed.connect(self._update_history_actions)
+        self.history.changed.connect(
+            lambda _can_undo, _can_redo: self.canvas.prune_retired_items(
+                self.history.retained_source_ids()
+            )
+        )
 
     def _finish_initialization(self) -> None:
         """Set the initial canvas view and establish the first undo snapshot."""
@@ -3392,43 +4026,193 @@ class MainWindow(QMainWindow):
         if selected in self.theme_actions:
             self.theme_actions[selected].setChecked(True)
         self._apply_style()
+        if self._inline_preview is not None:
+            self._inline_preview.refresh_theme()
+            if (
+                self._inline_preview_track_panel is not None
+                and self._inline_preview_controls is not None
+            ):
+                self._inline_preview_track_panel.setStyleSheet(
+                    self._inline_preview_controls.styleSheet()
+                )
         if self.centralWidget() is not None:
             self.motion.fade_in(self.centralWidget(), 140)
 
-    def _set_sidebar_visible(self, visible: bool) -> None:
+    def _set_sidebar_visible(
+        self, visible: bool, *, persist: bool = True, sync_action: bool = True,
+    ) -> None:
         """Collapse or reveal the editing sidebar with a short width animation."""
-        if self._sidebar_transition:
-            return
+        if persist:
+            QSettings().setValue("workspace/left_panel_visible", bool(visible))
+        self._panel_transition_serial["left"] += 1
+        serial = self._panel_transition_serial["left"]
         self._sidebar_transition = True
-        self.panels_action.setEnabled(False)
+        if sync_action:
+            self.panels_action.setEnabled(False)
         if visible:
             target_width = max(180, self._sidebar_open_width)
+            start_width = max(0, self.left_workspace.width())
+            if self.left_workspace.isHidden():
+                start_width = 0
             self.left_workspace.setVisible(True)
             self.left_workspace.setMinimumWidth(0)
-            self.left_workspace.setMaximumWidth(0)
-            self.motion.animate_width(self.left_workspace, 0, target_width)
+            self.left_workspace.setMaximumWidth(start_width)
 
             def finish_expand() -> None:
+                if self._panel_transition_serial["left"] != serial:
+                    return
                 self.left_workspace.setMaximumWidth(16_777_215)
                 self.left_workspace.setMinimumWidth(180)
                 self._sidebar_transition = False
-                self.panels_action.setEnabled(True)
+                self.main_splitter.lock_edge_sizes()
+                if sync_action:
+                    self.panels_action.setEnabled(True)
                 self.motion.fade_in(self.left_workspace, 120)
 
-            QTimer.singleShot(205, finish_expand)
+            self.motion.animate_width(
+                self.left_workspace, start_width, target_width,
+                on_finished=finish_expand,
+            )
             return
         self._sidebar_open_width = max(180, self.left_workspace.width())
+        start_width = self._sidebar_open_width
         self.left_workspace.setMinimumWidth(0)
-        self.left_workspace.setMaximumWidth(self._sidebar_open_width)
-        self.motion.animate_width(self.left_workspace, self._sidebar_open_width, 0)
+        self.left_workspace.setMaximumWidth(start_width)
 
         def finish_collapse() -> None:
+            if self._panel_transition_serial["left"] != serial:
+                return
             self.left_workspace.setVisible(False)
             self.left_workspace.setMaximumWidth(16_777_215)
             self._sidebar_transition = False
-            self.panels_action.setEnabled(True)
+            self.main_splitter.lock_edge_sizes()
+            if sync_action:
+                self.panels_action.setEnabled(True)
 
-        QTimer.singleShot(205, finish_collapse)
+        self.motion.animate_width(
+            self.left_workspace, start_width, 0,
+            on_finished=finish_collapse,
+        )
+
+    def _set_inspector_panel_visible(
+        self, visible: bool, *, persist: bool = True, sync_action: bool = True,
+    ) -> None:
+        """Show or hide the right properties workspace independently."""
+        if persist:
+            QSettings().setValue("workspace/right_panel_visible", bool(visible))
+        self._panel_transition_serial["right"] += 1
+        serial = self._panel_transition_serial["right"]
+        if sync_action:
+            self.inspector_panel_action.setEnabled(False)
+        sizes = self.main_splitter.sizes()
+        if not visible:
+            if len(sizes) == 3:
+                self._inspector_open_width = max(
+                    220, sizes[2], self.inspector_stack.width(),
+                )
+            start_width = max(220, self.inspector_stack.width())
+            self.inspector_stack.setMinimumWidth(0)
+            self.inspector_stack.setMaximumWidth(start_width)
+
+            def finish_collapse() -> None:
+                if self._panel_transition_serial["right"] != serial:
+                    return
+                self.inspector_stack.setVisible(False)
+                self.inspector_stack.setMaximumWidth(16_777_215)
+                self.main_splitter.lock_edge_sizes()
+                if sync_action:
+                    self.inspector_panel_action.setEnabled(True)
+
+            self.motion.animate_width(
+                self.inspector_stack, start_width, 0,
+                on_finished=finish_collapse,
+            )
+            return
+        start_width = max(0, self.inspector_stack.width())
+        if self.inspector_stack.isHidden():
+            start_width = 0
+        self.inspector_stack.setVisible(True)
+        self.inspector_stack.setMinimumWidth(0)
+        self.inspector_stack.setMaximumWidth(start_width)
+        current = self.main_splitter.sizes()
+        total = max(900, sum(current))
+        left = current[0] if len(current) == 3 else 0
+        maximum = max(220, total - left - 300)
+        target = min(maximum, max(220, self._inspector_open_width))
+
+        def finish_expand() -> None:
+            if self._panel_transition_serial["right"] != serial:
+                return
+            self.inspector_stack.setMaximumWidth(16_777_215)
+            self.main_splitter.lock_edge_sizes()
+            if sync_action:
+                self.inspector_panel_action.setEnabled(True)
+            self.motion.fade_in(self.inspector_stack, 120)
+
+        self.motion.animate_width(
+            self.inspector_stack, start_width, target,
+            on_finished=finish_expand,
+        )
+
+    def _set_bottom_panel_visible(
+        self, visible: bool, *, persist: bool = True, sync_action: bool = True,
+    ) -> None:
+        """Show or hide the shared Playlist, Timeline, and Preview workspace."""
+        if persist:
+            QSettings().setValue("workspace/bottom_panel_visible", bool(visible))
+        self._panel_transition_serial["bottom"] += 1
+        serial = self._panel_transition_serial["bottom"]
+        if sync_action:
+            self.bottom_panel_action.setEnabled(False)
+        sizes = self.workspace_splitter.sizes()
+        if not visible:
+            if len(sizes) == 2:
+                self._bottom_open_height = max(
+                    180, sizes[1], self.bottom_workspace_stack.height(),
+                )
+            start_height = max(180, self.bottom_workspace_stack.height())
+            self.bottom_workspace_stack.setMinimumHeight(0)
+            self.bottom_workspace_stack.setMaximumHeight(start_height)
+
+            def finish_collapse() -> None:
+                if self._panel_transition_serial["bottom"] != serial:
+                    return
+                self.bottom_workspace_stack.setVisible(False)
+                self.bottom_workspace_stack.setMaximumHeight(16_777_215)
+                self.workspace_splitter.lock_edge_sizes()
+                if sync_action:
+                    self.bottom_panel_action.setEnabled(True)
+
+            self.motion.animate_height(
+                self.bottom_workspace_stack, start_height, 0,
+                on_finished=finish_collapse,
+            )
+            return
+        start_height = max(0, self.bottom_workspace_stack.height())
+        if self.bottom_workspace_stack.isHidden():
+            start_height = 0
+        self.bottom_workspace_stack.setVisible(True)
+        self.bottom_workspace_stack.setMinimumHeight(0)
+        self.bottom_workspace_stack.setMaximumHeight(start_height)
+        current = self.workspace_splitter.sizes()
+        total = max(500, sum(current))
+        target = min(
+            max(180, self._bottom_open_height), max(180, total - 300),
+        )
+
+        def finish_expand() -> None:
+            if self._panel_transition_serial["bottom"] != serial:
+                return
+            self.bottom_workspace_stack.setMaximumHeight(16_777_215)
+            self.workspace_splitter.lock_edge_sizes()
+            if sync_action:
+                self.bottom_panel_action.setEnabled(True)
+            self.motion.fade_in(self.bottom_workspace_stack, 120)
+
+        self.motion.animate_height(
+            self.bottom_workspace_stack, start_height, target,
+            on_finished=finish_expand,
+        )
 
     def _schedule_history(self) -> None:
         """Coalesce rapid property edits such as dragging into a single undo entry."""
@@ -4307,7 +5091,29 @@ class MainWindow(QMainWindow):
         self.theme_actions[Theme.LIGHT].setText("라이트" if korean else "Light")
         self.theme_actions[Theme.DARK].setText("다크" if korean else "Dark")
         self.theme_actions[Theme.AUTO].setText("자동" if korean else "Auto")
-        self.panels_action.setText("패널" if korean else "Panels")
+        self.panels_action.setText(
+            "왼쪽 패널 표시" if korean else "Show left panel"
+        )
+        self.inspector_panel_action.setText(
+            "오른쪽 속성 패널 표시" if korean else "Show right properties panel"
+        )
+        self.bottom_panel_action.setText(
+            "하단 작업 패널 표시" if korean else "Show bottom workspace"
+        )
+        self.panels_action.setToolTip(
+            "요소·프로젝트 콘텐츠·레이어 패널을 표시하거나 숨깁니다."
+            if korean else
+            "Show or hide the Sources, Project content, and Layers panel."
+        )
+        self.inspector_panel_action.setToolTip(
+            "오른쪽 속성 패널을 표시하거나 숨깁니다."
+            if korean else "Show or hide the right properties panel."
+        )
+        self.bottom_panel_action.setToolTip(
+            "플레이리스트·타임라인·미리보기 패널을 표시하거나 숨깁니다."
+            if korean else
+            "Show or hide the Playlist, Timeline, and Preview workspace."
+        )
         self.sidebar_title.setText(text("add_to_canvas"))
         self.left_tabs.setTabText(
             0, "요소" if self.translator.language is Language.KOREAN else "Sources"
@@ -4315,11 +5121,26 @@ class MainWindow(QMainWindow):
         self.left_tabs.setTabText(
             1, "프로젝트 콘텐츠" if self.translator.language is Language.KOREAN else "Project content"
         )
+        self.left_tabs.setTabText(
+            2, "레이어" if self.translator.language is Language.KOREAN else "Layers"
+        )
+        self.left_tabs.setTabToolTip(
+            0, "캔버스에 추가할 요소" if korean else "Sources to add to the Canvas"
+        )
+        self.left_tabs.setTabToolTip(
+            1, "프로젝트 콘텐츠" if korean else "Project content"
+        )
+        self.left_tabs.setTabToolTip(
+            2, "캔버스 레이어와 그룹" if korean else "Canvas layers and groups"
+        )
         self.bottom_tabs.setTabText(
             0, "플레이리스트" if self.translator.language is Language.KOREAN else "Playlist"
         )
         self.bottom_tabs.setTabText(
             1, "타임라인" if self.translator.language is Language.KOREAN else "Timeline"
+        )
+        self.bottom_tabs.setTabText(
+            2, "미리보기" if self.translator.language is Language.KOREAN else "Preview"
         )
         self.source_search.setPlaceholderText(
             "요소 검색…" if korean else "Search sources…"
@@ -4359,9 +5180,9 @@ class MainWindow(QMainWindow):
             else "Render the current Canvas and Playlist as an MP4 file."
         )
         self.preview_action.setToolTip(
-            "전체 플레이리스트를 실제 음원과 함께 미리 확인합니다."
+            "하단 미리보기 탭에서 전체 플레이리스트를 실제 음원과 함께 확인합니다."
             if self.translator.language is Language.KOREAN
-            else "Preview the complete playlist with the actual audio tracks."
+            else "Open the bottom Preview tab with the complete playlist and actual audio."
         )
         self.playlist_files_action.setToolTip(
             "YouTube 설명문과 CSV 목록 파일을 만듭니다."
@@ -4393,17 +5214,23 @@ class MainWindow(QMainWindow):
         self.canvas.fit_artboard()
 
     def _show_bottom_panel(self, index: int) -> None:
-        """Reveal and focus the Playlist or Timeline workspace tab."""
-        self.bottom_tabs.setCurrentIndex(max(0, min(self.bottom_tabs.count() - 1, index)))
+        """Reveal and focus a bottom workspace tab."""
+        if self.bottom_workspace_stack.isHidden():
+            self.bottom_panel_action.setChecked(True)
+        selected = max(0, min(self.bottom_tabs.count() - 1, index))
+        self.bottom_tabs.setCurrentIndex(selected)
         sizes = self.workspace_splitter.sizes()
         if len(sizes) == 2 and sizes[1] < 180:
             total = max(500, sum(sizes))
             self.workspace_splitter.setSizes([max(300, total - 280), 280])
-        target = (
-            self.playlist_editor.list_widget if index == 0
-            else self.timeline_panel.track_table
-        )
-        target.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        if selected == 0:
+            self.playlist_editor.list_widget.setFocus(
+                Qt.FocusReason.ShortcutFocusReason
+            )
+        elif selected == 1:
+            self.timeline_panel.track_table.setFocus(
+                Qt.FocusReason.ShortcutFocusReason
+            )
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Avoid destroying a running FFmpeg thread during application shutdown."""
@@ -4419,14 +5246,42 @@ class MainWindow(QMainWindow):
         if self._animation_preview_active:
             event.ignore()
             return
+        if self._inline_preview is not None:
+            self._finish_inline_preview()
+        if self._export_preparation_cancel is not None:
+            if self._export_preparation_cancel.is_set():
+                cancellation_requested = True
+            elif self._export_dialog is not None:
+                cancellation_requested = self._export_dialog.request_cancel()
+            else:
+                self._export_preparation_cancel.set()
+                cancellation_requested = True
+            if cancellation_requested:
+                self._close_after_export_cancel = True
+                message = (
+                    "내보내기를 안전하게 취소한 뒤 종료합니다."
+                    if self.translator.language is Language.KOREAN else
+                    "Closing after export is cancelled safely..."
+                )
+                self.statusBar().showMessage(message, 5000)
+            event.ignore()
+            return
         if self._render_worker and self._render_worker.isRunning():
             if self._export_dialog is not None:
-                cancellation_requested = self._export_dialog.request_cancel()
+                cancellation_requested = (
+                    self._export_dialog.is_cancelling
+                    or self._export_dialog.request_cancel()
+                )
             else:
                 self._render_worker.cancel()
                 cancellation_requested = True
             if cancellation_requested:
-                message = "내보내기를 안전하게 취소하는 중입니다." if self.translator.language is Language.KOREAN else "Cancelling export safely..."
+                self._close_after_export_cancel = True
+                message = (
+                    "내보내기를 안전하게 취소한 뒤 종료합니다."
+                    if self.translator.language is Language.KOREAN else
+                    "Closing after export is cancelled safely..."
+                )
                 self.statusBar().showMessage(message, 5000)
             event.ignore()
             return
@@ -4464,7 +5319,12 @@ class MainWindow(QMainWindow):
                 # the unsaved workspace open. Only explicit Discard may exit.
                 event.ignore()
                 return
+        if self._workspace_settings_timer.isActive():
+            self._workspace_settings_timer.stop()
+        self._save_workspace_layout()
+        QSettings().sync()
         self._clear_recovery()
+        self.canvas.release_video_decoders()
         self.smooth_scroll.uninstall()
         application = QApplication.instance()
         if application is not None:

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -53,6 +54,7 @@ class TrackDetailsDialog(QDialog):
         self.selected_artist = track.artist
         self.selected_album = track.album
         self.selected_cover_path = track.cover_path
+        self.selected_video_paths = list(track.video_paths)
         saved_volume = preview_volume()
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(saved_volume / 100.0)
@@ -71,6 +73,7 @@ class TrackDetailsDialog(QDialog):
         self.tabs.setObjectName("trackDetailsTabs")
         self.info_tab = QWidget()
         self.lyrics_tab = QWidget()
+        self.video_tab = QWidget()
         info_tab_layout = QHBoxLayout(self.info_tab)
         info_tab_layout.setContentsMargins(12, 12, 12, 12)
         info_tab_layout.setSpacing(14)
@@ -294,6 +297,53 @@ class TrackDetailsDialog(QDialog):
         lyrics_tab_layout.addLayout(content_row, 1)
         self.tabs.addTab(self.info_tab, "")
         self.tabs.addTab(self.lyrics_tab, "")
+        video_layout = QVBoxLayout(self.video_tab)
+        video_layout.setContentsMargins(12, 12, 12, 12)
+        video_layout.setSpacing(10)
+        self.video_scope_badge = QLabel()
+        self.video_scope_badge.setObjectName("trackVideoScopeBadge")
+        self.video_scope_badge.setWordWrap(True)
+        self.video_scope_badge.setStyleSheet(
+            "background: rgba(22, 133, 209, 0.12); "
+            "border: 1px solid rgba(22, 133, 209, 0.35); "
+            "border-radius: 7px; padding: 8px 10px; font-weight: 700;"
+        )
+        self.video_help = QLabel()
+        self.video_help.setObjectName("mutedLabel")
+        self.video_help.setWordWrap(True)
+        self.video_list_group = QGroupBox()
+        video_list_layout = QVBoxLayout(self.video_list_group)
+        video_list_header = QHBoxLayout()
+        self.video_count_label = QLabel()
+        self.video_count_label.setObjectName("mutedLabel")
+        video_list_header.addStretch(1)
+        video_list_header.addWidget(self.video_count_label)
+        video_list_layout.addLayout(video_list_header)
+        self.video_list = QListWidget()
+        self.video_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        for video_path in self.selected_video_paths:
+            self.video_list.addItem(video_path)
+        self.video_empty_label = QLabel()
+        self.video_empty_label.setObjectName("mutedLabel")
+        self.video_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_empty_label.setWordWrap(True)
+        video_actions = QHBoxLayout()
+        self.add_video_button = QPushButton()
+        self.remove_video_button = QPushButton()
+        self.video_up_button = QPushButton()
+        self.video_down_button = QPushButton()
+        video_actions.addWidget(self.add_video_button)
+        video_actions.addWidget(self.remove_video_button)
+        video_actions.addWidget(self.video_up_button)
+        video_actions.addWidget(self.video_down_button)
+        video_actions.addStretch(1)
+        video_list_layout.addWidget(self.video_empty_label)
+        video_list_layout.addWidget(self.video_list, 1)
+        video_list_layout.addLayout(video_actions)
+        video_layout.addWidget(self.video_scope_badge)
+        video_layout.addWidget(self.video_help)
+        video_layout.addWidget(self.video_list_group, 1)
+        self.tabs.addTab(self.video_tab, "")
         root.addWidget(self.tabs, 1)
 
         self.buttons = QDialogButtonBox(
@@ -310,6 +360,12 @@ class TrackDetailsDialog(QDialog):
         self.clear_button.clicked.connect(self._clear_lyrics)
         self.change_cover_button.clicked.connect(self._choose_cover)
         self.reset_cover_button.clicked.connect(self._reset_cover)
+        self.add_video_button.clicked.connect(self._add_track_videos)
+        self.remove_video_button.clicked.connect(self._remove_track_videos)
+        self.video_up_button.clicked.connect(lambda: self._move_track_video(-1))
+        self.video_down_button.clicked.connect(lambda: self._move_track_video(1))
+        self.video_list.itemSelectionChanged.connect(self._update_track_video_ui)
+        self.video_list.currentRowChanged.connect(self._update_track_video_ui)
         self.earlier_button.clicked.connect(lambda: self._nudge_timing(-0.1))
         self.later_button.clicked.connect(lambda: self._nudge_timing(0.1))
         self.reset_button.clicked.connect(lambda: self.timing_offset_spin.setValue(0.0))
@@ -328,9 +384,69 @@ class TrackDetailsDialog(QDialog):
         self._refresh_cover()
         self._refresh_preview()
         self._playback_duration_changed(round(track.duration_seconds * 1000))
+        self._update_track_video_ui()
 
     def _nudge_timing(self, delta: float) -> None:
         self.timing_offset_spin.setValue(self.timing_offset_spin.value() + delta)
+
+    def _add_track_videos(self) -> None:
+        korean = self.translator.language.value == "ko"
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "곡 영상 추가" if korean else "Add track videos",
+            "",
+            "Video files (*.mp4 *.mov *.mkv *.webm *.avi *.m4v)",
+        )
+        existing = {str(Path(path).resolve()).casefold() for path in self.selected_video_paths}
+        for raw_path in paths:
+            resolved = str(Path(raw_path).resolve())
+            if resolved.casefold() not in existing:
+                self.selected_video_paths.append(resolved)
+                self.video_list.addItem(resolved)
+                existing.add(resolved.casefold())
+        self._update_track_video_ui()
+
+    def _remove_track_videos(self) -> None:
+        for item in self.video_list.selectedItems():
+            self.video_list.takeItem(self.video_list.row(item))
+        self.selected_video_paths = [
+            self.video_list.item(index).text()
+            for index in range(self.video_list.count())
+        ]
+        self._update_track_video_ui()
+
+    def _move_track_video(self, delta: int) -> None:
+        """Reorder this track's sequence without changing any video settings."""
+        row = self.video_list.currentRow()
+        target = row + delta
+        if row < 0 or target < 0 or target >= self.video_list.count():
+            return
+        item = self.video_list.takeItem(row)
+        self.video_list.insertItem(target, item)
+        self.video_list.setCurrentRow(target)
+        self.selected_video_paths = [
+            self.video_list.item(index).text()
+            for index in range(self.video_list.count())
+        ]
+
+    def _update_track_video_ui(self, *_args: object) -> None:
+        count = self.video_list.count()
+        korean = self.translator.language.value == "ko"
+        self.video_count_label.setText(
+            f"{count}개 영상" if korean else f"{count} video{'s' if count != 1 else ''}"
+        )
+        self.video_empty_label.setText(
+            "아직 이 곡에 등록된 영상이 없습니다.\n‘영상 추가…’를 눌러 선택하세요."
+            if korean else
+            "No videos are assigned to this track yet.\nChoose ‘Add videos…’ to begin."
+        )
+        self.video_empty_label.setVisible(count == 0)
+        self.video_list.setVisible(count > 0)
+        selected = bool(self.video_list.selectedItems())
+        row = self.video_list.currentRow()
+        self.remove_video_button.setEnabled(selected)
+        self.video_up_button.setEnabled(row > 0)
+        self.video_down_button.setEnabled(0 <= row < count - 1)
 
     def _load_lyrics(self) -> None:
         korean = self.translator.language.value == "ko"
@@ -660,6 +776,10 @@ class TrackDetailsDialog(QDialog):
         self.selected_artist = self.artist_edit.text().strip()
         self.selected_album = self.album_edit.text().strip()
         self.selected_timing_offset = self.timing_offset_spin.value()
+        self.selected_video_paths = [
+            self.video_list.item(index).text()
+            for index in range(self.video_list.count())
+        ]
         self.accept()
 
     def done(self, result: int) -> None:
@@ -672,6 +792,26 @@ class TrackDetailsDialog(QDialog):
         self.setWindowTitle("곡 정보/설정" if korean else "Track information/settings")
         self.tabs.setTabText(0, "곡 정보" if korean else "Track information")
         self.tabs.setTabText(1, "가사 설정" if korean else "Lyrics settings")
+        self.tabs.setTabText(2, "이 곡의 영상" if korean else "Videos for this track")
+        self.video_scope_badge.setText(
+            "적용 범위 · 이 곡이 재생되는 동안만"
+            if korean else "Scope · Only while this track is playing"
+        )
+        self.video_help.setText(
+            "캔버스의 영상 요소에서 ‘곡마다 다른 영상 사용’을 선택하면 이 목록을 사용합니다. "
+            "영상 요소의 크기·반복·속도·효과 설정은 그대로 적용됩니다."
+            if korean else
+            "Canvas video sources set to ‘Use different videos for each track’ use this list. "
+            "The source's size, repeat, speed, and effects still apply."
+        )
+        self.video_list_group.setTitle(
+            "재생 순서" if korean else "Playback order"
+        )
+        self.add_video_button.setText("영상 추가…" if korean else "Add videos…")
+        self.remove_video_button.setText("선택 제거" if korean else "Remove selected")
+        self.video_up_button.setText("위로" if korean else "Up")
+        self.video_down_button.setText("아래로" if korean else "Down")
+        self._update_track_video_ui()
         self.info_group.setTitle("곡 정보" if korean else "Track information")
         self.cover_group.setTitle("앨범 커버" if korean else "Album artwork")
         self.change_cover_button.setText("이미지 변경…" if korean else "Change image…")

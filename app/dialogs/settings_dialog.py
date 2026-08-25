@@ -48,13 +48,17 @@ class SettingsDialog(QDialog):
     download_requested = Signal()
 
     def __init__(self, settings: AppSettings, language: LanguageSelection, theme: Theme,
-                 translator: Translator, parent: object | None = None) -> None:
+                 translator: Translator, parent: object | None = None, *,
+                 active_preview_backend: str | None = None) -> None:
         super().__init__(parent)
         self.translator = translator
         self.setMinimumSize(720, 590)
         self.resize(760, 640)
         self._ffmpeg_installing = False
         self._ffmpeg_status_override: tuple[bool, str] | None = None
+        self._active_preview_backend = (
+            active_preview_backend or settings.preview_backend
+        )
         self.title_label = QLabel()
         self.title_label.setObjectName("dialogTitle")
         self.subtitle_label = QLabel()
@@ -160,6 +164,30 @@ class SettingsDialog(QDialog):
         self.smooth_scroll_duration_slider.valueChanged.connect(
             self._update_smooth_scroll_ui
         )
+        self.preview_backend_combo = QComboBox()
+        self.preview_backend_combo.addItem("", "gpu_layers")
+        self.preview_backend_combo.addItem("", "cpu")
+        self.preview_backend_combo.setCurrentIndex(
+            max(0, self.preview_backend_combo.findData(settings.preview_backend))
+        )
+        self.preview_backend_combo.setMinimumWidth(260)
+        self.preview_backend_hint = QLabel()
+        self.preview_backend_hint.setObjectName("mutedLabel")
+        self.preview_backend_hint.setWordWrap(True)
+        self.preview_backend_restart_hint = QLabel()
+        self.preview_backend_restart_hint.setObjectName("warningLabel")
+        self.preview_backend_restart_hint.setWordWrap(True)
+        self.preview_backend_restart_hint.hide()
+        preview_backend_panel = QWidget()
+        preview_backend_layout = QVBoxLayout(preview_backend_panel)
+        preview_backend_layout.setContentsMargins(0, 0, 0, 0)
+        preview_backend_layout.setSpacing(4)
+        preview_backend_layout.addWidget(self.preview_backend_combo)
+        preview_backend_layout.addWidget(self.preview_backend_hint)
+        preview_backend_layout.addWidget(self.preview_backend_restart_hint)
+        self.preview_backend_combo.currentIndexChanged.connect(
+            self._update_preview_backend_restart_hint
+        )
 
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save
@@ -227,11 +255,13 @@ class SettingsDialog(QDialog):
         self.language_pack_label = QLabel()
         self.smooth_scroll_label = QLabel()
         self.smooth_scroll_speed_label = QLabel()
+        self.preview_backend_label = QLabel()
         app_form.addRow(self.theme_label, self.theme_combo)
         app_form.addRow(self.language_label, self.language_combo)
         app_form.addRow(self.language_pack_label, language_pack_panel)
         app_form.addRow(self.smooth_scroll_label, self.smooth_scroll_check)
         app_form.addRow(self.smooth_scroll_speed_label, smooth_scroll_speed_row)
+        app_form.addRow(self.preview_backend_label, preview_backend_panel)
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("settingsTabs")
@@ -270,6 +300,7 @@ class SettingsDialog(QDialog):
         self.app_group = app_group
         self.retranslate()
         self._update_smooth_scroll_ui()
+        self._update_preview_backend_restart_hint()
         self._refresh_ffmpeg_status()
         self._update_language_pack_ui()
 
@@ -287,6 +318,9 @@ class SettingsDialog(QDialog):
             audio_bitrate=self.audio_bitrate_combo.currentText(),
             smooth_scrolling=self.smooth_scroll_check.isChecked(),
             smooth_scroll_duration_ms=self.smooth_scroll_duration_slider.value(),
+            preview_backend=str(
+                self.preview_backend_combo.currentData() or "gpu_layers"
+            ),
         )
 
     @property
@@ -604,6 +638,26 @@ class SettingsDialog(QDialog):
             if korean else
             "Higher values scroll more slowly and smoothly."
         )
+
+        self.preview_backend_label.setText(
+            "미리보기 렌더러" if korean else "Preview renderer"
+        )
+        self.preview_backend_combo.setItemText(
+            0, "GPU 레이어 (권장)" if korean else "GPU layers (Recommended)",
+        )
+        self.preview_backend_combo.setItemText(
+            1, "CPU 호환 모드" if korean else "CPU compatibility mode",
+        )
+        self.preview_backend_hint.setText(
+            "GPU 레이어는 합성·캐시·자동 품질 조절을 사용합니다. 그래픽 드라이버와 충돌하는 경우에만 CPU 모드를 선택하세요. 렌더러는 미리보기 화면에서 변경할 수 없습니다."
+            if korean else
+            "GPU layers use accelerated composition, caching, and adaptive quality. Select CPU only for graphics-driver compatibility. The renderer cannot be changed from Preview."
+        )
+        self.preview_backend_restart_hint.setText(
+            "미리보기 렌더러 변경은 프로그램 재시작 후 적용됩니다. 프로그램을 완전히 종료한 후 다시 실행해 주세요. 현재 실행 중인 미리보기에는 영향을 주지 않습니다."
+            if korean else
+            "The preview renderer change takes effect after fully closing and restarting the program. It does not affect previews in the current session."
+        )
         self.ffmpeg_browse_button.setText("찾아보기" if korean else "Browse")
         self.ffmpeg_test_button.setText("확인" if korean else "Check")
         self.ffmpeg_download_button.setText("다운로드" if korean else "Download")
@@ -653,6 +707,15 @@ class SettingsDialog(QDialog):
         )
         self._refresh_ffmpeg_status()
         self._update_language_pack_ui()
+        self._update_preview_backend_restart_hint()
+
+    def _update_preview_backend_restart_hint(self, _index: int = -1) -> None:
+        """Explain that renderer changes are intentionally deferred to restart."""
+        changed = (
+            str(self.preview_backend_combo.currentData() or "gpu_layers")
+            != self._active_preview_backend
+        )
+        self.preview_backend_restart_hint.setVisible(changed)
 
     def _ffmpeg_browse_title(self) -> str:
         return "FFmpeg 실행 파일 선택" if self.translator.language is Language.KOREAN else "Choose FFmpeg executable"

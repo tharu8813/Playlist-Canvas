@@ -44,4 +44,15 @@ def hidden_opacity_factor(style: str) -> float:
 
 
 def hidden_scale_factor(style: str) -> float:
-    return 0.92 if style == "zoom" else 1.0
+    return {
+        "zoom": 0.92,
+        "pop": 0.76,
+        "rotate": 0.94,
+    }.get(style, 1.0)
+
+
+def hidden_rotation_offset(style: str, entering: bool) -> float:
+    """Return a restrained rotation that unwinds or winds up with the fade."""
+    if style != "rotate":
+        return 0.0
+    return -12.0 if entering else 12.0

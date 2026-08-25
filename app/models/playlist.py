@@ -25,6 +25,7 @@ class PlaylistTrack:
     lyrics_timing_offset_seconds: float = 0.0
     id: str = field(default_factory=lambda: str(uuid4()))
     cover_path: str = ""
+    video_paths: list[str] = field(default_factory=list)
 
     @property
     def filename(self) -> str:
@@ -53,6 +54,10 @@ class PlaylistTrack:
             raise ValueError("Playlist file paths and titles must be strings.")
         if not isinstance(track.cover_path, str):
             raise ValueError("Playlist cover paths must be strings.")
+        if not isinstance(track.video_paths, list) or not all(
+            isinstance(path, str) for path in track.video_paths
+        ):
+            raise ValueError(f"Track '{track.title}' has invalid video paths.")
         duration = track.duration_seconds
         if (not isinstance(duration, (int, float)) or isinstance(duration, bool)
                 or not isfinite(float(duration)) or duration < 0):

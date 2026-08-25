@@ -14,6 +14,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".svg"}
 FONT_EXTENSIONS = {".ttf", ".otf", ".woff", ".woff2"}
 LYRICS_EXTENSIONS = {".lrc", ".srt", ".vtt"}
 CONTENT_AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
 
 class ProjectContentService(QObject):
@@ -63,12 +64,14 @@ class ProjectContentService(QObject):
         paths: list[str] = []
         for source in document.sources:
             paths.extend(path for path in (source.content_path, source.font_path) if path)
+            paths.extend(path for path in source.video_paths if path)
         for track in document.playlist:
             paths.extend(
                 path for path in (
                     track.file_path, track.lyrics_path, track.cover_path,
                 ) if path
             )
+            paths.extend(path for path in track.video_paths if path)
         self.add_paths(paths)
 
     @staticmethod
@@ -78,6 +81,8 @@ class ProjectContentService(QObject):
             return "image"
         if extension in CONTENT_AUDIO_EXTENSIONS:
             return "audio"
+        if extension in VIDEO_EXTENSIONS:
+            return "video"
         if extension in FONT_EXTENSIONS:
             return "font"
         if extension in LYRICS_EXTENSIONS:

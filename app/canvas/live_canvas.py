@@ -414,7 +414,23 @@ class LiveCanvas(QGraphicsView):
         """Hide removed items for safe reuse by Undo instead of deleting Qt objects."""
         item.setSelected(False)
         item.setVisible(False)
+        item.release_video_decoder()
         self._retired_items[source_id] = item
+
+    def prune_retired_items(self, retained_source_ids: set[str]) -> None:
+        """Destroy retired items that no remaining Undo snapshot can restore."""
+        for source_id in tuple(self._retired_items):
+            if source_id in retained_source_ids:
+                continue
+            item = self._retired_items.pop(source_id)
+            item.release_video_decoder()
+            self.scene_model.removeItem(item)
+            item.deleteLater()
+
+    def release_video_decoders(self) -> None:
+        """Release every active or retired decoder before the Canvas closes."""
+        for item in {*self._items.values(), *self._retired_items.values()}:
+            item.release_video_decoder()
 
     def update_source(self, source: Source) -> None:
         """Refresh canvas representation after an Inspector update."""

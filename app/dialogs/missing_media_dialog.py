@@ -77,6 +77,7 @@ class MissingMediaDialog(QDialog):
     def _choose_file(self, row: int) -> None:
         entry = self.media[row]
         filter_text = (
+            "Video (*.mp4 *.mov *.mkv *.webm *.avi *.m4v)" if entry.is_video else
             "Audio (*.mp3 *.wav *.flac *.aac *.m4a *.ogg)" if entry.is_audio else
             "Fonts (*.ttf *.otf)" if entry.is_font else
             "Lyrics (*.lrc *.srt *.vtt)" if entry.is_lyrics else
@@ -85,12 +86,14 @@ class MissingMediaDialog(QDialog):
         )
         selected, _ = QFileDialog.getOpenFileName(
             self,
+            "영상 찾기" if entry.is_video and self._korean else
             "음원 찾기" if entry.is_audio and self._korean else
             "글꼴 찾기" if entry.is_font and self._korean else
             "가사 찾기" if entry.is_lyrics and self._korean else
             "앨범 커버 찾기" if entry.kind == "cover" and self._korean else
             "콘텐츠 찾기" if entry.library_type and self._korean else
             "이미지 찾기" if self._korean else
+            "Locate video" if entry.is_video else
             "Locate audio" if entry.is_audio else "Locate font" if entry.is_font else
             "Locate lyrics" if entry.is_lyrics else
             "Locate album artwork" if entry.kind == "cover" else
@@ -125,12 +128,14 @@ class MissingMediaDialog(QDialog):
         )
         for row, entry in enumerate(self.media):
             label = (
+                "영상" if korean and entry.is_video else
                 "음원" if korean and entry.is_audio else
                 "글꼴" if korean and entry.is_font else
                 "가사" if korean and entry.is_lyrics else
                 "앨범 커버" if korean and entry.kind == "cover" else
                 "콘텐츠" if korean and entry.library_type else
                 "이미지" if korean else
+                "Video" if entry.is_video else
                 "Audio" if entry.is_audio else "Font" if entry.is_font else
                 "Lyrics" if entry.is_lyrics else
                 "Album artwork" if entry.kind == "cover" else

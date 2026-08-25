@@ -1,22 +1,25 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import (QEvent, QItemSelectionModel, QMimeData, QPoint, QPointF, QRectF,
+from PySide6.QtCore import (QEvent, QItemSelectionModel, QMimeData, QPoint, QPointF, QRect, QRectF,
                             QSettings, QSize, Qt, QTimer)
 from PySide6.QtGui import (QColor, QCloseEvent, QDropEvent, QImage, QMouseEvent, QPalette,
                            QPixmap, QWheelEvent)
 from PySide6.QtTest import QTest
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QColorDialog, QDialog, QFileDialog,
+    QAbstractItemView, QApplication, QColorDialog, QDialog, QFileDialog, QFrame,
     QFormLayout, QGraphicsView, QListView, QMessageBox, QScrollArea, QSizePolicy, QStyle,
     QStyleOptionSpinBox,
     QWidget,
@@ -26,6 +29,7 @@ from app import __version__
 from app.models.project import CanvasSettings, ProjectContent, ProjectDocument
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
+from app.canvas.source_item import SourceItem
 from app.dialogs.settings_dialog import SettingsDialog
 from app.dialogs.preset_dialog import DesignPresetDialog
 from app.dialogs.ai_project_builder_dialog import AIProjectBuilderDialog
@@ -39,7 +43,12 @@ from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.dialogs.track_details_dialog import TrackDetailsDialog
 from app.dialogs.text_editor_dialog import TextEditorDialog
-from app.dialogs.export_progress_dialog import ExportProgressDialog
+from app.dialogs.video_source_dialog import VideoSourceDialog
+from app.dialogs.export_progress_dialog import ExportEtaEstimator, ExportProgressDialog
+from app.dialogs.export_preview_dialog import (
+    GPU_TEXTURE_SURFACE_AVAILABLE, ExportPreviewDialog, OverlayFrameWorker,
+    VideoDurationProbeWorker,
+)
 from app.dialogs.ffmpeg_install_progress_dialog import FFmpegInstallProgressDialog
 from app.widgets.source_template_button import (
     SourceTemplateButton,
@@ -56,11 +65,23 @@ from app.services.lrc_draft_service import LrcDraftService
 from app.ui.main_window import MainWindow
 from app.utils.i18n import Language
 from app.preview.canvas_snapshot import CanvasSnapshot
+from app.preview.gpu_texture_surface import (
+    GpuColorFilter, GpuPreviewLayer, GpuTexturePreviewSurface,
+)
 from app.preview.album_art import (
     create_cached_ambient_background, extract_track_cover,
 )
+from app.video.preview_proxy import PreviewProxyCache
 from app.widgets.token_text_editor import TokenLineEdit, TokenPlainTextEdit
-from app.renderer.ffmpeg_renderer import FFmpegRenderer, RenderFrame
+from app.renderer.ffmpeg_renderer import (
+    FFmpegRenderer,
+    PreparedStaticOverlayLayer,
+    PreparedVideoInput,
+    RenderError,
+    RenderFrame,
+    VisualizerOverlay,
+)
+from app.renderer.static_video_stream import StaticVideoStreamResult
 from app.presets.preset_service import PresetService
 
 
@@ -323,6 +344,69 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertIsNotNone(self.window.store.get(marker.id))
         self.assertTrue(self.window.smooth_scroll._installed)
 
+    def test_close_during_export_preparation_cancels_then_resumes_close(self) -> None:
+        preparation_cancel = threading.Event()
+        dialog = MagicMock()
+
+        def request_cancel() -> bool:
+            preparation_cancel.set()
+            return True
+
+        dialog.request_cancel.side_effect = request_cancel
+        self.window._export_preparation_cancel = preparation_cancel
+        self.window._export_dialog = dialog
+        event = QCloseEvent()
+        try:
+            self.window.closeEvent(event)
+
+            self.assertFalse(event.isAccepted())
+            self.assertTrue(preparation_cancel.is_set())
+            self.assertTrue(self.window._close_after_export_cancel)
+            with patch.object(QTimer, "singleShot") as single_shot:
+                self.window._resume_close_after_export_cancel()
+            self.assertFalse(self.window._close_after_export_cancel)
+            single_shot.assert_called_once()
+            self.assertEqual(single_shot.call_args.args[0], 0)
+        finally:
+            self.window._export_preparation_cancel = None
+            self.window._export_dialog = None
+            self.window._close_after_export_cancel = False
+
+    def test_close_during_render_requests_cancel_and_defers_shutdown(self) -> None:
+        worker = MagicMock()
+        worker.isRunning.return_value = True
+        self.window._render_worker = worker
+        self.window._export_dialog = None
+        event = QCloseEvent()
+        try:
+            self.window.closeEvent(event)
+
+            self.assertFalse(event.isAccepted())
+            worker.cancel.assert_called_once()
+            self.assertTrue(self.window._close_after_export_cancel)
+        finally:
+            self.window._render_worker = None
+            self.window._close_after_export_cancel = False
+
+    def test_close_while_export_is_already_cancelling_still_defers_shutdown(self) -> None:
+        worker = MagicMock()
+        worker.isRunning.return_value = True
+        dialog = MagicMock()
+        dialog.is_cancelling = True
+        self.window._render_worker = worker
+        self.window._export_dialog = dialog
+        event = QCloseEvent()
+        try:
+            self.window.closeEvent(event)
+
+            self.assertFalse(event.isAccepted())
+            dialog.request_cancel.assert_not_called()
+            self.assertTrue(self.window._close_after_export_cancel)
+        finally:
+            self.window._render_worker = None
+            self.window._export_dialog = None
+            self.window._close_after_export_cancel = False
+
     def test_project_save_runs_in_background_and_preserves_newer_edits(self) -> None:
         with TemporaryDirectory(prefix="pvs-background-save-") as raw_directory:
             target = Path(raw_directory) / "many-tracks.pvsproj"
@@ -485,6 +569,80 @@ class MainWindowSafetyTests(unittest.TestCase):
         finally:
             self.window.translator.set_language(original_language)
             self.application.processEvents()
+
+    def test_view_menu_toggles_each_workspace_panel_with_shortcuts(self) -> None:
+        settings = QSettings()
+        keys = (
+            "workspace/left_panel_visible",
+            "workspace/right_panel_visible",
+            "workspace/bottom_panel_visible",
+        )
+        original_values = {key: settings.value(key, None) for key in keys}
+        actions = (
+            self.window.panels_action,
+            self.window.inspector_panel_action,
+            self.window.bottom_panel_action,
+        )
+        try:
+            for action in actions:
+                action.setChecked(True)
+            QTest.qWait(230)
+            self.assertTrue(all(
+                action in self.window.view_menu.actions() for action in actions
+            ))
+            self.assertEqual(
+                [action.shortcut().toString() for action in actions],
+                ["Ctrl+Alt+L", "Ctrl+Alt+R", "Ctrl+Alt+B"],
+            )
+
+            self.window.panels_action.trigger()
+            self.application.processEvents()
+            self.assertFalse(self.window.left_workspace.isHidden())
+            QTest.qWait(230)
+            self.assertTrue(self.window.left_workspace.isHidden())
+            self.assertFalse(self.window.panels_action.isChecked())
+
+            self.window.inspector_panel_action.trigger()
+            self.application.processEvents()
+            self.assertFalse(self.window.inspector_stack.isHidden())
+            QTest.qWait(230)
+            self.assertTrue(self.window.inspector_stack.isHidden())
+            self.assertFalse(self.window.inspector_panel_action.isChecked())
+
+            self.window.bottom_panel_action.trigger()
+            self.application.processEvents()
+            self.assertFalse(self.window.bottom_workspace_stack.isHidden())
+            QTest.qWait(230)
+            self.assertTrue(self.window.bottom_workspace_stack.isHidden())
+            self.assertFalse(self.window.bottom_panel_action.isChecked())
+
+            self.window._show_bottom_panel(1)
+            QTest.qWait(230)
+            self.assertFalse(self.window.bottom_workspace_stack.isHidden())
+            self.assertTrue(self.window.bottom_panel_action.isChecked())
+            self.assertEqual(self.window.bottom_tabs.currentIndex(), 1)
+
+            # Preview can be closed while its sidebar collapse is still moving.
+            # Reversing that transition must leave the editable sidebar open.
+            self.window._set_sidebar_visible(
+                False, persist=False, sync_action=False,
+            )
+            QTest.qWait(40)
+            self.window._set_sidebar_visible(
+                True, persist=False, sync_action=False,
+            )
+            QTest.qWait(230)
+            self.assertFalse(self.window.left_workspace.isHidden())
+            self.assertGreaterEqual(self.window.left_workspace.minimumWidth(), 180)
+        finally:
+            for action in actions:
+                action.setChecked(True)
+            QTest.qWait(230)
+            for key, value in original_values.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
 
     def test_lrc_generator_registers_saved_files_as_project_content(self) -> None:
         saved = Path("generated-test-lyrics.lrc").resolve()
@@ -926,6 +1084,97 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(resized_horizontal[0], user_horizontal[0])
         self.assertEqual(resized_horizontal[2], user_horizontal[2])
         self.assertEqual(resized_vertical[1], user_vertical[1])
+
+    def test_workspace_panel_sizes_persist_across_program_restarts(self) -> None:
+        with TemporaryDirectory(prefix="pvs-panel-settings-") as directory:
+            settings_path = Path(directory) / "workspace.ini"
+
+            def isolated_settings() -> QSettings:
+                return QSettings(
+                    str(settings_path), QSettings.Format.IniFormat,
+                )
+
+            first_window = None
+            second_window = None
+            with patch("app.ui.main_window.QSettings", side_effect=isolated_settings):
+                try:
+                    first_window = MainWindow()
+                    first_window.resize(1600, 980)
+                    first_window.show()
+                    self.application.processEvents()
+
+                    horizontal_total = sum(first_window.main_splitter.sizes())
+                    first_window.main_splitter.setSizes([
+                        360, max(300, horizontal_total - 780), 420,
+                    ])
+                    vertical_total = sum(first_window.workspace_splitter.sizes())
+                    first_window.workspace_splitter.setSizes([
+                        max(300, vertical_total - 310), 310,
+                    ])
+                    self.application.processEvents()
+                    first_window.main_splitter.splitterMoved.emit(360, 1)
+                    first_window.workspace_splitter.splitterMoved.emit(310, 1)
+                    QTest.qWait(280)
+
+                    stored = isolated_settings()
+                    stored.sync()
+                    self.assertEqual(
+                        int(stored.value("workspace/left_panel_width")), 360,
+                    )
+                    self.assertEqual(
+                        int(stored.value("workspace/right_panel_width")), 420,
+                    )
+                    self.assertEqual(
+                        int(stored.value("workspace/bottom_panel_height")), 310,
+                    )
+
+                    # Hiding a panel must not replace its useful open size with 0.
+                    for panel in (
+                        first_window.left_workspace,
+                        first_window.inspector_stack,
+                        first_window.bottom_workspace_stack,
+                    ):
+                        panel.setVisible(False)
+                    first_window._save_workspace_layout()
+                    stored.sync()
+                    self.assertEqual(
+                        int(stored.value("workspace/left_panel_width")), 360,
+                    )
+                    self.assertEqual(
+                        int(stored.value("workspace/right_panel_width")), 420,
+                    )
+                    self.assertEqual(
+                        int(stored.value("workspace/bottom_panel_height")), 310,
+                    )
+                    for panel in (
+                        first_window.left_workspace,
+                        first_window.inspector_stack,
+                        first_window.bottom_workspace_stack,
+                    ):
+                        panel.setVisible(True)
+
+                    second_window = MainWindow()
+                    second_window.resize(1600, 980)
+                    second_window.show()
+                    self.application.processEvents()
+
+                    self.assertAlmostEqual(
+                        second_window.main_splitter.sizes()[0], 360, delta=2,
+                    )
+                    self.assertAlmostEqual(
+                        second_window.main_splitter.sizes()[2], 420, delta=2,
+                    )
+                    self.assertAlmostEqual(
+                        second_window.workspace_splitter.sizes()[1], 310, delta=2,
+                    )
+                    self.assertEqual(second_window._sidebar_open_width, 360)
+                    self.assertEqual(second_window._inspector_open_width, 420)
+                    self.assertEqual(second_window._bottom_open_height, 310)
+                finally:
+                    for window in (second_window, first_window):
+                        if window is not None:
+                            window._project_dirty = False
+                            window.close()
 
     def test_canvas_hover_uses_directional_cursor_on_selected_resize_handles(self) -> None:
         source = next(
@@ -1465,6 +1714,1080 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(self.window.store.selected.id, source.id)
         self.assertEqual(source.to_dict(), original_model)
 
+    def test_preview_tab_embeds_canvas_controls_and_restores_editing_tab(self) -> None:
+        track = PlaylistTrack(
+            "preview.wav", "Preview", duration_seconds=10.0,
+        )
+        self.window.playlist_service.add_tracks([track])
+
+        class StubPreview(QDialog):
+            def __init__(self, *_args, **kwargs) -> None:
+                super().__init__(kwargs.get("parent"))
+                self.stopped = False
+                self.controls_page = QWidget()
+                self.track_list_panel = QFrame()
+                self.preferred_backend = kwargs.get("preferred_backend")
+
+            def build_embedded_controls_page(self) -> QWidget:
+                return self.controls_page
+
+            def _stop_preview(self) -> None:
+                self.stopped = True
+
+        with patch(
+            "app.ui.main_window.ExportPreviewDialog", StubPreview,
+        ):
+            self.window.preview_action.trigger()
+            self.application.processEvents()
+            self.assertFalse(self.window.left_workspace.isHidden())
+            QTest.qWait(230)
+
+        preview = self.window._inline_preview
+        self.assertIsNotNone(preview)
+        self.assertEqual(
+            preview.preferred_backend,
+            self.window._preview_backend_for_session,
+        )
+        self.assertIs(self.window.canvas_stack.currentWidget(), preview)
+        self.assertEqual(self.window.bottom_tabs.currentIndex(), 2)
+        self.assertIs(
+            self.window.bottom_workspace_stack.currentWidget(),
+            self.window.bottom_tabs,
+        )
+        self.assertIs(
+            preview.controls_page.parentWidget(), self.window.preview_tab_page,
+        )
+        self.assertIs(
+            preview.track_list_panel.parentWidget(),
+            self.window.preview_track_inspector,
+        )
+        self.assertIs(
+            self.window.inspector_stack.currentWidget(),
+            self.window.preview_track_inspector,
+        )
+        self.assertFalse(self.window.canvas.isEnabled())
+        self.assertTrue(self.window.left_workspace.isHidden())
+        self.assertTrue(self.window.inspector_stack.isEnabled())
+        self.assertTrue(self.window.bottom_tabs.isEnabled())
+        self.assertFalse(self.window.toolbar.isEnabled())
+        self.assertFalse(self.window.toolbar.isHidden())
+        self.assertFalse(self.window.menuBar().isEnabled())
+        self.assertFalse(self.window.acceptDrops())
+        self.assertIsNone(
+            self.window.toolbar.widgetForAction(self.window.preview_action),
+        )
+
+        self.window.bottom_tabs.setCurrentIndex(1)
+        QTest.qWait(230)
+
+        self.assertIsNone(self.window._inline_preview)
+        self.assertEqual(self.window.bottom_tabs.currentIndex(), 1)
+        self.assertIs(self.window.canvas_stack.currentWidget(), self.window.canvas)
+        self.assertIs(
+            self.window.bottom_workspace_stack.currentWidget(),
+            self.window.bottom_tabs,
+        )
+        self.assertTrue(preview.stopped)
+        self.assertTrue(self.window.canvas.isEnabled())
+        self.assertFalse(self.window.left_workspace.isHidden())
+        self.assertTrue(self.window.inspector.isEnabled())
+        self.assertIs(
+            self.window.inspector_stack.currentWidget(), self.window.inspector,
+        )
+        self.assertTrue(self.window.bottom_tabs.isEnabled())
+        self.assertTrue(self.window.toolbar.isEnabled())
+        self.assertTrue(self.window.menuBar().isEnabled())
+        self.assertTrue(self.window.acceptDrops())
+
+    def test_empty_preview_tab_returns_to_the_last_editing_tab(self) -> None:
+        self.window.bottom_tabs.setCurrentIndex(1)
+        with patch.object(QMessageBox, "warning") as warning:
+            self.window.bottom_tabs.setCurrentIndex(2)
+
+        warning.assert_called_once()
+        self.assertEqual(self.window.bottom_tabs.currentIndex(), 1)
+        self.assertIsNone(self.window._inline_preview)
+        self.assertIs(
+            self.window.inspector_stack.currentWidget(), self.window.inspector,
+        )
+
+    def test_preview_renderer_setting_is_deferred_until_next_program_start(self) -> None:
+        original = self.window.settings_service.current
+        session_backend = self.window._preview_backend_for_session
+        selected_backend = "cpu" if session_backend == "gpu_layers" else "gpu_layers"
+        try:
+            self.window.settings_service.save(replace(
+                original, preview_backend=selected_backend,
+            ))
+
+            self.assertEqual(
+                self.window.settings_service.current.preview_backend,
+                selected_backend,
+            )
+            self.assertEqual(
+                self.window._preview_backend_for_session, session_backend,
+            )
+        finally:
+            self.window.settings_service.save(original)
+
+    def test_gpu_session_prepares_opengl_before_main_window_is_shown(self) -> None:
+        if (
+            self.window._preview_backend_for_session == "gpu_layers"
+            and GPU_TEXTURE_SURFACE_AVAILABLE
+        ):
+            self.assertIsNotNone(self.window._preview_gpu_composition_anchor)
+            self.assertIs(
+                self.window.canvas_stack.currentWidget(), self.window.canvas,
+            )
+        else:
+            self.assertIsNone(self.window._preview_gpu_composition_anchor)
+
+    def test_embedded_preview_keeps_complete_transport_controls(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+
+        self.assertTrue(preview.embedded)
+        self.assertEqual(preview.windowType(), Qt.WindowType.Widget)
+        self.assertEqual(preview.minimumWidth(), 0)
+        self.assertTrue(preview.play_button.isCheckable())
+        self.assertIsNotNone(preview.timeline)
+        self.assertIsNotNone(preview.previous_button)
+        self.assertIsNotNone(preview.next_button)
+        self.assertIsNotNone(preview.volume_slider)
+        self.assertFalse(hasattr(preview, "quality_combo"))
+        self.assertFalse(hasattr(preview, "quality_label"))
+        self.assertFalse(hasattr(preview, "gpu_check"))
+        self.assertIsNotNone(preview.button_box)
+        self.assertTrue(preview.error_banner.isHidden())
+
+        controls_page = preview.build_embedded_controls_page()
+        self.assertEqual(preview.objectName(), "embeddedCanvasPreview")
+        self.assertEqual(controls_page.objectName(), "embeddedPreviewControls")
+        self.assertEqual(preview.dialog_title_label.text(), "캔버스 미리보기")
+        self.assertTrue(preview.hint_label.isHidden())
+        self.assertIs(preview.now_playing_card.parentWidget(), controls_page)
+        self.assertIs(preview.timeline_card.parentWidget(), controls_page)
+        self.assertIs(preview.transport_card.parentWidget(), controls_page)
+        self.assertTrue(preview.button_box.isHidden())
+        self.assertIs(
+            preview.preview_close_button.parentWidget(), preview.transport_card,
+        )
+        self.assertEqual(preview.preview_close_button.text(), "편집으로 돌아가기")
+        self.assertEqual(
+            preview.preview_close_button.objectName(), "embeddedPreviewCloseButton",
+        )
+        self.assertEqual(preview.layout().indexOf(preview.now_playing_card), -1)
+        self.assertGreaterEqual(controls_page.layout().indexOf(preview.timeline_card), 0)
+
+        preview.gpu_preview_enabled = True
+        preview._gpu_backend_failed("simulated context loss")
+        self.assertFalse(preview.gpu_preview_enabled)
+        self.assertEqual(preview.preview_stack.currentIndex(), 0)
+        self.assertIn("simulated context loss", preview.preview_mode_label.toolTip())
+        preview._stop_preview()
+        controls_page.deleteLater()
+        preview.deleteLater()
+
+    def test_preview_errors_are_visible_deduplicated_and_expandable(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+
+        preview._preview_worker_failed("decoder failed at frame 42")
+        self.assertFalse(preview.error_banner.isHidden())
+        self.assertIn("처리하지 못했습니다", preview.error_title_label.text())
+        self.assertEqual(preview.error_message_label.text(), "decoder failed at frame 42")
+        self.assertEqual(len(preview._preview_error_signatures), 1)
+        preview._preview_worker_failed("decoder failed at frame 42")
+        self.assertEqual(len(preview._preview_error_signatures), 1)
+
+        with patch.object(QMessageBox, "warning") as warning:
+            preview._show_preview_error_details()
+        warning.assert_called_once()
+        self.assertIn("decoder failed at frame 42", warning.call_args.args[2])
+
+        preview.error_dismiss_button.click()
+        self.assertTrue(preview.error_banner.isHidden())
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_failed_video_probe_shows_path_in_preview_error(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+
+        with patch.object(preview, "_schedule_refresh") as schedule:
+            preview._store_video_duration("broken.mp4", 0.0)
+        schedule.assert_called_once_with()
+        self.assertFalse(preview.error_banner.isHidden())
+        self.assertIn("broken.mp4", preview.error_message_label.text())
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_preview_uses_gpu_layers_by_default_when_available(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+        )
+
+        self.assertEqual(preview.preferred_backend, "gpu_layers")
+        self.assertEqual(
+            preview.gpu_preview_enabled, GPU_TEXTURE_SURFACE_AVAILABLE,
+        )
+        self.assertFalse(hasattr(preview, "gpu_check"))
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_preview_track_navigator_highlights_and_jumps_to_track(self) -> None:
+        tracks = [
+            PlaylistTrack(
+                "first.wav", "First", artist="Artist A",
+                duration_seconds=10.0,
+            ),
+            PlaylistTrack(
+                "second.wav", "Second", artist="Artist B",
+                duration_seconds=8.0, start_time_seconds=20.0,
+            ),
+        ]
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model, tracks, self.window.translator,
+            parent=self.window, source_store=self.window.store, embedded=True,
+            preferred_backend="cpu",
+        )
+
+        self.assertEqual(preview.track_list.count(), 2)
+        self.assertEqual(preview.track_list.currentRow(), 0)
+        self.assertIn("First", preview.track_list.item(0).text())
+        self.assertFalse(preview.performance_bar.isHidden())
+        self.assertEqual(preview.frame_rate_label.toolTip(), "")
+        self.assertTrue(preview.performance_scale_label.text())
+
+        second = preview.track_list.item(1)
+        preview.track_list.itemDoubleClicked.emit(second)
+        self.application.processEvents()
+
+        self.assertEqual(preview.timeline.value(), 2000)
+        self.assertEqual(preview.track_list.currentRow(), 1)
+        self.assertEqual(preview._highlighted_track_index, 1)
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_gpu_preview_submits_ordered_layers_without_flattening_frame(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+        submissions: list[tuple[QSize, tuple[object, ...]]] = []
+
+        class SurfaceStub:
+            def set_layers(self, size: QSize, layers: object) -> None:
+                submissions.append((QSize(size), tuple(layers)))
+
+        preview.gpu_surface = SurfaceStub()
+        preview.gpu_preview_enabled = True
+        with patch.object(preview.preview_label, "set_image") as cpu_present:
+            preview.refresh_preview()
+
+        self.assertEqual(len(submissions), 1)
+        size, layers = submissions[0]
+        self.assertFalse(size.isEmpty())
+        self.assertGreaterEqual(len(layers), 1)
+        self.assertEqual(layers[0].key[0], "canvas-base")
+        cpu_present.assert_not_called()
+        preview.gpu_surface = None
+        preview.gpu_preview_enabled = False
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_simple_video_color_effects_route_to_gpu_shader(self) -> None:
+        video = Source(
+            SourceType.VIDEO, "Shader video", video_paths=["missing.mp4"],
+            image_fit_mode="stretch", border_radius=0.0, outline_width=0.0,
+            brightness=14.0, contrast=8.0, video_saturation=1.4,
+        )
+        self.window.store.replace([video])
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+        preview.gpu_surface = MagicMock()
+        preview.gpu_preview_enabled = True
+        preview._refresh_source_partitions()
+
+        first = preview._configure_gpu_video_color_filters(
+            {video.id}, False, 0.0,
+        )
+        item = next(
+            item for item in preview.scene.items()
+            if isinstance(item, SourceItem) and item.source.id == video.id
+        )
+        self.assertTrue(item._video_gpu_color_filter)
+        self.assertEqual(first, {})
+        item._video_applied_gpu_color_filter = True
+        filters = preview._configure_gpu_video_color_filters(
+            {video.id}, False, 0.0,
+        )
+
+        self.assertEqual(filters[video.id].brightness, 14.0)
+        self.assertEqual(filters[video.id].contrast, 8.0)
+        self.assertEqual(filters[video.id].saturation, 1.4)
+        preview.gpu_surface = None
+        preview.gpu_preview_enabled = False
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_styled_video_falls_back_but_z_banded_video_uses_gpu_filter(self) -> None:
+        video = Source(
+            SourceType.VIDEO, "Styled video", video_paths=["missing.mp4"],
+            image_fit_mode="stretch", border_radius=12.0, brightness=10.0,
+        )
+        self.window.store.replace([video])
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+        preview.gpu_surface = MagicMock()
+        preview.gpu_preview_enabled = True
+        preview._refresh_source_partitions()
+
+        self.assertEqual(
+            preview._configure_gpu_video_color_filters({video.id}, False, 0.0),
+            {},
+        )
+        item = next(
+            item for item in preview.scene.items()
+            if isinstance(item, SourceItem) and item.source.id == video.id
+        )
+        self.assertFalse(item._video_gpu_color_filter)
+        video.border_radius = 0.0
+        item._video_applied_gpu_color_filter = True
+        z_banded_filters = preview._configure_gpu_video_color_filters(
+            {video.id}, True, 0.0,
+        )
+        self.assertEqual(z_banded_filters[video.id].brightness, 10.0)
+        self.assertTrue(item._video_gpu_color_filter)
+        preview.gpu_surface = None
+        preview.gpu_preview_enabled = False
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_simple_video_frame_uses_a_direct_gpu_texture_layer(self) -> None:
+        video = Source(
+            SourceType.VIDEO, "Direct video", video_paths=["missing.mp4"],
+            x=24.0, y=36.0, width=320.0, height=180.0, scale=1.25,
+            rotation=7.0, opacity=0.8, z_index=4,
+            image_fit_mode="stretch", border_radius=0.0, outline_width=0.0,
+        )
+        self.window.store.replace([video])
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window, source_store=self.window.store, embedded=True,
+            preferred_backend="cpu",
+        )
+        preview.gpu_surface = MagicMock()
+        preview.gpu_preview_enabled = True
+        preview._refresh_source_partitions()
+        item = next(
+            item for item in preview.scene.items()
+            if isinstance(item, SourceItem) and item.source.id == video.id
+        )
+        image = QImage(320, 180, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(20, 40, 60))
+        item._video_presented_frame = image
+        item._video_timeline_preview_active = True
+        item._video_preview_suppressed = False
+
+        self.assertIn(video.id, {cached.source.id for cached in preview._cached_video_items})
+        self.assertTrue(item.video_preview_active)
+        self.assertTrue(item.source.visible)
+        self.assertEqual(item.source.image_fit_mode, "stretch")
+        self.assertFalse(item.source.shadow.enabled)
+
+        direct_ids, layers = preview._direct_gpu_video_layers(
+            {video.id}, False, 0.0, {},
+        )
+
+        self.assertEqual(direct_ids, frozenset({video.id}))
+        self.assertEqual(len(layers), 1)
+        z_index, layer = layers[0]
+        self.assertEqual(z_index, 4)
+        self.assertEqual(layer.key, ("video-direct", video.id))
+        self.assertEqual(layer.opacity, 0.8)
+        self.assertEqual(layer.rotation, 7.0)
+        self.assertEqual(layer.image.pixelColor(1, 1), QColor(20, 40, 60))
+        preview.gpu_surface = None
+        preview.gpu_preview_enabled = False
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_static_source_above_video_uses_cached_gpu_z_bands(self) -> None:
+        video = Source(
+            SourceType.VIDEO, "Lower video", video_paths=["missing.mp4"],
+            x=20.0, y=20.0, width=160.0, height=90.0, z_index=0,
+            image_fit_mode="stretch",
+        )
+        foreground = Source(
+            SourceType.SHAPE, "Upper title plate", x=30.0, y=30.0,
+            width=100.0, height=40.0, z_index=1,
+        )
+        self.window.store.replace([video, foreground])
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window, source_store=self.window.store, embedded=True,
+            preferred_backend="cpu",
+        )
+        submissions: list[tuple[object, ...]] = []
+
+        class SurfaceStub:
+            frame_pending = False
+
+            def set_layers(self, _size: QSize, layers: object) -> None:
+                submissions.append(tuple(layers))
+
+        preview.gpu_surface = SurfaceStub()
+        preview.gpu_preview_enabled = True
+        preview._refresh_source_partitions()
+        item = next(
+            item for item in preview.scene.items()
+            if isinstance(item, SourceItem) and item.source.id == video.id
+        )
+        frame = QImage(160, 90, QImage.Format.Format_RGBA8888)
+        frame.fill(QColor("#224466"))
+        item._video_presented_frame = frame
+        item._video_timeline_preview_active = True
+        item._video_preview_suppressed = False
+        original_capture = CanvasSnapshot.capture_track
+
+        with (
+            patch.object(preview, "_sync_video_sources"),
+            patch.object(
+                CanvasSnapshot, "capture_track", side_effect=original_capture,
+            ) as capture,
+        ):
+            preview.refresh_preview()
+            first_capture_count = capture.call_count
+            preview.refresh_preview()
+            submissions_after_duplicate_tick = len(submissions)
+            item._video_presented_revision += 1
+            preview.refresh_preview()
+
+        self.assertEqual(first_capture_count, 2)
+        self.assertEqual(capture.call_count, first_capture_count)
+        self.assertEqual(submissions_after_duplicate_tick, 1)
+        self.assertEqual(len(submissions), 2)
+        keys = [layer.key for layer in submissions[-1]]
+        self.assertEqual(keys[0][0], "canvas-base")
+        self.assertEqual(keys[1], ("video-direct", video.id))
+        self.assertEqual(keys[2][0], "video-z-foreground")
+        preview.gpu_surface = None
+        preview.gpu_preview_enabled = False
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_gpu_filter_cpu_fallback_preserves_color_adjustments(self) -> None:
+        image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(100, 120, 140, 255))
+        layer = GpuPreviewLayer(
+            "filtered", image, QRectF(0, 0, 8, 8),
+            color_filter=GpuColorFilter(brightness=10.0, contrast=20.0),
+        )
+
+        filtered = ExportPreviewDialog._cpu_fallback_layer_image(layer)
+
+        color = filtered.pixelColor(4, 4)
+        self.assertAlmostEqual(color.red(), 119, delta=1)
+        self.assertAlmostEqual(color.green(), 143, delta=1)
+        self.assertAlmostEqual(color.blue(), 167, delta=1)
+
+    @unittest.skipIf(GpuTexturePreviewSurface is None, "OpenGL preview is unavailable")
+    def test_gpu_filter_quad_uses_canvas_coordinates_and_top_left_uv(self) -> None:
+        vertices = GpuTexturePreviewSurface._filtered_quad_vertices(
+            QRectF(0, 0, 100, 50), QRect(0, 0, 200, 100), 0.0,
+        )
+
+        self.assertEqual(len(vertices), 16)
+        self.assertEqual(vertices[:4], (-1.0, 1.0, 0.0, 1.0))
+        self.assertEqual(vertices[-4:], (0.0, 0.0, 1.0, 0.0))
+
+    def test_dynamic_canvas_source_keeps_z_order_below_static_source(self) -> None:
+        dynamic = Source(
+            SourceType.SHAPE, "Timed lower", x=20, y=20,
+            width=120, height=90, fill_color="#EF4444",
+            z_index=0, timeline_start=1.0,
+        )
+        static = Source(
+            SourceType.SHAPE, "Static upper", x=20, y=20,
+            width=120, height=90, fill_color="#2563EB", z_index=1,
+        )
+        self.window.store.replace([dynamic, static])
+        track = PlaylistTrack("preview.wav", "Preview", duration_seconds=5.0)
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model, [track], self.window.translator,
+            parent=self.window, source_store=self.window.store, embedded=True,
+            preferred_backend="cpu",
+        )
+
+        preview.timeline.setValue(200)
+        self.application.processEvents()
+
+        self.assertTrue(
+            preview._canvas_dynamic_requires_z_composition({dynamic.id}, 2.0)
+        )
+        sample = round(60 * preview._active_render_scale)
+        self.assertEqual(
+            preview._image.pixelColor(sample, sample).name().upper(), "#2563EB",
+        )
+        submissions: list[tuple[object, ...]] = []
+
+        class SurfaceStub:
+            frame_pending = False
+
+            def set_layers(self, _size: QSize, layers: object) -> None:
+                submissions.append(tuple(layers))
+
+        preview.gpu_surface = SurfaceStub()
+        preview.gpu_preview_enabled = True
+        preview.refresh_preview()
+        self.assertTrue(submissions)
+        self.assertFalse(any(
+            isinstance(layer.key, tuple) and layer.key[0] == "canvas-dynamic"
+            for layer in submissions[-1]
+        ))
+        self.assertEqual(
+            submissions[-1][0].image.pixelColor(sample, sample).name().upper(),
+            "#2563EB",
+        )
+        preview.gpu_surface = None
+        preview.gpu_preview_enabled = False
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_topmost_dynamic_canvas_source_keeps_fast_region_path(self) -> None:
+        dynamic = Source(
+            SourceType.SHAPE, "Timed upper", timeline_start=1.0, z_index=2,
+        )
+        static = Source(SourceType.SHAPE, "Static lower", z_index=1)
+        self.window.store.replace([dynamic, static])
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=5.0)],
+            self.window.translator, parent=self.window,
+            source_store=self.window.store, embedded=True,
+            preferred_backend="cpu",
+        )
+        preview._refresh_source_partitions()
+
+        self.assertFalse(
+            preview._canvas_dynamic_requires_z_composition({dynamic.id}, 2.0)
+        )
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_paused_video_frame_completion_schedules_preview_refresh(self) -> None:
+        video = Source(SourceType.VIDEO, "Paused clip", video_paths=["missing.mp4"])
+        self.window.store.replace([video])
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+        item = next(
+            item for item in preview.scene.items()
+            if isinstance(item, SourceItem) and item.source.id == video.id
+        )
+
+        with patch.object(preview, "_schedule_refresh") as schedule:
+            item.video_frame_ready.emit()
+            schedule.assert_called_once_with()
+            schedule.reset_mock()
+            preview._playing = True
+            item.video_frame_ready.emit()
+            schedule.assert_not_called()
+
+        preview._playing = False
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_video_duration_probe_is_queued_without_blocking_preview(self) -> None:
+        with TemporaryDirectory() as directory:
+            video_path = Path(directory) / "clip.mp4"
+            second_path = Path(directory) / "second.mp4"
+            video_path.touch()
+            second_path.touch()
+            video = Source(
+                SourceType.VIDEO, "Async probe",
+                video_paths=[str(video_path), str(second_path)],
+            )
+            self.window.store.replace([video])
+            with (
+                patch.object(VideoDurationProbeWorker, "start") as start,
+                patch.object(PlaylistService, "_probe_duration") as probe,
+            ):
+                preview = ExportPreviewDialog(
+                    self.window.canvas.scene_model,
+                    [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+                    self.window.translator,
+                    parent=self.window,
+                    source_store=self.window.store,
+                    embedded=True,
+                    preferred_backend="cpu",
+                )
+
+            probe.assert_not_called()
+            start.assert_called_once_with()
+            self.assertIsNotNone(preview._video_probe_worker)
+            assert preview._video_probe_worker is not None
+            self.assertEqual(preview._video_probe_worker.path, str(video_path))
+            self.assertEqual(preview._video_probe_queue, [str(second_path)])
+            self.assertNotIn(str(video_path), preview._video_duration_cache)
+
+            with patch.object(preview, "_schedule_refresh") as schedule:
+                preview._store_video_duration(str(video_path), 4.25)
+                schedule.assert_called_once_with()
+            self.assertEqual(preview._video_duration_cache[str(video_path)], 4.25)
+
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_video_duration_probe_worker_runs_off_the_ui_thread(self) -> None:
+        ui_thread = threading.get_ident()
+        probe_threads: list[int] = []
+
+        def probe(_path: Path) -> float:
+            probe_threads.append(threading.get_ident())
+            return 3.5
+
+        worker = VideoDurationProbeWorker("clip.mp4")
+        with patch.object(PlaylistService, "_probe_duration", side_effect=probe):
+            worker.start()
+            self.assertTrue(worker.wait(3000))
+
+        self.assertEqual(len(probe_threads), 1)
+        self.assertNotEqual(probe_threads[0], ui_thread)
+        worker.deleteLater()
+
+    def test_preview_proxy_replaces_decoder_path_but_preserves_export_source(self) -> None:
+        with TemporaryDirectory(prefix="preview-proxy-routing-") as raw_directory:
+            directory = Path(raw_directory)
+            original = directory / "original.mp4"
+            proxy_path = directory / "proxy.mp4"
+            original.write_bytes(b"original")
+            proxy_path.write_bytes(b"proxy")
+            video = Source(
+                SourceType.VIDEO, "Proxy routed video",
+                video_paths=[str(original)], video_repeat_mode="loop_one",
+            )
+            self.window.store.replace([video])
+            preview = ExportPreviewDialog(
+                self.window.canvas.scene_model,
+                [PlaylistTrack(
+                    "preview.wav", "Preview", duration_seconds=10.0,
+                )],
+                self.window.translator,
+                parent=self.window, source_store=self.window.store,
+                embedded=True, preferred_backend="cpu",
+            )
+            preview._refresh_source_partitions()
+            preview._video_duration_cache[str(original)] = 4.0
+            preview._video_proxy_paths[str(original.resolve())] = str(proxy_path)
+            item = preview._cached_video_items[0]
+            preview.timeline.blockSignals(True)
+            preview.timeline.setValue(125)
+            preview.timeline.blockSignals(False)
+
+            with patch.object(item, "set_video_preview_position") as position:
+                preview._sync_video_sources(
+                    preview.tracks[0], 1.25, track_start=0.0,
+                )
+
+            self.assertEqual(position.call_args.args[:2], (str(proxy_path), 1.25))
+            self.assertEqual(video.video_paths, [str(original)])
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_ready_preview_proxy_is_reused_without_starting_worker(self) -> None:
+        with TemporaryDirectory(prefix="preview-proxy-cache-hit-") as raw_directory:
+            directory = Path(raw_directory)
+            original = directory / "original.mp4"
+            ffmpeg = directory / "ffmpeg.exe"
+            original.write_bytes(b"large-original")
+            ffmpeg.touch()
+            cache = PreviewProxyCache(directory / "cache")
+            cached = cache.proxy_path(original)
+            cached.parent.mkdir(parents=True)
+            cached.write_bytes(b"cached-proxy")
+            preview = ExportPreviewDialog(
+                self.window.canvas.scene_model,
+                [PlaylistTrack(
+                    "preview.wav", "Preview", duration_seconds=10.0,
+                )],
+                self.window.translator,
+                parent=self.window, source_store=self.window.store,
+                embedded=True, preferred_backend="cpu",
+            )
+            preview._preview_proxy_ffmpeg = ffmpeg
+            preview._preview_proxy_cache = cache
+
+            preview._request_video_proxies([str(original)])
+
+            self.assertEqual(
+                preview._preview_video_path(str(original)), str(cached),
+            )
+            self.assertIsNone(preview._video_proxy_worker)
+            self.assertEqual(preview._video_proxy_queue, [])
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_preview_prefetches_video_metadata_for_upcoming_tracks_once(self) -> None:
+        source = Source(
+            SourceType.VIDEO, "Per-track", video_timing_mode="track",
+        )
+        tracks = [
+            PlaylistTrack(
+                f"song-{index}.wav", f"Song {index}", duration_seconds=2.0,
+                video_paths=[f"clip-{index}.mp4"],
+            )
+            for index in range(4)
+        ]
+        request = MagicMock()
+        preview = SimpleNamespace(
+            _last_video_prefetch_track_index=-1,
+            _cached_video_items=(SimpleNamespace(source=source),),
+            tracks=tracks,
+            _request_video_durations=request,
+        )
+
+        ExportPreviewDialog._prefetch_upcoming_video_durations(preview, 0)
+        ExportPreviewDialog._prefetch_upcoming_video_durations(preview, 0)
+
+        request.assert_called_once_with([
+            "clip-0.mp4", "clip-1.mp4", "clip-2.mp4",
+        ])
+
+    def test_inactive_video_and_running_decoder_commands_are_idempotent(self) -> None:
+        source = Source(SourceType.VIDEO, "Video")
+        item = SourceItem(source)
+        item.release_video_decoder()
+
+        class FakePlayer:
+            def __init__(self) -> None:
+                self.state = QMediaPlayer.PlaybackState.StoppedState
+                self.stop_calls = 0
+                self.play_calls = 0
+                self.rate_calls = 0
+
+            def playbackState(self):  # type: ignore[no-untyped-def]
+                return self.state
+
+            def stop(self) -> None:
+                self.stop_calls += 1
+                self.state = QMediaPlayer.PlaybackState.StoppedState
+
+            def play(self) -> None:
+                self.play_calls += 1
+                self.state = QMediaPlayer.PlaybackState.PlayingState
+
+            def pause(self) -> None:
+                self.state = QMediaPlayer.PlaybackState.PausedState
+
+            def setPlaybackRate(self, _rate: float) -> None:
+                self.rate_calls += 1
+
+        player = FakePlayer()
+        item._video_player = player  # type: ignore[assignment]
+        try:
+            item.set_video_preview_position(None)
+            item.set_video_preview_position(None)
+            self.assertEqual(player.stop_calls, 1)
+
+            item._video_timeline_preview_active = True
+            item.set_video_preview_playback(True, 1.25)
+            item.set_video_preview_playback(True, 1.25)
+            self.assertEqual(player.play_calls, 1)
+            self.assertEqual(player.rate_calls, 1)
+        finally:
+            item._video_player = None
+            item.release_video_decoder()
+
+    def test_visualizer_worker_uses_original_analysis_index_for_active_subset(self) -> None:
+        first = VisualizerOverlay(0, 0, 32, 20, "bars", "#FFFFFF")
+        second = VisualizerOverlay(0, 0, 32, 20, "wave", "#FFFFFF")
+        analysis = {
+            "levels": [[1.0]],
+            "waveform": [[2.0]],
+            "processed": ([[11.0]], [[22.0]]),
+            "meters": (None, None),
+        }
+        worker = OverlayFrameWorker(
+            "track", 30, 1, 0, 1, (second,), (1,), analysis,
+        )
+        emitted: list[tuple[int, ...]] = []
+        worker.ready.connect(
+            lambda _track, _fps, _generation, signature, _frames:
+            emitted.append(signature)
+        )
+        image = QImage(2, 2, QImage.Format.Format_ARGB32)
+        image.fill(QColor("#FFFFFF"))
+        with patch(
+            "app.dialogs.export_preview_dialog.PythonVisualizerRenderer.preview_image",
+            return_value=image,
+        ) as render:
+            worker.run()
+
+        self.assertEqual(render.call_args.args[3], [22.0])
+        self.assertEqual(emitted, [(1,)])
+        worker.deleteLater()
+
+    def test_visualizer_cache_separates_equal_count_active_effect_sets(self) -> None:
+        track = PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model, [track], self.window.translator,
+            parent=self.window, source_store=self.window.store, embedded=True,
+            preferred_backend="cpu",
+        )
+        first = QImage(2, 2, QImage.Format.Format_ARGB32)
+        first.fill(QColor("#FF0000"))
+        second = QImage(2, 2, QImage.Format.Format_ARGB32)
+        second.fill(QColor("#0000FF"))
+        preview._overlay_frame_cache[(track.id, (0,), 5)] = (first,)
+        preview._overlay_frame_cache[(track.id, (1,), 5)] = (second,)
+
+        first_layers = preview._overlay_layers_for_frame(track.id, 5, (0,))
+        second_layers = preview._overlay_layers_for_frame(track.id, 5, (1,))
+        missing_layers = preview._overlay_layers_for_frame(track.id, 6, (2,))
+
+        self.assertEqual(first_layers[0].pixelColor(0, 0), QColor("#FF0000"))
+        self.assertEqual(second_layers[0].pixelColor(0, 0), QColor("#0000FF"))
+        self.assertEqual(missing_layers, ())
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_gpu_z_band_composition_preserves_canvas_layer_order(self) -> None:
+        track = PlaylistTrack(
+            "preview.wav", "Preview", duration_seconds=10.0,
+        )
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model, [track], self.window.translator,
+            parent=self.window, source_store=self.window.store, embedded=True,
+            preferred_backend="cpu",
+        )
+        preview._base_image = QImage(64, 36, QImage.Format.Format_RGBA8888)
+        preview._base_image.fill(QColor("#101820"))
+        overlay = VisualizerOverlay(
+            4, 3, 12, 8, "bars", "#FFFFFF", z_index=0.5, rotation=15,
+        )
+        overlay_image = QImage(12, 8, QImage.Format.Format_RGBA8888)
+        overlay_image.fill(QColor(255, 255, 255, 128))
+
+        def captured(*_args: object, **kwargs: object) -> QImage:
+            image = QImage(64, 36, QImage.Format.Format_RGBA8888)
+            image.fill(
+                QColor(0, 0, 0, 0)
+                if kwargs.get("transparent") else QColor("#101820")
+            )
+            return image
+
+        with (
+            patch.object(CanvasSnapshot, "z_bands", return_value=[(None, 1.0), (1.0, None)]),
+            patch.object(CanvasSnapshot, "capture_track", side_effect=captured),
+        ):
+            layers = preview._gpu_z_band_layers(
+                track, 0, 0.0, 0.0, None, 1.0, 0.0,
+                [overlay], (overlay_image,),
+            )
+
+        self.assertEqual(layers[0].key[0], "z-base")
+        self.assertEqual(layers[1].key, ("audio-overlay", 0))
+        self.assertEqual(layers[2].key[0], "z-foreground")
+        self.assertEqual(layers[1].rotation, 15)
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_gpu_audio_layers_wait_for_a_complete_async_overlay_frame(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+        overlays = [
+            VisualizerOverlay(0, 0, 16, 8, "bars", "#FFFFFF"),
+            VisualizerOverlay(20, 0, 16, 8, "wave", "#FFFFFF"),
+        ]
+        image = QImage(16, 8, QImage.Format.Format_RGBA8888)
+        image.fill(QColor("#FFFFFF"))
+
+        self.assertEqual(preview._gpu_audio_layers(overlays, ()), [])
+        self.assertEqual(preview._gpu_audio_layers(overlays, (image,)), [])
+        self.assertEqual(
+            len(preview._gpu_audio_layers(overlays, (image, image))), 2,
+        )
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_gpu_preview_defers_render_while_previous_frame_is_pending(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+
+        class BusySurfaceStub:
+            frame_pending = True
+
+        preview.gpu_surface = BusySurfaceStub()
+        preview.gpu_preview_enabled = True
+        with patch.object(CanvasSnapshot, "capture_track") as capture:
+            preview.refresh_preview()
+
+        capture.assert_not_called()
+        self.assertTrue(preview._gpu_refresh_deferred)
+        with patch.object(preview, "_schedule_refresh") as schedule:
+            preview._gpu_frame_presented()
+        schedule.assert_called_once()
+        self.assertFalse(preview._gpu_refresh_deferred)
+        preview.gpu_surface = None
+        preview.gpu_preview_enabled = False
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_gpu_preview_adapts_render_scale_without_changing_base_quality(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+
+        class Stats:
+            dropped_pending_frames = 0
+            texture_uploads = 0
+            texture_reuses = 0
+            uploaded_bytes = 0
+            texture_evictions = 0
+            cached_textures = 0
+            allocated_bytes = 0
+            texture_budget_bytes = 256 * 1024 * 1024
+
+        class SurfaceStub:
+            upload_stats = Stats()
+
+        class ClockStub:
+            def elapsed(self) -> int:
+                return 600
+
+            def restart(self) -> None:
+                pass
+
+        selected_scale = preview.preview_render_scale
+        preview.gpu_surface = SurfaceStub()
+        preview.gpu_preview_enabled = True
+        preview._playing = True
+        preview._frame_stats_clock = ClockStub()
+        preview._base_image = QImage(64, 36, QImage.Format.Format_RGBA8888)
+        for _ in range(2):
+            preview._presented_frames = 5
+            preview._record_presented_frame()
+
+        self.assertEqual(preview.preview_render_scale, selected_scale)
+        self.assertLess(preview._active_render_scale, selected_scale)
+        self.assertTrue(preview._base_image.isNull())
+        self.assertIn("렌더 85%", preview.performance_scale_label.text())
+        preview.gpu_surface = None
+        preview.gpu_preview_enabled = False
+        preview._stop_preview()
+        preview.deleteLater()
+
+    def test_gpu_watchdog_retries_once_then_falls_back_after_second_stall(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+        surface = MagicMock()
+        preview.gpu_surface = surface
+        preview.gpu_preview_enabled = True
+        preview._gpu_health.frame_queued(1.0)
+
+        with (
+            patch.object(preview, "isVisible", return_value=True),
+            patch.object(preview, "_gpu_backend_failed") as fallback,
+        ):
+            preview._gpu_watchdog_timeout()
+            surface.update.assert_called_once()
+            fallback.assert_not_called()
+            self.assertEqual(preview._gpu_health.stats.total_stalls, 1)
+
+            preview._gpu_watchdog_timeout()
+            fallback.assert_called_once()
+            self.assertIn("timed out twice", fallback.call_args.args[0])
+
+        preview._gpu_watchdog.stop()
+        preview.gpu_surface = None
+        preview.gpu_preview_enabled = False
+        preview._stop_preview()
+        preview.deleteLater()
+
     def test_animation_preview_button_requires_configured_animation(self) -> None:
         source = self.window.store.sources()[0]
         self.window.store.update(
@@ -1474,6 +2797,14 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertFalse(self.window.inspector.animation_preview_button.isEnabled())
         self.window.store.update(source.id, animation_in="fade")
         self.assertTrue(self.window.inspector.animation_preview_button.isEnabled())
+
+    def test_animation_inspector_offers_pop_and_rotate(self) -> None:
+        values = [
+            self.window.inspector.animation_in_combo.itemData(index)
+            for index in range(self.window.inspector.animation_in_combo.count())
+        ]
+        self.assertIn("pop", values)
+        self.assertIn("rotate", values)
 
     def test_new_project_requires_explicit_discard(self) -> None:
         marker = Source(SourceType.TEXT, "UNSAVED_TEST_MARKER")
@@ -1641,7 +2972,7 @@ class MainWindowSafetyTests(unittest.TestCase):
 
     def test_export_resolutions_follow_project_canvas_ratio(self) -> None:
         dialog = ExportSettingsDialog(
-            AppSettings(), 1, 60.0, self.window.translator,
+            AppSettings(preview_backend="cpu"), 1, 60.0, self.window.translator,
             Path("portrait-export.mp4"), canvas_size=(800, 1900),
         )
         try:
@@ -1654,6 +2985,7 @@ class MainWindowSafetyTests(unittest.TestCase):
                 (width, height),
             )
             self.assertIn("프로젝트 비율", dialog.resolution_combo.currentText())
+            self.assertEqual(dialog.app_settings.preview_backend, "cpu")
         finally:
             dialog.close()
 
@@ -1667,13 +2999,41 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertTrue(dialog.advanced_group.isHidden())
             self.assertIn("권장", dialog.quality_mode_combo.currentText())
             self.assertIn("예상 작업량", dialog.workload_label.text())
-            self.assertIn("잘 모른다면", dialog.beginner_hint_label.text())
+            self.assertIn("권장", dialog.quality_description_label.text())
             settings = dialog.app_settings
             self.assertEqual(settings.video_codec, "libx264")
             self.assertEqual(
                 (settings.crf, settings.preset, settings.audio_bitrate),
                 ExportSettingsDialog.QUALITY_PROFILES["balanced"],
             )
+        finally:
+            dialog.close()
+
+    def test_export_dialog_uses_compact_two_column_layout(self) -> None:
+        dialog = ExportSettingsDialog(
+            AppSettings(), 12, 754.0, self.window.translator,
+            Path("layout-export.mp4"), canvas_size=(1920, 1080),
+        )
+        try:
+            dialog.show()
+            self.application.processEvents()
+            render_geometry = dialog.render_group.geometry()
+            quality_geometry = dialog.quality_group.geometry()
+            output_geometry = dialog.output_group.geometry()
+
+            self.assertLessEqual(
+                abs(render_geometry.top() - quality_geometry.top()), 2,
+            )
+            self.assertLess(render_geometry.right(), quality_geometry.left())
+            self.assertLess(output_geometry.bottom(), render_geometry.top())
+            self.assertGreaterEqual(dialog.width(), 760)
+            self.assertLess(dialog.height(), dialog.width())
+
+            compact_height = dialog.height()
+            dialog.advanced_check.setChecked(True)
+            self.application.processEvents()
+            self.assertFalse(dialog.advanced_group.isHidden())
+            self.assertGreater(dialog.height(), compact_height)
         finally:
             dialog.close()
 
@@ -2678,9 +4038,10 @@ class MainWindowSafetyTests(unittest.TestCase):
             dialog = TrackDetailsDialog(track, self.window.translator, self.window)
             try:
                 self.assertEqual(dialog.windowTitle(), "곡 정보/설정")
-                self.assertEqual(dialog.tabs.count(), 2)
+                self.assertEqual(dialog.tabs.count(), 3)
                 self.assertEqual(dialog.tabs.tabText(0), "곡 정보")
                 self.assertEqual(dialog.tabs.tabText(1), "가사 설정")
+                self.assertEqual(dialog.tabs.tabText(2), "이 곡의 영상")
                 self.assertTrue(dialog.info_tab.isAncestorOf(dialog.info_group))
                 self.assertTrue(dialog.lyrics_tab.isAncestorOf(dialog.lyrics_group))
                 self.assertTrue(dialog.lyrics_tab.isAncestorOf(dialog.playback_group))
@@ -2700,6 +4061,72 @@ class MainWindowSafetyTests(unittest.TestCase):
                 self.assertFalse(dialog.reset_cover_button.isEnabled())
             finally:
                 dialog.close()
+
+    def test_video_settings_explain_scope_without_discarding_other_mode_media(self) -> None:
+        source = Source(
+            SourceType.VIDEO, "Video",
+            video_timing_mode="track",
+            video_repeat_mode="sequence",
+            video_paths=["C:/Videos/whole-a.mp4", "C:/Videos/whole-b.mp4"],
+        )
+        dialog = VideoSourceDialog(source, True, self.window)
+        try:
+            self.assertEqual(dialog.timing.currentData(), "track")
+            self.assertIn("곡마다 다른", dialog.timing.currentText())
+            self.assertFalse(dialog.track_scope_panel.isHidden())
+            self.assertTrue(dialog.timeline_media_group.isHidden())
+            self.assertEqual(dialog.values["video_paths"], source.video_paths)
+
+            dialog.timing.setCurrentIndex(dialog.timing.findData("timeline"))
+            self.assertTrue(dialog.track_scope_panel.isHidden())
+            self.assertFalse(dialog.timeline_media_group.isHidden())
+            self.assertIn("현재 2개", dialog.scope_summary.text())
+
+            dialog.repeat.setCurrentIndex(dialog.repeat.findData("once"))
+            self.assertTrue(dialog.cycle_host.isHidden())
+            dialog.repeat.setCurrentIndex(dialog.repeat.findData("random"))
+            self.assertFalse(dialog.cycle_host.isHidden())
+            self.assertEqual(dialog.values["video_repeat_mode"], "random")
+        finally:
+            dialog.close()
+
+    def test_track_video_tab_explains_scope_and_supports_sequence_reordering(self) -> None:
+        track = PlaylistTrack(
+            "track.wav", "Track", duration_seconds=10.0,
+            video_paths=["first.mp4", "second.mp4"],
+        )
+        dialog = TrackDetailsDialog(track, self.window.translator, self.window)
+        try:
+            self.assertEqual(dialog.tabs.tabText(2), "이 곡의 영상")
+            self.assertIn("이 곡이 재생되는 동안만", dialog.video_scope_badge.text())
+            self.assertEqual(dialog.video_count_label.text(), "2개 영상")
+            dialog.video_list.setCurrentRow(1)
+            dialog._move_track_video(-1)
+            self.assertEqual(dialog.selected_video_paths, ["second.mp4", "first.mp4"])
+            self.assertTrue(dialog.video_down_button.isEnabled())
+        finally:
+            dialog.close()
+
+    def test_video_inspector_summarizes_current_media_scope(self) -> None:
+        source = Source(
+            SourceType.VIDEO, "Video", video_timing_mode="track",
+        )
+        self.window.store.add(source)
+        self.window.store.select(source.id)
+        self.application.processEvents()
+        self.assertEqual(
+            self.window.inspector._form_labels["video_settings"].text(),
+            "영상 사용 범위",
+        )
+        self.assertIn("곡마다 다른 영상", self.window.inspector.video_settings_button.text())
+
+        self.window.store.update(
+            source.id, video_timing_mode="timeline",
+            video_paths=["one.mp4", "two.mp4"],
+        )
+        self.application.processEvents()
+        self.assertIn("전체에서 같은 영상", self.window.inspector.video_settings_button.text())
+        self.assertIn("2개", self.window.inspector.video_settings_button.text())
 
     def test_custom_track_cover_drives_cover_and_ambient_rendering(self) -> None:
         with TemporaryDirectory(prefix="playlist-render-cover-") as raw_directory:
@@ -2924,6 +4351,36 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertFalse(settings.smooth_scrolling)
             self.assertEqual(settings.smooth_scroll_duration_ms, 320)
             self.assertFalse(dialog.smooth_scroll_duration_slider.isEnabled())
+            self.assertEqual(AppSettings().preview_backend, "gpu_layers")
+            initial_backend = dialog.app_settings.preview_backend
+            target_backend = "cpu" if initial_backend == "gpu_layers" else "gpu_layers"
+            dialog.preview_backend_combo.setCurrentIndex(
+                dialog.preview_backend_combo.findData(target_backend)
+            )
+            self.assertEqual(dialog.app_settings.preview_backend, target_backend)
+            self.assertFalse(dialog.preview_backend_restart_hint.isHidden())
+            self.assertIn("다시 실행", dialog.preview_backend_restart_hint.text())
+            self.assertIn("미리보기 화면에서 변경할 수 없습니다", dialog.preview_backend_hint.text())
+        finally:
+            dialog.close()
+
+    def test_pending_preview_renderer_setting_shows_restart_notice(self) -> None:
+        active_backend = self.window._preview_backend_for_session
+        pending_backend = "cpu" if active_backend == "gpu_layers" else "gpu_layers"
+        dialog = SettingsDialog(
+            replace(
+                self.window.settings_service.current,
+                preview_backend=pending_backend,
+            ),
+            self.window.translator.language,
+            self.window.theme_service.preference,
+            self.window.translator,
+            self.window,
+            active_preview_backend=active_backend,
+        )
+        try:
+            self.assertFalse(dialog.preview_backend_restart_hint.isHidden())
+            self.assertIn("재시작", dialog.preview_backend_restart_hint.text())
         finally:
             dialog.close()
 
@@ -2991,6 +4448,19 @@ class MainWindowSafetyTests(unittest.TestCase):
             )
         service._stop_animations()
 
+    def test_left_workspace_combines_sources_content_and_layers_as_tabs(self) -> None:
+        tabs = self.window.left_tabs
+
+        self.assertEqual(tabs.count(), 3)
+        self.assertIs(tabs.widget(0), self.window.source_sidebar)
+        self.assertIs(tabs.widget(1), self.window.content_library_panel)
+        self.assertIs(tabs.widget(2), self.window.layer_panel)
+        self.assertIs(tabs.parentWidget(), self.window.left_workspace)
+        self.assertEqual(
+            [tabs.tabText(index) for index in range(tabs.count())],
+            ["요소", "프로젝트 콘텐츠", "레이어"],
+        )
+
     def test_project_content_context_menu_adds_removes_and_shows_information(self) -> None:
         panel = self.window.content_library_panel
         with TemporaryDirectory(prefix="pvs-content-menu-") as raw_directory:
@@ -3005,16 +4475,9 @@ class MainWindowSafetyTests(unittest.TestCase):
                 for action in menu.actions() if action.data() is not None
             }
             self.assertEqual(
-                list(actions), ["add", "remove", "information", "import"],
+                list(actions), ["preview", "remove", "information", "import"],
             )
-            self.assertTrue(actions["add"].isEnabled())
-
-            added: list[tuple[str, str]] = []
-            panel.add_requested.connect(
-                lambda path, media_type: added.append((path, media_type))
-            )
-            actions["add"].trigger()
-            self.assertEqual(added, [(str(image_path.resolve()), "image")])
+            self.assertTrue(actions["preview"].isEnabled())
 
             with patch.object(QMessageBox, "information") as information:
                 actions["information"].trigger()
@@ -3066,6 +4529,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             directory = Path(raw_directory)
             paths = [
                 directory / "cover.png",
+                directory / "clip.mp4",
                 directory / "song.mp3",
                 directory / "captions.lrc",
                 directory / "typeface.ttf",
@@ -3073,12 +4537,12 @@ class MainWindowSafetyTests(unittest.TestCase):
             for path in paths:
                 path.write_bytes(b"fixture")
             self.window.project_content_service.add_paths(paths)
-            self.assertEqual(panel.filter_combo.count(), 5)
+            self.assertEqual(panel.filter_combo.count(), 6)
             self.assertEqual(panel.content_filter, "all")
-            self.assertEqual(panel.list.count(), 4)
-            self.assertEqual(panel.filter_count_label.text(), "4 / 4")
+            self.assertEqual(panel.list.count(), 5)
+            self.assertEqual(panel.filter_count_label.text(), "5 / 5")
 
-            for media_type in ("image", "audio", "lyrics", "font"):
+            for media_type in ("image", "video", "audio", "lyrics", "font"):
                 panel.filter_combo.setCurrentIndex(
                     panel.filter_combo.findData(media_type)
                 )
@@ -3088,10 +4552,10 @@ class MainWindowSafetyTests(unittest.TestCase):
                     panel.list.item(0).data(Qt.ItemDataRole.UserRole + 2),
                     media_type,
                 )
-                self.assertEqual(panel.filter_count_label.text(), "1 / 4")
+                self.assertEqual(panel.filter_count_label.text(), "1 / 5")
 
             panel.filter_combo.setCurrentIndex(panel.filter_combo.findData("all"))
-            self.assertEqual(panel.list.count(), 4)
+            self.assertEqual(panel.list.count(), 5)
 
     def test_about_action_opens_program_information(self) -> None:
         with patch("app.ui.main_window.AboutDialog") as about_dialog:
@@ -3155,17 +4619,66 @@ class MainWindowSafetyTests(unittest.TestCase):
 
             self.assertEqual(first.image, repeated.image)
             self.assertNotEqual(first.image, third.image)
+            self.assertEqual(first.duration_seconds, 0.5)
+            self.assertEqual(repeated.duration_seconds, 1.0)
+            self.assertEqual(third.duration_seconds, 0.5)
             self.assertEqual(self.window._export_capture_count, 3)
             self.assertEqual(self.window._export_frame_index, 2)
             self.assertTrue(first.image.is_file())
             self.assertTrue(third.image.is_file())
+            metrics = self.window._export_frame_metrics
+            self.assertIsNotNone(metrics)
+            assert metrics is not None
+            expected_bytes = first.image.stat().st_size + third.image.stat().st_size
+            self.assertEqual(metrics.capture_count, 3)
+            self.assertEqual(metrics.unique_file_count, 2)
+            self.assertEqual(metrics.reused_frame_count, 1)
+            self.assertEqual(metrics.total_bytes, expected_bytes)
+            self.assertEqual(metrics.stream_file_counts, {"base": 2})
+            self.assertEqual(metrics.stream_bytes, {"base": expected_bytes})
+            self.assertEqual((metrics.largest_width, metrics.largest_height), (48, 32))
         finally:
             self.window._clear_export_frame_staging()
+        completed_metrics = self.window._last_export_frame_metrics
+        self.assertIsNotNone(completed_metrics)
+        assert completed_metrics is not None
+        self.assertEqual(completed_metrics.capture_count, 3)
+        self.assertEqual(completed_metrics.unique_file_count, 2)
+        self.assertEqual(completed_metrics.reused_frame_count, 1)
+        self.assertGreaterEqual(completed_metrics.elapsed_seconds, 0.0)
 
     def test_export_animation_sampling_is_capped_without_changing_output_setting(self) -> None:
         self.assertEqual(self.window._export_animation_sample_rate(60), 30)
         self.assertEqual(self.window._export_animation_sample_rate(24), 24)
         self.assertEqual(self.window._export_animation_sample_rate(10), 15)
+
+    def test_export_preflight_failure_stops_before_canvas_capture(self) -> None:
+        track = PlaylistTrack(
+            file_path="missing-before-capture.mp3",
+            title="Missing before capture",
+            duration_seconds=1.0,
+        )
+        self.window.playlist_service.replace([track])
+        with (
+            patch("app.ui.main_window.FFmpegRenderer") as renderer_type,
+            patch("app.ui.main_window.RenderWorker") as worker_type,
+            patch(
+                "app.ui.main_window.ExportSettingsDialog.exec",
+                return_value=QDialog.DialogCode.Accepted,
+            ),
+            patch.object(CanvasSnapshot, "capture_track") as capture,
+            patch.object(QMessageBox, "critical") as critical_message,
+        ):
+            renderer_type.return_value.preflight_export.side_effect = RenderError(
+                "Audio file is missing: missing-before-capture.mp3"
+            )
+            self.window._export_video()
+
+        capture.assert_not_called()
+        worker_type.assert_not_called()
+        critical_message.assert_called_once()
+        self.assertIsNone(self.window._export_dialog)
+        self.assertIsNone(self.window._export_frame_staging)
 
     def test_export_static_layers_keep_intro_stable_outro_timeline_order(self) -> None:
         """Transparent Z bands must be captured in the same order as base frames."""
@@ -3226,7 +4739,7 @@ class MainWindowSafetyTests(unittest.TestCase):
 
         try:
             with (
-                patch("app.ui.main_window.FFmpegRenderer"),
+                patch("app.ui.main_window.FFmpegRenderer") as renderer_type,
                 patch("app.ui.main_window.RenderWorker", WorkerStub),
                 patch("app.ui.main_window.ExportSettingsDialog.exec",
                       return_value=QDialog.DialogCode.Accepted),
@@ -3237,6 +4750,12 @@ class MainWindowSafetyTests(unittest.TestCase):
                 patch.object(self.window, "_export_visualizers", return_value=[]),
                 patch.object(QMessageBox, "critical") as critical_message,
             ):
+                renderer_type.return_value.ensure_encoder_available.side_effect = (
+                    lambda encoder: (
+                        (_ for _ in ()).throw(RenderError("ffv1 unavailable"))
+                        if encoder == "ffv1" else None
+                    )
+                )
                 self.window._export_video()
 
             critical_message.assert_not_called()
@@ -3273,6 +4792,291 @@ class MainWindowSafetyTests(unittest.TestCase):
                 and "elapsed_seconds" in state
             ]
             self.assertTrue(any(0.99 < elapsed < 1.01 for elapsed in stable_elapsed))
+        finally:
+            if self.window._export_dialog is not None:
+                self.window._export_dialog.complete(False)
+                self.window._export_dialog = None
+            self.window._export_finished()
+            self.application.processEvents()
+
+    def test_static_export_streams_without_staging_png_frames(self) -> None:
+        track = PlaylistTrack(
+            file_path="streamed-static.mp3",
+            title="Streamed static",
+            duration_seconds=1.0,
+        )
+        self.window.playlist_service.replace([track])
+        self.window.store.add(Source(SourceType.TEXT, "Static title"))
+        captured_worker_arguments: list[tuple[object, ...]] = []
+        submitted_durations: list[float] = []
+        direct_profiles: list[object] = []
+
+        class SignalStub:
+            def connect(self, _callback: object) -> None:
+                pass
+
+        class WorkerStub:
+            def __init__(self, *arguments: object) -> None:
+                captured_worker_arguments.append(arguments)
+                self.progress = SignalStub()
+                self.succeeded = SignalStub()
+                self.failed = SignalStub()
+                self.cancelled = SignalStub()
+                self.finished = SignalStub()
+
+            def start(self) -> None:
+                pass
+
+            def cancel(self) -> None:
+                pass
+
+            def isRunning(self) -> bool:
+                return False
+
+            def deleteLater(self) -> None:
+                pass
+
+        class EncoderStub:
+            def __init__(
+                self, _executable: object, output_path: Path, fps: int,
+                **kwargs: object,
+            ) -> None:
+                self.output_path = output_path
+                self.fps = fps
+                self.width = 4
+                self.height = 4
+                direct_profiles.append(kwargs.get("direct_profile"))
+
+            def submit(self, image: QImage, duration: float) -> None:
+                self.width = image.width()
+                self.height = image.height()
+                submitted_durations.append(duration)
+
+            def finish(self) -> StaticVideoStreamResult:
+                self.output_path.touch()
+                return StaticVideoStreamResult(
+                    self.output_path,
+                    sum(submitted_durations),
+                    self.width,
+                    self.height,
+                    self.fps,
+                    False,
+                    30,
+                    1,
+                )
+
+            def cancel(self) -> None:
+                pass
+
+        def capture_static(*_arguments: object, **_state: object) -> QImage:
+            image = QImage(4, 4, QImage.Format.Format_RGB32)
+            image.fill(QColor("#336699"))
+            return image
+
+        try:
+            with (
+                patch("app.ui.main_window.FFmpegRenderer") as renderer_type,
+                patch("app.ui.main_window.RenderWorker", WorkerStub),
+                patch("app.ui.main_window.StaticVideoStreamEncoder", EncoderStub),
+                patch("app.ui.main_window.ExportSettingsDialog.exec",
+                      return_value=QDialog.DialogCode.Accepted),
+                patch.object(CanvasSnapshot, "z_bands", return_value=[(None, None)]),
+                patch.object(CanvasSnapshot, "capture_track", side_effect=capture_static),
+                patch.object(self.window, "_stage_export_frame") as png_stage,
+                patch.object(self.window, "_export_visualizers", return_value=[]),
+                patch.object(QMessageBox, "critical") as critical_message,
+            ):
+                renderer_type.return_value.ensure_encoder_available.return_value = None
+                self.window._export_video()
+
+            critical_message.assert_not_called()
+            png_stage.assert_not_called()
+            self.assertTrue(submitted_durations)
+            self.assertAlmostEqual(sum(submitted_durations), track.duration_seconds)
+            self.assertEqual(len(captured_worker_arguments), 1)
+            prepared = captured_worker_arguments[0][1]
+            self.assertIsInstance(prepared, PreparedVideoInput)
+            self.assertTrue(prepared.ready_for_mux)
+            self.assertEqual(len(direct_profiles), 1)
+            self.assertIsNotNone(direct_profiles[0])
+            self.assertEqual(prepared.encoded_codec, direct_profiles[0].codec)
+            self.assertEqual(captured_worker_arguments[0][6], [])
+            self.assertEqual(self.window._export_frame_index, 0)
+        finally:
+            if self.window._export_dialog is not None:
+                self.window._export_dialog.complete(False)
+                self.window._export_dialog = None
+            self.window._export_finished()
+            self.application.processEvents()
+
+    def test_export_probes_independent_video_files_concurrently(self) -> None:
+        with TemporaryDirectory(prefix="parallel-video-probe-") as raw_directory:
+            paths = [Path(raw_directory) / f"clip-{index}.mp4" for index in range(3)]
+            for path in paths:
+                path.touch()
+            track = PlaylistTrack(
+                "song.wav", "Song", duration_seconds=3.0,
+                video_paths=[str(path) for path in paths],
+            )
+            source = Source(
+                SourceType.VIDEO, "Per-track videos",
+                video_timing_mode="track", video_repeat_mode="sequence",
+            )
+            self.window.store.add(source)
+            running = 0
+            maximum_running = 0
+            lock = threading.Lock()
+
+            def probe(_path: Path) -> float:
+                nonlocal running, maximum_running
+                with lock:
+                    running += 1
+                    maximum_running = max(maximum_running, running)
+                threading.Event().wait(0.04)
+                with lock:
+                    running -= 1
+                return 1.0
+
+            with patch.object(PlaylistService, "_probe_duration", side_effect=probe) as duration:
+                clips = self.window._export_video_clips([track], 3.0)
+
+        self.assertEqual(duration.call_count, 3)
+        self.assertGreaterEqual(maximum_running, 2)
+        self.assertEqual(len(clips), 3)
+
+    def test_dynamic_export_streams_base_and_transparent_z_bands(self) -> None:
+        track = PlaylistTrack(
+            file_path="streamed-dynamic.mp3",
+            title="Streamed dynamic",
+            duration_seconds=0.5,
+        )
+        self.window.playlist_service.replace([track])
+        particle = Source(SourceType.PARTICLE_OVERLAY, "Particles", z_index=1.0)
+        self.window.store.add(particle)
+        self.window.store.add(Source(SourceType.TEXT, "Foreground", z_index=2.0))
+        captured_worker_arguments: list[tuple[object, ...]] = []
+        active_encoder_count = 0
+        maximum_active_encoder_count = 0
+
+        class SignalStub:
+            def connect(self, _callback: object) -> None:
+                pass
+
+        class WorkerStub:
+            def __init__(self, *arguments: object) -> None:
+                captured_worker_arguments.append(arguments)
+                self.progress = SignalStub()
+                self.succeeded = SignalStub()
+                self.failed = SignalStub()
+                self.cancelled = SignalStub()
+                self.finished = SignalStub()
+
+            def start(self) -> None:
+                pass
+
+            def cancel(self) -> None:
+                pass
+
+            def isRunning(self) -> bool:
+                return False
+
+            def deleteLater(self) -> None:
+                pass
+
+        class EncoderStub:
+            def __init__(
+                self, _executable: object, output_path: Path, fps: int,
+                *, preserve_alpha: bool = False, **_kwargs: object,
+            ) -> None:
+                nonlocal active_encoder_count, maximum_active_encoder_count
+                self.output_path = output_path
+                self.fps = fps
+                self.preserve_alpha = preserve_alpha
+                self.width = 4
+                self.height = 4
+                self.durations: list[float] = []
+                self.active = True
+                active_encoder_count += 1
+                maximum_active_encoder_count = max(
+                    maximum_active_encoder_count, active_encoder_count,
+                )
+
+            def submit(self, image: QImage, duration: float) -> None:
+                self.width = image.width()
+                self.height = image.height()
+                self.durations.append(duration)
+
+            def finish(self) -> StaticVideoStreamResult:
+                nonlocal active_encoder_count
+                self.output_path.touch()
+                if self.active:
+                    self.active = False
+                    active_encoder_count -= 1
+                return StaticVideoStreamResult(
+                    self.output_path,
+                    sum(self.durations),
+                    self.width,
+                    self.height,
+                    self.fps,
+                    self.preserve_alpha,
+                    max(1, len(self.durations)),
+                    1,
+                )
+
+            def cancel(self) -> None:
+                nonlocal active_encoder_count
+                if self.active:
+                    self.active = False
+                    active_encoder_count -= 1
+
+        overlay = VisualizerOverlay(
+            0, 0, 4, 4, "noise", "#FFFFFF",
+            kind="particles", z_index=1.0,
+        )
+
+        def capture_layer(*_arguments: object, **state: object) -> QImage:
+            transparent = bool(state.get("transparent"))
+            image = QImage(
+                4, 4,
+                QImage.Format.Format_ARGB32_Premultiplied
+                if transparent else QImage.Format.Format_RGB32,
+            )
+            image.fill(QColor(255, 0, 0, 128) if transparent else QColor("#123456"))
+            return image
+
+        try:
+            with (
+                patch("app.ui.main_window.FFmpegRenderer") as renderer_type,
+                patch("app.ui.main_window.RenderWorker", WorkerStub),
+                patch("app.ui.main_window.StaticVideoStreamEncoder", EncoderStub),
+                patch("app.ui.main_window.ExportSettingsDialog.exec",
+                      return_value=QDialog.DialogCode.Accepted),
+                patch.object(CanvasSnapshot, "z_bands",
+                             return_value=[(None, 1.0), (1.0, None)]),
+                patch.object(CanvasSnapshot, "capture_track", side_effect=capture_layer),
+                patch.object(self.window, "_stage_export_frame") as png_stage,
+                patch.object(self.window, "_export_visualizers", return_value=[overlay]),
+                patch.object(QMessageBox, "critical") as critical_message,
+            ):
+                renderer_type.return_value.ensure_encoder_available.return_value = None
+                self.window._export_video()
+
+            critical_message.assert_not_called()
+            png_stage.assert_not_called()
+            self.assertEqual(len(captured_worker_arguments), 1)
+            arguments = captured_worker_arguments[0]
+            self.assertIsInstance(arguments[1], PreparedVideoInput)
+            self.assertEqual(arguments[5], [overlay])
+            self.assertEqual(len(arguments[6]), 1)
+            self.assertIsInstance(arguments[6][0], PreparedStaticOverlayLayer)
+            self.assertEqual(arguments[6][0].z_index, 1.0)
+            self.assertEqual(self.window._export_frame_index, 0)
+            assert self.window._export_dialog is not None
+            self.assertEqual(self.window._export_dialog.progress_bar.value(), 25)
+            self.assertIn("2/2", self.window._export_dialog.detail_label.text())
+            self.assertIn("100%", self.window._export_dialog.detail_label.text())
+            self.assertEqual(maximum_active_encoder_count, 1)
+            self.assertEqual(active_encoder_count, 0)
         finally:
             if self.window._export_dialog is not None:
                 self.window._export_dialog.complete(False)
@@ -3355,6 +5159,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             ):
                 self.assertTrue(dialog.request_cancel())
             self.assertEqual(requested, [True])
+            self.assertTrue(dialog.is_cancelling)
             self.assertFalse(dialog.cancel_button.isEnabled())
         finally:
             dialog.complete(False)
@@ -3381,6 +5186,14 @@ class MainWindowSafetyTests(unittest.TestCase):
                 self.assertEqual(dialog._detail_text(source), expected)
             self.assertEqual(dialog._stage_text("Preparing visualizers"), "비주얼라이저 준비")
             self.assertEqual(dialog._stage_text("Downloading FFmpeg"), "FFmpeg 다운로드")
+            combined = dialog._detail_text(
+                "Visualizer 1/2 · frame 12/30 · 40.0%\n"
+                "Visualizer 2/2 · frame 6/30 · 20.0%\n"
+                "All visualizers · frame 18/60 · 30.0%"
+            )
+            self.assertIn("비주얼라이저 1/2 · 프레임 12/30", combined)
+            self.assertIn("비주얼라이저 2/2 · 프레임 6/30", combined)
+            self.assertIn("전체 비주얼라이저 · 프레임 18/60", combined)
             dialog.set_busy(
                 "Preparing visualizers",
                 "Analyzing audio and rendering Python visualizer frames",
@@ -3408,9 +5221,42 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertIn("비주얼라이저 1/2", dialog.detail_label.text())
 
             dialog.set_busy("Preparing export", "Preparing temporary files")
-            self.assertIn("남은 시간 계산 중", dialog.time_label.text())
+            # A short indeterminate hand-off must keep counting down the last
+            # stable estimate instead of blanking it at every stage boundary.
+            self.assertIn("남은 시간 약", dialog.time_label.text())
         finally:
             dialog.complete(False)
+
+    def test_export_eta_blends_recent_stage_speed_and_counts_down_while_busy(self) -> None:
+        estimator = ExportEtaEstimator(0.0)
+
+        self.assertIsNone(estimator.update("Preparing visual frames", 0.01, 1.0))
+        initial = estimator.update("Preparing visual frames", 0.10, 10.0)
+        slowed = estimator.update("Preparing visual frames", 0.12, 20.0)
+
+        self.assertIsNotNone(initial)
+        self.assertIsNotNone(slowed)
+        assert initial is not None and slowed is not None
+        self.assertGreater(slowed, initial)
+        self.assertAlmostEqual(
+            estimator.remaining(25.0), max(0.0, slowed - 5.0), delta=0.001,
+        )
+
+    def test_export_eta_smooths_weighted_progress_jumps_between_stages(self) -> None:
+        estimator = ExportEtaEstimator(0.0)
+        before = estimator.update("Preparing visual frames", 0.25, 25.0)
+        after = estimator.update("Preparing export", 0.50, 26.0)
+
+        self.assertIsNotNone(before)
+        self.assertIsNotNone(after)
+        assert before is not None and after is not None
+        # A raw whole-export extrapolation falls from 75s to 26s here. Preserve
+        # evidence from the completed preparation stage instead of presenting
+        # that artificial progress-weight jump as a real 49-second speed-up.
+        self.assertGreater(after, 40.0)
+        self.assertLess(after, before)
+
+        self.assertEqual(estimator.update("Complete", 1.0, 60.0), 0.0)
 
     def test_export_progress_keeps_selected_settings_visible(self) -> None:
         dialog = ExportProgressDialog(self.window)

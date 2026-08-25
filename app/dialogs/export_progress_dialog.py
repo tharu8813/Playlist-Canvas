@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 import re
 from time import monotonic
@@ -21,6 +23,120 @@ from PySide6.QtWidgets import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _EtaSample:
+    """One monotonic export-progress observation."""
+
+    timestamp: float
+    fraction: float
+    stage: str
+
+
+class ExportEtaEstimator:
+    """Estimate completion from stable overall and recent stage-local rates.
+
+    Export progress is deliberately weighted rather than proportional to wall
+    time. Canvas capture, audio work, visualizers, and the final encoder can
+    therefore run at very different speeds. A whole-export average alone makes
+    the ETA jump at every stage boundary; a recent rate alone incorrectly
+    assumes that the current stage represents all remaining work. Blend both
+    signals and smooth the predicted finish time instead.
+    """
+
+    _WINDOW_SECONDS = 30.0
+    _MAX_SAMPLES = 80
+
+    def __init__(self, started_at: float) -> None:
+        self.started_at = float(started_at)
+        self._samples: deque[_EtaSample] = deque(maxlen=self._MAX_SAMPLES)
+        self._samples.append(_EtaSample(self.started_at, 0.0, ""))
+        self._last_fraction = 0.0
+        self._last_observed_at = self.started_at
+        self._predicted_finish_at: float | None = None
+
+    def update(self, stage: str, fraction: float, now: float) -> float | None:
+        """Return a smoothed remaining duration for one progress observation."""
+        now = max(self.started_at, float(now))
+        fraction = max(0.0, min(1.0, float(fraction)))
+        if fraction >= 1.0:
+            self._last_fraction = 1.0
+            self._predicted_finish_at = now
+            return 0.0
+
+        # Ignore duplicate callbacks for rate calculation, but keep counting
+        # down the last stable prediction while a subprocess reports one value.
+        if fraction <= self._last_fraction + 1e-6:
+            self._last_observed_at = now
+            return self.remaining(now)
+
+        sample = _EtaSample(now, fraction, stage)
+        self._samples.append(sample)
+        self._last_fraction = fraction
+        previous_observed_at = self._last_observed_at
+        self._last_observed_at = now
+
+        elapsed = now - self.started_at
+        if elapsed <= 0.0 or fraction <= 0.02:
+            return None
+        overall_rate = fraction / elapsed
+        if overall_rate <= 0.0:
+            return None
+
+        stage_samples = [
+            entry for entry in self._samples
+            if entry.stage == stage and now - entry.timestamp <= self._WINDOW_SECONDS
+        ]
+        stage_rate: float | None = None
+        stage_elapsed = 0.0
+        stage_delta = 0.0
+        if len(stage_samples) >= 2:
+            first = stage_samples[0]
+            stage_elapsed = now - first.timestamp
+            stage_delta = fraction - first.fraction
+            if stage_elapsed >= 0.5 and stage_delta >= 0.002:
+                stage_rate = stage_delta / stage_elapsed
+
+        rate = overall_rate
+        if stage_rate is not None:
+            # Require several seconds and measurable progress before trusting a
+            # stage-local speed. Near completion it receives more weight because
+            # the active encoder normally owns nearly all remaining work.
+            confidence = min(0.70, stage_elapsed / 12.0, stage_delta / 0.06)
+            if fraction >= 0.80:
+                confidence = min(0.82, confidence + 0.12)
+            bounded_stage_rate = max(
+                overall_rate * 0.20,
+                min(overall_rate * 5.0, stage_rate),
+            )
+            rate = overall_rate * (1.0 - confidence) + bounded_stage_rate * confidence
+
+        raw_remaining = (1.0 - fraction) / max(rate, 1e-9)
+        raw_finish_at = now + raw_remaining
+        if self._predicted_finish_at is None:
+            self._predicted_finish_at = raw_finish_at
+        else:
+            # Smooth the completion timestamp, not the duration. This lets the
+            # displayed ETA count down naturally between slightly noisy samples.
+            delta_seconds = max(0.0, now - previous_observed_at)
+            alpha = min(0.42, max(0.16, 0.18 + delta_seconds / 30.0))
+            self._predicted_finish_at = (
+                self._predicted_finish_at * (1.0 - alpha)
+                + raw_finish_at * alpha
+            )
+        return self.remaining(now)
+
+    def remaining(self, now: float) -> float | None:
+        """Count down the last prediction while progress is temporarily busy."""
+        if self._predicted_finish_at is None:
+            return None
+        remaining = self._predicted_finish_at - float(now)
+        if remaining <= 0.0 and self._last_fraction < 1.0:
+            # A stalled stage invalidates an expired prediction. Showing
+            # ``00:00`` indefinitely is more misleading than recalculating.
+            return None
+        return max(0.0, remaining)
+
+
 class ExportProgressDialog(QDialog):
     """Display a comprehensible in-flight FFmpeg export and allow safe cancellation."""
 
@@ -32,6 +148,7 @@ class ExportProgressDialog(QDialog):
         self.setModal(False)
         self.setMinimumSize(600, 420)
         self._started_at = monotonic()
+        self._eta_estimator = ExportEtaEstimator(self._started_at)
         self._cancelling = False
         self._allow_close = False
         self._last_log = ""
@@ -170,7 +287,10 @@ class ExportProgressDialog(QDialog):
         self.progress_bar.setRange(0, 0)
         self.percent_label.setText("…")
         self.detail_label.setText(display_message)
-        self._update_time_label(None)
+        now = monotonic()
+        self._update_time_label(
+            self._eta_estimator.remaining(now), now - self._started_at,
+        )
         if display_message and display_message != self._last_log:
             self.log_output.append(display_message)
             self._last_log = display_message
@@ -178,7 +298,8 @@ class ExportProgressDialog(QDialog):
     def update_progress(self, stage: str, fraction: float, message: str) -> None:
         """Apply worker progress and calculate an approximate time remaining."""
         percent = round(max(0.0, min(1.0, fraction)) * 100)
-        elapsed = monotonic() - self._started_at
+        now = monotonic()
+        elapsed = now - self._started_at
         display_message = self._detail_text(message)
         if self.progress_bar.maximum() == 0:
             self.progress_bar.setRange(0, 100)
@@ -189,7 +310,7 @@ class ExportProgressDialog(QDialog):
         if display_message and display_message != self._last_log:
             self.log_output.append(display_message)
             self._last_log = display_message
-        remaining = elapsed * (1.0 - fraction) / fraction if fraction > 0.02 else None
+        remaining = self._eta_estimator.update(stage, fraction, now)
         self._update_time_label(remaining, elapsed)
 
     def _update_time_label(
@@ -233,6 +354,11 @@ class ExportProgressDialog(QDialog):
         self.log_output.append("취소를 요청했습니다" if self._korean else "Cancellation requested")
         self.cancel_requested.emit()
         return True
+
+    @property
+    def is_cancelling(self) -> bool:
+        """Return whether a confirmed cancellation is already in progress."""
+        return self._cancelling
 
     def complete(self, accepted: bool) -> None:
         """Close the dialog after the worker has reached a terminal state."""
@@ -302,6 +428,7 @@ class ExportProgressDialog(QDialog):
             "Analyzing stereo level meter channels": "스테레오 레벨 미터 분석 중",
             "Visualizer frames complete": "비주얼라이저 프레임 준비 완료",
             "Rendering the final video": "최종 영상 렌더링 중",
+            "Muxing prepared video and audio": "준비된 영상과 오디오를 결합하는 중",
             "Audio normalization complete": "오디오 정규화 완료",
             "Export completed": "내보내기 완료",
             "Moving the completed video to the selected location":
@@ -325,7 +452,8 @@ class ExportProgressDialog(QDialog):
             )
         if message.startswith("Visualizer "):
             return (
-                message.replace("Visualizer ", "비주얼라이저 ", 1)
+                message.replace("Visualizer ", "비주얼라이저 ")
+                .replace("All visualizers", "전체 비주얼라이저")
                 .replace(" · frame ", " · 프레임 ")
             )
         if message.startswith("Normalizing audio "):
@@ -362,6 +490,8 @@ class ExportProgressDialog(QDialog):
             return f"무음 구간 {duration} 추가"
         if message.startswith("Encoding ") and " / " in message:
             return message.replace("Encoding ", "영상 인코딩 중 · ", 1)
+        if message.startswith("Muxing ") and " / " in message:
+            return message.replace("Muxing ", "영상·오디오 결합 중 · ", 1)
         if message.startswith("Downloaded "):
             return message.replace("Downloaded ", "다운로드됨 · ", 1)
         return message

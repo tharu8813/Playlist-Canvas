@@ -10,7 +10,8 @@ from PySide6.QtCore import (
 from app.canvas.source_item import SourceItem
 from app.models.source import Source
 from app.animation.curves import (
-    hidden_opacity_factor, hidden_scale_factor, slide_distance,
+    hidden_opacity_factor, hidden_rotation_offset, hidden_scale_factor,
+    slide_distance,
 )
 
 
@@ -23,7 +24,7 @@ class CanvasAnimationPreviewController(QObject):
         super().__init__(parent)
         self._group: QSequentialAnimationGroup | None = None
         self._item: SourceItem | None = None
-        self._original: tuple[QPointF, float, float, bool] | None = None
+        self._original: tuple[QPointF, float, float, float, bool] | None = None
 
     @property
     def active(self) -> bool:
@@ -37,7 +38,8 @@ class CanvasAnimationPreviewController(QObject):
             return False
         self._item = item
         self._original = (
-            QPointF(item.pos()), item.scale(), item.opacity(), item.isSelected()
+            QPointF(item.pos()), item.scale(), item.rotation(), item.opacity(),
+            item.isSelected(),
         )
         item._suppress_position_sync = True
         self._set_selected_without_signal(item, False)
@@ -87,6 +89,8 @@ class CanvasAnimationPreviewController(QObject):
         }.get(style, QPointF())
         hidden_position = normal_position + offset
         hidden_scale = normal_scale * hidden_scale_factor(style)
+        normal_rotation = source.rotation
+        hidden_rotation = normal_rotation + hidden_rotation_offset(style, entering)
         # Source opacity is already applied inside SourceItem.paint(). Graphics
         # opacity is only the animation multiplier; including source.opacity here
         # would square semi-transparent elements during preview/export.
@@ -96,35 +100,45 @@ class CanvasAnimationPreviewController(QObject):
         group = QParallelAnimationGroup()
         position = QPropertyAnimation(item, b"pos")
         scale = QPropertyAnimation(item, b"scale")
+        rotation = QPropertyAnimation(item, b"rotation")
         opacity = QPropertyAnimation(item, b"opacity")
-        for animation in (position, scale, opacity):
+        for animation in (position, scale, rotation):
             animation.setDuration(duration)
             animation.setEasingCurve(
                 QEasingCurve.Type.OutQuint if entering
                 else QEasingCurve.Type.InQuint
             )
+        opacity.setDuration(duration)
+        opacity.setEasingCurve(QEasingCurve.Type.InOutCubic)
         if entering:
             item.setPos(hidden_position)
             item.setScale(hidden_scale)
+            item.setRotation(hidden_rotation)
             item.setOpacity(hidden_opacity)
             position.setStartValue(hidden_position)
             position.setEndValue(normal_position)
             scale.setStartValue(hidden_scale)
             scale.setEndValue(normal_scale)
+            rotation.setStartValue(hidden_rotation)
+            rotation.setEndValue(normal_rotation)
             opacity.setStartValue(hidden_opacity)
             opacity.setEndValue(normal_opacity)
         else:
             item.setPos(normal_position)
             item.setScale(normal_scale)
+            item.setRotation(normal_rotation)
             item.setOpacity(normal_opacity)
             position.setStartValue(normal_position)
             position.setEndValue(hidden_position)
             scale.setStartValue(normal_scale)
             scale.setEndValue(hidden_scale)
+            rotation.setStartValue(normal_rotation)
+            rotation.setEndValue(hidden_rotation)
             opacity.setStartValue(normal_opacity)
             opacity.setEndValue(hidden_opacity)
         group.addAnimation(position)
         group.addAnimation(scale)
+        group.addAnimation(rotation)
         group.addAnimation(opacity)
         return group
 
@@ -136,9 +150,10 @@ class CanvasAnimationPreviewController(QObject):
         self._item = None
         self._original = None
         if item is not None and original is not None:
-            position, scale, opacity, selected = original
+            position, scale, rotation, opacity, selected = original
             item.setPos(position)
             item.setScale(scale)
+            item.setRotation(rotation)
             item.setOpacity(opacity)
             item._suppress_position_sync = False
             self._set_selected_without_signal(item, selected)

@@ -16,9 +16,12 @@ from app.renderer.ffmpeg_renderer import (
     RenderError,
     RenderResult,
     RenderFrame,
+    PreparedVideoInput,
     RenderSettings,
+    PreparedStaticOverlayLayer,
     StaticOverlayLayer,
     VisualizerOverlay,
+    VideoClipOverlay,
 )
 from app.utils.logging_setup import report_unexpected_error
 
@@ -34,22 +37,33 @@ class RenderWorker(QThread):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, renderer: FFmpegRenderer, image: QImage | list[QImage] | list[RenderFrame],
+    def __init__(self, renderer: FFmpegRenderer,
+                 image: QImage | list[QImage] | list[RenderFrame] | PreparedVideoInput,
                  tracks: list[PlaylistTrack], output_path: str | Path,
                  settings: RenderSettings | None = None,
                  visualizers: list[VisualizerOverlay] | None = None,
-                 static_layers: list[StaticOverlayLayer] | None = None) -> None:
+                 static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer] | None = None,
+                 video_clips: list[VideoClipOverlay] | None = None) -> None:
         super().__init__()
         self.renderer = renderer
-        self.image = [
-            RenderFrame(frame.image if isinstance(frame.image, Path) else QImage(frame.image), frame.duration_seconds)
-            if isinstance(frame, RenderFrame) else QImage(frame)
-            for frame in image
-        ] if isinstance(image, list) else QImage(image)
+        if isinstance(image, PreparedVideoInput):
+            self.image = image
+        elif isinstance(image, list):
+            self.image = [
+                RenderFrame(
+                    frame.image if isinstance(frame.image, Path) else QImage(frame.image),
+                    frame.duration_seconds,
+                )
+                if isinstance(frame, RenderFrame) else QImage(frame)
+                for frame in image
+            ]
+        else:
+            self.image = QImage(image)
         self.tracks = list(tracks)
         self.output_path = Path(output_path)
         self.settings = settings
         self.visualizers = list(visualizers or [])
+        self.video_clips = list(video_clips or [])
         self.static_layers = list(static_layers or [])
         self._cancel_event = threading.Event()
 
@@ -64,6 +78,7 @@ class RenderWorker(QThread):
                 self.image, self.tracks, self.output_path, self.settings,
                 progress_callback=self.progress.emit, cancel_event=self._cancel_event,
                 visualizers=self.visualizers, static_layers=self.static_layers,
+                video_clips=self.video_clips,
             )
         except RenderCancelledError:
             self.cancelled.emit()

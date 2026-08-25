@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.models.project import ProjectDocument
+from app.models.source import SourceType
 
 
 @dataclass(slots=True)
@@ -31,6 +32,10 @@ class MissingMedia:
         return self.kind == "lyrics" or self.kind == "library:lyrics"
 
     @property
+    def is_video(self) -> bool:
+        return self.kind in {"video", "track_video", "library:video"}
+
+    @property
     def library_type(self) -> str:
         return self.kind.partition(":")[2] if self.kind.startswith("library:") else ""
 
@@ -44,7 +49,7 @@ class ProjectMediaService:
         directory = project_path.parent
         missing: list[MissingMedia] = []
         for source in document.sources:
-            if source.content_path:
+            if source.content_path and source.source_type is not SourceType.VIDEO:
                 resolved = cls._resolve_existing_path(source.content_path, directory)
                 if resolved:
                     source.content_path = str(resolved)
@@ -52,6 +57,16 @@ class ProjectMediaService:
                     missing.append(MissingMedia(
                         kind="image", identifier=source.id, display_name=source.name,
                         original_path=source.content_path,
+                    ))
+            for index, video_path in enumerate(source.video_paths):
+                resolved_video = cls._resolve_existing_path(video_path, directory)
+                if resolved_video:
+                    source.video_paths[index] = str(resolved_video)
+                else:
+                    missing.append(MissingMedia(
+                        kind="video", identifier=f"{source.id}:{index}",
+                        display_name=f"{source.name} video {index + 1}",
+                        original_path=video_path,
                     ))
             if source.font_path:
                 resolved_font = cls._resolve_existing_path(source.font_path, directory)
@@ -92,6 +107,16 @@ class ProjectMediaService:
                         display_name=f"{track.title} lyrics",
                         original_path=track.lyrics_path,
                     ))
+            for index, video_path in enumerate(track.video_paths):
+                resolved_video = cls._resolve_existing_path(video_path, directory)
+                if resolved_video:
+                    track.video_paths[index] = str(resolved_video)
+                else:
+                    missing.append(MissingMedia(
+                        kind="track_video", identifier=f"{track.id}:{index}",
+                        display_name=f"{track.title} video {index + 1}",
+                        original_path=video_path,
+                    ))
         referenced_missing = {entry.original_path.casefold() for entry in missing}
         for content in document.content_library:
             if not content.path:
@@ -127,6 +152,14 @@ class ProjectMediaService:
                     tracks[entry.identifier].cover_path = replacement_value
                 elif entry.kind == "lyrics" and entry.identifier in tracks:
                     tracks[entry.identifier].lyrics_path = replacement_value
+                elif entry.kind in {"video", "track_video"}:
+                    owner_id, _, index_text = entry.identifier.rpartition(":")
+                    owner = sources.get(owner_id) if entry.kind == "video" else tracks.get(owner_id)
+                    if owner is not None and index_text.isdigit():
+                        paths = owner.video_paths
+                        index = int(index_text)
+                        if 0 <= index < len(paths):
+                            paths[index] = replacement_value
                 elif entry.kind.startswith("library:") and entry.identifier in contents:
                     contents[entry.identifier].path = replacement_value
                 for content in document.content_library:
@@ -143,6 +176,13 @@ class ProjectMediaService:
             elif entry.kind == "lyrics" and entry.identifier in tracks:
                 tracks[entry.identifier].lyrics_path = ""
                 tracks[entry.identifier].lyrics = []
+            elif entry.kind in {"video", "track_video"}:
+                owner_id, _, index_text = entry.identifier.rpartition(":")
+                owner = sources.get(owner_id) if entry.kind == "video" else tracks.get(owner_id)
+                if owner is not None and index_text.isdigit():
+                    index = int(index_text)
+                    if 0 <= index < len(owner.video_paths):
+                        owner.video_paths[index] = ""
             elif entry.kind.startswith("library:") and entry.identifier in contents:
                 contents[entry.identifier].path = ""
             if not replacement or not replacement.is_file():
@@ -152,6 +192,12 @@ class ProjectMediaService:
         document.content_library[:] = [
             content for content in document.content_library if content.path
         ]
+        for source in document.sources:
+            source.video_paths[:] = [path for path in source.video_paths if path]
+            if source.source_type is SourceType.VIDEO:
+                source.content_path = source.video_paths[0] if source.video_paths else ""
+        for track in document.playlist:
+            track.video_paths[:] = [path for path in track.video_paths if path]
 
     @staticmethod
     def _resolve_existing_path(raw_path: str, project_directory: Path) -> Path | None:

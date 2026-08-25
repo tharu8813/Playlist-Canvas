@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from math import atan2, ceil, cos, degrees, radians, sin
+from pathlib import Path
+from time import monotonic
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QThreadPool, QUrl, Signal
 from PySide6.QtGui import QColor, QBrush, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsBlurEffect,
@@ -15,12 +17,19 @@ from PySide6.QtWidgets import (
     QGraphicsSceneHoverEvent,
     QGraphicsSceneMouseEvent,
 )
+from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 
 from app.models.source import Source, SourceType
 from app.utils.font_loader import load_application_font
 from app.utils.image_loader import load_pixmap
 from app.utils.level_meter_painter import paint_level_meter
 from app.utils.particle_painter import paint_particles
+from app.video.frame_filter import (
+    VideoFrameFilterSettings, VideoFrameFilterSignals, VideoFrameFilterTask,
+)
+from app.video.preview_decoder import (
+    VideoDecoderStats, video_position_needs_seek, video_seek_tolerance_ms,
+)
 
 
 class SourceItem(QGraphicsObject):
@@ -28,8 +37,16 @@ class SourceItem(QGraphicsObject):
 
     changed_by_user = Signal(str, dict)
     duplicate_requested = Signal(str, float, float)
+    video_frame_ready = Signal()
 
     _handle_size = 10.0
+    _direct_gpu_pixel_formats = frozenset({
+        "Format_RGBA8888", "Format_RGBX8888",
+        "Format_BGRA8888", "Format_BGRX8888",
+        "Format_ARGB8888", "Format_XRGB8888",
+        "Format_ABGR8888", "Format_XBGR8888",
+        "Format_NV12", "Format_NV21",
+    })
 
     def __init__(self, source: Source) -> None:
         super().__init__()
@@ -49,6 +66,49 @@ class SourceItem(QGraphicsObject):
         self._duplicate_origin = QPointF()
         self._pending_user_changes: dict[str, object] = {}
         self._pixmap = QPixmap()
+        self._video_player: QMediaPlayer | None = None
+        self._video_sink: QVideoSink | None = None
+        self._video_preview_path = ""
+        self._video_preview_suppressed = False
+        self._video_timeline_preview_active = False
+        self._video_editor_poster_pending = False
+        self._video_display_scale = 1.0
+        self._video_preview_fps = 30
+        self._video_last_frame_accepted = 0.0
+        self._video_should_play = False
+        self._video_applied_playback_rate: float | None = None
+        self._video_loop_mode: QMediaPlayer.Loops | None = None
+        self._video_pause_after_frame = False
+        self._video_pending_seek_ms: int | None = None
+        self._video_last_seek_time = 0.0
+        self._video_last_requested_target_ms: int | None = None
+        self._video_last_request_time = 0.0
+        self._video_accepted_frames = 0
+        self._video_dropped_frames = 0
+        self._video_throttled_frames = 0
+        self._video_pressure_drops = 0
+        self._video_seek_count = 0
+        self._video_source_switches = 0
+        self._video_frame_handle = ""
+        self._video_gpu_backed_frame = False
+        self._video_gpu_color_filter = False
+        self._video_applied_gpu_color_filter = False
+        self._video_last_raw_frame = QImage()
+        # Keep the filtered decoder image independently from the editor pixmap.
+        # GPU preview can upload this image directly instead of rendering the
+        # pixmap back through QGraphicsScene and capturing it into another image.
+        self._video_presented_frame = QImage()
+        self._video_presented_gpu_frame = QVideoFrame()
+        self._video_presented_gpu_serial = 0
+        self._video_presented_revision = 0
+        self._video_direct_gpu_frame = False
+        # The runnable keeps this unparented signal bridge alive if the Canvas
+        # closes while a final frame is still being filtered.
+        self._video_filter_signals = VideoFrameFilterSignals()
+        self._video_filter_signals.finished.connect(self._video_filter_finished)
+        self._video_filter_busy = False
+        self._video_pending_frame: tuple[QImage, object] | None = None
+        self._video_filter_generation = 0
         self._image_filter_key: tuple[str, float, float, float] | None = None
         self._lyric_fonts: dict[str, QFont] = {}
         self._lyric_ghost_cache: dict[tuple[object, ...], QPixmap] = {}
@@ -202,13 +262,558 @@ class SourceItem(QGraphicsObject):
         image_path = self.source.content_path
         if self.source.source_type is SourceType.BACKGROUND and self.source.background_mode != "image":
             image_path = ""
+        if self.source.source_type is SourceType.VIDEO:
+            self._configure_video_preview()
+            image_path = ""
+        elif self._video_player is not None:
+            self.release_video_decoder()
         filter_key = (
             image_path, self.source.brightness, self.source.contrast, self.source.blur
         )
-        if filter_key != self._image_filter_key:
+        if self.source.source_type is not SourceType.VIDEO and filter_key != self._image_filter_key:
             raw_pixmap = load_pixmap(image_path) if image_path else QPixmap()
             self._pixmap = self._apply_image_filters(raw_pixmap)
             self._image_filter_key = filter_key
+        self.update()
+
+    def _configure_video_preview(self) -> None:
+        """Load one editor poster frame without continuously decoding video."""
+        paths = self.source.video_paths
+        path = paths[0] if paths else ""
+        self._video_should_play = False
+        self._ensure_video_decoder()
+        if path == self._video_preview_path:
+            if not self.isVisible():
+                self._video_player.stop()
+            elif path and self._pixmap.isNull() and not self._video_editor_poster_pending:
+                self._video_editor_poster_pending = True
+                self._set_video_loops(QMediaPlayer.Loops.Once)
+                self._video_player.setPosition(0)
+                self._video_player.play()
+            elif not self._video_timeline_preview_active:
+                self._video_player.pause()
+            return
+        self._video_filter_generation += 1
+        self._video_pending_frame = None
+        self._video_preview_path = path
+        self._video_timeline_preview_active = False
+        self._video_editor_poster_pending = False
+        self._video_last_frame_accepted = 0.0
+        self._video_last_seek_time = 0.0
+        self._video_last_requested_target_ms = None
+        self._video_last_request_time = 0.0
+        self._pixmap = QPixmap()
+        self._video_presented_frame = QImage()
+        self._video_presented_gpu_frame = QVideoFrame()
+        self._video_presented_gpu_serial = 0
+        self._video_presented_revision = 0
+        if path and Path(path).is_file():
+            self._video_player.setSource(QUrl.fromLocalFile(str(Path(path).resolve())))
+            self._set_video_loops(QMediaPlayer.Loops.Once)
+            self._video_player.setPosition(0)
+            if self.isVisible():
+                # Qt Multimedia needs to start decoding before its first frame
+                # reaches QVideoSink.  _video_frame_changed pauses immediately
+                # after that poster frame is accepted.
+                self._video_editor_poster_pending = True
+                self._video_player.play()
+            else:
+                self._video_player.stop()
+        else:
+            self._video_player.stop()
+
+    def _ensure_video_decoder(self) -> QMediaPlayer:
+        """Create one reusable decoder and connect its deferred-seek signals."""
+        if self._video_player is None:
+            self._video_player = QMediaPlayer(self)
+            self._video_sink = QVideoSink(self)
+            self._video_sink.videoFrameChanged.connect(self._video_frame_changed)
+            self._video_player.setVideoOutput(self._video_sink)
+            self._video_player.mediaStatusChanged.connect(
+                self._video_media_status_changed,
+            )
+        return self._video_player
+
+    def _set_video_loops(self, loops: QMediaPlayer.Loops) -> None:
+        if self._video_player is not None and loops != self._video_loop_mode:
+            self._video_player.setLoops(loops)
+            self._video_loop_mode = loops
+
+    def _set_video_playback_rate(self, speed: float) -> None:
+        rate = max(0.05, min(8.0, float(speed)))
+        if self._video_player is not None and rate != self._video_applied_playback_rate:
+            self._video_player.setPlaybackRate(rate)
+            self._video_applied_playback_rate = rate
+
+    def _video_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if status not in {
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        } or self._video_pending_seek_ms is None:
+            return
+        target = self._video_pending_seek_ms
+        self._video_pending_seek_ms = None
+        self._apply_video_seek(target)
+
+    def _apply_video_seek(self, target_ms: int, *, request_time: float | None = None) -> None:
+        if self._video_player is None:
+            return
+        self._video_last_seek_time = (
+            monotonic() if request_time is None else float(request_time)
+        )
+        self._video_last_frame_accepted = 0.0
+        self._video_player.setPosition(max(0, int(target_ms)))
+        self._video_seek_count += 1
+        if self._video_should_play:
+            self._video_player.play()
+        else:
+            # Some backends emit a paused seek frame directly; others need one
+            # decode tick. Pause immediately after that frame reaches the sink.
+            self._video_pause_after_frame = True
+            self._video_player.play()
+
+    def _video_frame_changed(self, frame: QVideoFrame) -> None:
+        now = monotonic()
+        if self._video_timeline_preview_active:
+            minimum_interval = 1.0 / max(1, self._video_preview_fps)
+            if now - self._video_last_frame_accepted < minimum_interval:
+                self._video_dropped_frames += 1
+                self._video_throttled_frames += 1
+                return
+        try:
+            handle = frame.handleType()
+            self._video_frame_handle = handle.name
+            self._video_gpu_backed_frame = (
+                handle is not QVideoFrame.HandleType.NoHandle
+            )
+        except (AttributeError, RuntimeError):
+            self._video_frame_handle = ""
+            self._video_gpu_backed_frame = False
+        pixel_format_name = getattr(frame.pixelFormat(), "name", "")
+        if (
+            self._video_direct_gpu_frame
+            and self._video_gpu_backed_frame
+            and pixel_format_name in self._direct_gpu_pixel_formats
+            and not frame.mirrored()
+            and int(frame.rotation().value) == 0
+        ):
+            self._video_last_frame_accepted = now
+            self._video_accepted_frames += 1
+            self._video_presented_gpu_frame = QVideoFrame(frame)
+            self._video_presented_gpu_serial += 1
+            self._video_presented_revision += 1
+            self._video_applied_gpu_color_filter = self._video_gpu_color_filter
+            if self._video_editor_poster_pending and not self._video_timeline_preview_active:
+                self._video_editor_poster_pending = False
+                if self._video_player is not None:
+                    self._video_player.pause()
+            if self._video_pause_after_frame:
+                self._video_pause_after_frame = False
+                if self._video_player is not None:
+                    self._video_player.pause()
+            self.video_frame_ready.emit()
+            return
+        image = frame.toImage()
+        if image.isNull():
+            self._video_dropped_frames += 1
+            self._video_pressure_drops += 1
+            return
+        self._video_last_frame_accepted = now
+        self._video_accepted_frames += 1
+        self._video_last_raw_frame = QImage(image)
+        if self._video_editor_poster_pending and not self._video_timeline_preview_active:
+            self._video_editor_poster_pending = False
+            if self._video_player is not None:
+                self._video_player.pause()
+        if self._video_pause_after_frame:
+            self._video_pause_after_frame = False
+            if self._video_player is not None:
+                self._video_player.pause()
+        generation = self._video_filter_key()
+        # Decode callbacks can arrive faster than a costly blur. Keep only the
+        # newest frame, so effects never create an unbounded GUI event backlog.
+        if self._video_pending_frame is not None:
+            self._video_dropped_frames += 1
+            self._video_pressure_drops += 1
+        self._video_pending_frame = (QImage(image), generation)
+        self._start_next_video_filter()
+
+    def _video_filter_key(self) -> tuple[object, ...]:
+        return (
+            self._video_filter_generation,
+            self._video_preview_path,
+            max(8, round(self.source.width * self.source.scale * self._video_display_scale)),
+            max(8, round(self.source.height * self.source.scale * self._video_display_scale)),
+            self.source.brightness,
+            self.source.contrast,
+            self.source.video_saturation,
+            self.source.video_grayscale,
+            self.source.blur,
+            self._video_gpu_color_filter,
+        )
+
+    def _start_next_video_filter(self) -> None:
+        if self._video_filter_busy or self._video_pending_frame is None:
+            return
+        image, generation = self._video_pending_frame
+        self._video_pending_frame = None
+        settings = self._video_filter_settings(generation)
+        self._video_filter_busy = True
+        QThreadPool.globalInstance().start(VideoFrameFilterTask(
+            image, settings, generation, self._video_filter_signals,
+        ))
+
+    @staticmethod
+    def _video_filter_settings(generation: tuple[object, ...]) -> VideoFrameFilterSettings:
+        """Split color work from scaling/blur when the GPU shader owns it."""
+        return VideoFrameFilterSettings(
+            width=int(generation[2]),
+            height=int(generation[3]),
+            brightness=0.0 if generation[9] else float(generation[4]),
+            contrast=0.0 if generation[9] else float(generation[5]),
+            saturation=1.0 if generation[9] else float(generation[6]),
+            grayscale=False if generation[9] else bool(generation[7]),
+            blur=float(generation[8]),
+        )
+
+    def _video_filter_finished(self, generation: object, image: object) -> None:
+        self._video_filter_busy = False
+        if (generation == self._video_filter_key()
+                and isinstance(image, QImage) and not image.isNull()
+                and not self._video_preview_suppressed and self.isVisible()):
+            self._video_presented_frame = QImage(image)
+            self._pixmap = QPixmap.fromImage(image)
+            self._video_presented_revision += 1
+            self._video_applied_gpu_color_filter = bool(generation[9])
+            self.update()
+            # Full preview renders the scene into a separate CPU/GPU surface.
+            # During playback its timer picks up this pixmap, but a paused seek
+            # has no next timer tick, so explicitly announce the completed frame.
+            self.video_frame_ready.emit()
+        self._start_next_video_filter()
+
+    def set_video_gpu_color_filter(self, enabled: bool) -> None:
+        """Move color-only video effects between CPU and GPU preview paths."""
+        enabled = bool(enabled)
+        if enabled == self._video_gpu_color_filter:
+            return
+        self._video_gpu_color_filter = enabled
+        self._video_filter_generation += 1
+        self._video_pending_frame = None
+        if not self._video_last_raw_frame.isNull():
+            self._video_pending_frame = (
+                QImage(self._video_last_raw_frame), self._video_filter_key(),
+            )
+            self._start_next_video_filter()
+
+    def set_video_direct_gpu_frame(self, enabled: bool) -> None:
+        """Retain supported RHI frames for plane upload instead of toImage()."""
+        enabled = bool(enabled)
+        if enabled == self._video_direct_gpu_frame:
+            return
+        self._video_direct_gpu_frame = enabled
+        self._video_presented_gpu_frame = QVideoFrame()
+        if not enabled:
+            self._video_presented_gpu_serial = 0
+        self._video_presented_revision += 1
+
+    @property
+    def video_gpu_color_filter_ready(self) -> bool:
+        """Return whether the displayed pixmap intentionally omits color effects."""
+        return (
+            self._video_gpu_color_filter
+            and self._video_applied_gpu_color_filter
+        )
+
+    def video_preview_frame(self) -> QImage:
+        """Return the latest filtered frame suitable for direct GPU upload."""
+        return QImage(self._video_presented_frame)
+
+    def video_preview_gpu_frame(self) -> tuple[QVideoFrame, int]:
+        """Return the retained RHI frame and its monotonically increasing serial."""
+        return QVideoFrame(self._video_presented_gpu_frame), self._video_presented_gpu_serial
+
+    @property
+    def video_preview_revision(self) -> int:
+        """Return a cheap revision token for preview composition deduplication."""
+        return self._video_presented_revision
+
+    @property
+    def video_preview_scale(self) -> float:
+        """Return the current decoder-resolution budget for native frame upload."""
+        return self._video_display_scale
+
+    @property
+    def video_preview_active(self) -> bool:
+        """Return whether the retained frame belongs to the active timeline video."""
+        return (
+            self._video_timeline_preview_active
+            and not self._video_preview_suppressed
+            and (
+                not self._video_presented_frame.isNull()
+                or self._video_presented_gpu_frame.isValid()
+            )
+        )
+
+    def set_video_preview_budget(self, display_scale: float, fps: int) -> None:
+        """Bound live-preview conversion work to the selected preview quality."""
+        scale = max(0.25, min(1.0, float(display_scale)))
+        bounded_fps = max(10, min(60, int(fps)))
+        scale_changed = scale != self._video_display_scale
+        fps_changed = bounded_fps != self._video_preview_fps
+        if not scale_changed and not fps_changed:
+            return
+        self._video_display_scale = scale
+        self._video_preview_fps = bounded_fps
+        if scale_changed:
+            self._video_filter_generation += 1
+            self._video_pending_frame = None
+
+    def set_video_preview_playback(self, playing: bool, speed: float = 1.0) -> None:
+        """Synchronize decoder run state with the main preview transport."""
+        self._video_should_play = bool(playing)
+        player = self._video_player
+        if player is None:
+            return
+        self._set_video_playback_rate(speed)
+        if not self._video_timeline_preview_active:
+            return
+        if self._video_should_play:
+            self._video_pause_after_frame = False
+            if player.playbackState() is not QMediaPlayer.PlaybackState.PlayingState:
+                player.play()
+        elif (not self._video_pause_after_frame
+              and player.playbackState() is not QMediaPlayer.PlaybackState.PausedState):
+            player.pause()
+
+    def set_video_preview_position(
+        self, path: str | None, seconds: float = 0.0, *, force_seek: bool = False,
+    ) -> None:
+        """Seek the editor decoder to a scheduler-selected video frame."""
+        if self.source.source_type is not SourceType.VIDEO:
+            return
+        if not path or not self.isVisible():
+            already_inactive = (
+                self._video_preview_suppressed
+                and not self._video_timeline_preview_active
+                and self._video_pending_seek_ms is None
+                and (
+                    self._video_player is None
+                    or self._video_player.playbackState()
+                    is QMediaPlayer.PlaybackState.StoppedState
+                )
+            )
+            if already_inactive:
+                return
+            self._video_preview_suppressed = True
+            self._video_timeline_preview_active = False
+            self._video_editor_poster_pending = False
+            if self._video_player is not None:
+                self._video_player.stop()
+            self._video_pending_seek_ms = None
+            self._video_last_requested_target_ms = None
+            self._video_last_request_time = 0.0
+            self.update()
+            return
+        self._video_preview_suppressed = False
+        if path != self._video_preview_path and not Path(path).is_file():
+            self._video_preview_suppressed = True
+            self._video_timeline_preview_active = False
+            self._video_pending_seek_ms = None
+            self._video_last_requested_target_ms = None
+            self._video_last_request_time = 0.0
+            if self._video_player is not None:
+                self._video_player.stop()
+            self.update()
+            return
+        self._video_timeline_preview_active = True
+        self._video_editor_poster_pending = False
+        self._ensure_video_decoder()
+        self._set_video_loops(QMediaPlayer.Loops.Infinite)
+        self._set_video_playback_rate(self.source.video_speed)
+        target = max(0, round(seconds * 1000))
+        request_time = monotonic()
+        previous_target = self._video_last_requested_target_ms
+        previous_request_time = self._video_last_request_time
+        self._video_last_requested_target_ms = target
+        self._video_last_request_time = request_time
+        if path != self._video_preview_path:
+            self._video_filter_generation += 1
+            self._video_pending_frame = None
+            self._video_preview_path = path
+            self._video_last_frame_accepted = 0.0
+            self._video_source_switches += 1
+            self._video_pending_seek_ms = target
+            self._video_player.setSource(QUrl.fromLocalFile(str(Path(path).resolve())))
+            self._video_player.play()
+            if self._video_player.mediaStatus() in {
+                QMediaPlayer.MediaStatus.LoadedMedia,
+                QMediaPlayer.MediaStatus.BufferedMedia,
+            }:
+                self._video_media_status_changed(self._video_player.mediaStatus())
+            return
+        if self._video_pending_seek_ms is not None:
+            # While loading, retain only the latest playhead request.
+            self._video_pending_seek_ms = target
+            return
+        current_position = self._video_player.position()
+        seek_applied = False
+        if not self._video_should_play:
+            if video_position_needs_seek(
+                current_position, target, self._video_preview_fps,
+            ):
+                self._apply_video_seek(target, request_time=request_time)
+                seek_applied = True
+        else:
+            # QMediaPlayer's position can update much less frequently than the
+            # 30 FPS preview timer. Re-seeking for each temporary discrepancy
+            # prevents a busy decoder from ever catching up, producing a
+            # positive feedback loop of stalls and more seeks. During ordinary
+            # playback, correct only substantial drift at a bounded cadence.
+            rate = max(0.05, self._video_applied_playback_rate or self.source.video_speed)
+            requested_advance = (
+                target - previous_target if previous_target is not None else 0
+            )
+            expected_advance = (
+                max(0.0, request_time - previous_request_time) * 1000.0 * rate
+                if previous_target is not None and previous_request_time > 0.0 else 0.0
+            )
+            discontinuity_threshold = max(
+                600,
+                video_seek_tolerance_ms(self._video_preview_fps) * 3,
+            )
+            discontinuous_request = (
+                force_seek
+                or (
+                    previous_target is not None
+                    and abs(requested_advance - expected_advance)
+                    > discontinuity_threshold
+                )
+            )
+            drift = abs(int(current_position) - target) if current_position >= 0 else 0
+            cooldown_elapsed = request_time - self._video_last_seek_time
+            drift_correction_due = (
+                drift > discontinuity_threshold and cooldown_elapsed >= 1.0
+            )
+            if discontinuous_request or drift_correction_due:
+                self._apply_video_seek(target, request_time=request_time)
+                seek_applied = True
+        if (not seek_applied and self._video_should_play
+                and self._video_player.playbackState()
+                is not QMediaPlayer.PlaybackState.PlayingState):
+            self._video_player.play()
+
+    def video_decoder_stats(self) -> VideoDecoderStats:
+        return VideoDecoderStats(
+            accepted_frames=self._video_accepted_frames,
+            dropped_frames=self._video_dropped_frames,
+            seek_count=self._video_seek_count,
+            source_switches=self._video_source_switches,
+            frame_handle=self._video_frame_handle,
+            gpu_backed_frame=self._video_gpu_backed_frame,
+            throttled_frames=self._video_throttled_frames,
+            pressure_drops=self._video_pressure_drops,
+            filter_pending=self._video_pending_frame is not None,
+        )
+
+    def reset_video_preview(self) -> None:
+        """Return a video item to its static editor-poster presentation."""
+        if self.source.source_type is SourceType.VIDEO:
+            self.set_video_gpu_color_filter(False)
+            self.set_video_direct_gpu_frame(False)
+            self._video_preview_suppressed = False
+            self._video_timeline_preview_active = False
+            self._video_editor_poster_pending = False
+            self._video_display_scale = 1.0
+            self._video_preview_fps = 30
+            self._video_preview_path = ""
+            self._video_pending_seek_ms = None
+            self._video_last_seek_time = 0.0
+            self._video_last_requested_target_ms = None
+            self._video_last_request_time = 0.0
+            self._video_should_play = False
+            self._video_pause_after_frame = False
+            self._configure_video_preview()
+            self.update()
+
+    def suspend_video_preview(self) -> None:
+        """Release decoder work while an element is hidden for deletion or replacement."""
+        self._video_filter_generation += 1
+        self._video_pending_frame = None
+        self._video_preview_path = ""
+        self._video_timeline_preview_active = False
+        self._video_editor_poster_pending = False
+        self._video_pending_seek_ms = None
+        self._video_last_seek_time = 0.0
+        self._video_last_requested_target_ms = None
+        self._video_last_request_time = 0.0
+        self._video_should_play = False
+        self._video_pause_after_frame = False
+        self._video_applied_playback_rate = None
+        self._video_loop_mode = None
+        self._video_gpu_color_filter = False
+        self._video_applied_gpu_color_filter = False
+        self._video_last_raw_frame = QImage()
+        self._video_presented_frame = QImage()
+        self._video_presented_gpu_frame = QVideoFrame()
+        self._video_presented_gpu_serial = 0
+        self._video_presented_revision = 0
+        self._video_direct_gpu_frame = False
+        if self._video_player is not None:
+            self._video_player.stop()
+            self._video_player.setSource(QUrl())
+
+    def release_video_decoder(self) -> None:
+        """Destroy multimedia objects while keeping this item reusable by Undo."""
+        self._video_filter_generation += 1
+        self._video_pending_frame = None
+        self._video_preview_path = ""
+        self._video_preview_suppressed = False
+        self._video_timeline_preview_active = False
+        self._video_editor_poster_pending = False
+        self._video_last_frame_accepted = 0.0
+        self._video_pending_seek_ms = None
+        self._video_last_seek_time = 0.0
+        self._video_last_requested_target_ms = None
+        self._video_last_request_time = 0.0
+        self._video_should_play = False
+        self._video_pause_after_frame = False
+        self._video_applied_playback_rate = None
+        self._video_loop_mode = None
+        self._video_gpu_color_filter = False
+        self._video_applied_gpu_color_filter = False
+        self._video_last_raw_frame = QImage()
+        self._video_presented_frame = QImage()
+        self._video_presented_gpu_frame = QVideoFrame()
+        self._video_presented_gpu_serial = 0
+        self._video_presented_revision = 0
+        self._video_direct_gpu_frame = False
+        player = self._video_player
+        sink = self._video_sink
+        had_decoder = player is not None or sink is not None
+        if had_decoder or self.source.source_type is SourceType.VIDEO:
+            self._pixmap = QPixmap()
+        if had_decoder and self.source.source_type is not SourceType.VIDEO:
+            # A source changed from video to an image-backed type. Force the
+            # ordinary image path to rebuild after the decoder frame is cleared.
+            self._image_filter_key = None
+        self._video_player = None
+        self._video_sink = None
+        if sink is not None:
+            try:
+                sink.videoFrameChanged.disconnect(self._video_frame_changed)
+            except (RuntimeError, TypeError):
+                pass
+        if player is not None:
+            player.stop()
+            try:
+                player.setVideoOutput(None)
+            except RuntimeError:
+                pass
+            player.setSource(QUrl())
+            player.deleteLater()
+        if sink is not None:
+            sink.deleteLater()
         self.update()
 
     def _rebuild_lyric_resources(self) -> None:
@@ -443,6 +1048,8 @@ class SourceItem(QGraphicsObject):
         widget: object | None = None,
     ) -> None:
         """Paint source content plus a compact selection bounding box."""
+        if self.source.source_type is SourceType.VIDEO and self._video_preview_suppressed:
+            return
         rect = self.content_rect()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.save()
@@ -480,6 +1087,7 @@ class SourceItem(QGraphicsObject):
             SourceType.ALBUM_COVER,
             SourceType.LOGO,
             SourceType.WATERMARK,
+            SourceType.VIDEO,
         }
         if self.source.source_type in image_backed_types and not self._pixmap.isNull():
             display_rect = rect
@@ -517,6 +1125,32 @@ class SourceItem(QGraphicsObject):
                 painter.setBrush(QColor(255, 255, 255, 40))
                 painter.setPen(QPen(QColor(255, 255, 255, 180), 1.5))
                 painter.drawRoundedRect(rect, self.source.border_radius, self.source.border_radius)
+        elif self.source.source_type is SourceType.VIDEO:
+            painter.setClipping(True)
+            clip_path = QPainterPath()
+            clip_path.addRoundedRect(rect, self.source.border_radius, self.source.border_radius)
+            painter.setClipPath(clip_path)
+            painter.fillRect(rect, QColor("#10151D"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 210))
+            size = min(rect.width(), rect.height()) * 0.22
+            center = rect.center()
+            play = QPainterPath()
+            play.moveTo(center.x() - size * 0.35, center.y() - size * 0.55)
+            play.lineTo(center.x() + size * 0.55, center.y())
+            play.lineTo(center.x() - size * 0.35, center.y() + size * 0.55)
+            play.closeSubpath()
+            painter.drawPath(play)
+            painter.setClipping(False)
+            paths = self.source.video_paths
+            filename = Path(paths[0]).name if paths else "No video selected"
+            suffix = f"  +{len(paths) - 1}" if len(paths) > 1 else ""
+            painter.setPen(QColor("#D8E1EE"))
+            painter.drawText(
+                rect.adjusted(10, 10, -10, -10),
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
+                filename + suffix,
+            )
         elif self.source.source_type is SourceType.BACKGROUND:
             # Color, gradient, and unavailable-image backgrounds are visual-only.
             # Never fall through to the generic text renderer with the name "Background".

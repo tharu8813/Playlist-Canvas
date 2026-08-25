@@ -11,7 +11,7 @@ from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.animation.curves import (
     ease_in_out_cubic, ease_in_quint, ease_out_cubic, ease_out_quint,
-    hidden_scale_factor,
+    hidden_rotation_offset, hidden_scale_factor,
     slide_distance,
 )
 from app.models.playlist import PlaylistTrack
@@ -146,7 +146,9 @@ class CanvasSnapshot:
                       animation_phase_duration: float | None = None) -> QImage:
         """Capture one track state with metadata, cover art, and an optional Z band."""
         original_text: list[tuple[SourceItem, str]] = []
-        original_transforms: list[tuple[SourceItem, object, float, float]] = []
+        original_transforms: list[
+            tuple[SourceItem, object, float, float, float]
+        ] = []
         original_progress: list[tuple[SourceItem, float]] = []
         original_covers: list[tuple[SourceItem, QPixmap]] = []
         original_backgrounds: list[tuple[SourceItem, QPixmap]] = []
@@ -358,7 +360,8 @@ class CanvasSnapshot:
                     exit_motion = ease_in_out_cubic(exit_progress)
                     exit_opacity = 1.0 - exit_motion
                     original_transforms.append((
-                        graphics_item, graphics_item.pos(), graphics_item.scale(), graphics_item.opacity()
+                        graphics_item, graphics_item.pos(), graphics_item.scale(),
+                        graphics_item.rotation(), graphics_item.opacity(),
                     ))
                     graphics_item._suppress_position_sync = True
                     if source.now_playing_exit_animation == "fade":
@@ -432,23 +435,38 @@ class CanvasSnapshot:
                         # provide normalized animation progress.
                         phase_progress = max(0.0, min(1.0, animation_progress))
                     local_progress = max(0.0, min(1.0, phase_progress))
-                    progress = (
+                    motion_progress = (
                         ease_out_quint(local_progress)
                         if animation_phase == "in" else
                         1.0 - ease_in_quint(local_progress)
                     )
-                    original_transforms.append((graphics_item, graphics_item.pos(), graphics_item.scale(), graphics_item.opacity()))
+                    opacity_progress = (
+                        ease_in_out_cubic(local_progress)
+                        if animation_phase == "in" else
+                        1.0 - ease_in_out_cubic(local_progress)
+                    )
+                    original_transforms.append((
+                        graphics_item, graphics_item.pos(), graphics_item.scale(),
+                        graphics_item.rotation(), graphics_item.opacity(),
+                    ))
                     graphics_item._suppress_position_sync = True
-                    graphics_item.setOpacity(progress)
-                    if style == "zoom":
+                    graphics_item.setOpacity(opacity_progress)
+                    if style in {"zoom", "pop", "rotate"}:
                         hidden_scale = hidden_scale_factor(style)
                         graphics_item.setScale(
                             graphics_item.source.scale
-                            * (hidden_scale + (1.0 - hidden_scale) * progress)
+                            * (hidden_scale + (1.0 - hidden_scale) * motion_progress)
+                        )
+                    if style == "rotate":
+                        graphics_item.setRotation(
+                            graphics_item.source.rotation
+                            + hidden_rotation_offset(
+                                style, animation_phase == "in",
+                            ) * (1.0 - motion_progress)
                         )
                     distance = slide_distance(
                         source.width, source.height,
-                    ) * (1.0 - progress)
+                    ) * (1.0 - motion_progress)
                     offset = {
                         "slide_left": (-distance, 0.0), "slide_right": (distance, 0.0),
                         "slide_up": (0.0, -distance), "slide_down": (0.0, distance),
@@ -495,8 +513,9 @@ class CanvasSnapshot:
                 graphics_item.update()
             for graphics_item, visible in original_visibility:
                 graphics_item.setVisible(visible)
-            for graphics_item, position, scale, opacity in original_transforms:
+            for graphics_item, position, scale, rotation, opacity in original_transforms:
                 graphics_item.setPos(position)
                 graphics_item.setScale(scale)
+                graphics_item.setRotation(rotation)
                 graphics_item.setOpacity(opacity)
                 graphics_item._suppress_position_sync = False

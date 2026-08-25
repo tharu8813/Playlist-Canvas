@@ -11,12 +11,14 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -51,15 +53,13 @@ class ExportSettingsDialog(QDialog):
         self._base_settings = settings
         self.canvas_size = canvas_size
         self._applying_quality_profile = False
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(760)
+        self.setSizeGripEnabled(True)
         self.quality_mode_combo = QComboBox()
         self.quality_mode_label = QLabel()
         self.quality_description_label = QLabel()
         self.quality_description_label.setObjectName("mutedLabel")
         self.quality_description_label.setWordWrap(True)
-        self.beginner_hint_label = QLabel()
-        self.beginner_hint_label.setObjectName("infoCallout")
-        self.beginner_hint_label.setWordWrap(True)
         self.workload_label = QLabel()
         self.workload_label.setObjectName("mutedLabel")
         self.workload_label.setWordWrap(True)
@@ -87,7 +87,7 @@ class ExportSettingsDialog(QDialog):
         self.output_browse_button = QPushButton()
         self.output_browse_button.clicked.connect(self._browse_output_path)
         self.summary_label = QLabel()
-        self.summary_label.setObjectName("mutedLabel")
+        self.summary_label.setObjectName("infoCallout")
         self.summary_label.setWordWrap(True)
         self.save_default_check = QCheckBox()
         self.optimize_button = QPushButton()
@@ -104,8 +104,11 @@ class ExportSettingsDialog(QDialog):
         quality_form.addRow(self.quality_mode_label, self.quality_mode_combo)
         quality_layout.addLayout(quality_form)
         quality_layout.addWidget(self.quality_description_label)
-        quality_layout.addWidget(self.workload_label)
-        quality_layout.addWidget(self.beginner_hint_label)
+        quality_actions = QHBoxLayout()
+        quality_actions.addWidget(self.optimize_button)
+        quality_actions.addStretch(1)
+        quality_actions.addWidget(self.advanced_check)
+        quality_layout.addLayout(quality_actions)
 
         render_group = QGroupBox()
         render_form = QFormLayout(render_group)
@@ -117,26 +120,46 @@ class ExportSettingsDialog(QDialog):
         self.audio_label = QLabel()
         render_form.addRow(self.resolution_label, self.resolution_combo)
         render_form.addRow(self.fps_label, self.fps_combo)
+        render_form.addRow(self.workload_label)
         advanced_group = QGroupBox()
-        advanced_form = QFormLayout(advanced_group)
-        advanced_form.addRow(self.codec_label, self.codec_combo)
-        advanced_form.addRow(self.crf_label, self.crf_spin)
-        advanced_form.addRow(self.preset_label, self.preset_combo)
-        advanced_form.addRow(self.audio_label, self.audio_bitrate_combo)
+        advanced_grid = QGridLayout(advanced_group)
+        advanced_grid.addWidget(self.codec_label, 0, 0)
+        advanced_grid.addWidget(self.codec_combo, 0, 1)
+        advanced_grid.addWidget(self.crf_label, 0, 2)
+        advanced_grid.addWidget(self.crf_spin, 0, 3)
+        advanced_grid.addWidget(self.preset_label, 1, 0)
+        advanced_grid.addWidget(self.preset_combo, 1, 1)
+        advanced_grid.addWidget(self.audio_label, 1, 2)
+        advanced_grid.addWidget(self.audio_bitrate_combo, 1, 3)
+        advanced_grid.setColumnStretch(1, 1)
+        advanced_grid.setColumnStretch(3, 1)
         output_group = QGroupBox()
         output_layout = QHBoxLayout(output_group)
         output_layout.addWidget(self.output_path_edit, 1)
         output_layout.addWidget(self.output_browse_button)
         layout = QVBoxLayout(self)
         layout.addWidget(self.summary_label)
-        layout.addWidget(quality_group)
-        layout.addWidget(render_group)
-        layout.addWidget(self.advanced_check)
-        layout.addWidget(advanced_group)
         layout.addWidget(output_group)
-        layout.addWidget(self.optimize_button)
-        layout.addWidget(self.save_default_check)
-        layout.addWidget(self.button_box)
+        main_columns = QHBoxLayout()
+        main_columns.addWidget(render_group, 1)
+        main_columns.addWidget(quality_group, 1)
+        layout.addLayout(main_columns)
+        layout.addWidget(advanced_group)
+        footer = QHBoxLayout()
+        footer.addWidget(self.save_default_check)
+        footer.addStretch(1)
+        footer.addWidget(self.button_box)
+        layout.addLayout(footer)
+        self.main_columns = main_columns
+        self.summary_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum,
+        )
+        for section in (
+            output_group, render_group, quality_group, advanced_group,
+        ):
+            section.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum,
+            )
         self.quality_group = quality_group
         self.render_group = render_group
         self.advanced_group = advanced_group
@@ -164,7 +187,24 @@ class ExportSettingsDialog(QDialog):
             self._update_workload_hint
         )
         self.fps_combo.currentIndexChanged.connect(self._update_workload_hint)
+        self.setTabOrder(self.output_path_edit, self.output_browse_button)
+        self.setTabOrder(self.output_browse_button, self.resolution_combo)
+        self.setTabOrder(self.resolution_combo, self.fps_combo)
+        self.setTabOrder(self.fps_combo, self.quality_mode_combo)
+        self.setTabOrder(self.quality_mode_combo, self.optimize_button)
+        self.setTabOrder(self.optimize_button, self.advanced_check)
+        self.setTabOrder(self.advanced_check, self.codec_combo)
+        self.setTabOrder(self.codec_combo, self.crf_spin)
+        self.setTabOrder(self.crf_spin, self.preset_combo)
+        self.setTabOrder(self.preset_combo, self.audio_bitrate_combo)
+        self.setTabOrder(self.audio_bitrate_combo, self.save_default_check)
+        self.setTabOrder(
+            self.save_default_check,
+            self.button_box.button(QDialogButtonBox.StandardButton.Ok),
+        )
         self.retranslate()
+        preferred_width = min(960, max(820, self.sizeHint().width()))
+        self.resize(preferred_width, self.sizeHint().height())
 
     @classmethod
     def _matching_quality_profile(
@@ -336,6 +376,7 @@ class ExportSettingsDialog(QDialog):
             audio_bitrate=self.audio_bitrate_combo.currentText(),
             smooth_scrolling=self._base_settings.smooth_scrolling,
             smooth_scroll_duration_ms=self._base_settings.smooth_scroll_duration_ms,
+            preview_backend=self._base_settings.preview_backend,
             render_width=int(width),
             render_height=int(height),
         )
@@ -463,11 +504,6 @@ class ExportSettingsDialog(QDialog):
         self.advanced_group.setTitle("고급 인코딩 설정" if korean else "Advanced encoding settings")
         self.output_group.setTitle("출력 파일" if korean else "Output file")
         self.quality_mode_label.setText("용도" if korean else "Purpose")
-        self.beginner_hint_label.setText(
-            "인코딩 설정을 잘 모른다면 ‘권장 · 대부분의 영상’을 선택한 상태로 바로 내보내도 됩니다."
-            if korean else
-            "If you are unfamiliar with encoding, keep ‘Recommended · Most videos’ and start the export."
-        )
         self.advanced_check.setText(
             "고급 설정 직접 조정" if korean else "Adjust advanced settings"
         )
