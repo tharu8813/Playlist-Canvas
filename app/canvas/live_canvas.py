@@ -360,7 +360,12 @@ class LiveCanvas(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setBackgroundBrush(QColor("#171B22"))
         self.setFrameShape(QGraphicsView.Shape.NoFrame)
+        # QGraphicsView is a QAbstractScrollArea, so the viewport is the widget
+        # physically under the pointer during an external drag.  Explicitly
+        # enable drops on both the view and its viewport to make file drags
+        # reliable across Qt/PySide versions.
         self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
         self.scene_model.selectionChanged.connect(self._on_selection_changed)
         self.scene_model.selectionChanged.connect(self.scene_model.clear_alignment_guides)
         store.source_added.connect(self.add_source)
@@ -511,8 +516,19 @@ class LiveCanvas(QGraphicsView):
             return
         super().wheelEvent(event)
 
+    @staticmethod
+    def _local_drop_paths(event: QDragEnterEvent | QDropEvent) -> list[str]:
+        """Return non-empty local paths from a URL drag payload."""
+        if not event.mimeData().hasUrls():
+            return []
+        return [
+            path
+            for url in event.mimeData().urls()
+            if url.isLocalFile() and (path := url.toLocalFile())
+        ]
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        """Accept palette templates and Explorer files over the Canvas."""
+        """Accept palette templates and local-file copies over the Canvas."""
         if event.mimeData().hasFormat(SOURCE_TEMPLATE_MIME):
             if read_source_template_mime(event.mimeData()) is not None:
                 event.setDropAction(Qt.DropAction.CopyAction)
@@ -520,17 +536,33 @@ class LiveCanvas(QGraphicsView):
                 return
             event.ignore()
             return
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
+
+        # Project Content deliberately starts a CopyAction drag.  Do not rely
+        # on acceptProposedAction() here: a source/model action mismatch can
+        # otherwise leave the Canvas showing the forbidden-drop cursor.
+        if self._local_drop_paths(event):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
             return
         event.ignore()
 
     def dragMoveEvent(self, event: QDragEnterEvent) -> None:
-        """Maintain an active drop cursor over the editable Canvas."""
-        self.dragEnterEvent(event)
+        """Maintain an active copy cursor over the editable Canvas."""
+        if event.mimeData().hasFormat(SOURCE_TEMPLATE_MIME):
+            if read_source_template_mime(event.mimeData()) is not None:
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+            event.ignore()
+            return
+        if self._local_drop_paths(event):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            return
+        event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        """Forward dropped templates or paths with their Canvas position."""
+        """Forward dropped templates or local paths with their Canvas position."""
         template = read_source_template_mime(event.mimeData())
         if template is not None:
             source_type, parent_type = template
@@ -541,12 +573,14 @@ class LiveCanvas(QGraphicsView):
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
             return
-        if not event.mimeData().hasUrls():
+
+        paths = self._local_drop_paths(event)
+        if not paths:
             event.ignore()
             return
-        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
         self.files_dropped.emit(paths, self.mapToScene(event.position().toPoint()))
-        event.acceptProposedAction()
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         """Offer editing, alignment, grouping, and layer commands at the pointer."""

@@ -113,6 +113,63 @@ class BoundedExportPipelineTests(unittest.TestCase):
         with self.assertRaises(ExportPipelineClosedError):
             pipeline.submit(2)
 
+    def test_finish_pumps_wait_callback_while_consumer_drains(self) -> None:
+        consumer_started = threading.Event()
+        release_consumer = threading.Event()
+        callback_calls = 0
+
+        def consume(_value: int) -> None:
+            consumer_started.set()
+            release_consumer.wait(2.0)
+
+        def pump() -> None:
+            nonlocal callback_calls
+            callback_calls += 1
+
+        pipeline = BoundedExportPipeline(
+            consume, capacity=1, poll_interval_seconds=0.01,
+        )
+        pipeline.start()
+        pipeline.submit(1)
+        self.assertTrue(consumer_started.wait(1.0))
+        release_timer = threading.Timer(0.08, release_consumer.set)
+        release_timer.start()
+        try:
+            pipeline.finish(timeout_seconds=1.0, wait_callback=pump)
+        finally:
+            release_timer.cancel()
+        self.assertGreater(callback_calls, 0)
+
+    def test_finish_pumps_callback_while_end_marker_waits_for_queue_space(self) -> None:
+        consumer_started = threading.Event()
+        release_consumer = threading.Event()
+        callback_seen = threading.Event()
+
+        def consume(_value: int) -> None:
+            consumer_started.set()
+            release_consumer.wait(2.0)
+
+        pipeline = BoundedExportPipeline(
+            consume, capacity=1, poll_interval_seconds=0.01,
+        )
+        pipeline.start()
+        pipeline.submit(1)
+        self.assertTrue(consumer_started.wait(1.0))
+        # This second item occupies the only queue slot while the first item is
+        # still being consumed. finish() must remain responsive even before it
+        # can enqueue the end-of-stream marker.
+        pipeline.submit(2)
+
+        release_timer = threading.Timer(0.08, release_consumer.set)
+        release_timer.start()
+        try:
+            pipeline.finish(
+                timeout_seconds=1.0, wait_callback=callback_seen.set,
+            )
+        finally:
+            release_timer.cancel()
+        self.assertTrue(callback_seen.is_set())
+
     def test_capacity_must_be_positive(self) -> None:
         with self.assertRaises(ValueError):
             BoundedExportPipeline(lambda _value: None, capacity=0)

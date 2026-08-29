@@ -28,6 +28,37 @@ class ExportTimelinePlanner:
     """Reproduce the existing export sampling schedule without rendering pixels."""
 
     @staticmethod
+    def build_by_z_band(
+        tracks: Sequence[PlaylistTrack],
+        sources: Sequence[Source],
+        dynamic_source_ids: set[str],
+        z_bands: Sequence[tuple[float | None, float | None]],
+        animation_fps: int,
+    ) -> dict[str, list[ExportFrameSample]]:
+        """Build an independent sample schedule for each Canvas Z band.
+
+        A lyric or clock in one band must not force unrelated bands through the
+        same sample points. Dynamic FFmpeg overlays are omitted because Canvas
+        capture hides them and the renderer schedules them independently.
+        """
+        canvas_sources = [
+            source for source in sources
+            if source.visible and source.id not in dynamic_source_ids
+        ]
+        timelines: dict[str, list[ExportFrameSample]] = {}
+        for index, (z_min, z_max) in enumerate(z_bands):
+            stream_key = "base" if index == 0 else f"layer:{index - 1}"
+            band_sources = [
+                source for source in canvas_sources
+                if (z_min is None or source.z_index >= z_min)
+                and (z_max is None or source.z_index <= z_max)
+            ]
+            timelines[stream_key] = ExportTimelinePlanner.build(
+                tracks, band_sources, animation_fps,
+            )
+        return timelines
+
+    @staticmethod
     def build(
         tracks: Sequence[PlaylistTrack],
         sources: Sequence[Source],
@@ -169,16 +200,20 @@ class ExportTimelinePlanner:
         steps = max(2, round(duration * animation_fps))
         samples: list[ExportFrameSample] = []
         for step in range(steps):
-            # Include both animation endpoints.  The old ``step / steps``
-            # contract never captured progress 1.0, so a short exit could end
-            # on a visibly opaque frame and then disappear at the next cut.
+            # Include both animation endpoints in the state *and* its elapsed
+            # timestamp.  CanvasSnapshot derives each source's bounded phase
+            # from elapsed time, so keeping the former ``step / steps`` time
+            # here silently ignored animation_progress=1.0.  The last exit
+            # frame then retained opacity before disappearing at the cut.
             progress = step / (steps - 1)
-            elapsed = (
-                duration * step / steps
+            phase_start = (
+                0.0
                 if phase == "in"
-                else intro + max(0.0, track.duration_seconds - intro - outro)
-                + duration * step / steps
+                else intro + max(
+                    0.0, track.duration_seconds - intro - outro,
+                )
             )
+            elapsed = phase_start + duration * progress
             samples.append(ExportFrameSample(
                 track=track,
                 track_number=track_number,
@@ -212,7 +247,12 @@ class ExportTimelinePlanner:
                     sample_points.add(local_point)
 
         if any(source.source_type is SourceType.PROGRESS_BAR for source in sources):
-            progress_steps = min(180, max(1, round(stable)))
+            # Progress is continuous motion, so sampling it once per second (or
+            # at most 180 times) made a 60 FPS file contain repeated Canvas
+            # frames.  Only the Z stream containing the progress element gets
+            # this full-rate schedule; independent static streams remain
+            # capture-invariant and are still rendered once.
+            progress_steps = max(1, round(stable * animation_fps))
             sample_points.update(
                 intro + stable * step / progress_steps
                 for step in range(progress_steps + 1)

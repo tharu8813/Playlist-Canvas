@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import threading
 import unittest
@@ -58,7 +59,69 @@ class _FakeProcess:
         self.returncode = -9
 
 
+class _SlowFlushProcess(_FakeProcess):
+    """Pretend FFmpeg needs several polling cycles to flush its encoder."""
+
+    def __init__(self, command: list[str], polls: int = 3) -> None:
+        super().__init__(command)
+        self.remaining_polls = polls
+
+    def wait(self, timeout: float | None = None) -> int:
+        if timeout is not None and self.remaining_polls > 0:
+            self.remaining_polls -= 1
+            raise subprocess.TimeoutExpired(self.command, timeout)
+        return super().wait(timeout)
+
+
 class StaticVideoStreamEncoderTests(unittest.TestCase):
+    def test_finish_pumps_ui_while_ffmpeg_flushes(self) -> None:
+        callbacks: list[int] = []
+
+        def create_process(command: list[str], **_kwargs: object) -> _FakeProcess:
+            return _SlowFlushProcess(command)
+
+        image = QImage(2, 2, QImage.Format.Format_RGB32)
+        with TemporaryDirectory(prefix="static-stream-responsive-") as raw_directory, patch(
+            "app.renderer.static_video_stream.subprocess.Popen",
+            side_effect=create_process,
+        ):
+            encoder = StaticVideoStreamEncoder(
+                Path("ffmpeg.exe"), Path(raw_directory) / "stream.mkv", 30,
+                producer_wait_callback=lambda: callbacks.append(1),
+            )
+            encoder.submit(image, 0.1)
+            result = encoder.finish()
+
+        self.assertEqual(result.frame_count, 3)
+        self.assertGreaterEqual(len(callbacks), 3)
+
+    def test_finish_honors_cancel_while_ffmpeg_flushes(self) -> None:
+        cancel_event = threading.Event()
+        process: _SlowFlushProcess | None = None
+
+        def create_process(command: list[str], **_kwargs: object) -> _FakeProcess:
+            nonlocal process
+            process = _SlowFlushProcess(command, polls=100)
+            return process
+
+        image = QImage(2, 2, QImage.Format.Format_RGB32)
+        with TemporaryDirectory(prefix="static-stream-finish-cancel-") as raw_directory, patch(
+            "app.renderer.static_video_stream.subprocess.Popen",
+            side_effect=create_process,
+        ):
+            encoder = StaticVideoStreamEncoder(
+                Path("ffmpeg.exe"), Path(raw_directory) / "stream.mkv", 30,
+                producer_cancel_event=cancel_event,
+                producer_wait_callback=cancel_event.set,
+            )
+            encoder.submit(image, 0.1)
+            with self.assertRaisesRegex(StaticVideoStreamError, "cancelled"):
+                encoder.finish()
+
+        self.assertIsNotNone(process)
+        assert process is not None
+        self.assertTrue(process.terminated)
+
     def test_variable_durations_stream_as_lossless_cfr_with_bounded_queue(self) -> None:
         processes: list[_FakeProcess] = []
 

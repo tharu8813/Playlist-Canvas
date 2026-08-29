@@ -5,9 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QUrl, Signal
-from PySide6.QtGui import (
-    QColor, QDrag, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF,
-)
+from PySide6.QtGui import QColor, QDrag, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListView,
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QToolButton,
@@ -22,19 +20,49 @@ from app.utils.i18n import Language, Translator
 class ContentListWidget(QListWidget):
     """Expose library paths as file URLs so dropping is the only add gesture."""
 
-    def startDrag(self, supported_actions: Qt.DropAction) -> None:
-        item = self.currentItem()
-        if item is None:
-            return
-        path = Path(str(item.data(Qt.ItemDataRole.UserRole + 1)))
-        if not path.is_file():
-            return
+    def mimeData(self, items: list[QListWidgetItem]) -> QMimeData:  # noqa: N802
+        """Build a standard local-file payload for Qt's native drag lifecycle."""
         mime = QMimeData()
-        mime.setUrls([QUrl.fromLocalFile(str(path))])
+        paths = [
+            Path(str(item.data(Qt.ItemDataRole.UserRole + 1))).resolve()
+            for item in items
+            if Path(str(item.data(Qt.ItemDataRole.UserRole + 1))).is_file()
+        ]
+        if paths:
+            mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        return mime
+
+    def supportedDropActions(self) -> Qt.DropAction:  # noqa: N802
+        """Project content is copied into an editor target, never moved."""
+        return Qt.DropAction.CopyAction
+
+    def startDrag(self, _supported_actions: Qt.DropAction) -> None:
+        """Start a real external file drag with an explicit copy action.
+
+        Relying on QListWidget/QAbstractItemView.startDrag() can leave the drag
+        action to the internal item model.  That is fragile across Qt versions
+        (notably around QListWidget.supportedDragActions), and can result in no
+        external drag being started even though mimeData() contains valid URLs.
+        Build QDrag ourselves so Canvas/Playlist always receive file URLs.
+        """
+        items = self.selectedItems()
+        if not items:
+            return
+
+        mime = self.mimeData(items)
+        if mime is None or not mime.hasUrls():
+            return
+
         drag = QDrag(self)
         drag.setMimeData(mime)
-        drag.setPixmap(item.icon().pixmap(self.iconSize()))
-        drag.exec(Qt.DropAction.CopyAction)
+
+        current = self.currentItem()
+        if current is not None and not current.icon().isNull():
+            pixmap = current.icon().pixmap(self.iconSize())
+            if not pixmap.isNull():
+                drag.setPixmap(pixmap)
+
+        drag.exec(Qt.DropAction.CopyAction, Qt.DropAction.CopyAction)
 
 
 class ContentLibraryPanel(QWidget):
@@ -100,6 +128,12 @@ class ContentLibraryPanel(QWidget):
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list.setDragEnabled(True)
         self.list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.list.setDefaultDropAction(Qt.DropAction.CopyAction)
+        # Qt 6.10+ exposes drag actions separately from drop actions.  Keep the
+        # source action explicit while remaining compatible with older PySide6.
+        set_drag_actions = getattr(self.list, "setSupportedDragActions", None)
+        if callable(set_drag_actions):
+            set_drag_actions(Qt.DropAction.CopyAction)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.itemDoubleClicked.connect(lambda _item: self._preview_selected())
         self.list.itemSelectionChanged.connect(self._update_buttons)
@@ -143,10 +177,12 @@ class ContentLibraryPanel(QWidget):
         korean = self.translator.language is Language.KOREAN
         self.help_label.setText(
             "프로젝트에서 재사용할 이미지·영상·음원·폰트·가사 파일입니다. "
-            "더블클릭은 미리보기, 캔버스로 드래그하면 추가됩니다."
+            "이미지·영상은 캔버스로, 음원은 플레이리스트로 드래그하세요. "
+            "가사는 적용할 곡 위에 놓을 수 있으며 더블클릭하면 미리봅니다."
             if korean else
-            "Reusable images, videos, audio, fonts, and lyrics. Double-click to preview; "
-            "drag onto the Canvas to add."
+            "Reusable images, videos, audio, fonts, and lyrics. Drag images/videos "
+            "onto the Canvas, audio onto the playlist, and lyrics onto a track. "
+            "Double-click to preview."
         )
         self.view_label.setText("보기" if korean else "View")
         self.filter_label.setText("필터" if korean else "Filter")
@@ -268,6 +304,7 @@ class ContentLibraryPanel(QWidget):
                 item_text = f"{content.name}\n{detail}"
                 item_height = 54
             item = QListWidgetItem(item_text)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
             item.setIcon(self._content_item_icon(path, content.media_type, available))
             item.setSizeHint(
                 QSize(108, item_height) if self._view_mode == "grid"

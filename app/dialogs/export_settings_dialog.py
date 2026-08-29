@@ -32,6 +32,7 @@ from app.services.app_settings_service import (
     AppSettings,
 )
 from app.utils.i18n import Language, Translator
+from app.services.video_encoder_service import AUTO_VIDEO_ENCODER
 
 
 class ExportSettingsDialog(QDialog):
@@ -211,7 +212,7 @@ class ExportSettingsDialog(QDialog):
         cls, crf: int, preset: str, audio_bitrate: str,
         video_codec: str = "libx264",
     ) -> str:
-        if video_codec != "libx264":
+        if video_codec not in {AUTO_VIDEO_ENCODER, "libx264"}:
             return "custom"
         values = (int(crf), str(preset), str(audio_bitrate))
         return next(
@@ -260,7 +261,7 @@ class ExportSettingsDialog(QDialog):
         self._applying_quality_profile = True
         try:
             self.codec_combo.setCurrentIndex(
-                max(0, self.codec_combo.findData("libx264"))
+                max(0, self.codec_combo.findData(AUTO_VIDEO_ENCODER))
             )
             self.crf_spin.setValue(crf)
             self.preset_combo.setCurrentText(preset)
@@ -293,8 +294,8 @@ class ExportSettingsDialog(QDialog):
         profile = str(self.quality_mode_combo.currentData() or "balanced")
         descriptions = {
             "balanced": (
-                "화질, 인코딩 시간, 파일 크기의 균형이 좋습니다. 처음이라면 이 설정을 권장합니다.",
-                "A good balance of quality, export time, and file size. Recommended if you are unsure.",
+                "화질, 인코딩 시간, 파일 크기의 균형이 좋습니다. 사용 가능한 NVIDIA GPU가 있으면 자동으로 사용합니다.",
+                "A good balance of quality, export time, and file size. An available NVIDIA GPU is used automatically.",
             ),
             "fast": (
                 "화질과 용량을 조금 양보하고 더 빠르게 내보냅니다.",
@@ -374,6 +375,7 @@ class ExportSettingsDialog(QDialog):
             crf=self.crf_spin.value(),
             preset=self.preset_combo.currentText(),
             audio_bitrate=self.audio_bitrate_combo.currentText(),
+            work_mode=self._base_settings.work_mode,
             smooth_scrolling=self._base_settings.smooth_scrolling,
             smooth_scroll_duration_ms=self._base_settings.smooth_scroll_duration_ms,
             preview_backend=self._base_settings.preview_backend,
@@ -511,6 +513,12 @@ class ExportSettingsDialog(QDialog):
         self.resolution_label.setText("해상도" if korean else "Resolution")
         self.fps_label.setText("프레임 레이트" if korean else "Frame rate")
         self.codec_label.setText("비디오 인코더" if korean else "Video encoder")
+        automatic_index = self.codec_combo.findData(AUTO_VIDEO_ENCODER)
+        if automatic_index >= 0:
+            self.codec_combo.setItemText(
+                automatic_index,
+                "자동 선택 (권장)" if korean else "Automatic (Recommended)",
+            )
         self.crf_label.setText("화질 (CRF, 낮을수록 고화질)" if korean else "Quality (CRF, lower is higher quality)")
         self.preset_label.setText("인코딩 속도" if korean else "Encoding speed")
         self.audio_label.setText("오디오 품질 (AAC)" if korean else "Audio quality (AAC)")
@@ -518,9 +526,9 @@ class ExportSettingsDialog(QDialog):
             "권장 설정으로 되돌리기" if korean else "Restore recommended settings"
         )
         self.optimize_button.setToolTip(
-            "해상도와 FPS는 유지하고 호환성이 높은 H.264 권장값을 적용합니다."
+            "해상도와 FPS는 유지하고 하드웨어 자동 선택과 H.264 권장값을 적용합니다."
             if korean else
-            "Keeps resolution and FPS while restoring compatible H.264 recommended values."
+            "Keeps resolution and FPS while restoring automatic hardware selection and recommended H.264 values."
         )
         self.save_default_check.setText(
             "이 값을 다음 내보내기의 기본값으로 저장" if korean else "Save these values as future export defaults"

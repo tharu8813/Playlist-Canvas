@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QFontMetricsF, QImage
 
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
@@ -23,9 +24,12 @@ from app.animation.curves import slide_distance
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.canvas_snapshot import CanvasSnapshot
+from app.preview.export_canvas_capture import ExportCanvasCapturer
+from app.renderer.export_timeline import ExportFrameSample
 from app.renderer.ffmpeg_renderer import (
     FFmpegRenderer, PreparedVideoInput, RenderError, RenderFrame, RenderSettings,
     StaticOverlayLayer, VideoClipOverlay, VisualizerOverlay,
+    WORK_MODE_AUTO, WORK_MODE_MAX_SPEED, WORK_MODE_STABLE,
 )
 from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.services.playlist_export_service import PlaylistExportError, PlaylistExportService
@@ -33,7 +37,12 @@ from app.services.playlist_service import PlaylistService
 from app.services.lyrics_service import LyricsService
 from app.services.project_service import ProjectService
 from app.ffmpeg.install_worker import FFmpegInstallWorker
-from app.ffmpeg.managed_installer import FFmpegInstallError, ManagedFFmpegInstaller
+from app.ffmpeg.managed_installer import (
+    FFmpegInstallError,
+    FFmpegReleaseOption,
+    ManagedFFmpegInstallation,
+    ManagedFFmpegInstaller,
+)
 from app.dialogs.about_dialog import AboutDialog
 from app.dialogs.export_preview_dialog import ExportPreviewDialog, TIMELINE_SCALE
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
@@ -69,6 +78,125 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertNotEqual(before.pixelColor(60, 50), during.pixelColor(60, 50))
         self.assertEqual(before.pixelColor(60, 50), after.pixelColor(60, 50))
         self.assertTrue(item.isVisible())
+
+    def test_capture_invariant_classifier_is_deliberately_conservative(self) -> None:
+        duration = 20.0
+        self.assertTrue(CanvasSnapshot.source_is_capture_invariant(
+            Source(SourceType.SHAPE, "Static shape"), duration,
+        ))
+        self.assertTrue(CanvasSnapshot.source_is_capture_invariant(
+            Source(SourceType.TEXT, "Static title", text="Playlist"), duration,
+        ))
+        for source in (
+            Source(SourceType.TEXT, "Token", text="%title%"),
+            Source(SourceType.LYRICS, "Lyrics"),
+            Source(SourceType.PROGRESS_BAR, "Progress"),
+            Source(SourceType.BACKGROUND, "Cover", background_mode="album_art"),
+            Source(SourceType.SHAPE, "Animated", animation_in="fade"),
+            Source(SourceType.IMAGE, "Timed", timeline_start=1.0),
+        ):
+            self.assertFalse(
+                CanvasSnapshot.source_is_capture_invariant(source, duration),
+                source.name,
+            )
+
+    def test_capture_invariant_stream_rasterizes_scene_only_once(self) -> None:
+        scene = CanvasScene()
+        scene.addItem(SourceItem(Source(SourceType.SHAPE, "Static shape")))
+        track = PlaylistTrack("track.wav", "Track", duration_seconds=2.0)
+        staged: list[tuple[QImage, float, str]] = []
+        sample = ExportFrameSample(track, 1, 0.0, 1.0, 0.0, 0.0)
+
+        def stage(image: QImage, duration: float, key: str) -> RenderFrame:
+            staged.append((image, duration, key))
+            return RenderFrame(image, duration)
+
+        capturer = ExportCanvasCapturer(
+            scene, [track], 2.0, set(), [(None, None)], stage,
+            lambda: None, lambda _track, _key: None,
+        )
+        original_capture = CanvasSnapshot.capture_track
+        with patch.object(
+            CanvasSnapshot, "capture_track", side_effect=original_capture,
+        ) as capture:
+            capturer.capture_invariant_stream(sample, "base", 2.0)
+
+        self.assertEqual(capture.call_count, 1)
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0][1:], (2.0, "base"))
+
+    def test_z_band_capture_updates_only_sources_inside_that_band(self) -> None:
+        scene = CanvasScene()
+        scene.addItem(SourceItem(Source(
+            SourceType.TEXT, "Base token", text="%title%", z_index=0,
+        )))
+        scene.addItem(SourceItem(Source(
+            SourceType.TEXT, "Other band token", text="%artist%", z_index=2,
+        )))
+        track = PlaylistTrack("band.wav", "Band", artist="Artist", duration_seconds=1.0)
+        from app.preview import canvas_snapshot as snapshot_module
+
+        original_expand = snapshot_module.expand_track_template
+        with patch.object(
+            snapshot_module,
+            "expand_track_template",
+            side_effect=original_expand,
+        ) as expand:
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0,
+                elapsed_seconds=0.25, timeline_seconds=0.25,
+                z_max=0.0,
+            )
+
+        expand.assert_called_once()
+
+    def test_mixed_capture_bands_split_static_and_dynamic_z_runs(self) -> None:
+        scene = CanvasScene()
+        sources = [
+            Source(SourceType.SHAPE, "Static bottom", z_index=0),
+            Source(SourceType.TEXT, "Dynamic token", text="%title%", z_index=1),
+            Source(SourceType.SHAPE, "Static middle", z_index=2),
+            Source(SourceType.AUDIO_VISUALIZER, "Reactive", z_index=3),
+            Source(SourceType.IMAGE, "Static top", z_index=4),
+        ]
+        for source in sources:
+            scene.addItem(SourceItem(source))
+        dynamic_ids = {sources[3].id}
+        broad = CanvasSnapshot.z_bands(scene, dynamic_ids)
+        split = CanvasSnapshot.split_mixed_capture_bands(
+            scene, dynamic_ids, broad, 10.0,
+        )
+
+        self.assertEqual(len(broad), 2)
+        self.assertEqual(split, [
+            (None, 0.0),
+            (1.0, 1.0),
+            (2.0, broad[0][1]),
+            (3, None),
+        ])
+        invariant = CanvasSnapshot.invariant_stream_keys(
+            scene, dynamic_ids, split, 10.0,
+        )
+        self.assertEqual(invariant, {"base", "layer:1", "layer:2"})
+
+    def test_mixed_capture_band_split_respects_stream_cap(self) -> None:
+        scene = CanvasScene()
+        for z_index in range(20):
+            source = (
+                Source(SourceType.SHAPE, f"Static {z_index}", z_index=z_index)
+                if z_index % 2 == 0 else
+                Source(
+                    SourceType.TEXT, f"Dynamic {z_index}",
+                    text="%current_time%", z_index=z_index,
+                )
+            )
+            scene.addItem(SourceItem(source))
+        split = CanvasSnapshot.split_mixed_capture_bands(
+            scene, set(), [(None, None)], 30.0, max_streams=5,
+        )
+        self.assertLessEqual(len(split), 5)
+        self.assertIsNone(split[0][0])
+        self.assertIsNone(split[-1][1])
 
     def test_resize_handle_cursors_follow_item_screen_rotation(self) -> None:
         cursor = SourceItem.cursor_for_edit_handle
@@ -261,7 +389,7 @@ class FunctionalRegressionTests(unittest.TestCase):
         renderer._run = fake_run  # type: ignore[method-assign]
         tracks = [
             PlaylistTrack(f"track-{index}.mp3", f"Track {index}", duration_seconds=2.0)
-            for index in range(3)
+            for index in range(6)
         ]
         with TemporaryDirectory() as directory, patch(
             "app.renderer.ffmpeg_renderer.os.cpu_count", return_value=8,
@@ -270,10 +398,10 @@ class FunctionalRegressionTests(unittest.TestCase):
                 tracks, Path(directory), RenderSettings(), None, threading.Event(),
             )
 
-        self.assertGreaterEqual(maximum_running, 2)
+        self.assertEqual(maximum_running, 4)
         self.assertEqual(
             [path.name for path in segments],
-            ["track_0000.nut", "track_0001.nut", "track_0002.nut"],
+            [f"track_{index:04d}.nut" for index in range(6)],
         )
 
     def test_audio_normalization_reports_live_ffmpeg_time(self) -> None:
@@ -320,6 +448,40 @@ class FunctionalRegressionTests(unittest.TestCase):
             )),
             1,
         )
+
+    def test_export_work_modes_change_bounded_worker_counts(self) -> None:
+        with patch("app.renderer.ffmpeg_renderer.os.cpu_count", return_value=12):
+            self.assertEqual(FFmpegRenderer._audio_worker_count(
+                RenderSettings(work_mode=WORK_MODE_STABLE), 10,
+            ), 1)
+            self.assertEqual(FFmpegRenderer._audio_worker_count(
+                RenderSettings(work_mode=WORK_MODE_AUTO), 10,
+            ), 4)
+            self.assertEqual(FFmpegRenderer._audio_worker_count(
+                RenderSettings(work_mode=WORK_MODE_MAX_SPEED), 10,
+            ), 6)
+        self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
+            work_mode=WORK_MODE_STABLE,
+        )), 1)
+        self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
+            work_mode=WORK_MODE_MAX_SPEED,
+        )), 4)
+        self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
+            work_mode=WORK_MODE_MAX_SPEED,
+            output_width=3840, output_height=2160, fps=60,
+        )), 1)
+
+    def test_cropped_static_stream_is_composited_at_original_coordinates(self) -> None:
+        graph = FFmpegRenderer._layered_filter_graph(
+            [],
+            [(2.0, Path("cropped.mkv"), "alpha_pair", 104, 62)],
+            30,
+            320,
+            180,
+        )
+
+        self.assertIn("[2:v:0][2:v:1]alphamerge", graph)
+        self.assertIn("overlay=104:62:eof_action=pass", graph)
 
     def test_export_preflight_checks_inputs_destination_and_real_encoder(self) -> None:
         renderer = object.__new__(FFmpegRenderer)
@@ -457,6 +619,43 @@ class FunctionalRegressionTests(unittest.TestCase):
 
         audio_codec_index = final_command.index("-c:a")
         self.assertEqual(final_command[audio_codec_index + 1], "copy")
+        duration_index = final_command.index("-t")
+        self.assertEqual(final_command[duration_index + 1], "1.000000")
+        self.assertNotIn("-shortest", final_command)
+
+    def test_one_explicit_frame_can_cover_a_multi_track_playlist(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        renderer.executable = Path("ffmpeg.exe")
+        renderer.ensure_encoder_available = lambda _encoder: None  # type: ignore[method-assign]
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> None:
+            output = Path(arguments[-1])
+            if output.suffix.lower() in {".nut", ".m4a", ".mp4"}:
+                output.touch()
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        frame = QImage(16, 16, QImage.Format.Format_RGB32)
+        frame.fill(0xFF224466)
+        with TemporaryDirectory(prefix="pvs-sparse-base-") as raw_directory:
+            directory = Path(raw_directory)
+            first_audio = directory / "first.wav"
+            second_audio = directory / "second.wav"
+            first_audio.touch()
+            second_audio.touch()
+            output = directory / "result.mp4"
+
+            result = renderer.render(
+                [RenderFrame(frame, 2.0)],
+                [
+                    PlaylistTrack(str(first_audio), "First", duration_seconds=1.0),
+                    PlaylistTrack(str(second_audio), "Second", duration_seconds=1.0),
+                ],
+                output,
+                RenderSettings(fps=30, output_width=16, output_height=16),
+            )
+            self.assertTrue(output.is_file())
+
+        self.assertEqual(result.track_count, 2)
 
     def test_failed_final_encode_keeps_existing_output_and_removes_staging(self) -> None:
         renderer = object.__new__(FFmpegRenderer)
@@ -562,6 +761,9 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertEqual(final_command[video_codec_index + 1], "copy")
         self.assertNotIn("-vf", final_command)
         self.assertNotIn("-filter_complex", final_command)
+        duration_index = final_command.index("-t")
+        self.assertEqual(final_command[duration_index + 1], "1.000000")
+        self.assertNotIn("-shortest", final_command)
         self.assertEqual(encoder_checks, [])
 
     def test_visualizer_layers_render_concurrently_and_return_in_z_input_order(self) -> None:
@@ -643,6 +845,83 @@ class FunctionalRegressionTests(unittest.TestCase):
                 displayed_active = np.max(displayed, axis=0)
                 self.assertTrue(np.all(displayed_active[[0, 1, 3, 5, 8]] > 0.0))
 
+    def test_batched_visualizer_fft_is_exact_and_uses_bounded_calls(self) -> None:
+        renderer = PythonVisualizerRenderer(Path("ffmpeg.exe"))
+        rng = np.random.default_rng(20260829)
+        samples = rng.normal(
+            0.0, 0.2, renderer.sample_rate * 3,
+        ).astype(np.float32)
+        fps = 29
+        bands = 36
+
+        def scalar_reference() -> np.ndarray:
+            frame_count = max(
+                1, math.ceil(len(samples) * fps / renderer.sample_rate),
+            )
+            window = np.hanning(renderer.fft_size).astype(np.float32)
+            frequencies = np.fft.rfftfreq(
+                renderer.fft_size, 1 / renderer.sample_rate,
+            )
+            edges = np.geomspace(35.0, renderer.sample_rate / 2, bands + 1)
+            bins, probes = renderer._frequency_band_layout(frequencies, edges)
+            result = np.zeros((frame_count, bands), dtype=np.float32)
+            for frame_index in range(frame_count):
+                center = int(frame_index * renderer.sample_rate / fps)
+                start = center - renderer.fft_size // 2
+                end = start + renderer.fft_size
+                segment = np.zeros(renderer.fft_size, dtype=np.float32)
+                source_start = max(0, start)
+                source_end = min(len(samples), end)
+                if source_end > source_start:
+                    target_start = source_start - start
+                    segment[
+                        target_start:target_start + source_end - source_start
+                    ] = samples[source_start:source_end]
+                spectrum = (
+                    np.abs(np.fft.rfft(segment * window))
+                    / (renderer.fft_size / 2)
+                )
+                result[frame_index] = np.clip(
+                    renderer._frequency_band_values(
+                        spectrum, frequencies, bins, probes,
+                    ),
+                    0.0,
+                    2.0,
+                )
+            return result
+
+        expected = scalar_reference()
+        original_rfft = np.fft.rfft
+        with patch(
+            "app.renderer.python_visualizer.np.fft.rfft",
+            side_effect=original_rfft,
+        ) as batched_rfft:
+            actual = renderer._analyze_levels(
+                samples, fps, bands, threading.Event(),
+            )
+
+        self.assertTrue(np.array_equal(actual, expected))
+        self.assertEqual(batched_rfft.call_count, math.ceil(len(actual) / 256))
+
+    def test_ffmpeg_encoder_catalog_is_reused_within_one_export(self) -> None:
+        with TemporaryDirectory(prefix="encoder-cache-test-") as raw_directory:
+            executable = Path(raw_directory) / "ffmpeg.exe"
+            executable.touch()
+            renderer = FFmpegRenderer(executable)
+            completed = SimpleNamespace(
+                returncode=0,
+                stdout=" V..... libx264rgb\n V..... ffv1\n V..... libx264\n",
+            )
+            with patch(
+                "app.renderer.ffmpeg_renderer.subprocess.run",
+                return_value=completed,
+            ) as run:
+                renderer.ensure_encoder_available("libx264rgb")
+                renderer.ensure_encoder_available("ffv1")
+                renderer.ensure_encoder_available("libx264")
+
+        run.assert_called_once()
+
     def test_static_source_with_same_z_as_visualizer_is_not_dropped(self) -> None:
         scene = CanvasScene()
         dynamic = Source(SourceType.AUDIO_VISUALIZER, "Dynamic", z_index=4.0)
@@ -700,8 +979,32 @@ class FunctionalRegressionTests(unittest.TestCase):
         )
 
         self.assertIn("rotate=0.785398163397", layered)
+        self.assertIn(
+            "ow=rotw(0.785398163397):oh=roth(0.785398163397)", layered,
+        )
+        self.assertNotIn("rotw(iw)", layered)
         self.assertIn("fillcolor=none", layered)
+        self.assertIn(
+            "ow=rotw(0.785398163397):oh=roth(0.785398163397)", legacy,
+        )
+        self.assertNotIn("rotw(iw)", legacy)
         self.assertIn("fillcolor=none", legacy)
+
+    def test_half_turn_visualizer_keeps_its_full_canvas_extent(self) -> None:
+        overlay = VisualizerOverlay(
+            0, 0, 1280, 110, "center", "#D14A4A", rotation=180.0,
+        )
+
+        graph = FFmpegRenderer._layered_filter_graph(
+            [overlay], [], 30, 1920, 1080,
+        )
+
+        self.assertIn(
+            "rotate=3.141592653590:ow=rotw(3.141592653590):"
+            "oh=roth(3.141592653590)",
+            graph,
+        )
+        self.assertIn("overlay=0:0:eof_action=pass", graph)
 
     def test_video_export_converts_canvas_effect_percentages(self) -> None:
         clip = VideoClipOverlay(
@@ -730,6 +1033,10 @@ class FunctionalRegressionTests(unittest.TestCase):
         )
 
         self.assertIn("rotate=1.570796326795", graph)
+        self.assertIn(
+            "ow=rotw(1.570796326795):oh=roth(1.570796326795)", graph,
+        )
+        self.assertNotIn("rotw(iw)", graph)
         self.assertIn("overlay=125:25:eof_action=pass", graph)
 
     def test_video_export_preserves_contain_fill_and_rounded_clip(self) -> None:
@@ -1229,10 +1536,10 @@ class FunctionalRegressionTests(unittest.TestCase):
                 {"start": 9.0, "end": 11.0, "text": "Next"},
             ],
         )
-        observed: list[tuple[int, float, int, float, float]] = []
+        observed: list[tuple[int, float, int, float, float, int, float]] = []
 
         def inspect_layout(*_args: object, **_kwargs: object) -> QImage:
-            line_height = source.font_size + source.subtitle_line_spacing
+            line_height = item._lyric_line_height()
             visual_origin = (
                 -item._subtitle_anchor_line * line_height
                 + source.subtitle_scroll_offset
@@ -1240,6 +1547,8 @@ class FunctionalRegressionTests(unittest.TestCase):
             observed.append((
                 item._subtitle_anchor_line, source.subtitle_scroll_offset,
                 source.subtitle_current_line, item.opacity(), visual_origin,
+                item._subtitle_previous_line_count,
+                item._subtitle_transition_progress,
             ))
             return QImage(1, 1, QImage.Format.Format_ARGB32)
 
@@ -1261,6 +1570,28 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertLess(transition_middle[1], transition_start[1])
         self.assertEqual(transition_start[2], 1)
         self.assertAlmostEqual(transition_start[3], 1.0)
+        self.assertEqual(transition_start[5], 1)
+        self.assertEqual(transition_middle[5], 1)
+        self.assertAlmostEqual(transition_start[6], 0.0)
+        self.assertAlmostEqual(transition_middle[6], 0.5)
+
+    def test_lyric_line_height_preserves_font_descenders(self) -> None:
+        source = Source(
+            SourceType.LYRICS,
+            "Descenders",
+            text="gypqj",
+            font_size=42,
+            subtitle_line_spacing=0,
+        )
+        item = SourceItem(source)
+        regular = QFontMetricsF(item._lyric_fonts["regular"])
+        current = QFontMetricsF(item._lyric_fonts["current"])
+        required = (
+            max(regular.height(), current.height())
+            + max(2.0, max(regular.descent(), current.descent()) * 0.35)
+        )
+
+        self.assertGreaterEqual(item._lyric_line_height(), required)
 
     def test_lyric_font_and_blur_cache_survives_unrelated_source_edits(self) -> None:
         source = Source(SourceType.LYRICS, "Lyrics")
@@ -1464,6 +1795,58 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertTrue(checksum_url.endswith(installer.checksum_name))
         self.assertIn("/releases/download/latest/", archive_url)
         self.assertTrue(any("official latest" in message for _, _, message in updates))
+
+    def test_ffmpeg_catalog_lists_supported_static_versions_and_recommends_nine(self) -> None:
+        installer = ManagedFFmpegInstaller(Path("unused-test-install-root"))
+        release = {
+            "tag_name": "latest",
+            "name": "Latest Auto-Build",
+            "published_at": "2026-08-25T13:00:00Z",
+            "body": "Windows master `N-126300-gabc`\n9.0 `n9.0.1-gdef`\n8.1 `n8.1.2-ghij`",
+            "assets": [
+                {"name": "checksums.sha256", "browser_download_url": "https://test/checksums"},
+                {"name": "ffmpeg-master-latest-win64-gpl.zip", "browser_download_url": "https://test/master"},
+                {"name": "ffmpeg-n9.0-latest-win64-gpl-9.0.zip", "browser_download_url": "https://test/9"},
+                {"name": "ffmpeg-n8.1-latest-win64-gpl-8.1.zip", "browser_download_url": "https://test/8"},
+                {"name": "ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip", "browser_download_url": "https://test/shared"},
+                {"name": "ffmpeg-n9.0-latest-win64-lgpl-9.0.zip", "browser_download_url": "https://test/lgpl"},
+            ],
+        }
+        with patch.object(installer, "_read_json", return_value=release):
+            options = installer.available_releases()
+
+        self.assertEqual([option.series for option in options], ["9.0", "8.1", "master"])
+        self.assertTrue(options[0].recommended)
+        self.assertEqual(options[0].build, "n9.0.1-gdef")
+        self.assertEqual(options[1].build, "n8.1.2-ghij")
+        self.assertEqual(options[2].build, "N-126300-gabc")
+        self.assertTrue(all(option.checksum_url == "https://test/checksums" for option in options))
+        self.assertIn("FFmpeg 9.0", options[0].notes)
+
+    def test_managed_ffmpeg_delete_is_scoped_to_the_active_version(self) -> None:
+        with TemporaryDirectory(prefix="pvs-managed-ffmpeg-delete-") as raw_directory:
+            root = Path(raw_directory)
+            installer = ManagedFFmpegInstaller(root)
+            active = root / "versions" / "9.0-test" / "bin" / "ffmpeg.exe"
+            sibling = root / "versions" / "8.1-keep" / "bin" / "ffmpeg.exe"
+            active.parent.mkdir(parents=True)
+            sibling.parent.mkdir(parents=True)
+            active.touch()
+            sibling.touch()
+            installation = installer.current_installation()
+            self.assertIsNone(installation)
+            installer._activate(ManagedFFmpegInstallation(
+                active, "n9-test", "9.0", "latest"
+            ))
+            # Deletion must remain available even when the executable cannot
+            # pass validation (for example after an interrupted disk cleanup).
+            self.assertIsNone(installer.current_installation())
+            self.assertIsNotNone(installer.recorded_installation())
+            removed = installer.uninstall_current()
+            self.assertIsNotNone(removed)
+            self.assertFalse(active.parent.parent.exists())
+            self.assertTrue(sibling.exists())
+            self.assertFalse((root / "current.json").exists())
 
     def test_ffmpeg_safe_extract_rejects_oversized_expansion(self) -> None:
         with TemporaryDirectory(prefix="pvs-ffmpeg-limit-test-") as raw_directory:

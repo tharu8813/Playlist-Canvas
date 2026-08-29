@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from heapq import heappop, heappush
 import json
 import logging
 from pathlib import Path
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyle,
+    QSystemTrayIcon,
     QTabWidget,
     QToolBar,
     QToolButton,
@@ -48,6 +50,7 @@ from app.canvas.live_canvas import LiveCanvas
 from app.animation.motion import MotionController
 from app.animation.canvas_preview import CanvasAnimationPreviewController
 from app.dialogs.export_progress_dialog import ExportProgressDialog
+from app.dialogs.export_complete_dialog import ExportCompleteDialog
 from app.dialogs.ffmpeg_install_progress_dialog import FFmpegInstallProgressDialog
 from app.dialogs.export_preview_dialog import ExportPreviewDialog
 from app.dialogs.export_settings_dialog import ExportSettingsDialog
@@ -60,6 +63,7 @@ from app.dialogs.audio_metadata_dialog import AudioMetadataDialog
 from app.dialogs.project_settings_dialog import ProjectSettingsDialog
 from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
+from app.dialogs.lyrics_compare_dialog import LyricsCompareDialog
 from app.dialogs.settings_dialog import SettingsDialog
 from app.dialogs.startup_dialog import StartupDialog
 from app.dialogs.track_details_dialog import TrackDetailsDialog
@@ -67,8 +71,13 @@ from app.dialogs.shortcuts_dialog import ShortcutsDialog
 from app.dialogs.about_dialog import AboutDialog
 from app.dialogs.help_dialog import HelpDialog
 from app.dialogs.update_dialogs import UpdateAvailableDialog, UpdateDownloadDialog
-from app.ffmpeg.install_worker import FFmpegInstallWorker
-from app.ffmpeg.managed_installer import ManagedFFmpegInstallation, ManagedFFmpegInstaller
+from app.ffmpeg.install_worker import FFmpegCatalogWorker, FFmpegInstallWorker
+from app.ffmpeg.managed_installer import (
+    FFmpegInstallError,
+    FFmpegReleaseOption,
+    ManagedFFmpegInstallation,
+    ManagedFFmpegInstaller,
+)
 from app.inspector.source_inspector import SourceInspector
 from app.layers.layer_panel import LayerPanel
 from app.models.source import Source, SourceType
@@ -85,7 +94,17 @@ from app.services.theme_service import Theme, ThemeService
 from app.services.source_store import SourceStore
 from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
 from app.services.playlist_export_service import PlaylistExportError, PlaylistExportService
-from app.services.app_settings_service import AppSettingsService, VIDEO_ENCODERS
+from app.services.app_settings_service import (
+    AppSettings,
+    AppSettingsService,
+    VIDEO_ENCODERS,
+)
+from app.services.video_encoder_service import (
+    AUTO_VIDEO_ENCODER,
+    CPU_H264_ENCODER,
+    NVIDIA_H264_ENCODER,
+    VideoEncoderAdvisor,
+)
 from app.services.smooth_scroll_service import SmoothScrollService
 from app.widgets.source_template_button import SourceTemplateButton
 from app.services.update_service import (
@@ -100,23 +119,33 @@ from app.preview.export_canvas_capture import ExportCanvasCapturer
 from app.preview.gpu_texture_surface import (
     GPU_TEXTURE_SURFACE_AVAILABLE, GpuTexturePreviewSurface,
 )
-from app.renderer.export_timeline import ExportTimelinePlanner
+from app.renderer.export_timeline import ExportFrameSample, ExportTimelinePlanner
 from app.renderer.static_video_stream import (
     DirectVideoEncodingProfile,
     StaticVideoStreamEncoder,
     StaticVideoStreamError,
 )
+from app.renderer.png_frame_staging import (
+    PngFrameStagingCancelled,
+    PngFrameStagingError,
+    PngFrameStagingPipeline,
+)
 from app.renderer.ffmpeg_renderer import (
+    EncoderUnavailableError,
     FFmpegNotFoundError,
     FFmpegRenderer,
     RenderCancelledError,
     RenderError,
     RenderFrame,
+    RenderSettings,
     PreparedVideoInput,
     PreparedStaticOverlayLayer,
     RenderResult,
     VisualizerOverlay,
     VideoClipOverlay,
+    WORK_MODE_AUTO,
+    WORK_MODE_MAX_SPEED,
+    WORK_MODE_STABLE,
 )
 from app.video.timeline import build_video_occurrences
 from app.renderer.render_worker import RenderWorker
@@ -151,31 +180,38 @@ class ExportFrameStagingMetrics:
     largest_height: int = 0
     stream_file_counts: dict[str, int] = field(default_factory=dict)
     stream_bytes: dict[str, int] = field(default_factory=dict)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False,
+    )
 
     def record_capture(self) -> None:
-        self.capture_count += 1
+        with self._lock:
+            self.capture_count += 1
 
     def record_reuse(self) -> None:
-        self.reused_frame_count += 1
+        with self._lock:
+            self.reused_frame_count += 1
 
     def record_file(self, stream_key: str, image: QImage, byte_count: int) -> None:
-        self.unique_file_count += 1
-        self.total_bytes += byte_count
-        self.stream_file_counts[stream_key] = self.stream_file_counts.get(stream_key, 0) + 1
-        self.stream_bytes[stream_key] = self.stream_bytes.get(stream_key, 0) + byte_count
-        if byte_count > self.largest_file_bytes:
-            self.largest_file_bytes = byte_count
-            self.largest_width = image.width()
-            self.largest_height = image.height()
+        with self._lock:
+            self.unique_file_count += 1
+            self.total_bytes += byte_count
+            self.stream_file_counts[stream_key] = self.stream_file_counts.get(stream_key, 0) + 1
+            self.stream_bytes[stream_key] = self.stream_bytes.get(stream_key, 0) + byte_count
+            if byte_count > self.largest_file_bytes:
+                self.largest_file_bytes = byte_count
+                self.largest_width = image.width()
+                self.largest_height = image.height()
 
     def snapshot(self) -> ExportFrameStagingMetrics:
         """Freeze current counters for diagnostics after the temp directory is gone."""
-        return replace(
-            self,
-            elapsed_seconds=max(0.0, monotonic() - self.started_at),
-            stream_file_counts=dict(self.stream_file_counts),
-            stream_bytes=dict(self.stream_bytes),
-        )
+        with self._lock:
+            return replace(
+                self,
+                elapsed_seconds=max(0.0, monotonic() - self.started_at),
+                stream_file_counts=dict(self.stream_file_counts),
+                stream_bytes=dict(self.stream_bytes),
+            )
 
 
 class CanvasCenteredSplitter(QSplitter):
@@ -290,6 +326,9 @@ class MainWindow(QMainWindow):
                 settings.smooth_scrolling, settings.smooth_scroll_duration_ms
             )
         )
+        self.settings_service.changed.connect(
+            self._sync_export_notification_tray
+        )
         self.recent_projects = RecentProjectsService(self)
         self.translator = Translator(self)
         self.theme_service = ThemeService(self)
@@ -348,14 +387,24 @@ class MainWindow(QMainWindow):
         self._export_capture_count = 0
         self._export_frame_cache: dict[str, tuple[QImage, Path]] = {}
         self._export_frame_metrics: ExportFrameStagingMetrics | None = None
+        self._export_png_pipeline: PngFrameStagingPipeline | None = None
         self._last_export_frame_metrics: ExportFrameStagingMetrics | None = None
         self._export_dialog: ExportProgressDialog | None = None
         self._export_ui_lock_state: tuple[bool, bool, bool, bool, bool] | None = None
         self._export_preparation_cancel: threading.Event | None = None
         self._close_after_export_cancel = False
         self._export_restore_pending = False
+        self._notification_tray: QSystemTrayIcon | None = None
+        self._export_notified_steps: set[str] = set()
+        self._active_export_output_path: Path | None = None
+        self._pending_export_result: RenderResult | None = None
         self._clipboard_paste_serial = 0
         self._ffmpeg_install_worker: FFmpegInstallWorker | None = None
+        self._ffmpeg_catalog_worker: FFmpegCatalogWorker | None = None
+        self._ffmpeg_catalog_cache: tuple[
+            list[FFmpegReleaseOption], ManagedFFmpegInstallation | None,
+        ] | None = None
+        self._close_after_ffmpeg_catalog_cancel = False
         self._ffmpeg_install_dialog: FFmpegInstallProgressDialog | None = None
         self._settings_dialog: SettingsDialog | None = None
         self._update_service = GitHubUpdateService()
@@ -394,6 +443,7 @@ class MainWindow(QMainWindow):
         self.retranslate()
         self._connect_history()
         self._autosave_timer.start()
+        self._sync_export_notification_tray(self.settings_service.current)
         QTimer.singleShot(0, self._finish_initialization)
 
     def _build_toolbar(self) -> None:
@@ -1380,6 +1430,7 @@ class MainWindow(QMainWindow):
         self.playlist_editor = PlaylistEditor(self.playlist_service, self.translator)
         self.playlist_editor.request_files.connect(self._choose_audio_files)
         self.playlist_editor.files_dropped.connect(self._handle_dropped_files)
+        self.playlist_editor.lyrics_dropped.connect(self._handle_lyrics_drop)
         self.playlist_editor.track_double_clicked.connect(self._show_track_details)
         self.bottom_tabs.addTab(self.playlist_editor, "")
         self.timeline_panel = TimelinePanel(
@@ -1994,16 +2045,88 @@ class MainWindow(QMainWindow):
                     "Select one playlist track, then add this lyrics file again.",
                 )
                 return
-            try:
-                cues = LyricsService.load(content_path)
-            except LyricsError as error:
-                QMessageBox.warning(self, "Lyrics", str(error))
-                return
-            self.playlist_service.update_track(
-                target.id, lyrics_path=str(content_path.resolve()), lyrics=cues
+            self._attach_lyrics_to_track(content_path, target.id)
+
+    def _handle_lyrics_drop(self, path: str, track_id: str) -> None:
+        """Attach a dropped lyrics file to the exact playlist row under the pointer."""
+        korean = self.translator.language is Language.KOREAN
+        if not track_id:
+            QMessageBox.information(
+                self,
+                "가사 연결" if korean else "Attach lyrics",
+                "가사 파일을 적용할 곡 위에 직접 놓아 주세요."
+                if korean else "Drop the lyrics file directly onto a playlist track.",
             )
-            if not any(source.source_type is SourceType.LYRICS for source in self.store.sources()):
-                self._add_source(SourceType.LYRICS)
+            return
+        self._attach_lyrics_to_track(Path(path), track_id)
+
+    def _attach_lyrics_to_track(self, content_path: Path, track_id: str) -> bool:
+        """Load, compare, and attach lyrics without silently replacing existing work."""
+        korean = self.translator.language is Language.KOREAN
+        target = next(
+            (track for track in self.playlist_service.tracks if track.id == track_id),
+            None,
+        )
+        if target is None:
+            QMessageBox.warning(
+                self, "가사 연결" if korean else "Attach lyrics",
+                "선택한 곡을 찾을 수 없습니다."
+                if korean else "The selected track could not be found.",
+            )
+            return False
+        if not content_path.is_file():
+            QMessageBox.warning(
+                self, "가사 파일을 찾을 수 없음" if korean else "Lyrics not found",
+                str(content_path),
+            )
+            return False
+        try:
+            incoming_cues = LyricsService.load(content_path)
+        except LyricsError as error:
+            QMessageBox.warning(self, "Lyrics", str(error))
+            return False
+        if not incoming_cues:
+            QMessageBox.warning(
+                self, "가사 연결" if korean else "Attach lyrics",
+                "가사 파일에 인식할 수 있는 타이밍 가사가 없습니다."
+                if korean else "The file contains no recognizable timed lyrics.",
+            )
+            return False
+
+        current_cues = list(target.lyrics)
+        if not current_cues and target.lyrics_path:
+            try:
+                current_cues = LyricsService.load(target.lyrics_path)
+            except LyricsError:
+                # The project may still contain usable embedded cues or a stale
+                # path. The comparison remains useful even with an empty side.
+                current_cues = []
+        if target.lyrics or target.lyrics_path:
+            dialog = LyricsCompareDialog(
+                current_cues, incoming_cues, target.lyrics_path,
+                str(content_path.resolve()), self.translator, self,
+            )
+            if (
+                dialog.exec() != QDialog.DialogCode.Accepted
+                or not dialog.replace_requested
+            ):
+                return False
+
+        resolved = str(content_path.resolve())
+        self.playlist_service.update_track(
+            target.id, lyrics_path=resolved, lyrics=incoming_cues,
+        )
+        self.project_content_service.add_paths([content_path])
+        if not any(
+            source.source_type is SourceType.LYRICS for source in self.store.sources()
+        ):
+            self._add_source(SourceType.LYRICS)
+        self.statusBar().showMessage(
+            f"'{target.title}' 곡에 가사를 적용했습니다."
+            if korean else f"Attached lyrics to '{target.title}'.",
+            5000,
+        )
+        return True
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Accept local file URLs dropped anywhere outside a specialized child widget."""
@@ -2168,7 +2291,7 @@ class MainWindow(QMainWindow):
     def _stage_export_frame(
         self, image: QImage, duration_seconds: float, stream_key: str = "base",
     ) -> RenderFrame:
-        """Move a captured Canvas frame to temporary disk instead of retaining its pixels in RAM."""
+        """Stage a frame synchronously or queue it to the active PNG pipeline."""
         if self._export_frame_staging is None:
             raise RenderError("Export frame staging has not been initialized.")
         if image.isNull():
@@ -2193,33 +2316,89 @@ class MainWindow(QMainWindow):
                 )
         path = Path(self._export_frame_staging.name) / f"frame_{self._export_frame_index:07d}.png"
         self._export_frame_index += 1
-        writer = QImageWriter(str(path), b"png")
-        # Compression level 1 trades a little temporary disk space for much
-        # faster preparation. FFmpeg output quality is unaffected.
-        writer.setCompression(1)
-        writer.setOptimizedWrite(False)
-        if not writer.write(image):
-            raise RenderError(
-                f"Could not stage an export frame on disk: {writer.errorString()}"
+        owned_image = image.copy()
+        pipeline = self._export_png_pipeline
+        if pipeline is not None:
+            try:
+                pipeline.submit(owned_image, path, stream_key)
+            except PngFrameStagingCancelled as error:
+                raise RenderCancelledError(str(error)) from error
+            except PngFrameStagingError as error:
+                raise RenderError(str(error)) from error
+        else:
+            writer = QImageWriter(str(path), b"png")
+            # Compression level 1 trades a little temporary disk space for much
+            # faster preparation. FFmpeg output quality is unaffected.
+            writer.setCompression(1)
+            writer.setOptimizedWrite(False)
+            if not writer.write(owned_image):
+                raise RenderError(
+                    f"Could not stage an export frame on disk: {writer.errorString()}"
+                )
+            try:
+                staged_bytes = path.stat().st_size
+            except OSError as error:
+                # Diagnostics must never turn a successfully written export frame
+                # into an export failure on an unusual or transient filesystem.
+                LOGGER.warning("Could not measure staged export frame %s: %s", path, error)
+                staged_bytes = 0
+            self._export_frame_metrics.record_file(
+                stream_key, owned_image, staged_bytes,
             )
-        try:
-            staged_bytes = path.stat().st_size
-        except OSError as error:
-            # Diagnostics must never turn a successfully written export frame
-            # into an export failure on an unusual or transient filesystem.
-            LOGGER.warning("Could not measure staged export frame %s: %s", path, error)
-            staged_bytes = 0
-        self._export_frame_metrics.record_file(stream_key, image, staged_bytes)
-        self._export_frame_cache[stream_key] = (image.copy(), path)
+        self._export_frame_cache[stream_key] = (owned_image, path)
         return RenderFrame(path, max(0.001, duration_seconds))
+
+    def _start_export_png_pipeline(
+        self, cancel_event: threading.Event, *, queue_capacity: int = 3,
+    ) -> None:
+        """Start bounded PNG writes so Canvas capture can continue concurrently."""
+        if self._export_png_pipeline is not None:
+            raise RenderError("Export PNG staging is already active.")
+        if self._export_frame_metrics is None:
+            self._export_frame_metrics = ExportFrameStagingMetrics()
+
+        def record_written(stream_key: str, image: QImage, byte_count: int) -> None:
+            metrics = self._export_frame_metrics
+            if metrics is not None:
+                metrics.record_file(stream_key, image, byte_count)
+
+        self._export_png_pipeline = PngFrameStagingPipeline(
+            record_written,
+            cancel_event=cancel_event,
+            wait_callback=QApplication.processEvents,
+            queue_capacity=max(1, queue_capacity),
+        )
+
+    def _finish_export_png_pipeline(self) -> None:
+        pipeline = self._export_png_pipeline
+        if pipeline is None:
+            return
+        self._export_png_pipeline = None
+        try:
+            pipeline.finish()
+        except PngFrameStagingCancelled as error:
+            raise RenderCancelledError(str(error)) from error
+        except PngFrameStagingError as error:
+            raise RenderError(str(error)) from error
+        LOGGER.info(
+            "PNG frame staging pipeline drained: peak_buffered_frames=%d",
+            pipeline.peak_buffered_frames,
+        )
+
+    def _cancel_export_png_pipeline(self) -> None:
+        pipeline = self._export_png_pipeline
+        self._export_png_pipeline = None
+        if pipeline is not None:
+            pipeline.cancel()
 
     @staticmethod
     def _export_animation_sample_rate(output_fps: int) -> int:
-        """Cap preparation samples while FFmpeg still emits the requested output FPS."""
-        return max(15, min(30, int(output_fps)))
+        """Sample Canvas motion at the exact frame rate selected for export."""
+        return max(1, min(240, int(output_fps)))
 
     def _clear_export_frame_staging(self) -> None:
         """Release disk-backed captured frames after every export completion path."""
+        self._cancel_export_png_pipeline()
         if self._export_frame_metrics is not None:
             summary = self._export_frame_metrics.snapshot()
             self._last_export_frame_metrics = summary
@@ -2283,6 +2462,170 @@ class MainWindow(QMainWindow):
         self.export_action.setEnabled(export_enabled)
         self.setAcceptDrops(accepts_drops)
 
+    @staticmethod
+    def _export_notification_allowed(
+        settings: AppSettings,
+        step: str,
+        application_active: bool,
+    ) -> bool:
+        """Apply the master, per-stage, and focus notification preferences."""
+        if not settings.export_notifications_enabled:
+            return False
+        enabled_for_step = {
+            "visuals": settings.export_notify_visuals,
+            "audio": settings.export_notify_audio,
+            "effects": settings.export_notify_effects,
+            "encode": settings.export_notify_encode,
+            "complete": settings.export_notify_complete,
+            "failures": settings.export_notify_failures,
+        }.get(step, False)
+        if not enabled_for_step:
+            return False
+        return (
+            settings.export_notification_mode == "always"
+            or not application_active
+        )
+
+    def _sync_export_notification_tray(self, settings: AppSettings) -> None:
+        """Create a tray endpoint only while export notifications are enabled."""
+        if not settings.export_notifications_enabled:
+            if self._notification_tray is not None:
+                self._notification_tray.hide()
+                self._notification_tray.deleteLater()
+                self._notification_tray = None
+            return
+        self._ensure_notification_tray()
+
+    def _ensure_notification_tray(self) -> QSystemTrayIcon | None:
+        if self._notification_tray is not None:
+            return self._notification_tray
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return None
+        icon = QApplication.windowIcon()
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        tray = QSystemTrayIcon(icon, self)
+        tray.setToolTip("Playlist Canvas")
+        tray.messageClicked.connect(self._restore_from_export_notification)
+        tray.show()
+        self._notification_tray = tray
+        return tray
+
+    def _restore_from_export_notification(self) -> None:
+        """Bring the running export or completed workspace back to the user."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        if self._export_dialog is not None:
+            self._export_restore_pending = False
+            self._export_dialog.show()
+            self._export_dialog.raise_()
+            self._export_dialog.activateWindow()
+
+    def _show_system_notification(
+        self,
+        title: str,
+        message: str,
+        *,
+        critical: bool = False,
+    ) -> bool:
+        tray = self._ensure_notification_tray()
+        if tray is None:
+            return False
+        icon = (
+            QSystemTrayIcon.MessageIcon.Critical
+            if critical else QSystemTrayIcon.MessageIcon.Information
+        )
+        tray.showMessage(title, message, icon, 7000)
+        return True
+
+    def _notify_export_stage(self, stage: str) -> None:
+        """Notify once when the export crosses into a user-facing phase."""
+        step = ExportProgressDialog._stage_key(stage)
+        if step in self._export_notified_steps:
+            return
+        self._export_notified_steps.add(step)
+        settings = self.settings_service.current
+        application_active = (
+            QApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+        )
+        if not self._export_notification_allowed(
+            settings, step, application_active,
+        ):
+            return
+        korean = self.translator.language is Language.KOREAN
+        names = {
+            "visuals": "화면 준비" if korean else "Visual preparation",
+            "audio": "오디오 준비" if korean else "Audio preparation",
+            "effects": "효과 준비" if korean else "Effects preparation",
+            "encode": "영상 만들기" if korean else "Creating video",
+            "complete": "내보내기 완료" if korean else "Export complete",
+        }
+        name = names.get(step)
+        if name is None:
+            return
+        output_name = (
+            self._active_export_output_path.name
+            if self._active_export_output_path is not None else ""
+        )
+        if step == "complete":
+            title = "내보내기 완료" if korean else "Export complete"
+            message = (
+                f"{output_name} 파일을 만들었습니다."
+                if korean else f"Created {output_name}."
+            )
+        else:
+            title = "내보내기 진행" if korean else "Export progress"
+            message = (
+                f"{name} 단계를 시작했습니다."
+                if korean else f"Started: {name}."
+            )
+        self._show_system_notification(title, message)
+
+    def _notify_export_problem(self, message: str, *, cancelled: bool = False) -> None:
+        settings = self.settings_service.current
+        application_active = (
+            QApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+        )
+        if not self._export_notification_allowed(
+            settings, "failures", application_active,
+        ):
+            return
+        korean = self.translator.language is Language.KOREAN
+        if cancelled:
+            title = "내보내기 취소" if korean else "Export cancelled"
+            detail = (
+                "진행 중인 내보내기를 안전하게 취소했습니다."
+                if korean else "The active export was cancelled safely."
+            )
+        else:
+            title = "내보내기 오류" if korean else "Export failed"
+            detail = message.strip().replace("\n", " ")[:220]
+        self._show_system_notification(
+            title, detail, critical=not cancelled,
+        )
+
+    def _handle_export_render_progress(
+        self,
+        export_dialog: ExportProgressDialog,
+        stage: str,
+        fraction: float,
+        message: str,
+    ) -> None:
+        """Keep progress UI, status activity, and notifications synchronized."""
+        overall = (
+            EXPORT_PREPARATION_PROGRESS_WEIGHT
+            + (1.0 - EXPORT_PREPARATION_PROGRESS_WEIGHT) * fraction
+        )
+        export_dialog.update_progress(stage, overall, message)
+        self.activity_progress.update(
+            "export", overall, f"{stage} · {message}",
+        )
+        self._notify_export_stage(stage)
+
     def _export_video(self) -> None:
         """Render the static Canvas and enabled playlist tracks to an MP4 file."""
         korean = self.translator.language is Language.KOREAN
@@ -2293,9 +2636,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "FFmpeg 필요" if korean else "FFmpeg required",
-                "FFmpeg를 찾을 수 없습니다. FFmpeg를 설치하고 시스템 PATH에 추가한 뒤 다시 시도하세요."
-                if korean else "FFmpeg was not found. Install it and add it to your system PATH, then try again.",
+                (
+                    "영상을 내보내려면 FFmpeg 설치가 필요합니다.\n\n"
+                    "확인을 누르면 설정의 FFmpeg 설치 화면으로 이동합니다. "
+                    "자동 설치를 사용하거나 기존 ffmpeg.exe를 선택해 주세요."
+                )
+                if korean else (
+                    "FFmpeg is required to export a video.\n\n"
+                    "Click OK to open the FFmpeg setup page. Use automatic "
+                    "installation or select an existing ffmpeg executable."
+                ),
             )
+            self._show_settings(focus_ffmpeg=True)
             return
         active_tracks = [track for track in self.playlist_service.tracks if track.enabled]
         if not active_tracks:
@@ -2334,7 +2686,17 @@ class MainWindow(QMainWindow):
         )
         if export_options.exec() != export_options.DialogCode.Accepted:
             return
-        selected_app_settings = export_options.app_settings
+        requested_app_settings = export_options.app_settings
+        automatic_encoder = (
+            requested_app_settings.video_codec == AUTO_VIDEO_ENCODER
+        )
+        effective_encoder = (
+            VideoEncoderAdvisor.automatic_encoder()
+            if automatic_encoder else requested_app_settings.video_codec
+        )
+        selected_app_settings = replace(
+            requested_app_settings, video_codec=effective_encoder,
+        )
         quality_profile_name = export_options.quality_mode_combo.currentText()
         output = str(export_options.output_path)
         active_tracks = [track for track in self.playlist_service.tracks if track.enabled]
@@ -2349,6 +2711,56 @@ class MainWindow(QMainWindow):
         render_settings = selected_app_settings.render_settings()
         try:
             renderer.preflight_export(active_tracks, output, render_settings)
+        except EncoderUnavailableError as error:
+            if not (
+                automatic_encoder
+                and effective_encoder == NVIDIA_H264_ENCODER
+            ):
+                QMessageBox.critical(
+                    self,
+                    "내보내기 사전 검사 실패" if korean else "Export preflight failed",
+                    str(error),
+                )
+                return
+            answer = QMessageBox.warning(
+                self,
+                "NVIDIA 인코더 사용 실패" if korean else "NVIDIA encoder failed",
+                (
+                    "NVIDIA GPU를 감지하여 NVENC 인코더를 자동으로 시도했지만 "
+                    "사용할 수 없습니다. 그래픽 드라이버, 다른 프로그램의 GPU 인코딩 "
+                    "사용 또는 FFmpeg 호환성 문제일 수 있습니다.\n\n"
+                    f"오류 내용:\n{error}\n\n"
+                    "CPU H.264 인코더로 다시 검사하고 내보내기를 계속할까요? "
+                    "속도는 느릴 수 있지만 결과 영상의 해상도와 FPS는 유지됩니다."
+                )
+                if korean else
+                (
+                    "An NVIDIA GPU was detected and NVENC was tried automatically, "
+                    "but it could not be used. The GPU driver, another application's "
+                    "encoder session, or FFmpeg compatibility may be the cause.\n\n"
+                    f"Error:\n{error}\n\n"
+                    "Retry the preflight and continue export with CPU H.264? It may "
+                    "be slower, but the output resolution and FPS will be preserved."
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            effective_encoder = CPU_H264_ENCODER
+            selected_app_settings = replace(
+                requested_app_settings, video_codec=effective_encoder,
+            )
+            render_settings = selected_app_settings.render_settings()
+            try:
+                renderer.preflight_export(active_tracks, output, render_settings)
+            except RenderError as cpu_error:
+                QMessageBox.critical(
+                    self,
+                    "CPU 인코더 검사 실패" if korean else "CPU encoder check failed",
+                    str(cpu_error),
+                )
+                return
         except RenderError as error:
             QMessageBox.critical(
                 self, "내보내기 사전 검사 실패" if korean else "Export preflight failed",
@@ -2356,7 +2768,9 @@ class MainWindow(QMainWindow):
             )
             return
         if export_options.save_as_default:
-            self.settings_service.save(selected_app_settings)
+            # Preserve "Automatic" as the preference; the concrete encoder is
+            # selected again for the hardware available at the next export.
+            self.settings_service.save(requested_app_settings)
         encoder_name = next(
             (
                 label for label, codec in VIDEO_ENCODERS.items()
@@ -2364,11 +2778,25 @@ class MainWindow(QMainWindow):
             ),
             selected_app_settings.video_codec,
         )
+        if automatic_encoder:
+            encoder_name = (
+                f"자동 선택 → {encoder_name}"
+                if korean else f"Automatic → {encoder_name}"
+            )
+        work_mode_name = {
+            WORK_MODE_STABLE: "안정" if korean else "Stable",
+            WORK_MODE_AUTO: "자동" if korean else "Automatic",
+            WORK_MODE_MAX_SPEED: "최대 속도" if korean else "Maximum speed",
+        }.get(
+            render_settings.work_mode,
+            "자동" if korean else "Automatic",
+        )
         settings_summary = (
             (
                 f"해상도 {render_settings.output_width} × {render_settings.output_height}"
                 f" · {selected_app_settings.fps} FPS\n"
                 f"비디오 인코더 {encoder_name}\n"
+                f"작업 모드 {work_mode_name} · "
                 f"품질 모드 {quality_profile_name} · CRF {selected_app_settings.crf}"
                 f" · 인코딩 속도 {selected_app_settings.preset}"
                 f" · 오디오 AAC {selected_app_settings.audio_bitrate}"
@@ -2378,11 +2806,15 @@ class MainWindow(QMainWindow):
                 f"Resolution {render_settings.output_width} × {render_settings.output_height}"
                 f" · {selected_app_settings.fps} FPS\n"
                 f"Video encoder {encoder_name}\n"
+                f"Work mode {work_mode_name} · "
                 f"Quality mode {quality_profile_name} · CRF {selected_app_settings.crf}"
                 f" · Encoding speed {selected_app_settings.preset}"
                 f" · Audio AAC {selected_app_settings.audio_bitrate}"
             )
         )
+        self._export_notified_steps.clear()
+        self._active_export_output_path = Path(output).expanduser().resolve()
+        self._pending_export_result = None
         preparation_cancel = threading.Event()
         self._export_preparation_cancel = preparation_cancel
         self._export_dialog = ExportProgressDialog(self)
@@ -2407,6 +2839,7 @@ class MainWindow(QMainWindow):
             "export", "영상 내보내기" if korean else "Exporting video",
             detail="화면 프레임 준비 중" if korean else "Preparing visual frames",
         )
+        self._notify_export_stage("Preparing visual frames")
         self.statusBar().showMessage(
             "화면 프레임 준비 중..." if korean else "Preparing visual frames..."
         )
@@ -2427,23 +2860,28 @@ class MainWindow(QMainWindow):
             self._unlock_main_form_after_export()
             self.activity_progress.finish("export")
             report_unexpected_error("Starting export preparation", error)
+            self._notify_export_problem(str(error))
+            self._active_export_output_path = None
             QMessageBox.critical(
                 self, "내보내기 오류" if korean else "Export error", str(error)
             )
             self._resume_close_after_export_cancel()
             return
-        active_stream_encoder: StaticVideoStreamEncoder | None = None
-        active_stream_key: str | None = None
+        active_stream_encoders: dict[str, StaticVideoStreamEncoder] = {}
 
         def cancel_static_streams() -> None:
-            if active_stream_encoder is not None:
-                active_stream_encoder.cancel()
+            for encoder in tuple(active_stream_encoders.values()):
+                encoder.cancel()
+            active_stream_encoders.clear()
+            self._cancel_export_png_pipeline()
 
         try:
             animation_fps = self._export_animation_sample_rate(render_settings.fps)
             playlist_duration = self._playlist_duration(active_tracks)
             visualizers = self._export_visualizers()
-            video_clips = self._export_video_clips(active_tracks, playlist_duration)
+            video_clips = self._export_video_clips(
+                active_tracks, playlist_duration, render_settings.work_mode,
+            )
             sources = self.store.sources()
             dynamic_visualizer_ids = {source.id for source in sources
                                       if source.source_type in {
@@ -2451,7 +2889,26 @@ class MainWindow(QMainWindow):
                                           SourceType.AUDIO_LEVEL_METER, SourceType.PARTICLE_OVERLAY,
                                           SourceType.VIDEO,
                                       } and source.visible}
-            z_bands = CanvasSnapshot.z_bands(self.canvas.scene_model, dynamic_visualizer_ids)
+            broad_z_bands = CanvasSnapshot.z_bands(
+                self.canvas.scene_model, dynamic_visualizer_ids,
+            )
+            preserve_direct_stream = (
+                len(broad_z_bands) == 1 and not visualizers and not video_clips
+            )
+            z_bands = (
+                broad_z_bands
+                if preserve_direct_stream else
+                CanvasSnapshot.split_mixed_capture_bands(
+                    self.canvas.scene_model,
+                    dynamic_visualizer_ids,
+                    broad_z_bands,
+                    playlist_duration,
+                )
+            )
+            LOGGER.info(
+                "Canvas capture bands: broad=%d split=%d direct_preserved=%s",
+                len(broad_z_bands), len(z_bands), preserve_direct_stream,
+            )
             direct_final_stream = (
                 len(z_bands) == 1 and not visualizers and not video_clips
             )
@@ -2487,12 +2944,27 @@ class MainWindow(QMainWindow):
                     for index, _band in enumerate(z_bands[1:])
                 )
 
-            timeline_samples = ExportTimelinePlanner.build(
-                active_tracks, sources, animation_fps,
+            stream_timeline_samples = ExportTimelinePlanner.build_by_z_band(
+                active_tracks,
+                sources,
+                dynamic_visualizer_ids,
+                z_bands,
+                animation_fps,
             )
-            total_preparation_captures = max(
-                1, len(timeline_samples) * len(z_bands),
+            if (
+                not stream_timeline_samples
+                or any(not samples for samples in stream_timeline_samples.values())
+            ):
+                raise RenderError(
+                    "The export timeline does not contain any renderable duration."
+                )
+            independent_capture_count = sum(
+                len(samples) for samples in stream_timeline_samples.values()
             )
+            total_preparation_captures = max(1, independent_capture_count)
+            invariant_stream_keys: set[str] = set()
+            sparse_invariant_stream_keys: set[str] = set()
+            state_key_skipped_captures = 0
 
             def pump_preparation_ui(track_number: int, stream_key: str) -> None:
                 """Keep the preparation dialog responsive during visual staging."""
@@ -2505,15 +2977,6 @@ class MainWindow(QMainWindow):
                 ) or self._export_dialog is None:
                     return
                 track_position = f"{track_number}/{len(active_tracks)}"
-                if stream_key == "base":
-                    stream_index = 1
-                    korean_stream = "기본 화면"
-                    english_stream = "Base Canvas"
-                else:
-                    layer_index = int(stream_key.removeprefix("layer:")) + 1
-                    stream_index = layer_index + 1
-                    korean_stream = f"Z 레이어 {layer_index}"
-                    english_stream = f"Z layer {layer_index}"
                 preparation_fraction = (
                     completed_captures / total_preparation_captures
                 )
@@ -2521,28 +2984,33 @@ class MainWindow(QMainWindow):
                     preparation_fraction * EXPORT_PREPARATION_PROGRESS_WEIGHT
                 )
                 preparation_percent = round(preparation_fraction * 100)
-                stream_position = f"{stream_index}/{len(z_bands)}"
                 if use_streamed_visuals:
                     korean_detail = (
-                        f"{korean_stream} {stream_position} · {track_position}번 곡 · "
-                        f"화면 준비 {preparation_percent}% · "
-                        f"캡처 {completed_captures:,}/{total_preparation_captures:,}"
+                        f"장면을 영상으로 준비하는 중 · {track_position}번 곡 · "
+                        f"전체 {preparation_percent}% · 장면 "
+                        f"{completed_captures:,}/{total_preparation_captures:,}"
                     )
                     english_detail = (
-                        f"{english_stream} {stream_position} · track {track_position} · "
-                        f"visual preparation {preparation_percent}% · "
-                        f"capture {completed_captures:,}/{total_preparation_captures:,}"
+                        f"Preparing scenes for the video · track {track_position} · "
+                        f"{preparation_percent}% overall · "
+                        f"{completed_captures:,}/{total_preparation_captures:,} scenes"
                     )
                 else:
+                    pending_png_frames = (
+                        self._export_png_pipeline.pending_frames
+                        if self._export_png_pipeline is not None else 0
+                    )
                     korean_detail = (
-                        f"{korean_stream} {stream_position} · {track_position}번 곡 · "
-                        f"화면 준비 {preparation_percent}% · 임시 프레임 "
-                        f"{self._export_frame_index:,}개"
+                        f"장면을 영상으로 준비하는 중 · {track_position}번 곡 · "
+                        f"전체 {preparation_percent}% · 장면 "
+                        f"{completed_captures:,}/{total_preparation_captures:,} · "
+                        f"저장 대기 {pending_png_frames}개"
                     )
                     english_detail = (
-                        f"{english_stream} {stream_position} · track {track_position} · "
-                        f"visual preparation {preparation_percent}% · "
-                        f"{self._export_frame_index:,} temporary file(s)"
+                        f"Preparing scenes for the video · track {track_position} · "
+                        f"{preparation_percent}% overall · "
+                        f"{completed_captures:,}/{total_preparation_captures:,} scenes · "
+                        f"{pending_png_frames} waiting to save"
                     )
                 self._export_dialog.update_progress(
                     "Preparing visual frames",
@@ -2563,8 +3031,8 @@ class MainWindow(QMainWindow):
             def stage_streamed_frame(
                 image: QImage, duration_seconds: float, stream_key: str,
             ) -> RenderFrame:
-                encoder = active_stream_encoder
-                if encoder is None or stream_key != active_stream_key:
+                encoder = active_stream_encoders.get(stream_key)
+                if encoder is None:
                     raise RenderError("Invalid streamed Canvas frame configuration.")
                 self._export_capture_count += 1
                 try:
@@ -2580,6 +3048,25 @@ class MainWindow(QMainWindow):
                     max(0.001, duration_seconds),
                 )
 
+            sparse_stream_frames: dict[str, list[RenderFrame]] = {}
+
+            def stage_export_stream_frame(
+                image: QImage, duration_seconds: float, stream_key: str,
+            ) -> RenderFrame:
+                # Do not expand one invariant Canvas image into every CFR frame
+                # through a CPU-only intermediate encoder. Preserve the single
+                # lossless image and duration; the final graph applies output FPS.
+                if (
+                    use_streamed_visuals
+                    and stream_key in sparse_invariant_stream_keys
+                ):
+                    rendered = self._stage_export_frame(
+                        image, duration_seconds, stream_key,
+                    )
+                    sparse_stream_frames.setdefault(stream_key, []).append(rendered)
+                    return rendered
+                return stage_streamed_frame(image, duration_seconds, stream_key)
+
             capturer = ExportCanvasCapturer(
                 self.canvas.scene_model,
                 active_tracks,
@@ -2587,7 +3074,7 @@ class MainWindow(QMainWindow):
                 dynamic_visualizer_ids,
                 z_bands,
                 (
-                    stage_streamed_frame
+                    stage_export_stream_frame
                     if use_streamed_visuals
                     else self._stage_export_frame
                 ),
@@ -2595,107 +3082,334 @@ class MainWindow(QMainWindow):
                 pump_preparation_ui,
                 retain_static_frames=not use_streamed_visuals,
             )
+            invariant_stream_keys = capturer.invariant_stream_keys
+            sparse_invariant_stream_keys = (
+                set(invariant_stream_keys) if not direct_final_stream else set()
+            )
+            if use_streamed_visuals and sparse_invariant_stream_keys:
+                self._start_export_png_pipeline(
+                    preparation_cancel,
+                    queue_capacity=self._export_png_queue_capacity(render_settings),
+                )
+                stream_specs = [
+                    spec for spec in stream_specs
+                    if spec[0] not in sparse_invariant_stream_keys
+                ]
+            stream_keys = [
+                "base", *(f"layer:{index}" for index in range(len(z_bands) - 1)),
+            ]
+            for stream_key in stream_keys:
+                if stream_key in invariant_stream_keys:
+                    continue
+                original_samples = stream_timeline_samples[stream_key]
+                coalesced_samples = capturer.coalesce_samples(
+                    original_samples, stream_key,
+                )
+                state_key_skipped_captures += (
+                    len(original_samples) - len(coalesced_samples)
+                )
+                stream_timeline_samples[stream_key] = coalesced_samples
+            total_preparation_captures = max(
+                1,
+                sum(
+                    1 if stream_key in invariant_stream_keys
+                    else len(stream_timeline_samples[stream_key])
+                    for stream_key in stream_keys
+                ),
+            )
+            LOGGER.info(
+                "Canvas independent timelines: band_captures=%d "
+                "optimized_captures=%d state_key_skipped=%d per_stream=%s",
+                independent_capture_count,
+                total_preparation_captures,
+                state_key_skipped_captures,
+                ",".join(
+                    f"{key}:{len(stream_timeline_samples[key])}"
+                    for key in stream_keys
+                ),
+            )
             if use_streamed_visuals:
                 duration_tolerance = 1e-6 * max(1.0, playlist_duration)
                 streamed_results = {}
-                for stream_key, output_path, preserve_alpha, queue_capacity in stream_specs:
-                    encoder = StaticVideoStreamEncoder(
-                        renderer.executable,
-                        output_path,
-                        render_settings.fps,
-                        queue_capacity=queue_capacity,
-                        preserve_alpha=preserve_alpha,
-                        producer_cancel_event=preparation_cancel,
-                        producer_wait_callback=QApplication.processEvents,
-                        direct_profile=(
-                            DirectVideoEncodingProfile(
-                                render_settings.output_width,
-                                render_settings.output_height,
-                                render_settings.video_codec,
-                                tuple(renderer._video_encoding_arguments(render_settings)),
-                            )
-                            if direct_final_stream and stream_key == "base"
-                            else None
-                        ),
+                stream_wait_last_update: dict[str, float] = {}
+
+                def pump_stream_wait_ui(stream_key: str) -> None:
+                    """Repaint and expose FFmpeg drain progress for long still runs."""
+                    QApplication.processEvents()
+                    if preparation_cancel.is_set() or self._export_dialog is None:
+                        return
+                    now = monotonic()
+                    if now - stream_wait_last_update.get(stream_key, 0.0) < 0.15:
+                        return
+                    stream_wait_last_update[stream_key] = now
+                    encoder = active_stream_encoders.get(stream_key)
+                    if encoder is None:
+                        return
+                    expected_frames = max(
+                        1, round(playlist_duration * render_settings.fps),
                     )
-                    active_stream_encoder = encoder
-                    active_stream_key = stream_key
+                    encoded_frames = min(
+                        int(getattr(encoder, "frame_count", 0)), expected_frames,
+                    )
+                    encoded_percent = round(encoded_frames / expected_frames * 100)
+                    capture_fraction = min(
+                        1.0,
+                        self._export_capture_count / total_preparation_captures,
+                    )
+                    overall_fraction = (
+                        capture_fraction * EXPORT_PREPARATION_PROGRESS_WEIGHT
+                    )
+                    detail = (
+                        "화면 구성 요소를 영상으로 변환하는 중 · "
+                        f"{encoded_frames:,}/{expected_frames:,} 프레임 · "
+                        f"{encoded_percent}%"
+                        if korean else
+                        "Converting visual elements into video · "
+                        f"{encoded_frames:,}/{expected_frames:,} frames · "
+                        f"{encoded_percent}%"
+                    )
+                    self._export_dialog.update_progress(
+                        "Preparing visual frames", overall_fraction, detail,
+                    )
+                    self.activity_progress.update(
+                        "export", overall_fraction, detail,
+                    )
+
+                # Each Canvas capture still touches the Qt scene only on the UI
+                # thread. Independent base/Z-band encoders consume those images
+                # concurrently, bounded to two processes to avoid 4K RAM spikes.
+                layer_parallelism = self._export_layer_worker_count(
+                    render_settings, len(stream_specs),
+                )
+                LOGGER.info(
+                    "Canvas layer preparation: streams=%d parallel_encoders=%d "
+                    "sparse_invariant=%d",
+                    len(stream_specs), layer_parallelism,
+                    len(sparse_invariant_stream_keys),
+                )
+                for stream_key in stream_keys:
+                    if stream_key in sparse_invariant_stream_keys:
+                        capturer.capture_invariant_stream(
+                            stream_timeline_samples[stream_key][0],
+                            stream_key,
+                            playlist_duration,
+                        )
+                for batch_start in range(0, len(stream_specs), layer_parallelism):
+                    batch = stream_specs[
+                        batch_start:batch_start + layer_parallelism
+                    ]
                     try:
-                        for sample in timeline_samples:
+                        for (
+                            stream_key, output_path, preserve_alpha, queue_capacity,
+                        ) in batch:
+                            active_stream_encoders[stream_key] = StaticVideoStreamEncoder(
+                                renderer.executable,
+                                output_path,
+                                render_settings.fps,
+                                queue_capacity=queue_capacity,
+                                preserve_alpha=preserve_alpha,
+                                producer_cancel_event=preparation_cancel,
+                                producer_wait_callback=(
+                                    lambda key=stream_key: pump_stream_wait_ui(key)
+                                ),
+                                direct_profile=(
+                                    DirectVideoEncodingProfile(
+                                        render_settings.output_width,
+                                        render_settings.output_height,
+                                        render_settings.video_codec,
+                                        tuple(renderer._video_encoding_arguments(render_settings)),
+                                    )
+                                    if direct_final_stream and stream_key == "base"
+                                    else None
+                                ),
+                            )
+                        for stream_key, _path, _alpha, _capacity in batch:
+                            if stream_key in invariant_stream_keys:
+                                capturer.capture_invariant_stream(
+                                    stream_timeline_samples[stream_key][0],
+                                    stream_key,
+                                    playlist_duration,
+                                )
+                        pending_samples: list[
+                            tuple[float, int, int, str, ExportFrameSample]
+                        ] = []
+                        batch_keys = [item[0] for item in batch]
+                        for stream_order, stream_key in enumerate(batch_keys):
+                            if stream_key in invariant_stream_keys:
+                                continue
+                            samples = stream_timeline_samples[stream_key]
+                            first = samples[0]
+                            heappush(pending_samples, (
+                                first.timeline_seconds,
+                                stream_order,
+                                0,
+                                stream_key,
+                                first,
+                            ))
+                        while pending_samples:
+                            (
+                                _timeline_seconds,
+                                stream_order,
+                                sample_index,
+                                stream_key,
+                                sample,
+                            ) = heappop(pending_samples)
                             capturer.capture_stream(sample, stream_key)
-                        streamed = encoder.finish()
+                            next_index = sample_index + 1
+                            samples = stream_timeline_samples[stream_key]
+                            if next_index < len(samples):
+                                next_sample = samples[next_index]
+                                heappush(pending_samples, (
+                                    next_sample.timeline_seconds,
+                                    stream_order,
+                                    next_index,
+                                    stream_key,
+                                    next_sample,
+                                ))
+                        for stream_key, _path, _alpha, _capacity in batch:
+                            encoder = active_stream_encoders[stream_key]
+                            LOGGER.info(
+                                "Draining Canvas stream: key=%s written_frames=%d "
+                                "expected_frames=%d",
+                                stream_key,
+                                int(getattr(encoder, "frame_count", 0)),
+                                max(1, round(playlist_duration * render_settings.fps)),
+                            )
+                            streamed = encoder.finish()
+                            active_stream_encoders.pop(stream_key, None)
+                            if abs(
+                                streamed.duration_seconds - playlist_duration
+                            ) > duration_tolerance:
+                                difference = (
+                                    streamed.duration_seconds - playlist_duration
+                                )
+                                raise RenderError(
+                                    "A streamed Canvas timeline does not match the playlist "
+                                    f"duration (expected {playlist_duration:.6f}s, got "
+                                    f"{streamed.duration_seconds:.6f}s, difference "
+                                    f"{difference:+.6f}s)."
+                                )
+                            expected_alpha = stream_key != "base"
+                            if streamed.has_alpha_stream != expected_alpha:
+                                raise RenderError(
+                                    "A streamed Canvas layer has an invalid alpha configuration."
+                                )
+                            streamed_results[stream_key] = streamed
                     except StaticVideoStreamError as error:
-                        encoder.cancel()
+                        cancel_static_streams()
                         if preparation_cancel.is_set():
                             raise RenderCancelledError(
                                 "Export preparation was cancelled."
                             ) from error
                         raise RenderError(str(error)) from error
                     except Exception:
-                        encoder.cancel()
+                        cancel_static_streams()
                         raise
-                    finally:
-                        active_stream_encoder = None
-                        active_stream_key = None
-                    if abs(streamed.duration_seconds - playlist_duration) > duration_tolerance:
-                        difference = streamed.duration_seconds - playlist_duration
-                        raise RenderError(
-                            "A streamed Canvas timeline does not match the playlist "
-                            f"duration (expected {playlist_duration:.6f}s, got "
-                            f"{streamed.duration_seconds:.6f}s, difference "
-                            f"{difference:+.6f}s)."
-                        )
-                    expected_alpha = stream_key != "base"
-                    if streamed.has_alpha_stream != expected_alpha:
-                        raise RenderError(
-                            "A streamed Canvas layer has an invalid alpha configuration."
-                        )
-                    streamed_results[stream_key] = streamed
-                streamed = streamed_results["base"]
-                frames: list[RenderFrame] | PreparedVideoInput = PreparedVideoInput(
-                    streamed.path,
-                    playlist_duration,
-                    streamed.width,
-                    streamed.height,
-                    streamed.fps,
-                    ready_for_mux=direct_final_stream,
-                    encoded_codec=(
-                        render_settings.video_codec if direct_final_stream else ""
-                    ),
-                )
-                try:
-                    stream_bytes = streamed.path.stat().st_size
-                except OSError:
-                    stream_bytes = -1
-                LOGGER.info(
-                    "Streamed Canvas summary: frames=%d duration=%.3fs "
-                    "resolution=%dx%d queue_peak=%d file_bytes=%d",
-                    streamed.frame_count,
-                    streamed.duration_seconds,
-                    streamed.width,
-                    streamed.height,
-                    streamed.peak_buffered_frames,
-                    stream_bytes,
-                )
-                static_layers = [
-                    PreparedStaticOverlayLayer(
-                        z_min if z_min is not None else -10_000.0,
-                        PreparedVideoInput(
-                            streamed_layer.path,
-                            playlist_duration,
-                            streamed_layer.width,
-                            streamed_layer.height,
-                            streamed_layer.fps,
+                if sparse_invariant_stream_keys:
+                    self._finish_export_png_pipeline()
+                if "base" in sparse_invariant_stream_keys:
+                    frames = sparse_stream_frames["base"]
+                    LOGGER.info(
+                        "Sparse invariant Canvas base: images=%d duration=%.3fs",
+                        len(frames), playlist_duration,
+                    )
+                else:
+                    streamed = streamed_results["base"]
+                    frames = PreparedVideoInput(
+                        streamed.path,
+                        playlist_duration,
+                        streamed.width,
+                        streamed.height,
+                        streamed.fps,
+                        ready_for_mux=direct_final_stream,
+                        encoded_codec=(
+                            render_settings.video_codec if direct_final_stream else ""
                         ),
                     )
+                    try:
+                        stream_bytes = streamed.path.stat().st_size
+                    except OSError:
+                        stream_bytes = -1
+                    LOGGER.info(
+                        "Streamed Canvas summary: frames=%d duration=%.3fs "
+                        "resolution=%dx%d queue_peak=%d file_bytes=%d",
+                        streamed.frame_count,
+                        streamed.duration_seconds,
+                        streamed.width,
+                        streamed.height,
+                        streamed.peak_buffered_frames,
+                        stream_bytes,
+                    )
+                static_layers = [
+                    (
+                        StaticOverlayLayer(
+                            z_min if z_min is not None else -10_000.0,
+                            sparse_stream_frames[f"layer:{index}"],
+                            *capturer.stream_origin(f"layer:{index}"),
+                        )
+                        if f"layer:{index}" in sparse_invariant_stream_keys else
+                        PreparedStaticOverlayLayer(
+                            z_min if z_min is not None else -10_000.0,
+                            PreparedVideoInput(
+                                streamed_results[f"layer:{index}"].path,
+                                playlist_duration,
+                                streamed_results[f"layer:{index}"].width,
+                                streamed_results[f"layer:{index}"].height,
+                                streamed_results[f"layer:{index}"].fps,
+                            ),
+                            *capturer.stream_origin(f"layer:{index}"),
+                        )
+                    )
                     for index, (z_min, _z_max) in enumerate(z_bands[1:])
-                    for streamed_layer in [streamed_results[f"layer:{index}"]]
                 ]
             else:
-                frames = [
-                    capturer.capture(sample) for sample in timeline_samples
-                ]
+                self._start_export_png_pipeline(
+                    preparation_cancel,
+                    queue_capacity=self._export_png_queue_capacity(render_settings),
+                )
+                captured_stream_frames: dict[str, list[RenderFrame]] = {}
+                for stream_key in stream_keys:
+                    samples = stream_timeline_samples[stream_key]
+                    if stream_key in invariant_stream_keys:
+                        captured_stream_frames[stream_key] = [
+                            capturer.capture_invariant_stream(
+                                samples[0], stream_key, playlist_duration,
+                            )
+                        ]
+                    else:
+                        captured_stream_frames[stream_key] = [
+                            capturer.capture_stream(sample, stream_key)
+                            for sample in samples
+                        ]
+                frames = captured_stream_frames["base"]
+                if self._export_dialog is not None:
+                    self._export_dialog.update_progress(
+                        "Preparing visual frames",
+                        EXPORT_PREPARATION_PROGRESS_WEIGHT,
+                        "남은 화면 프레임을 저장하고 있습니다."
+                        if korean else
+                        "Finishing the remaining background frame writes.",
+                    )
+                self._finish_export_png_pipeline()
                 static_layers = capturer.static_layers()
+            avoided_scene_pixels = max(
+                0,
+                capturer.full_frame_source_pixels
+                - capturer.scene_render_source_pixels,
+            )
+            avoided_percent = (
+                avoided_scene_pixels
+                / max(1, capturer.full_frame_source_pixels)
+                * 100.0
+            )
+            LOGGER.info(
+                "Canvas partial-region rendering: captures=%d "
+                "scene_pixels=%d full_frame_pixels=%d avoided=%.1f%%",
+                capturer.partial_render_capture_count,
+                capturer.scene_render_source_pixels,
+                capturer.full_frame_source_pixels,
+                avoided_percent,
+            )
             if preparation_cancel.is_set():
                 raise RenderCancelledError("Export preparation was cancelled.")
         except RenderCancelledError:
@@ -2707,6 +3421,10 @@ class MainWindow(QMainWindow):
                 self._export_dialog = None
             self._unlock_main_form_after_export()
             self.activity_progress.finish("export")
+            self._notify_export_problem(
+                "Export preparation was cancelled.", cancelled=True,
+            )
+            self._active_export_output_path = None
             self.statusBar().showMessage(
                 "내보내기를 취소했습니다." if korean else "Export cancelled.", 5000
             )
@@ -2721,6 +3439,8 @@ class MainWindow(QMainWindow):
                 self._export_dialog = None
             self._unlock_main_form_after_export()
             self.activity_progress.finish("export")
+            self._notify_export_problem(str(error))
+            self._active_export_output_path = None
             QMessageBox.critical(
                 self, "내보내기 오류" if korean else "Export error", str(error)
             )
@@ -2736,6 +3456,8 @@ class MainWindow(QMainWindow):
             self._unlock_main_form_after_export()
             self.activity_progress.finish("export")
             report_unexpected_error("Preparing export frames", error)
+            self._notify_export_problem(str(error))
+            self._active_export_output_path = None
             QMessageBox.critical(
                 self, "내보내기 오류" if korean else "Export error", str(error)
             )
@@ -2762,20 +3484,8 @@ class MainWindow(QMainWindow):
         )
         export_dialog = self._export_dialog
         self._render_worker.progress.connect(
-            lambda stage, fraction, message: export_dialog.update_progress(
-                stage,
-                EXPORT_PREPARATION_PROGRESS_WEIGHT
-                + (1.0 - EXPORT_PREPARATION_PROGRESS_WEIGHT) * fraction,
-                message,
-            )
-        )
-
-        self._render_worker.progress.connect(
-            lambda stage, fraction, message: self.activity_progress.update(
-                "export",
-                EXPORT_PREPARATION_PROGRESS_WEIGHT
-                + (1.0 - EXPORT_PREPARATION_PROGRESS_WEIGHT) * fraction,
-                f"{stage} · {message}",
+            lambda stage, fraction, message: self._handle_export_render_progress(
+                export_dialog, stage, fraction, message,
             )
         )
         self._render_worker.succeeded.connect(self._export_succeeded)
@@ -2934,6 +3644,10 @@ class MainWindow(QMainWindow):
             "inspector_visible": not self.inspector_stack.isHidden(),
             "inspector_page": self.inspector_stack.currentWidget(),
             "workspace_sizes": tuple(self.workspace_splitter.sizes()),
+            "main_splitter_sizes": tuple(self.main_splitter.sizes()),
+            "sidebar_open_width": max(
+                180, self.left_workspace.width(), self._sidebar_open_width,
+            ),
         }
         for widget in widgets:
             widget.setEnabled(False)
@@ -2996,8 +3710,12 @@ class MainWindow(QMainWindow):
         self.menuBar().setEnabled(bool(state["menu"]))
         self.toolbar.setEnabled(bool(state["toolbar"]))
         self.toolbar.setVisible(bool(state["toolbar_visible"]))
+        self._sidebar_open_width = max(
+            180, int(state.get("sidebar_open_width", self._sidebar_open_width)),
+        )
         self._set_sidebar_visible(
             bool(state["left_visible"]), persist=False, sync_action=False,
+            restore_sizes=list(state.get("main_splitter_sizes", ())),
         )
         inspector_page = state.get("inspector_page", self.inspector)
         if isinstance(inspector_page, QWidget):
@@ -3151,7 +3869,36 @@ class MainWindow(QMainWindow):
         # order when two reactive sources overlap.
         return sorted(overlays, key=lambda overlay: (overlay.z_index, overlay.y, overlay.x))
 
-    def _export_video_clips(self, tracks: list, playlist_duration: float) -> list[VideoClipOverlay]:
+    @staticmethod
+    def _export_layer_worker_count(
+        render_settings: RenderSettings, stream_count: int,
+    ) -> int:
+        """Bound Canvas-layer encoders according to the selected work mode."""
+        if stream_count <= 0:
+            return 0
+        mode = render_settings.work_mode
+        if mode == WORK_MODE_STABLE:
+            return 1
+        if mode == WORK_MODE_MAX_SPEED:
+            pixels = render_settings.output_width * render_settings.output_height
+            cap = 2 if pixels >= 3840 * 2160 else 3
+            return min(stream_count, cap)
+        return min(stream_count, 2)
+
+    @staticmethod
+    def _export_png_queue_capacity(render_settings: RenderSettings) -> int:
+        """Bound staged 4K QImages according to the selected work mode."""
+        if render_settings.work_mode == WORK_MODE_STABLE:
+            return 1
+        if render_settings.work_mode == WORK_MODE_MAX_SPEED:
+            pixels = render_settings.output_width * render_settings.output_height
+            return 2 if pixels >= 3840 * 2160 else 5
+        return 3
+
+    def _export_video_clips(
+        self, tracks: list, playlist_duration: float,
+        work_mode: str = WORK_MODE_AUTO,
+    ) -> list[VideoClipOverlay]:
         """Expand visible video elements into deterministic FFmpeg clip intervals."""
         clips: list[VideoClipOverlay] = []
         duration_cache: dict[str, float] = {}
@@ -3213,7 +3960,12 @@ class MainWindow(QMainWindow):
         # FFprobe startup dominates projects with several per-track videos.
         # Probe independent files concurrently, while keeping the small global
         # cap used by the rest of the export pipeline.
-        worker_count = min(3, len(media_paths))
+        if work_mode == WORK_MODE_STABLE:
+            worker_count = min(1, len(media_paths))
+        elif work_mode == WORK_MODE_MAX_SPEED:
+            worker_count = min(5, len(media_paths))
+        else:
+            worker_count = min(3, len(media_paths))
         if worker_count:
             with ThreadPoolExecutor(
                 max_workers=worker_count, thread_name_prefix="export-video-probe",
@@ -3529,7 +4281,7 @@ class MainWindow(QMainWindow):
         self._update_install_authorized = True
         self.close()
 
-    def _show_settings(self) -> None:
+    def _show_settings(self, focus_ffmpeg: bool = False) -> None:
         """Show and persist the Phase 4A application settings."""
         dialog = SettingsDialog(
             self.settings_service.current,
@@ -3540,7 +4292,23 @@ class MainWindow(QMainWindow):
             active_preview_backend=self._preview_backend_for_session,
         )
         self._settings_dialog = dialog
-        dialog.download_requested.connect(lambda: self._start_ffmpeg_install(dialog))
+        dialog.catalog_requested.connect(
+            lambda force=False: self._load_ffmpeg_catalog(dialog, force=force)
+        )
+        dialog.download_requested.connect(
+            lambda: self._start_ffmpeg_install(dialog)
+        )
+        dialog.update_requested.connect(
+            lambda: self._start_ffmpeg_update(dialog)
+        )
+        dialog.reinstall_requested.connect(
+            lambda: self._start_ffmpeg_reinstall(dialog)
+        )
+        dialog.delete_requested.connect(
+            lambda: self._delete_managed_ffmpeg(dialog)
+        )
+        if focus_ffmpeg:
+            dialog.open_ffmpeg_page()
         if dialog.exec() != dialog.DialogCode.Accepted:
             self._settings_dialog = None
             return
@@ -3564,39 +4332,95 @@ class MainWindow(QMainWindow):
             7000 if renderer_changed else 4000,
         )
 
-    def _start_ffmpeg_install(self, settings_dialog: SettingsDialog) -> None:
-        """Request consent, then download the checksum-verified managed FFmpeg build."""
+    def _load_ffmpeg_catalog(
+        self, settings_dialog: SettingsDialog, *, force: bool = False,
+    ) -> None:
+        """Fetch selectable versions and managed state away from the UI thread."""
+        if force:
+            self._ffmpeg_catalog_cache = None
+        if self._ffmpeg_catalog_cache is not None:
+            releases, current = self._ffmpeg_catalog_cache
+            settings_dialog.set_managed_installation(current)
+            settings_dialog.set_ffmpeg_catalog(releases)
+            return
+        if self._ffmpeg_catalog_worker and self._ffmpeg_catalog_worker.isRunning():
+            return
+        worker = FFmpegCatalogWorker(ManagedFFmpegInstaller())
+        self._ffmpeg_catalog_worker = worker
+        worker.succeeded.connect(self._ffmpeg_catalog_succeeded)
+        worker.failed.connect(self._ffmpeg_catalog_failed)
+        worker.finished.connect(self._release_ffmpeg_catalog_worker)
+        worker.start()
+
+    def _ffmpeg_catalog_succeeded(
+        self, payload: object,
+    ) -> None:
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            return
+        releases, current = payload
+        if not isinstance(releases, list) or not all(
+            isinstance(release, FFmpegReleaseOption) for release in releases
+        ):
+            return
+        installation = (
+            current if isinstance(current, ManagedFFmpegInstallation) else None
+        )
+        self._ffmpeg_catalog_cache = (releases, installation)
+        if self._settings_dialog is not None:
+            self._settings_dialog.set_managed_installation(installation)
+            self._settings_dialog.set_ffmpeg_catalog(releases)
+
+    def _ffmpeg_catalog_failed(
+        self, message: str, current: object,
+    ) -> None:
+        if self._settings_dialog is not None:
+            self._settings_dialog.set_managed_installation(
+                current if isinstance(current, ManagedFFmpegInstallation) else None
+            )
+            self._settings_dialog.set_ffmpeg_catalog_error(message)
+
+    def _release_ffmpeg_catalog_worker(self) -> None:
+        if self._ffmpeg_catalog_worker:
+            self._ffmpeg_catalog_worker.deleteLater()
+        self._ffmpeg_catalog_worker = None
+        if self._close_after_ffmpeg_catalog_cancel:
+            self._close_after_ffmpeg_catalog_cancel = False
+            QTimer.singleShot(0, self.close)
+
+    def _start_ffmpeg_install(
+        self, settings_dialog: SettingsDialog,
+        release: FFmpegReleaseOption | None = None, *, force: bool = False,
+    ) -> None:
+        """Install the selected checksum-verified build after required consent."""
         if self._ffmpeg_install_worker and self._ffmpeg_install_worker.isRunning():
             return
+        release = release or settings_dialog.selected_ffmpeg_release
         korean = self.translator.language is Language.KOREAN
-        message = (
-            "BtbN GitHub 배포본의 Windows 64비트 GPL FFmpeg을 다운로드합니다.\n"
-            "SHA-256 체크섬 및 ffmpeg -version 검증 후에만 앱 전용 폴더에 설치됩니다.\n\n"
-            "계속할까요?"
-            if korean else
-            "This downloads BtbN's GPL FFmpeg build for Windows 64-bit.\n"
-            "It is installed in the app-only folder only after SHA-256 and ffmpeg -version verification.\n\n"
-            "Continue?"
-        )
-        response = QMessageBox.question(
-            settings_dialog,
-            "FFmpeg 다운로드" if korean else "Download FFmpeg",
-            message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        # PySide can return an equivalent enum wrapper instead of the exact
-        # same Python object, so a value comparison is required here.
-        if response != QMessageBox.StandardButton.Yes:
+        if release is None:
+            QMessageBox.warning(
+                settings_dialog,
+                "FFmpeg 버전 확인" if korean else "Select an FFmpeg version",
+                "설치할 버전을 먼저 선택해 주세요."
+                if korean else "Select a version to install first.",
+            )
+            return
+        if not release.recommended and not self._confirm_ffmpeg_release(
+            settings_dialog, release,
+            "재설치" if korean and force else "설치" if korean else
+            "Reinstall" if force else "Install",
+        ):
             return
         settings_dialog.set_ffmpeg_installing(True)
         progress = FFmpegInstallProgressDialog(korean, settings_dialog)
         progress.set_busy(
             "Preparing download",
-            "GitHub에서 최신 FFmpeg 배포 정보를 확인하는 중입니다."
-            if korean else "Checking the latest FFmpeg release on GitHub.",
+            f"GitHub에서 FFmpeg {release.series} ({release.build}) 설치를 준비하는 중입니다."
+            if korean else
+            f"Preparing FFmpeg {release.series} ({release.build}) from GitHub.",
         )
-        worker = FFmpegInstallWorker(ManagedFFmpegInstaller())
+        worker = FFmpegInstallWorker(
+            ManagedFFmpegInstaller(), release, force=force,
+        )
         self._ffmpeg_install_dialog = progress
         self._ffmpeg_install_worker = worker
         worker.progress.connect(progress.update_progress)
@@ -3620,10 +4444,124 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         self.activity_progress.begin(
             "ffmpeg_install",
-            "FFmpeg 다운로드 및 설치" if korean else "Downloading and installing FFmpeg",
-            detail=("배포 정보 확인 중" if korean else "Checking release information"),
+            (f"FFmpeg {release.series} 재설치" if force else
+             f"FFmpeg {release.series} 다운로드 및 설치") if korean else
+            (f"Reinstalling FFmpeg {release.series}" if force else
+             f"Downloading and installing FFmpeg {release.series}"),
+            detail=(f"선택한 빌드: {release.build}" if korean else
+                    f"Selected build: {release.build}"),
         )
         worker.start()
+
+    def _confirm_ffmpeg_release(
+        self, parent: QWidget, release: FFmpegReleaseOption, operation: str,
+    ) -> bool:
+        """Warn for non-recommended or destructive version operations with notes."""
+        korean = self.translator.language is Language.KOREAN
+        box = QMessageBox(parent)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(
+            "비권장 FFmpeg 버전" if korean else "Non-recommended FFmpeg version"
+        )
+        box.setText(
+            f"FFmpeg {release.series}은(는) 이 Playlist Canvas 패치의 권장 버전이 아닙니다."
+            if korean else
+            f"FFmpeg {release.series} is not recommended for this Playlist Canvas patch."
+        )
+        excerpt = release.notes[:1000]
+        box.setInformativeText(
+            f"호환성이나 내보내기 결과가 달라질 수 있습니다.\n\n패치/배포 내용:\n{excerpt}\n\n{operation}을 계속할까요?"
+            if korean else
+            f"Compatibility or export output may differ.\n\nPatch/release notes:\n{excerpt}\n\nContinue with {operation.lower()}?"
+        )
+        box.setDetailedText(release.notes)
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _start_ffmpeg_update(self, settings_dialog: SettingsDialog) -> None:
+        release = settings_dialog.recommended_ffmpeg_release
+        if release is not None:
+            # Updating always targets the app-tested version, so it intentionally
+            # skips the non-recommended warning.
+            self._start_ffmpeg_install(settings_dialog, release)
+
+    def _start_ffmpeg_reinstall(self, settings_dialog: SettingsDialog) -> None:
+        current = settings_dialog.managed_installation
+        release = next((
+            entry for entry in settings_dialog.ffmpeg_releases
+            if current is not None and entry.series == current.series
+        ), None)
+        if current is None or release is None:
+            return
+        korean = self.translator.language is Language.KOREAN
+        response = QMessageBox.question(
+            settings_dialog,
+            "FFmpeg 재설치" if korean else "Reinstall FFmpeg",
+            (f"현재 관리 중인 FFmpeg {current.series or current.version}을(를) "
+             "다시 다운로드하고 검증한 뒤 교체할까요?")
+            if korean else
+            (f"Download, verify, and replace the managed FFmpeg "
+             f"{current.series or current.version}?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response == QMessageBox.StandardButton.Yes:
+            self._start_ffmpeg_install(settings_dialog, release, force=True)
+
+    def _delete_managed_ffmpeg(self, settings_dialog: SettingsDialog) -> None:
+        current = settings_dialog.managed_installation
+        if current is None:
+            return
+        korean = self.translator.language is Language.KOREAN
+        response = QMessageBox.warning(
+            settings_dialog,
+            "FFmpeg 삭제" if korean else "Delete FFmpeg",
+            "앱에서 관리하는 현재 FFmpeg를 삭제합니다. 삭제 후에는 다시 설치하기 전까지 영상을 내보낼 수 없습니다. 계속할까요?"
+            if korean else
+            "Delete the currently app-managed FFmpeg. Video export will be unavailable until it is installed again. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            removed = ManagedFFmpegInstaller().uninstall_current()
+        except FFmpegInstallError as error:
+            QMessageBox.critical(
+                settings_dialog,
+                "FFmpeg 삭제 오류" if korean else "Could not delete FFmpeg",
+                str(error),
+            )
+            return
+        if removed is None:
+            return
+        configured_text = self.settings_service.current.ffmpeg_path.strip()
+        removed_was_active = False
+        if configured_text:
+            try:
+                removed_was_active = (
+                    Path(configured_text).resolve(strict=False)
+                    == removed.executable.resolve(strict=False)
+                )
+            except OSError:
+                removed_was_active = Path(configured_text) == removed.executable
+        if removed_was_active:
+            settings_dialog.ffmpeg_edit.clear()
+            self.settings_service.save(replace(
+                self.settings_service.current, ffmpeg_path=""
+            ))
+        settings_dialog.set_managed_installation(None)
+        self._ffmpeg_catalog_cache = None
+        QMessageBox.information(
+            settings_dialog,
+            "FFmpeg 삭제 완료" if korean else "FFmpeg deleted",
+            "관리 설치본을 삭제했습니다. 필요하면 권장 버전을 다시 설치할 수 있습니다."
+            if korean else
+            "The managed installation was deleted. You can reinstall the recommended version when needed.",
+        )
 
     def _ffmpeg_install_succeeded(self, installation: ManagedFFmpegInstallation) -> None:
         """Persist the verified managed executable as the active FFmpeg path."""
@@ -3635,7 +4573,12 @@ class MainWindow(QMainWindow):
         ))
         if self._settings_dialog:
             self._settings_dialog.ffmpeg_edit.setText(str(installation.executable))
+            self._settings_dialog.set_managed_installation(installation)
             self._settings_dialog.set_ffmpeg_installing(False)
+            releases = list(self._settings_dialog.ffmpeg_releases)
+            self._ffmpeg_catalog_cache = (
+                (releases, installation) if releases else None
+            )
         korean = self.translator.language is Language.KOREAN
         message = (
             f"FFmpeg {installation.version} 설치 및 검증 완료"
@@ -3677,8 +4620,6 @@ class MainWindow(QMainWindow):
     def _ffmpeg_install_finished(self) -> None:
         """Release completed installer resources after queued outcome signals are handled."""
         self.activity_progress.finish("ffmpeg_install")
-        if self._settings_dialog and self._settings_dialog.isVisible():
-            self._settings_dialog.ffmpeg_download_button.setEnabled(True)
         QTimer.singleShot(0, self._release_ffmpeg_install_worker)
 
     def _release_ffmpeg_install_worker(self) -> None:
@@ -3753,7 +4694,9 @@ class MainWindow(QMainWindow):
         korean = self.translator.language is Language.KOREAN
         message = f"영상 생성 완료: {result.output_path}" if korean else f"Video created: {result.output_path}"
         self.statusBar().showMessage(message, 7000)
-        QMessageBox.information(self, "내보내기 완료" if korean else "Export complete", message)
+        self._active_export_output_path = result.output_path
+        self._pending_export_result = result
+        self._notify_export_stage("Complete")
 
     def _export_failed(self, message: str) -> None:
         """Show FFmpeg failure details reported by the worker thread."""
@@ -3762,6 +4705,8 @@ class MainWindow(QMainWindow):
             self._export_dialog.complete(False)
             self._export_dialog = None
         korean = self.translator.language is Language.KOREAN
+        self._pending_export_result = None
+        self._notify_export_problem(message)
         QMessageBox.critical(self, "내보내기 오류" if korean else "Export error", message)
         self.statusBar().showMessage(message, 7000)
 
@@ -3771,15 +4716,37 @@ class MainWindow(QMainWindow):
             self._export_dialog.complete(False)
             self._export_dialog = None
         message = "내보내기를 취소했습니다." if self.translator.language is Language.KOREAN else "Export cancelled."
+        self._pending_export_result = None
+        self._notify_export_problem(message, cancelled=True)
         self.statusBar().showMessage(message, 5000)
 
     def _export_finished(self) -> None:
         """Release the UI export lock after any worker completion path."""
+        completed_result = self._pending_export_result
+        self._pending_export_result = None
         self.activity_progress.finish("export")
         self._unlock_main_form_after_export()
         self._clear_export_frame_staging()
         QTimer.singleShot(0, self._release_render_worker)
         self._resume_close_after_export_cancel()
+        if completed_result is not None:
+            QTimer.singleShot(
+                0,
+                lambda result=completed_result: self._show_export_complete_dialog(
+                    result,
+                ),
+            )
+        else:
+            self._active_export_output_path = None
+
+    def _show_export_complete_dialog(self, result: RenderResult) -> None:
+        """Offer useful next actions only after the editor has been unlocked."""
+        dialog = ExportCompleteDialog(result.output_path, self.translator, self)
+        dialog.exec()
+        export_again = dialog.export_again_requested
+        self._active_export_output_path = None
+        if export_again:
+            QTimer.singleShot(0, self._export_video)
 
     def _resume_close_after_export_cancel(self) -> None:
         """Continue a window-close request only after export resources stop."""
@@ -4040,6 +5007,7 @@ class MainWindow(QMainWindow):
 
     def _set_sidebar_visible(
         self, visible: bool, *, persist: bool = True, sync_action: bool = True,
+        restore_sizes: list[int] | None = None,
     ) -> None:
         """Collapse or reveal the editing sidebar with a short width animation."""
         if persist:
@@ -4062,7 +5030,18 @@ class MainWindow(QMainWindow):
                 if self._panel_transition_serial["left"] != serial:
                     return
                 self.left_workspace.setMaximumWidth(16_777_215)
-                self.left_workspace.setMinimumWidth(180)
+                if restore_sizes is not None and len(restore_sizes) == 3:
+                    # During Preview the right-hand page can temporarily change
+                    # splitter constraints. Pin the remembered left edge for one
+                    # layout pass so Qt does not proportionally shrink it while
+                    # the normal inspector page is being restored.
+                    restored_left = max(180, int(restore_sizes[0]))
+                    self.left_workspace.setMinimumWidth(restored_left)
+                    self.main_splitter.setSizes(restore_sizes)
+                    self.left_workspace.setMinimumWidth(180)
+                    self._sidebar_open_width = restored_left
+                else:
+                    self.left_workspace.setMinimumWidth(180)
                 self._sidebar_transition = False
                 self.main_splitter.lock_edge_sizes()
                 if sync_action:
@@ -4074,8 +5053,9 @@ class MainWindow(QMainWindow):
                 on_finished=finish_expand,
             )
             return
-        self._sidebar_open_width = max(180, self.left_workspace.width())
-        start_width = self._sidebar_open_width
+        start_width = max(0, self.left_workspace.width())
+        if persist or sync_action:
+            self._sidebar_open_width = max(180, start_width)
         self.left_workspace.setMinimumWidth(0)
         self.left_workspace.setMaximumWidth(start_width)
 
@@ -5288,6 +6268,17 @@ class MainWindow(QMainWindow):
         if self._ffmpeg_install_worker and self._ffmpeg_install_worker.isRunning():
             self._ffmpeg_install_worker.cancel()
             message = "FFmpeg 다운로드를 취소하는 중입니다." if self.translator.language is Language.KOREAN else "Cancelling FFmpeg download..."
+            self.statusBar().showMessage(message, 5000)
+            event.ignore()
+            return
+        if self._ffmpeg_catalog_worker and self._ffmpeg_catalog_worker.isRunning():
+            self._ffmpeg_catalog_worker.cancel()
+            self._close_after_ffmpeg_catalog_cancel = True
+            message = (
+                "FFmpeg 버전 확인을 중단한 뒤 종료합니다."
+                if self.translator.language is Language.KOREAN else
+                "Closing after the FFmpeg version check stops..."
+            )
             self.statusBar().showMessage(message, 5000)
             event.ignore()
             return

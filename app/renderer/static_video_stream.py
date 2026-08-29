@@ -97,27 +97,23 @@ class StaticVideoStreamEncoder:
         self._finished = False
 
     def submit(self, image: QImage, duration_seconds: float) -> None:
-        """Queue one visual state; duration is converted to cumulative CFR frames."""
+        """Queue one state; pixel conversion and FFmpeg writes run off-thread."""
         if self._finished:
             raise StaticVideoStreamError("Static video stream has already finished.")
         if image.isNull():
             raise StaticVideoStreamError("Cannot stream an empty Canvas frame.")
         if duration_seconds <= 0.0:
             raise StaticVideoStreamError("Canvas frame duration must be greater than zero.")
-        prepared = image.convertToFormat(
-            QImage.Format.Format_RGBA8888
-            if self.preserve_alpha else QImage.Format.Format_RGB32
-        )
         if self._pipeline is None:
-            self._start(prepared.width(), prepared.height())
-        if prepared.width() != self._width or prepared.height() != self._height:
+            self._start(image.width(), image.height())
+        if image.width() != self._width or image.height() != self._height:
             raise StaticVideoStreamError(
                 "All streamed Canvas frames must use one resolution."
             )
         assert self._pipeline is not None
         try:
             self._pipeline.submit(
-                _QueuedCanvasFrame(QImage(prepared), duration_seconds),
+                _QueuedCanvasFrame(QImage(image), duration_seconds),
                 producer_cancel_event=self.producer_cancel_event,
                 producer_wait_callback=self.producer_wait_callback,
             )
@@ -128,6 +124,11 @@ class StaticVideoStreamEncoder:
             self.cancel()
             raise StaticVideoStreamError(str(error)) from error
 
+    @property
+    def frame_count(self) -> int:
+        """Return the number of CFR frames already written to FFmpeg."""
+        return self._frame_count
+
     def finish(self) -> StaticVideoStreamResult:
         """Drain the queue, close FFmpeg stdin, and validate the intermediate file."""
         if self._finished:
@@ -137,10 +138,29 @@ class StaticVideoStreamEncoder:
             raise StaticVideoStreamError("No Canvas frames were submitted for streaming.")
         pipeline = self._pipeline
         try:
-            pipeline.finish()
+            # A single coalesced Canvas state can represent several minutes of
+            # output.  The consumer still has to repeat and encode those CFR
+            # frames, so an unconditional join here made the Qt main thread look
+            # frozen until the entire stream drained.  Reuse the producer wait
+            # callback while draining and while FFmpeg flushes its encoder.
+            pipeline.finish(wait_callback=self.producer_wait_callback)
             assert self._process.stdin is not None
             self._process.stdin.close()
-            return_code = self._process.wait()
+            while True:
+                if (
+                    self.producer_cancel_event is not None
+                    and self.producer_cancel_event.is_set()
+                ):
+                    self.cancel()
+                    raise StaticVideoStreamError(
+                        "Static Canvas streaming was cancelled."
+                    )
+                try:
+                    return_code = self._process.wait(timeout=0.05)
+                    break
+                except subprocess.TimeoutExpired:
+                    if self.producer_wait_callback is not None:
+                        self.producer_wait_callback()
             self._join_stderr_thread()
             self._close_process_pipes()
             if return_code != 0:
@@ -264,13 +284,22 @@ class StaticVideoStreamEncoder:
         process = self._process
         if process is None or process.stdin is None:
             raise StaticVideoStreamError("Lossless Canvas encoder is not running.")
+        # Format conversion can be a significant per-frame cost at 4K. Keep it
+        # in the bounded consumer so the Canvas thread can capture the next state.
+        prepared = frame.image.convertToFormat(
+            QImage.Format.Format_RGBA8888
+            if self.preserve_alpha else QImage.Format.Format_RGB32
+        )
         self._duration_seconds += frame.duration_seconds
         target_count = max(1, floor(self._duration_seconds * self.fps + 0.5))
         repeat_count = max(0, target_count - self._frame_count)
-        pixels = frame.image.constBits()
+        pixels = prepared.constBits()
         for _index in range(repeat_count):
             process.stdin.write(pixels)
-        self._frame_count += repeat_count
+            # Publish progress incrementally.  A coalesced still can represent
+            # tens of thousands of output frames, and updating only after the
+            # whole run made the preparation UI appear permanently stalled.
+            self._frame_count += 1
 
     def _read_stderr(self) -> None:
         process = self._process

@@ -7,7 +7,10 @@ from pathlib import Path
 from time import monotonic
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QThreadPool, QUrl, Signal
-from PySide6.QtGui import QColor, QBrush, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor, QBrush, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter,
+    QPainterPath, QPen, QPixmap,
+)
 from PySide6.QtWidgets import (
     QGraphicsBlurEffect,
     QGraphicsItem,
@@ -118,6 +121,7 @@ class SourceItem(QGraphicsObject):
         self._subtitle_transition_progress = 1.0
         self._subtitle_anchor_line = -1
         self._subtitle_anchor_line_count = 1
+        self._subtitle_previous_line_count = 0
         self.setFlags(
             QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemIsSelectable
@@ -864,6 +868,22 @@ class SourceItem(QGraphicsObject):
         self._lyric_ghost_cache[key] = pixmap
         return pixmap
 
+    def _lyric_line_height(self) -> float:
+        """Return a font-metric row that preserves Latin/Korean descenders."""
+        regular = QFontMetricsF(self._lyric_fonts["regular"])
+        current = QFontMetricsF(self._lyric_fonts["current"])
+        glyph_height = max(regular.height(), current.height())
+        # Qt's aligned text rectangle can otherwise land the last antialiased
+        # row directly on its lower edge. Keep a small guard proportional to
+        # the real font descent for g, j, p, q and y, plus configured spacing.
+        descender_guard = max(2.0, max(regular.descent(), current.descent()) * 0.35)
+        return max(
+            16.0,
+            glyph_height
+            + max(0.0, float(self.source.subtitle_line_spacing))
+            + descender_guard,
+        )
+
     def _apply_image_filters(self, pixmap: QPixmap) -> QPixmap:
         """Apply non-destructive brightness, contrast, and soft blur to an image source."""
         if pixmap.isNull():
@@ -1333,8 +1353,7 @@ class SourceItem(QGraphicsObject):
             has_current_line = 0 <= current_line < len(lines)
             if not has_current_line:
                 current_line = -1
-            base_size = max(10, min(96, int(self.source.font_size)))
-            line_height = max(16.0, base_size + self.source.subtitle_line_spacing)
+            line_height = self._lyric_line_height()
             anchor_line = self._subtitle_anchor_line
             anchor_count = max(1, self._subtitle_anchor_line_count)
             if 0 <= anchor_line < len(lines):
@@ -1378,8 +1397,35 @@ class SourceItem(QGraphicsObject):
                     }.get(transition_style, 1.0)
                     line_color.setAlphaF(start_alpha + (1.0 - start_alpha) * transition)
                 elif not is_current:
-                    line_color.setAlphaF(max(0.05, min(0.9, self.source.subtitle_previous_opacity)))
-                    blur_radius = max(0, round(self.source.subtitle_previous_blur)) if is_previous else 0
+                    previous_alpha = max(
+                        0.05, min(0.9, self.source.subtitle_previous_opacity),
+                    )
+                    immediate_previous = (
+                        is_previous
+                        and self._subtitle_previous_line_count > 0
+                        and current_line - self._subtitle_previous_line_count
+                        <= index < current_line
+                    )
+                    # Do not demote the former current cue in a single frame.
+                    # Cross-fade its emphasis while the complete lyric stack
+                    # glides toward the new anchored position.
+                    line_alpha = previous_alpha
+                    if immediate_previous and transition < 1.0:
+                        line_alpha = (
+                            previous_alpha
+                            + (1.0 - previous_alpha) * (1.0 - transition)
+                        )
+                    line_color.setAlphaF(line_alpha)
+                    blur_radius = (
+                        max(
+                            0,
+                            round(
+                                self.source.subtitle_previous_blur
+                                * (transition if immediate_previous else 1.0)
+                            ),
+                        )
+                        if is_previous else 0
+                    )
                     if blur_radius:
                         ghost = QColor(line_color)
                         ghost.setAlpha(max(10, line_color.alpha() // 3))

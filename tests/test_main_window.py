@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import (QEvent, QItemSelectionModel, QMimeData, QPoint, QPointF, QRect, QRectF,
-                            QSettings, QSize, Qt, QTimer)
+                            QSettings, QSize, Qt, QTimer, QUrl)
 from PySide6.QtGui import (QColor, QCloseEvent, QDropEvent, QImage, QMouseEvent, QPalette,
                            QPixmap, QWheelEvent)
 from PySide6.QtTest import QTest
@@ -45,6 +45,7 @@ from app.dialogs.track_details_dialog import TrackDetailsDialog
 from app.dialogs.text_editor_dialog import TextEditorDialog
 from app.dialogs.video_source_dialog import VideoSourceDialog
 from app.dialogs.export_progress_dialog import ExportEtaEstimator, ExportProgressDialog
+from app.dialogs.export_complete_dialog import ExportCompleteDialog
 from app.dialogs.export_preview_dialog import (
     GPU_TEXTURE_SURFACE_AVAILABLE, ExportPreviewDialog, OverlayFrameWorker,
     VideoDurationProbeWorker,
@@ -54,7 +55,10 @@ from app.widgets.source_template_button import (
     SourceTemplateButton,
     read_source_template_mime,
 )
-from app.ffmpeg.managed_installer import ManagedFFmpegInstallation
+from app.ffmpeg.managed_installer import (
+    FFmpegReleaseOption,
+    ManagedFFmpegInstallation,
+)
 from app.services.autosave_service import RecoverySnapshot
 from app.services.project_service import ProjectError, ProjectService
 from app.services.app_settings_service import AppSettings
@@ -74,12 +78,24 @@ from app.preview.album_art import (
 from app.video.preview_proxy import PreviewProxyCache
 from app.widgets.token_text_editor import TokenLineEdit, TokenPlainTextEdit
 from app.renderer.ffmpeg_renderer import (
+    EncoderUnavailableError,
     FFmpegRenderer,
+    FFmpegNotFoundError,
     PreparedStaticOverlayLayer,
     PreparedVideoInput,
     RenderError,
     RenderFrame,
+    RenderSettings,
     VisualizerOverlay,
+    WORK_MODE_AUTO,
+    WORK_MODE_MAX_SPEED,
+    WORK_MODE_STABLE,
+)
+from app.services.video_encoder_service import (
+    AUTO_VIDEO_ENCODER,
+    CPU_H264_ENCODER,
+    NVIDIA_H264_ENCODER,
+    VideoEncoderAdvisor,
 )
 from app.renderer.static_video_stream import StaticVideoStreamResult
 from app.presets.preset_service import PresetService
@@ -932,6 +948,120 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertLessEqual(source.x + source.width, artboard.right())
         self.assertLessEqual(source.y + source.height, artboard.bottom())
 
+    def test_project_content_image_and_video_urls_create_matching_canvas_elements(self) -> None:
+        with TemporaryDirectory(prefix="playlist-content-canvas-drop-") as directory:
+            image_path = Path(directory) / "cover.png"
+            image = QImage(96, 54, QImage.Format.Format_ARGB32)
+            image.fill(QColor("#336699"))
+            self.assertTrue(image.save(str(image_path)))
+            video_path = Path(directory) / "clip.mp4"
+            video_path.write_bytes(b"project content video placeholder")
+            self.window.project_content_service.add_paths([image_path, video_path])
+            before = len(self.window.store.sources())
+
+            for path in (image_path, video_path):
+                mime = QMimeData()
+                mime.setUrls([QUrl.fromLocalFile(str(path))])
+                event = QDropEvent(
+                    QPointF(240.0, 180.0), Qt.DropAction.CopyAction, mime,
+                    Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                )
+                self.window.canvas.dropEvent(event)
+                self.assertTrue(event.isAccepted())
+            added = self.window.store.sources()[before:]
+            self.assertEqual(
+                [source.source_type for source in added],
+                [SourceType.IMAGE, SourceType.VIDEO],
+            )
+            self.assertEqual(Path(added[0].content_path).name, "cover.png")
+            self.assertEqual(Path(added[1].content_path).name, "clip.mp4")
+            for source in added:
+                self.window.store.remove(source.id)
+            self.application.processEvents()
+            QTest.qWait(50)
+
+    def test_project_content_items_publish_native_local_file_drag_payloads(self) -> None:
+        with TemporaryDirectory(prefix="playlist-content-mime-") as directory:
+            image_path = Path(directory) / "drag-cover.png"
+            image = QImage(20, 20, QImage.Format.Format_ARGB32)
+            image.fill(QColor("#123456"))
+            self.assertTrue(image.save(str(image_path)))
+            self.window.project_content_service.add_paths([image_path])
+            self.application.processEvents()
+
+            content_list = self.window.content_library_panel.list
+            item = next(
+                content_list.item(index) for index in range(content_list.count())
+                if Path(str(content_list.item(index).data(
+                    Qt.ItemDataRole.UserRole + 1
+                ))).name == image_path.name
+            )
+            content_list.setCurrentItem(item)
+            mime = content_list.mimeData([item])
+
+            self.assertTrue(item.flags() & Qt.ItemFlag.ItemIsDragEnabled)
+            self.assertEqual(
+                content_list.supportedDropActions(), Qt.DropAction.CopyAction,
+            )
+            self.assertTrue(mime.hasUrls())
+            self.assertEqual(
+                Path(mime.urls()[0].toLocalFile()), image_path.resolve(),
+            )
+
+    def test_lyrics_drop_targets_the_playlist_row_under_pointer(self) -> None:
+        track = PlaylistTrack("song.wav", "Drop target", duration_seconds=10.0)
+        self.window.playlist_service.add_tracks([track])
+        self.application.processEvents()
+        item = self.window.playlist_editor.list_widget.item(0)
+        self.assertIsNotNone(item)
+        with TemporaryDirectory(prefix="playlist-lyrics-drop-") as directory:
+            lyrics_path = Path(directory) / "incoming.lrc"
+            lyrics_path.write_text("[00:01.00]Incoming lyric\n", encoding="utf-8")
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(str(lyrics_path))])
+            event = QDropEvent(
+                QPointF(self.window.playlist_editor.list_widget.visualItemRect(item).center()),
+                Qt.DropAction.CopyAction, mime, Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            self.window.playlist_editor.list_widget.dropEvent(event)
+
+        self.assertTrue(event.isAccepted())
+        updated = self.window.playlist_service.tracks[0]
+        self.assertEqual(updated.lyrics[0]["text"], "Incoming lyric")
+        self.assertTrue(updated.lyrics_path.endswith("incoming.lrc"))
+
+    def test_existing_lyrics_are_replaced_only_after_comparison_choice(self) -> None:
+        track = PlaylistTrack(
+            "song.wav", "Existing lyrics", duration_seconds=10.0,
+            lyrics_path="old.lrc",
+            lyrics=[{"start": 0.0, "end": 4.0, "text": "Old lyric"}],
+        )
+        self.window.playlist_service.add_tracks([track])
+        with TemporaryDirectory(prefix="playlist-lyrics-compare-") as directory:
+            lyrics_path = Path(directory) / "replacement.lrc"
+            lyrics_path.write_text("[00:02.00]New lyric\n", encoding="utf-8")
+            with patch("app.ui.main_window.LyricsCompareDialog") as dialog_type:
+                dialog_type.return_value.exec.return_value = QDialog.DialogCode.Rejected
+                dialog_type.return_value.replace_requested = False
+                self.assertFalse(
+                    self.window._attach_lyrics_to_track(lyrics_path, track.id)
+                )
+                self.assertEqual(
+                    self.window.playlist_service.tracks[0].lyrics[0]["text"],
+                    "Old lyric",
+                )
+
+                dialog_type.return_value.exec.return_value = QDialog.DialogCode.Accepted
+                dialog_type.return_value.replace_requested = True
+                self.assertTrue(
+                    self.window._attach_lyrics_to_track(lyrics_path, track.id)
+                )
+
+        self.assertEqual(
+            self.window.playlist_service.tracks[0].lyrics[0]["text"], "New lyric",
+        )
+
     def test_inspector_properties_show_localized_detailed_hover_help(self) -> None:
         original_language = self.window.translator.language
         inspector = self.window.inspector
@@ -1719,6 +1849,12 @@ class MainWindowSafetyTests(unittest.TestCase):
             "preview.wav", "Preview", duration_seconds=10.0,
         )
         self.window.playlist_service.add_tracks([track])
+        total_width = sum(self.window.main_splitter.sizes())
+        self.window.main_splitter.setSizes([
+            355, max(300, total_width - 735), 380,
+        ])
+        self.application.processEvents()
+        expected_sidebar_width = self.window.main_splitter.sizes()[0]
 
         class StubPreview(QDialog):
             def __init__(self, *_args, **kwargs) -> None:
@@ -1798,6 +1934,10 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertTrue(self.window.toolbar.isEnabled())
         self.assertTrue(self.window.menuBar().isEnabled())
         self.assertTrue(self.window.acceptDrops())
+        self.assertAlmostEqual(
+            self.window.main_splitter.sizes()[0], expected_sidebar_width, delta=3,
+        )
+        self.assertEqual(self.window._sidebar_open_width, expected_sidebar_width)
 
     def test_empty_preview_tab_returns_to_the_last_editing_tab(self) -> None:
         self.window.bottom_tabs.setCurrentIndex(1)
@@ -2972,7 +3112,9 @@ class MainWindowSafetyTests(unittest.TestCase):
 
     def test_export_resolutions_follow_project_canvas_ratio(self) -> None:
         dialog = ExportSettingsDialog(
-            AppSettings(preview_backend="cpu"), 1, 60.0, self.window.translator,
+            AppSettings(
+                preview_backend="cpu", work_mode=WORK_MODE_MAX_SPEED,
+            ), 1, 60.0, self.window.translator,
             Path("portrait-export.mp4"), canvas_size=(800, 1900),
         )
         try:
@@ -2986,6 +3128,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             )
             self.assertIn("프로젝트 비율", dialog.resolution_combo.currentText())
             self.assertEqual(dialog.app_settings.preview_backend, "cpu")
+            self.assertEqual(dialog.app_settings.work_mode, WORK_MODE_MAX_SPEED)
         finally:
             dialog.close()
 
@@ -3001,7 +3144,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertIn("예상 작업량", dialog.workload_label.text())
             self.assertIn("권장", dialog.quality_description_label.text())
             settings = dialog.app_settings
-            self.assertEqual(settings.video_codec, "libx264")
+            self.assertEqual(settings.video_codec, AUTO_VIDEO_ENCODER)
             self.assertEqual(
                 (settings.crf, settings.preset, settings.audio_bitrate),
                 ExportSettingsDialog.QUALITY_PROFILES["balanced"],
@@ -4275,6 +4418,11 @@ class MainWindowSafetyTests(unittest.TestCase):
         dialog.download_requested.connect(
             lambda: self.window._start_ffmpeg_install(dialog)
         )
+        dialog.set_ffmpeg_catalog([FFmpegReleaseOption(
+            "9.0", "n9.0-test", "latest", "Latest", "2026-08-25",
+            "ffmpeg-test-win64-gpl-9.0.zip", "https://example.test/ffmpeg.zip",
+            "https://example.test/checksums.sha256", "Test release notes", True,
+        )])
         with (
             patch.object(
                 QMessageBox, "question",
@@ -4307,6 +4455,184 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.window._ffmpeg_install_worker = None
         self.window._settings_dialog = None
         dialog.deleteLater()
+
+    def test_export_work_mode_setting_and_layer_limits(self) -> None:
+        dialog = SettingsDialog(
+            AppSettings(work_mode=WORK_MODE_MAX_SPEED),
+            self.window.translator.language,
+            self.window.theme_service.preference,
+            self.window.translator,
+            self.window,
+        )
+        try:
+            self.assertEqual(
+                dialog.work_mode_combo.currentData(), WORK_MODE_MAX_SPEED,
+            )
+            self.assertEqual(dialog.app_settings.work_mode, WORK_MODE_MAX_SPEED)
+            self.assertIn("CPU", dialog.work_mode_hint.text())
+        finally:
+            dialog.close()
+
+        self.assertEqual(MainWindow._export_layer_worker_count(
+            RenderSettings(work_mode=WORK_MODE_STABLE), 5,
+        ), 1)
+        self.assertEqual(MainWindow._export_layer_worker_count(
+            RenderSettings(work_mode=WORK_MODE_AUTO), 5,
+        ), 2)
+        self.assertEqual(MainWindow._export_layer_worker_count(
+            RenderSettings(work_mode=WORK_MODE_MAX_SPEED), 5,
+        ), 3)
+        self.assertEqual(MainWindow._export_layer_worker_count(
+            RenderSettings(
+                work_mode=WORK_MODE_MAX_SPEED,
+                output_width=3840, output_height=2160,
+            ), 5,
+        ), 2)
+        self.assertEqual(MainWindow._export_png_queue_capacity(
+            RenderSettings(work_mode=WORK_MODE_STABLE),
+        ), 1)
+        self.assertEqual(MainWindow._export_png_queue_capacity(
+            RenderSettings(work_mode=WORK_MODE_AUTO),
+        ), 3)
+        self.assertEqual(MainWindow._export_png_queue_capacity(
+            RenderSettings(work_mode=WORK_MODE_MAX_SPEED),
+        ), 5)
+        self.assertEqual(MainWindow._export_png_queue_capacity(RenderSettings(
+            work_mode=WORK_MODE_MAX_SPEED,
+            output_width=3840, output_height=2160,
+        )), 2)
+
+    def test_export_without_ffmpeg_opens_the_ffmpeg_setup_page(self) -> None:
+        with (
+            patch(
+                "app.ui.main_window.FFmpegRenderer",
+                side_effect=FFmpegNotFoundError("missing"),
+            ),
+            patch.object(QMessageBox, "warning") as warning,
+            patch.object(self.window, "_show_settings") as show_settings,
+        ):
+            self.window._export_video()
+
+        warning.assert_called_once()
+        self.assertIn("FFmpeg", warning.call_args.args[2])
+        self.assertIn("설치 화면", warning.call_args.args[2])
+        show_settings.assert_called_once_with(focus_ffmpeg=True)
+
+    def test_settings_can_open_directly_on_ffmpeg_installation(self) -> None:
+        dialog = SettingsDialog(
+            self.window.settings_service.current,
+            self.window.translator.language,
+            self.window.theme_service.preference,
+            self.window.translator,
+            self.window,
+        )
+        try:
+            dialog.tabs.setCurrentWidget(dialog.general_page)
+            dialog.show()
+            dialog.open_ffmpeg_page()
+            dialog.set_ffmpeg_catalog([FFmpegReleaseOption(
+                "9.0", "n9.0-test", "latest", "Latest", "2026-08-25",
+                "ffmpeg-test-win64-gpl-9.0.zip", "https://example.test/ffmpeg.zip",
+                "https://example.test/checksums.sha256", "Test notes", True,
+            )])
+            self.application.processEvents()
+            self.assertIs(dialog.tabs.currentWidget(), dialog.ffmpeg_page)
+            self.assertTrue(dialog.ffmpeg_download_button.hasFocus())
+        finally:
+            dialog.close()
+
+    def test_ffmpeg_version_manager_labels_recommended_and_updates_button_states(self) -> None:
+        dialog = SettingsDialog(
+            self.window.settings_service.current,
+            self.window.translator.language,
+            self.window.theme_service.preference,
+            self.window.translator,
+            self.window,
+        )
+        recommended = FFmpegReleaseOption(
+            "9.0", "n9-current", "latest", "Latest", "2026-08-25",
+            "ffmpeg-9.zip", "https://test/9", "https://test/sums",
+            "Recommended patch notes", True,
+        )
+        older = FFmpegReleaseOption(
+            "8.1", "n8-old", "latest", "Latest", "2026-08-25",
+            "ffmpeg-8.zip", "https://test/8", "https://test/sums",
+            "Older patch notes", False,
+        )
+        try:
+            dialog.set_ffmpeg_catalog([recommended, older])
+            self.assertEqual(dialog.ffmpeg_about_title.text(), "FFmpeg이란?")
+            self.assertIn("동영상 내보내기에는 필요", dialog.ffmpeg_about_description.text())
+            self.assertIn("권장 버전", dialog.ffmpeg_about_description.text())
+            self.assertEqual(dialog.ffmpeg_version_combo.itemText(0), "9.0(권장)")
+            self.assertEqual(dialog.ffmpeg_version_combo.itemText(1), "8.1")
+            self.assertIn("빌드 n9-current", dialog.ffmpeg_release_info.text())
+            self.assertIn("Recommended patch notes", dialog.ffmpeg_release_info.toolTip())
+            current = ManagedFFmpegInstallation(
+                Path("managed/ffmpeg.exe"), "n9-current", "9.0", "latest"
+            )
+            dialog.set_managed_installation(current)
+            self.assertFalse(dialog.ffmpeg_update_button.isEnabled())
+            self.assertTrue(dialog.ffmpeg_reinstall_button.isEnabled())
+            self.assertTrue(dialog.ffmpeg_delete_button.isEnabled())
+
+            dialog.set_managed_installation(ManagedFFmpegInstallation(
+                Path("managed/old.exe"), "n8-old", "8.1", "latest"
+            ))
+            self.assertTrue(dialog.ffmpeg_update_button.isEnabled())
+            dialog.set_ffmpeg_installing(True)
+            self.assertFalse(dialog.ffmpeg_download_button.isEnabled())
+            self.assertFalse(dialog.ffmpeg_update_button.isEnabled())
+            self.assertFalse(dialog.ffmpeg_reinstall_button.isEnabled())
+            self.assertFalse(dialog.ffmpeg_delete_button.isEnabled())
+        finally:
+            dialog.close()
+
+    def test_recommended_ffmpeg_skips_warning_but_other_versions_require_it(self) -> None:
+        dialog = SettingsDialog(
+            self.window.settings_service.current,
+            self.window.translator.language,
+            self.window.theme_service.preference,
+            self.window.translator,
+            self.window,
+        )
+        recommended = FFmpegReleaseOption(
+            "9.0", "n9-current", "latest", "Latest", "2026-08-25",
+            "ffmpeg-9.zip", "https://test/9", "https://test/sums",
+            "Recommended release notes", True,
+        )
+        unsupported = FFmpegReleaseOption(
+            "8.1", "n8-old", "latest", "Latest", "2026-08-25",
+            "ffmpeg-8.zip", "https://test/8", "https://test/sums",
+            "Compatibility warning and release notes", False,
+        )
+        self.window._settings_dialog = dialog
+        try:
+            dialog.set_ffmpeg_catalog([recommended, unsupported])
+            with (
+                patch.object(self.window, "_confirm_ffmpeg_release") as confirm,
+                patch("app.ui.main_window.FFmpegInstallWorker.start") as start,
+            ):
+                self.window._start_ffmpeg_install(dialog, recommended)
+                confirm.assert_not_called()
+                start.assert_called_once()
+            if self.window._ffmpeg_install_dialog:
+                self.window._ffmpeg_install_dialog.complete(False)
+            self.window._ffmpeg_install_dialog = None
+            self.window._ffmpeg_install_worker = None
+            dialog.set_ffmpeg_installing(False)
+
+            with patch.object(
+                self.window, "_confirm_ffmpeg_release", return_value=False,
+            ) as confirm:
+                self.window._start_ffmpeg_install(dialog, unsupported)
+            confirm.assert_called_once_with(dialog, unsupported, "설치")
+            self.assertIsNone(self.window._ffmpeg_install_worker)
+        finally:
+            self.window._settings_dialog = None
+            self.window._ffmpeg_install_dialog = None
+            self.window._ffmpeg_install_worker = None
+            dialog.close()
 
     def test_ffmpeg_install_success_is_applied_and_persisted_automatically(self) -> None:
         original = self.window.settings_service.current
@@ -4363,6 +4689,123 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertIn("미리보기 화면에서 변경할 수 없습니다", dialog.preview_backend_hint.text())
         finally:
             dialog.close()
+
+    def test_export_notification_settings_are_individually_configurable(self) -> None:
+        configured = replace(
+            self.window.settings_service.current,
+            export_notifications_enabled=True,
+            export_notification_mode="always",
+            export_notify_visuals=False,
+            export_notify_audio=True,
+            export_notify_effects=False,
+            export_notify_encode=True,
+            export_notify_complete=True,
+            export_notify_failures=False,
+        )
+        dialog = SettingsDialog(
+            configured,
+            self.window.translator.language,
+            self.window.theme_service.preference,
+            self.window.translator,
+            self.window,
+        )
+        try:
+            self.assertTrue(dialog.export_notifications_check.isChecked())
+            self.assertEqual(
+                dialog.export_notification_mode_combo.currentData(), "always",
+            )
+            result = dialog.app_settings
+            self.assertFalse(result.export_notify_visuals)
+            self.assertTrue(result.export_notify_audio)
+            self.assertFalse(result.export_notify_effects)
+            self.assertTrue(result.export_notify_encode)
+            self.assertTrue(result.export_notify_complete)
+            self.assertFalse(result.export_notify_failures)
+
+            dialog.export_notifications_check.setChecked(False)
+            self.assertFalse(dialog.export_notification_mode_combo.isEnabled())
+            self.assertTrue(all(
+                not checkbox.isEnabled()
+                for checkbox in dialog._export_notification_stage_checks()
+            ))
+            # Turning off the master must retain the user's per-stage choices.
+            self.assertFalse(dialog.app_settings.export_notify_visuals)
+            self.assertTrue(dialog.app_settings.export_notify_audio)
+        finally:
+            dialog.close()
+
+    def test_export_notification_policy_respects_focus_and_each_stage(self) -> None:
+        configured = AppSettings(
+            export_notifications_enabled=True,
+            export_notification_mode="unfocused",
+            export_notify_visuals=False,
+            export_notify_audio=True,
+            export_notify_complete=True,
+        )
+        allowed = self.window._export_notification_allowed
+
+        self.assertFalse(allowed(configured, "visuals", False))
+        self.assertFalse(allowed(configured, "audio", True))
+        self.assertTrue(allowed(configured, "audio", False))
+        self.assertTrue(allowed(
+            replace(configured, export_notification_mode="always"),
+            "complete",
+            True,
+        ))
+
+    def test_export_stage_notifications_are_emitted_only_once_per_phase(self) -> None:
+        original = self.window.settings_service.current
+        configured = replace(
+            original,
+            export_notifications_enabled=True,
+            export_notification_mode="always",
+        )
+        self.window.settings_service._current = configured
+        self.window._export_notified_steps.clear()
+        self.window._active_export_output_path = Path("C:/Videos/result.mp4")
+        try:
+            with patch.object(
+                self.window, "_show_system_notification", return_value=True,
+            ) as notify:
+                self.window._notify_export_stage("Preparing audio")
+                self.window._notify_export_stage("Combining audio")
+                self.window._notify_export_stage("Encoding video")
+                self.window._notify_export_stage("Finalizing export")
+                self.window._notify_export_stage("Complete")
+
+            self.assertEqual(notify.call_count, 3)
+            self.assertEqual(
+                self.window._export_notified_steps,
+                {"audio", "encode", "complete"},
+            )
+        finally:
+            self.window.settings_service._current = original
+            self.window._active_export_output_path = None
+
+    def test_export_complete_dialog_provides_post_export_tools(self) -> None:
+        with TemporaryDirectory(prefix="pvs-export-complete-") as raw_directory:
+            output = Path(raw_directory) / "playlist.mp4"
+            output.write_bytes(b"completed video")
+            dialog = ExportCompleteDialog(
+                output, self.window.translator, self.window,
+            )
+            try:
+                with patch(
+                    "app.dialogs.export_complete_dialog.QDesktopServices.openUrl",
+                    return_value=True,
+                ) as open_url:
+                    dialog._play_video()
+                    dialog._open_folder()
+                self.assertEqual(open_url.call_count, 2)
+
+                dialog._copy_path()
+                self.assertEqual(QApplication.clipboard().text(), str(output.resolve()))
+                self.assertIn("복사", dialog.copy_path_button.text())
+
+                dialog._request_export_again()
+                self.assertTrue(dialog.export_again_requested)
+            finally:
+                dialog.close()
 
     def test_pending_preview_renderer_setting_shows_restart_notice(self) -> None:
         active_backend = self.window._preview_backend_for_session
@@ -4647,10 +5090,11 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(completed_metrics.reused_frame_count, 1)
         self.assertGreaterEqual(completed_metrics.elapsed_seconds, 0.0)
 
-    def test_export_animation_sampling_is_capped_without_changing_output_setting(self) -> None:
-        self.assertEqual(self.window._export_animation_sample_rate(60), 30)
+    def test_export_animation_sampling_matches_output_frame_rate(self) -> None:
+        self.assertEqual(self.window._export_animation_sample_rate(60), 60)
+        self.assertEqual(self.window._export_animation_sample_rate(50), 50)
         self.assertEqual(self.window._export_animation_sample_rate(24), 24)
-        self.assertEqual(self.window._export_animation_sample_rate(10), 15)
+        self.assertEqual(self.window._export_animation_sample_rate(10), 10)
 
     def test_export_preflight_failure_stops_before_canvas_capture(self) -> None:
         track = PlaylistTrack(
@@ -4679,6 +5123,75 @@ class MainWindowSafetyTests(unittest.TestCase):
         critical_message.assert_called_once()
         self.assertIsNone(self.window._export_dialog)
         self.assertIsNone(self.window._export_frame_staging)
+
+    def test_automatic_nvidia_failure_offers_cpu_preflight_retry(self) -> None:
+        track = PlaylistTrack(
+            file_path="automatic-encoder-test.mp3",
+            title="Automatic encoder",
+            duration_seconds=1.0,
+        )
+        self.window.playlist_service.replace([track])
+        original = self.window.settings_service.current
+        self.window.settings_service.save(replace(
+            original, video_codec=AUTO_VIDEO_ENCODER,
+        ))
+        try:
+            with (
+                patch("app.ui.main_window.FFmpegRenderer") as renderer_type,
+                patch(
+                    "app.ui.main_window.ExportSettingsDialog.exec",
+                    return_value=QDialog.DialogCode.Accepted,
+                ),
+                patch.object(
+                    VideoEncoderAdvisor, "automatic_encoder",
+                    return_value=NVIDIA_H264_ENCODER,
+                ),
+                patch.object(
+                    QMessageBox, "warning",
+                    return_value=QMessageBox.StandardButton.Yes,
+                ) as warning,
+                patch.object(QMessageBox, "critical") as critical,
+            ):
+                renderer_type.return_value.preflight_export.side_effect = [
+                    EncoderUnavailableError("NVENC startup failed"),
+                    RenderError("stop after CPU retry"),
+                ]
+                self.window._export_video()
+
+            self.assertEqual(
+                renderer_type.return_value.preflight_export.call_count, 2,
+            )
+            first_settings = (
+                renderer_type.return_value.preflight_export.call_args_list[0].args[2]
+            )
+            second_settings = (
+                renderer_type.return_value.preflight_export.call_args_list[1].args[2]
+            )
+            self.assertEqual(first_settings.video_codec, NVIDIA_H264_ENCODER)
+            self.assertEqual(second_settings.video_codec, CPU_H264_ENCODER)
+            self.assertIn("NVIDIA 인코더 사용 실패", warning.call_args.args[1])
+            self.assertIn("CPU H.264", warning.call_args.args[2])
+            critical.assert_called_once()
+        finally:
+            self.window.settings_service.save(original)
+
+    def test_automatic_encoder_prefers_nvidia_then_cpu(self) -> None:
+        with patch.object(VideoEncoderAdvisor, "has_nvidia_gpu", return_value=True):
+            self.assertEqual(
+                VideoEncoderAdvisor.automatic_encoder(), NVIDIA_H264_ENCODER,
+            )
+            self.assertEqual(
+                AppSettings().render_settings().video_codec,
+                NVIDIA_H264_ENCODER,
+            )
+        with patch.object(VideoEncoderAdvisor, "has_nvidia_gpu", return_value=False):
+            self.assertEqual(
+                VideoEncoderAdvisor.automatic_encoder(), CPU_H264_ENCODER,
+            )
+            self.assertEqual(
+                AppSettings().render_settings().video_codec,
+                CPU_H264_ENCODER,
+            )
 
     def test_export_static_layers_keep_intro_stable_outro_timeline_order(self) -> None:
         """Transparent Z bands must be captured in the same order as base frames."""
@@ -4745,6 +5258,10 @@ class MainWindowSafetyTests(unittest.TestCase):
                       return_value=QDialog.DialogCode.Accepted),
                 patch.object(CanvasSnapshot, "z_bands",
                              return_value=[(None, 1.0), (1.0, None)]),
+                patch.object(
+                    CanvasSnapshot, "split_mixed_capture_bands",
+                    return_value=[(None, 1.0), (1.0, None)],
+                ),
                 patch.object(CanvasSnapshot, "capture_track", side_effect=capture_phase),
                 patch.object(self.window, "_stage_export_frame", side_effect=stage_image),
                 patch.object(self.window, "_export_visualizers", return_value=[]),
@@ -5052,9 +5569,20 @@ class MainWindowSafetyTests(unittest.TestCase):
                 patch("app.ui.main_window.ExportSettingsDialog.exec",
                       return_value=QDialog.DialogCode.Accepted),
                 patch.object(CanvasSnapshot, "z_bands",
-                             return_value=[(None, 1.0), (1.0, None)]),
+                             return_value=[
+                                 (None, 1.0), (1.0, 2.0), (2.0, None),
+                             ]),
+                patch.object(
+                    CanvasSnapshot, "split_mixed_capture_bands",
+                    return_value=[
+                        (None, 1.0), (1.0, 2.0), (2.0, None),
+                    ],
+                ),
                 patch.object(CanvasSnapshot, "capture_track", side_effect=capture_layer),
-                patch.object(self.window, "_stage_export_frame") as png_stage,
+                patch.object(
+                    self.window, "_stage_export_frame",
+                    wraps=self.window._stage_export_frame,
+                ) as png_stage,
                 patch.object(self.window, "_export_visualizers", return_value=[overlay]),
                 patch.object(QMessageBox, "critical") as critical_message,
             ):
@@ -5062,20 +5590,23 @@ class MainWindowSafetyTests(unittest.TestCase):
                 self.window._export_video()
 
             critical_message.assert_not_called()
-            png_stage.assert_not_called()
+            # The unchanged base is represented by one lossless PNG instead of
+            # expanding it into a full-length CPU-only CFR intermediate video.
+            self.assertEqual(png_stage.call_count, 1)
             self.assertEqual(len(captured_worker_arguments), 1)
             arguments = captured_worker_arguments[0]
-            self.assertIsInstance(arguments[1], PreparedVideoInput)
+            self.assertIsInstance(arguments[1], list)
             self.assertEqual(arguments[5], [overlay])
-            self.assertEqual(len(arguments[6]), 1)
+            self.assertEqual(len(arguments[6]), 2)
             self.assertIsInstance(arguments[6][0], PreparedStaticOverlayLayer)
             self.assertEqual(arguments[6][0].z_index, 1.0)
-            self.assertEqual(self.window._export_frame_index, 0)
+            self.assertEqual(arguments[6][1].z_index, 2.0)
+            self.assertEqual(self.window._export_frame_index, 1)
             assert self.window._export_dialog is not None
             self.assertEqual(self.window._export_dialog.progress_bar.value(), 25)
-            self.assertIn("2/2", self.window._export_dialog.detail_label.text())
+            self.assertIn("3/3", self.window._export_dialog.detail_label.text())
             self.assertIn("100%", self.window._export_dialog.detail_label.text())
-            self.assertEqual(maximum_active_encoder_count, 1)
+            self.assertEqual(maximum_active_encoder_count, 2)
             self.assertEqual(active_encoder_count, 0)
         finally:
             if self.window._export_dialog is not None:
@@ -5172,6 +5703,9 @@ class MainWindowSafetyTests(unittest.TestCase):
                 "Analyzing audio and rendering Python visualizer frames":
                     "오디오를 분석하고 비주얼라이저 프레임을 생성하는 중",
                 "Normalizing track.mp3": "오디오 정규화 중 · track.mp3",
+                "Normalizing 6 independent track(s) with 4 parallel worker(s)":
+                    "독립 오디오 6곡 정규화 준비 · 병렬 작업 4개",
+                "Normalized 3/6 tracks": "오디오 정규화 완료 3/6곡",
                 "Inserted 2.5s of silence": "무음 구간 2.5s 추가",
                 "Encoding 12.0s / 60.0s": "영상 인코딩 중 · 12.0s / 60.0s",
                 "Combining audio 12.0s / 60.0s · 20%":
@@ -5184,7 +5718,10 @@ class MainWindowSafetyTests(unittest.TestCase):
             }
             for source, expected in translations.items():
                 self.assertEqual(dialog._detail_text(source), expected)
-            self.assertEqual(dialog._stage_text("Preparing visualizers"), "비주얼라이저 준비")
+            self.assertEqual(
+                dialog._stage_text("Preparing visualizers"),
+                "음악 반응 효과 준비",
+            )
             self.assertEqual(dialog._stage_text("Downloading FFmpeg"), "FFmpeg 다운로드")
             combined = dialog._detail_text(
                 "Visualizer 1/2 · frame 12/30 · 40.0%\n"
@@ -5198,7 +5735,7 @@ class MainWindowSafetyTests(unittest.TestCase):
                 "Preparing visualizers",
                 "Analyzing audio and rendering Python visualizer frames",
             )
-            self.assertEqual(dialog.stage_label.text(), "비주얼라이저 준비")
+            self.assertEqual(dialog.stage_label.text(), "음악 반응 효과 준비")
             self.assertEqual(
                 dialog.detail_label.text(),
                 "오디오를 분석하고 비주얼라이저 프레임을 생성하는 중",
@@ -5210,20 +5747,106 @@ class MainWindowSafetyTests(unittest.TestCase):
         dialog = ExportProgressDialog(self.window)
         dialog.set_korean(True)
         try:
-            dialog.update_progress(
-                "Preparing visualizers", 0.7,
-                "Visualizer 1/2 · frame 120/300 · 20.0% · about 00:40 remaining",
-            )
+            with patch.object(dialog._eta_estimator, "update", return_value=40.0):
+                dialog.update_progress(
+                    "Preparing visualizers", 0.7,
+                    "Visualizer 1/2 · frame 120/300 · 20.0% · about 00:40 remaining",
+                )
             self.assertNotIn("남은", dialog.stage_label.text())
             self.assertNotIn("남은", dialog.detail_label.text())
             self.assertNotIn("남은", dialog.log_output.toPlainText())
             self.assertIn("남은 시간 약", dialog.time_label.text())
             self.assertIn("비주얼라이저 1/2", dialog.detail_label.text())
 
-            dialog.set_busy("Preparing export", "Preparing temporary files")
+            with patch.object(dialog._eta_estimator, "remaining", return_value=35.0):
+                dialog.set_busy("Preparing export", "Preparing temporary files")
             # A short indeterminate hand-off must keep counting down the last
             # stable estimate instead of blanking it at every stage boundary.
             self.assertIn("남은 시간 약", dialog.time_label.text())
+        finally:
+            dialog.complete(False)
+
+    def test_export_progress_steps_and_technical_details_are_user_friendly(self) -> None:
+        dialog = ExportProgressDialog(self.window)
+        dialog.set_korean(True)
+        try:
+            self.assertEqual(
+                [label.property("stepState") for label in dialog.step_labels],
+                ["active", "pending", "pending", "pending", "pending"],
+            )
+            dialog.update_progress(
+                "Combining audio", 0.60,
+                "Combining audio 12.0s / 60.0s · 20%",
+            )
+            self.assertEqual(
+                [label.property("stepState") for label in dialog.step_labels],
+                ["completed", "active", "pending", "pending", "pending"],
+            )
+            dialog.update_progress("Encoding video", 0.80, "Encoding 8.0s / 60.0s")
+            self.assertEqual(
+                [label.property("stepState") for label in dialog.step_labels],
+                ["completed", "completed", "completed", "active", "pending"],
+            )
+            friendly = dialog._detail_text(
+                "Z 레이어 2 인코더 버퍼 처리 중 · "
+                "17,827/17,828 프레임 · 100% · 창을 닫지 않아도 계속 진행됩니다."
+            )
+            self.assertEqual(
+                friendly,
+                "화면 구성 요소를 영상으로 변환하는 중 · "
+                "17,827/17,828 프레임 · 100%",
+            )
+            self.assertNotIn("Z 레이어", friendly)
+            self.assertNotIn("버퍼", friendly)
+            self.assertFalse(dialog.log_output.isVisible())
+            dialog.details_button.setChecked(True)
+            self.assertFalse(dialog.log_output.isHidden())
+            self.assertEqual(dialog.details_button.text(), "기술 정보 숨기기")
+        finally:
+            dialog.complete(False)
+
+    def test_export_progress_resize_keeps_summary_controls_anchored(self) -> None:
+        dialog = ExportProgressDialog(self.window)
+        dialog.set_export_details(
+            3, 145.5,
+            "Resolution 1920 × 1080 · 30 FPS\nVideo encoder NVIDIA NVENC",
+            Path("C:/Videos/playlist.mp4"),
+        )
+        try:
+            dialog.resize(680, 470)
+            dialog.show()
+            self.application.processEvents()
+            original_positions = {
+                "steps": dialog.steps_widget.geometry().top(),
+                "settings": dialog.export_settings_label.geometry().top(),
+                "stage": dialog.stage_label.geometry().top(),
+                "progress": dialog.progress_bar.geometry().top(),
+                "detail": dialog.detail_label.geometry().top(),
+                "time": dialog.time_label.geometry().top(),
+            }
+
+            dialog.resize(680, 780)
+            self.application.processEvents()
+            resized_positions = {
+                "steps": dialog.steps_widget.geometry().top(),
+                "settings": dialog.export_settings_label.geometry().top(),
+                "stage": dialog.stage_label.geometry().top(),
+                "progress": dialog.progress_bar.geometry().top(),
+                "detail": dialog.detail_label.geometry().top(),
+                "time": dialog.time_label.geometry().top(),
+            }
+
+            self.assertEqual(resized_positions, original_positions)
+            self.assertGreater(
+                dialog.buttons.geometry().top(), dialog.time_label.geometry().bottom(),
+            )
+
+            dialog.details_button.setChecked(True)
+            self.application.processEvents()
+            initial_log_height = dialog.log_output.height()
+            dialog.resize(680, 920)
+            self.application.processEvents()
+            self.assertGreater(dialog.log_output.height(), initial_log_height)
         finally:
             dialog.complete(False)
 

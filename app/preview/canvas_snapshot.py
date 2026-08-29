@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from math import ceil, floor
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
@@ -10,12 +12,12 @@ from PySide6.QtGui import QImage, QPainter, QPixmap
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.animation.curves import (
-    ease_in_out_cubic, ease_in_quint, ease_out_cubic, ease_out_quint,
+    ease_in_out_cubic, ease_in_quint, ease_out_quint,
     hidden_rotation_offset, hidden_scale_factor,
     slide_distance,
 )
 from app.models.playlist import PlaylistTrack
-from app.models.source import SourceType
+from app.models.source import Source, SourceType
 from app.preview.album_art import create_cached_ambient_background, extract_track_cover
 from app.preview.text_template import expand_track_template
 from app.services.lyrics_service import LyricsService
@@ -96,6 +98,173 @@ class CanvasSnapshot:
         return image
 
     @staticmethod
+    def _dynamic_band_capture_rect(
+        scene: CanvasScene,
+        z_min: float | None,
+        z_max: float | None,
+    ) -> QRectF | None:
+        """Return pixel-aligned bounds for the currently visible band items."""
+        artboard = scene.artboard_rect
+        bounds = QRectF()
+        found = False
+        for item in scene.items():
+            if not isinstance(item, SourceItem) or not item.isVisible():
+                continue
+            source = item.source
+            if (
+                not source.visible
+                or (z_min is not None and source.z_index < z_min)
+                or (z_max is not None and source.z_index > z_max)
+            ):
+                continue
+            item_bounds = item.mapRectToScene(item.content_rect())
+            # SourceItem paints a few effects beyond its nominal content.  The
+            # item transform already includes current animation movement,
+            # scale, and rotation; this scene-space padding covers antialiasing,
+            # outlines, shadows, and lyric reveal blur without clipping them.
+            shadow_padding = 0.0
+            if source.shadow.enabled:
+                shadow_padding = (
+                    abs(source.shadow.offset_x)
+                    + abs(source.shadow.offset_y)
+                    + source.shadow.blur_radius * 0.25
+                )
+            visual_padding = max(
+                3.0,
+                source.outline_width + 2.0,
+                shadow_padding + 2.0,
+                source.subtitle_previous_blur * 2.0 + 2.0
+                if source.source_type is SourceType.LYRICS else 0.0,
+            ) * max(1.0, abs(item.scale()))
+            item_bounds = item_bounds.adjusted(
+                -visual_padding,
+                -visual_padding,
+                visual_padding,
+                visual_padding,
+            )
+            bounds = item_bounds if not found else bounds.united(item_bounds)
+            found = True
+        if not found:
+            return QRectF(artboard.left(), artboard.top(), 1.0, 1.0)
+        bounds = bounds.intersected(artboard)
+        if bounds.isEmpty():
+            return QRectF(artboard.left(), artboard.top(), 1.0, 1.0)
+        left = max(artboard.left(), floor(bounds.left()))
+        top = max(artboard.top(), floor(bounds.top()))
+        right = min(artboard.right(), ceil(bounds.right()))
+        bottom = min(artboard.bottom(), ceil(bounds.bottom()))
+        return QRectF(
+            left,
+            top,
+            max(1.0, right - left),
+            max(1.0, bottom - top),
+        )
+
+    @staticmethod
+    def band_capture_envelope(
+        scene: CanvasScene,
+        z_min: float | None,
+        z_max: float | None,
+        *,
+        maximum_area_ratio: float = 0.9,
+    ) -> QRectF | None:
+        """Return one safe fixed crop for a complete transparent Z stream."""
+        artboard = scene.artboard_rect
+        bounds = QRectF()
+        found = False
+        slide_styles = {
+            "slide_left", "slide_right", "slide_up", "slide_down",
+        }
+        for item in scene.items():
+            if not isinstance(item, SourceItem) or not item.isVisible():
+                continue
+            source = item.source
+            if (
+                not source.visible
+                or (z_min is not None and source.z_index < z_min)
+                or (z_max is not None and source.z_index > z_max)
+            ):
+                continue
+            item_bounds = item.mapRectToScene(item.content_rect())
+            scale = max(1.0, abs(item.scale()))
+            shadow_padding = 0.0
+            if source.shadow.enabled:
+                shadow_padding = (
+                    abs(source.shadow.offset_x)
+                    + abs(source.shadow.offset_y)
+                    + source.shadow.blur_radius * 0.25
+                )
+            padding = max(
+                3.0,
+                source.outline_width + 2.0,
+                shadow_padding + 2.0,
+                source.subtitle_previous_blur * 2.0 + 2.0
+                if source.source_type is SourceType.LYRICS else 0.0,
+            ) * scale
+            animation_styles = {source.animation_in, source.animation_out}
+            if animation_styles & slide_styles:
+                padding += slide_distance(source.width, source.height) * scale
+            if "rotate" in animation_styles:
+                # The animation rotates up to 12 degrees around the centre.
+                padding += (
+                    (source.width ** 2 + source.height ** 2) ** 0.5
+                    * 0.22 * scale
+                )
+            if source.source_type is SourceType.NOW_PLAYING:
+                if source.now_playing_exit_animation in slide_styles:
+                    padding += 24.0 * scale
+                elif source.now_playing_exit_animation == "zoom":
+                    padding += max(source.width, source.height) * 0.04 * scale
+            item_bounds = item_bounds.adjusted(
+                -padding, -padding, padding, padding,
+            )
+            bounds = item_bounds if not found else bounds.united(item_bounds)
+            found = True
+        if not found:
+            return None
+        bounds = bounds.intersected(artboard)
+        if bounds.isEmpty():
+            return None
+        left = max(artboard.left(), floor(bounds.left()))
+        top = max(artboard.top(), floor(bounds.top()))
+        right = min(artboard.right(), ceil(bounds.right()))
+        bottom = min(artboard.bottom(), ceil(bounds.bottom()))
+        envelope = QRectF(
+            left,
+            top,
+            max(1.0, right - left),
+            max(1.0, bottom - top),
+        )
+        artboard_area = max(1.0, artboard.width() * artboard.height())
+        if envelope.width() * envelope.height() >= (
+            artboard_area * max(0.1, min(1.0, maximum_area_ratio))
+        ):
+            return None
+        return envelope
+
+    @staticmethod
+    def _expand_partial_capture(
+        partial_image: QImage,
+        capture_rect: QRectF,
+        artboard: QRectF,
+        output_scale: float,
+    ) -> QImage:
+        """Place a cropped transparent render into a full-size export frame."""
+        scale = max(0.25, min(1.0, output_scale))
+        image = QImage(
+            max(1, round(artboard.width() * scale)),
+            max(1, round(artboard.height() * scale)),
+            QImage.Format.Format_ARGB32_Premultiplied,
+        )
+        image.fill(Qt.GlobalColor.transparent)
+        target_x = round((capture_rect.left() - artboard.left()) * scale)
+        target_y = round((capture_rect.top() - artboard.top()) * scale)
+        painter = QPainter(image)
+        painter.drawImage(target_x, target_y, partial_image)
+        painter.end()
+        return image
+
+    @staticmethod
     def z_bands(scene: CanvasScene, dynamic_source_ids: set[str]) -> list[tuple[float | None, float | None]]:
         """Return static Z-index intervals separated by reactive source layers."""
         dynamic_z = sorted({item.source.z_index for item in scene.items()
@@ -131,6 +300,200 @@ class CanvasSnapshot:
         return [bands[0], *(band for band in bands[1:] if contains_static(band))]
 
     @staticmethod
+    def source_is_capture_invariant(
+        source: Source, playlist_duration_seconds: float,
+    ) -> bool:
+        """Return whether a source is identical for every export sample.
+
+        This deliberately accepts only a small allow-list.  A false negative
+        merely keeps the established sequential capture path, while a false
+        positive could freeze a time-dependent element in the final video.
+        """
+        if source.animation_in != "none" or source.animation_out != "none":
+            return False
+        if source.timeline_start > 0.0:
+            return False
+        if (
+            source.timeline_duration > 0.0
+            and source.timeline_start + source.timeline_duration
+            < playlist_duration_seconds
+        ):
+            return False
+        if source.source_type is SourceType.TEXT:
+            return "%" not in source.text
+        if source.source_type is SourceType.ALBUM_COVER:
+            return bool(source.content_path)
+        if source.source_type is SourceType.BACKGROUND:
+            return source.background_mode != "album_art"
+        return source.source_type in {
+            SourceType.IMAGE,
+            SourceType.SHAPE,
+            SourceType.LOGO,
+            SourceType.WATERMARK,
+        }
+
+    @staticmethod
+    def split_mixed_capture_bands(
+        scene: CanvasScene,
+        dynamic_source_ids: set[str],
+        z_bands: list[tuple[float | None, float | None]],
+        playlist_duration_seconds: float,
+        *,
+        max_streams: int = 12,
+    ) -> list[tuple[float | None, float | None]]:
+        """Split broad Z bands into consecutive invariant/dynamic sublayers.
+
+        Sources sharing one Z value remain together so their QGraphicsScene
+        stacking order cannot change.  A global cap prevents an alternating
+        project from creating an unbounded number of lossless video streams.
+        """
+        visible_sources = [
+            item.source for item in scene.items()
+            if isinstance(item, SourceItem)
+            and item.isVisible()
+            and item.source.visible
+            and item.source.id not in dynamic_source_ids
+        ]
+        split_by_original: list[list[dict[str, object]]] = []
+        for original_min, original_max in z_bands:
+            band_sources = [
+                source for source in visible_sources
+                if (original_min is None or source.z_index >= original_min)
+                and (original_max is None or source.z_index <= original_max)
+            ]
+            grouped: dict[float, list[Source]] = {}
+            for source in band_sources:
+                grouped.setdefault(float(source.z_index), []).append(source)
+            if not grouped:
+                split_by_original.append([{
+                    "minimum": original_min,
+                    "maximum": original_max,
+                    "invariant": True,
+                    "source_count": 0,
+                }])
+                continue
+            z_values = sorted(grouped)
+            group_states = [
+                all(
+                    CanvasSnapshot.source_is_capture_invariant(
+                        source, playlist_duration_seconds,
+                    )
+                    for source in grouped[z_value]
+                )
+                for z_value in z_values
+            ]
+            runs: list[dict[str, object]] = []
+            run_start = 0
+            for group_index in range(1, len(z_values) + 1):
+                at_end = group_index == len(z_values)
+                if not at_end and group_states[group_index] == group_states[run_start]:
+                    continue
+                runs.append({
+                    "minimum": (
+                        original_min if run_start == 0 else z_values[run_start]
+                    ),
+                    "maximum": (
+                        original_max if at_end else z_values[group_index - 1]
+                    ),
+                    "invariant": group_states[run_start],
+                    "source_count": sum(
+                        len(grouped[z_value])
+                        for z_value in z_values[run_start:group_index]
+                    ),
+                })
+                run_start = group_index
+            split_by_original.append(runs)
+
+        stream_limit = max(len(z_bands), max(1, int(max_streams)))
+
+        def coalesce_equal_states(runs: list[dict[str, object]]) -> None:
+            index = 0
+            while index + 1 < len(runs):
+                left, right = runs[index], runs[index + 1]
+                if bool(left["invariant"]) != bool(right["invariant"]):
+                    index += 1
+                    continue
+                left["maximum"] = right["maximum"]
+                left["source_count"] = (
+                    int(left["source_count"]) + int(right["source_count"])
+                )
+                runs.pop(index + 1)
+
+        while sum(len(runs) for runs in split_by_original) > stream_limit:
+            candidates: list[tuple[int, int, int, int, int]] = []
+            for band_index, runs in enumerate(split_by_original):
+                for run_index, (left, right) in enumerate(zip(runs, runs[1:])):
+                    lost_invariant_sources = (
+                        int(left["source_count"]) if bool(left["invariant"]) else 0
+                    ) + (
+                        int(right["source_count"]) if bool(right["invariant"]) else 0
+                    )
+                    candidates.append((
+                        lost_invariant_sources,
+                        int(left["source_count"]) + int(right["source_count"]),
+                        band_index,
+                        run_index,
+                        len(runs),
+                    ))
+            if not candidates:
+                break
+            _lost, _size, band_index, run_index, _run_count = min(candidates)
+            runs = split_by_original[band_index]
+            left, right = runs[run_index], runs[run_index + 1]
+            runs[run_index:run_index + 2] = [{
+                "minimum": left["minimum"],
+                "maximum": right["maximum"],
+                "invariant": bool(left["invariant"]) and bool(right["invariant"]),
+                "source_count": (
+                    int(left["source_count"]) + int(right["source_count"])
+                ),
+            }]
+            coalesce_equal_states(runs)
+
+        return [
+            (run["minimum"], run["maximum"])
+            for runs in split_by_original
+            for run in runs
+        ]
+
+    @staticmethod
+    def invariant_stream_keys(
+        scene: CanvasScene,
+        dynamic_source_ids: set[str],
+        z_bands: list[tuple[float | None, float | None]],
+        playlist_duration_seconds: float,
+    ) -> set[str]:
+        """Find complete Z bands that are safe to capture only once.
+
+        The scene itself always remains on the GUI thread.  Only bands whose
+        every visible Canvas source is immutable are admitted to this cache;
+        dynamic FFmpeg overlays are excluded because they are hidden during
+        Canvas capture and composed later.
+        """
+        visible_sources = [
+            item.source for item in scene.items()
+            if isinstance(item, SourceItem)
+            and item.isVisible()
+            and item.source.visible
+            and item.source.id not in dynamic_source_ids
+        ]
+        invariant: set[str] = set()
+        for index, (z_min, z_max) in enumerate(z_bands):
+            sources = [
+                source for source in visible_sources
+                if (z_min is None or source.z_index >= z_min)
+                and (z_max is None or source.z_index <= z_max)
+            ]
+            if all(
+                CanvasSnapshot.source_is_capture_invariant(
+                    source, playlist_duration_seconds,
+                )
+                for source in sources
+            ):
+                invariant.add("base" if index == 0 else f"layer:{index - 1}")
+        return invariant
+
+    @staticmethod
     def capture_track(scene: CanvasScene, track: PlaylistTrack, track_number: int,
                       track_total: int, start_seconds: float, animation_phase: str | None = None,
                       animation_progress: float = 1.0, elapsed_seconds: float = 0.0,
@@ -143,7 +506,10 @@ class CanvasSnapshot:
                       image_buffer: QImage | None = None,
                       capture_rect: QRectF | None = None,
                       timeline_seconds: float | None = None,
-                      animation_phase_duration: float | None = None) -> QImage:
+                      animation_phase_duration: float | None = None,
+                      partial_render: bool = False,
+                      render_metrics: dict[str, object] | None = None,
+                      band_source_items: Sequence[SourceItem] | None = None) -> QImage:
         """Capture one track state with metadata, cover art, and an optional Z band."""
         original_text: list[tuple[SourceItem, str]] = []
         original_transforms: list[
@@ -157,13 +523,20 @@ class CanvasSnapshot:
         original_subtitle_lines: list[tuple[SourceItem, int, int]] = []
         original_subtitle_offsets: list[tuple[SourceItem, float]] = []
         original_subtitle_transitions: list[tuple[SourceItem, float]] = []
-        original_subtitle_anchors: list[tuple[SourceItem, int, int]] = []
+        original_subtitle_anchors: list[
+            tuple[SourceItem, int, int, int]
+        ] = []
         original_track_list_rows: list[tuple[SourceItem, int]] = []
         # Removed sources are deliberately retained as hidden Qt items for safe Undo.
         # They must never participate in preview/export captures after a preset swap.
         source_items = [
-            item for item in scene.items()
+            item for item in (
+                band_source_items
+                if band_source_items is not None else scene.items()
+            )
             if isinstance(item, SourceItem) and item.isVisible() and item.source.visible
+            and (z_min is None or item.source.z_index >= z_min)
+            and (z_max is None or item.source.z_index <= z_max)
         ]
         hidden_source_ids = set(hide_visualizers or ()) | set(hide_source_ids or ())
         global_seconds = (
@@ -227,8 +600,10 @@ class CanvasSnapshot:
                 original_subtitle_anchors.append((
                     graphics_item, graphics_item._subtitle_anchor_line,
                     graphics_item._subtitle_anchor_line_count,
+                    graphics_item._subtitle_previous_line_count,
                 ))
                 graphics_item._subtitle_transition_progress = 1.0
+                graphics_item._subtitle_previous_line_count = 0
                 effective_lyric_offset = (
                     track.lyrics_timing_offset_seconds
                     + source.subtitle_timing_offset
@@ -285,7 +660,9 @@ class CanvasSnapshot:
                     progress = max(0.0, min(
                         1.0, (elapsed_seconds - cue_start) / max(0.05, source.subtitle_animation_duration)
                     ))
-                    eased = ease_out_cubic(progress)
+                    # A symmetric ease prevents the lyric stack from jumping
+                    # most of its distance during the first few frames.
+                    eased = ease_in_out_cubic(progress)
                     graphics_item._subtitle_transition_progress = eased
                     # Keep the lyric card/background stable. Only its text layout
                     # moves, so context lines no longer pulse and fade each time a
@@ -299,7 +676,8 @@ class CanvasSnapshot:
                         previous_line_count = max(
                             1, len([line for line in previous_text.splitlines() if line.strip()])
                         )
-                    line_height = source.font_size + source.subtitle_line_spacing
+                    graphics_item._subtitle_previous_line_count = previous_line_count
+                    line_height = graphics_item._lyric_line_height()
                     source.subtitle_scroll_offset = (
                         previous_line_count * line_height * (1.0 - eased)
                     )
@@ -474,10 +852,37 @@ class CanvasSnapshot:
                     if offset:
                         graphics_item.setPos(graphics_item.pos().x() + offset[0], graphics_item.pos().y() + offset[1])
         try:
-            return CanvasSnapshot.capture(
+            effective_capture_rect = capture_rect
+            used_partial_render = False
+            if partial_render and transparent and capture_rect is None:
+                candidate = CanvasSnapshot._dynamic_band_capture_rect(
+                    scene, z_min, z_max,
+                )
+                artboard = scene.artboard_rect
+                if candidate is not None:
+                    artboard_area = max(1.0, artboard.width() * artboard.height())
+                    candidate_area = candidate.width() * candidate.height()
+                    # A near-full crop adds a blit without materially reducing
+                    # scene painting. Keep the established full render there.
+                    if candidate_area < artboard_area * 0.9:
+                        effective_capture_rect = candidate
+                        used_partial_render = True
+            captured = CanvasSnapshot.capture(
                 scene, output_scale, z_min=z_min, z_max=z_max, transparent=transparent,
-                image_buffer=image_buffer, capture_rect=capture_rect,
+                image_buffer=(None if used_partial_render else image_buffer),
+                capture_rect=effective_capture_rect,
             )
+            if used_partial_render and effective_capture_rect is not None:
+                captured = CanvasSnapshot._expand_partial_capture(
+                    captured,
+                    effective_capture_rect,
+                    scene.artboard_rect,
+                    output_scale,
+                )
+            if render_metrics is not None:
+                render_metrics["partial_render"] = used_partial_render
+                render_metrics["capture_rect"] = effective_capture_rect
+            return captured
         finally:
             for graphics_item, text in original_text:
                 graphics_item.source.text = text
@@ -495,9 +900,12 @@ class CanvasSnapshot:
             for graphics_item, progress in original_subtitle_transitions:
                 graphics_item._subtitle_transition_progress = progress
                 graphics_item.update()
-            for graphics_item, anchor_line, anchor_count in original_subtitle_anchors:
+            for (
+                graphics_item, anchor_line, anchor_count, previous_line_count,
+            ) in original_subtitle_anchors:
                 graphics_item._subtitle_anchor_line = anchor_line
                 graphics_item._subtitle_anchor_line_count = anchor_count
+                graphics_item._subtitle_previous_line_count = previous_line_count
                 graphics_item.update()
             for graphics_item, current_row in original_track_list_rows:
                 graphics_item.source.track_list_current_row = current_row

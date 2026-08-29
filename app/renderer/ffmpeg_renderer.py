@@ -25,6 +25,11 @@ from app.utils.subprocess_utils import hidden_process_kwargs
 
 LOGGER = logging.getLogger(__name__)
 
+WORK_MODE_STABLE = "stable"
+WORK_MODE_AUTO = "auto"
+WORK_MODE_MAX_SPEED = "max_speed"
+WORK_MODES = (WORK_MODE_STABLE, WORK_MODE_AUTO, WORK_MODE_MAX_SPEED)
+
 
 class FFmpegNotFoundError(RuntimeError):
     """Raised when no runnable FFmpeg executable can be found."""
@@ -32,6 +37,10 @@ class FFmpegNotFoundError(RuntimeError):
 
 class RenderError(RuntimeError):
     """Raised when FFmpeg rejects an input or cannot produce the video."""
+
+
+class EncoderUnavailableError(RenderError):
+    """Raised when the requested video encoder cannot start on this computer."""
 
 
 class RenderCancelledError(RenderError):
@@ -49,6 +58,7 @@ class RenderSettings:
     audio_bitrate: str = "192k"
     output_width: int = 1920
     output_height: int = 1080
+    work_mode: str = WORK_MODE_AUTO
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +96,8 @@ class StaticOverlayLayer:
 
     z_index: float
     frames: list[RenderFrame]
+    x: int = 0
+    y: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +106,8 @@ class PreparedStaticOverlayLayer:
 
     z_index: float
     video: PreparedVideoInput
+    x: int = 0
+    y: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +214,7 @@ class FFmpegRenderer:
 
     def __init__(self, executable: str | Path | None = None) -> None:
         self.executable = self.find_executable(executable)
+        self._available_encoders: frozenset[str] | None = None
 
     @staticmethod
     def find_executable(configured_path: str | Path | None = None) -> Path:
@@ -277,7 +292,15 @@ class FFmpegRenderer:
             raise RenderError(
                 "The number of Canvas frames does not match the enabled playlist tracks."
             )
-        if prepared_video is None and len(frames) == 1 and len(active_tracks) > 1:
+        # Legacy callers may supply one plain QImage for every track. Explicit
+        # RenderFrame input already carries its own exact duration and may
+        # intentionally represent an entire multi-track playlist with one image.
+        if (
+            prepared_video is None
+            and not explicit_frames
+            and len(frames) == 1
+            and len(active_tracks) > 1
+        ):
             frames *= len(active_tracks)
         self._report(
             progress_callback, "Preparing export", 0.005,
@@ -438,7 +461,7 @@ class FFmpegRenderer:
                     raise RenderError(str(error)) from error
             encoding_start = 0.78 if visualizers else 0.66
             encoding_span = 0.21 if visualizers else 0.33
-            static_inputs: list[tuple[float, Path, str]] = []
+            static_inputs: list[tuple[float, Path, str, int, int]] = []
             static_stage_start = 0.76 if visualizers else 0.64
             static_stage_span = max(0.0, encoding_start - static_stage_start)
             static_frame_total = sum(
@@ -464,15 +487,17 @@ class FFmpegRenderer:
                     if (not prepared_layer.path.is_file()
                             or prepared_layer.width <= 0 or prepared_layer.height <= 0
                             or prepared_layer.fps != selected_settings.fps
+                            or layer.x < 0 or layer.y < 0
                             or (prepared_video is not None and (
-                                prepared_layer.width != prepared_video.width
-                                or prepared_layer.height != prepared_video.height
+                                layer.x + prepared_layer.width > prepared_video.width
+                                or layer.y + prepared_layer.height > prepared_video.height
                             ))):
                         raise RenderError(
                             "A prepared static overlay video is missing or invalid."
                         )
                     static_inputs.append((
                         layer.z_index, prepared_layer.path.resolve(), "alpha_pair",
+                        layer.x, layer.y,
                     ))
                     continue
                 if not layer.frames:
@@ -529,7 +554,9 @@ class FFmpegRenderer:
                     layer_manifest,
                     list(zip(layer_paths, [frame.duration_seconds for frame in layer.frames], strict=True)),
                 )
-                static_inputs.append((layer.z_index, layer_manifest, "concat"))
+                static_inputs.append((
+                    layer.z_index, layer_manifest, "concat", layer.x, layer.y,
+                ))
             if prepared_video is None:
                 video_concat_path = temporary / "video.ffconcat"
                 self._write_visual_concat(video_concat_path, visual_sequence)
@@ -540,15 +567,22 @@ class FFmpegRenderer:
             def encoding_progress(line: str) -> None:
                 seconds = self._parse_progress_seconds(line)
                 if seconds is not None and total_duration > 0:
-                    fraction = min(1.0, seconds / total_duration)
+                    bounded = min(total_duration, max(0.0, seconds))
+                    fraction = bounded / total_duration
+                    finishing = bounded >= max(
+                        0.0,
+                        total_duration - max(0.5, 2.0 / selected_settings.fps),
+                    )
                     self._report(
                         progress_callback,
-                        "Finalizing export" if direct_mux else "Encoding video",
+                        "Finalizing export" if direct_mux or finishing else "Encoding video",
                         encoding_start + fraction * encoding_span,
                         (
-                            f"Muxing {seconds:.1f}s / {total_duration:.1f}s"
+                            "Finishing the MP4 file"
+                            if finishing else
+                            f"Muxing {bounded:.1f}s / {total_duration:.1f}s"
                             if direct_mux else
-                            f"Encoding {seconds:.1f}s / {total_duration:.1f}s"
+                            f"Encoding {bounded:.1f}s / {total_duration:.1f}s"
                         ),
                     )
 
@@ -597,7 +631,7 @@ class FFmpegRenderer:
                     "-t", f"{video_input.duration_seconds:.6f}",
                     "-i", str(video_input.path),
                 ])
-            for _z_index, layer_path, input_kind in static_inputs:
+            for _z_index, layer_path, input_kind, _x, _y in static_inputs:
                 if input_kind == "concat":
                     video_arguments.extend([
                         "-f", "concat", "-safe", "0", "-i", str(layer_path),
@@ -628,7 +662,12 @@ class FFmpegRenderer:
                     # Both streams were already encoded once at their selected
                     # final settings. This pass only writes the MP4 container.
                     "-c:v", "copy", "-c:a", "copy",
-                    "-shortest", "-movflags", "+faststart",
+                    # Do not use -shortest here. Sparse Canvas inputs and framesync
+                    # filters can disagree by a fraction of a frame at EOF, causing
+                    # FFmpeg to retain queued frames while the UI appears stuck at
+                    # 99%. The validated project timeline is authoritative.
+                    "-t", f"{total_duration:.6f}",
+                    "-movflags", "+faststart",
                     "-progress", "pipe:1", "-nostats", "-y", str(temporary_video),
                 ])
             else:
@@ -642,9 +681,30 @@ class FFmpegRenderer:
                     # avoids a redundant lossy pass and preserves the prepared audio
                     # bytes and timing exactly.
                     "-c:a", "copy",
-                    "-pix_fmt", "yuv420p", "-shortest", "-movflags", "+faststart",
+                    "-pix_fmt", "yuv420p",
+                    # Bound the filter graph and muxer to the exact timeline.
+                    # Without this output limit, a one-frame EOF mismatch between
+                    # the base, alpha-pair and audio streams can make FFmpeg keep
+                    # buffering after the last visible frame.
+                    "-t", f"{total_duration:.6f}",
+                    "-movflags", "+faststart",
                     "-progress", "pipe:1", "-nostats", "-y", str(temporary_video),
                 ])
+            LOGGER.info(
+                "Final FFmpeg stage: codec=%s direct_mux=%s duration=%.3fs "
+                "fps=%d resolution=%dx%d filter_workers=%d visualizers=%d "
+                "video_clips=%d static_inputs=%d",
+                "copy" if direct_mux else selected_settings.video_codec,
+                direct_mux,
+                total_duration,
+                selected_settings.fps,
+                selected_settings.output_width,
+                selected_settings.output_height,
+                self._filter_worker_count(selected_settings),
+                len(visualizer_paths),
+                len(video_clips),
+                len(static_inputs),
+            )
             try:
                 self._run(
                     video_arguments,
@@ -717,8 +777,9 @@ class FFmpegRenderer:
                 y = round(overlay.y - (rotated_height - overlay.height) / 2.0)
                 rotated_label = f"[rotated{index}]"
                 graph.append(
-                    f"{layer_input}rotate={radians_value:.12f}:ow=rotw(iw):"
-                    f"oh=roth(ih):fillcolor=none{rotated_label}"
+                    f"{layer_input}rotate={radians_value:.12f}:"
+                    f"ow=rotw({radians_value:.12f}):"
+                    f"oh=roth({radians_value:.12f}):fillcolor=none{rotated_label}"
                 )
                 layer_input = rotated_label
             graph.append(f"{current}{layer_input}overlay={x}:{y}:eof_action=pass{output}")
@@ -732,7 +793,11 @@ class FFmpegRenderer:
 
     @staticmethod
     def _layered_filter_graph(visualizers: list[VisualizerOverlay],
-                              static_layers: list[tuple[float, Path] | tuple[float, Path, str]], fps: int,
+                              static_layers: list[
+                                  tuple[float, Path]
+                                  | tuple[float, Path, str]
+                                  | tuple[float, Path, str, int, int]
+                              ], fps: int,
                               output_width: int, output_height: int,
                               video_clips: list[VideoClipOverlay] | None = None,
                               video_input_slots: list[int] | None = None) -> str:
@@ -797,8 +862,9 @@ class FFmpegRenderer:
                     y = round(y - (rotated_height - overlay.height) / 2.0)
                     rotated = f"[zrot{order}]"
                     graph.append(
-                        f"{layer_input}rotate={angle:.12f}:ow=rotw(iw):"
-                        f"oh=roth(ih):fillcolor=none{rotated}"
+                        f"{layer_input}rotate={angle:.12f}:"
+                        f"ow=rotw({angle:.12f}):"
+                        f"oh=roth({angle:.12f}):fillcolor=none{rotated}"
                     )
                     layer_input = rotated
                 graph.append(f"{current}{layer_input}overlay={x}:{y}:eof_action=pass{output}")
@@ -877,8 +943,9 @@ class FFmpegRenderer:
                     y = round(y - (rotated_height - clip.height) / 2.0)
                     rotated = f"[vrot{order}]"
                     graph.append(
-                        f"{layer_input}rotate={angle:.12f}:ow=rotw(iw):"
-                        f"oh=roth(ih):fillcolor=none{rotated}"
+                        f"{layer_input}rotate={angle:.12f}:"
+                        f"ow=rotw({angle:.12f}):"
+                        f"oh=roth({angle:.12f}):fillcolor=none{rotated}"
                     )
                     layer_input = rotated
                 graph.append(
@@ -887,6 +954,11 @@ class FFmpegRenderer:
             else:
                 static_layer = static_layers[index]
                 input_kind = static_layer[2] if len(static_layer) == 3 else "concat"
+                if len(static_layer) >= 5:
+                    input_kind = static_layer[2]
+                    layer_x, layer_y = int(static_layer[3]), int(static_layer[4])
+                else:
+                    layer_x, layer_y = 0, 0
                 input_index = static_offset + index
                 if input_kind == "alpha_pair":
                     layer_input = f"[staticrgba{order}]"
@@ -896,7 +968,10 @@ class FFmpegRenderer:
                     )
                 else:
                     layer_input = f"[{input_index}:v]"
-                graph.append(f"{current}{layer_input}overlay=0:0:eof_action=pass{output}")
+                graph.append(
+                    f"{current}{layer_input}overlay={layer_x}:{layer_y}:"
+                    f"eof_action=pass{output}"
+                )
             current = output
         graph.append(f"{current}{FFmpegRenderer._output_scaling_filter(fps, output_width, output_height, include_fps=False)}[vout]")
         return ";".join(graph)
@@ -1064,19 +1139,27 @@ class FFmpegRenderer:
 
     def ensure_encoder_available(self, encoder: str) -> None:
         """Fail early when the active FFmpeg build lacks the selected encoder."""
-        try:
-            completed = subprocess.run(
-                [str(self.executable), "-hide_banner", "-encoders"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-                **hidden_process_kwargs(),
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise RenderError("Could not inspect the available FFmpeg encoders.") from error
-        if completed.returncode != 0 or encoder not in completed.stdout.split():
-            raise RenderError(
+        if self._available_encoders is None:
+            try:
+                completed = subprocess.run(
+                    [str(self.executable), "-hide_banner", "-encoders"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                    **hidden_process_kwargs(),
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise EncoderUnavailableError(
+                    "Could not inspect the available FFmpeg encoders."
+                ) from error
+            if completed.returncode != 0:
+                raise EncoderUnavailableError(
+                    "Could not inspect the available FFmpeg encoders."
+                )
+            self._available_encoders = frozenset(completed.stdout.split())
+        if encoder not in self._available_encoders:
+            raise EncoderUnavailableError(
                 f"The selected video encoder '{encoder}' is unavailable in this FFmpeg build. "
                 "Choose a supported CPU/GPU encoder in Settings."
             )
@@ -1161,12 +1244,12 @@ class FFmpegRenderer:
                 **hidden_process_kwargs(),
             )
         except subprocess.TimeoutExpired as error:
-            raise RenderError(
+            raise EncoderUnavailableError(
                 f"The selected video encoder '{encoder}' did not respond during "
                 "the selected-format startup check."
             ) from error
         except OSError as error:
-            raise RenderError(
+            raise EncoderUnavailableError(
                 "Could not start FFmpeg for the video encoder check."
             ) from error
         if completed.returncode == 0:
@@ -1175,7 +1258,7 @@ class FFmpegRenderer:
         if len(details) > 1600:
             details = details[-1600:]
         suffix = f"\n\nFFmpeg: {details}" if details else ""
-        raise RenderError(
+        raise EncoderUnavailableError(
             f"The selected video encoder '{encoder}' is installed but could not "
             f"start on this computer. Check the GPU driver or choose CPU H.264."
             f"{suffix}"
@@ -1229,9 +1312,31 @@ class FFmpegRenderer:
         pixels_per_second = (
             settings.output_width * settings.output_height * settings.fps
         )
+        if settings.work_mode == WORK_MODE_STABLE:
+            return 1
+        if settings.work_mode == WORK_MODE_MAX_SPEED:
+            if pixels_per_second <= 1920 * 1080 * 60:
+                return 4
+            if pixels_per_second <= 2560 * 1440 * 60:
+                return 2
+            return 1
         # Two filter workers improve the common 720p/1080p path. Higher-rate 4K
         # work remains single-worker to avoid retaining several large RGBA frames.
         return 2 if pixels_per_second <= 1920 * 1080 * 60 else 1
+
+    @staticmethod
+    def _audio_worker_count(settings: RenderSettings, track_count: int) -> int:
+        """Choose bounded independent-track concurrency for the work mode."""
+        if track_count <= 0:
+            return 0
+        if settings.work_mode == WORK_MODE_STABLE:
+            return 1
+        cpu_count = os.cpu_count() or 2
+        if settings.work_mode == WORK_MODE_MAX_SPEED:
+            cap = max(2, min(6, cpu_count - 1))
+        else:
+            cap = max(1, min(4, cpu_count // 2))
+        return min(track_count, cap)
 
     def _normalize_audio(self, tracks: list[PlaylistTrack], directory: Path,
                          settings: RenderSettings,
@@ -1284,8 +1389,11 @@ class FFmpegRenderer:
             ], progress_parser=normalization_progress, cancel_event=cancel_event)
             return index, output
 
-        worker_count = min(
-            len(tracks), max(1, min(3, (os.cpu_count() or 2) // 2)),
+        worker_count = self._audio_worker_count(settings, len(tracks))
+        self._report(
+            progress_callback, "Preparing audio", 0.05,
+            f"Normalizing {len(tracks)} independent track(s) with "
+            f"{worker_count} parallel worker(s)",
         )
         with ThreadPoolExecutor(
             max_workers=worker_count, thread_name_prefix="audio-normalize",

@@ -8,6 +8,98 @@ from app.renderer.export_timeline import ExportTimelinePlanner
 
 
 class ExportTimelinePlannerTests(unittest.TestCase):
+    def test_progress_motion_uses_every_selected_output_frame(self) -> None:
+        track = PlaylistTrack(
+            file_path="progress.mp3", title="Progress", duration_seconds=1.0,
+        )
+        progress = Source(SourceType.PROGRESS_BAR, "Progress")
+
+        samples_30 = ExportTimelinePlanner.build([track], [progress], 30)
+        samples_60 = ExportTimelinePlanner.build([track], [progress], 60)
+
+        self.assertEqual(len(samples_30), 30)
+        self.assertEqual(len(samples_60), 60)
+        self.assertTrue(all(
+            abs(sample.duration_seconds - 1 / 30) < 1e-12
+            for sample in samples_30
+        ))
+        self.assertTrue(all(
+            abs(sample.duration_seconds - 1 / 60) < 1e-12
+            for sample in samples_60
+        ))
+
+    def test_element_animations_scale_with_selected_output_frame_rate(self) -> None:
+        track = PlaylistTrack(
+            file_path="animation.mp3", title="Animation", duration_seconds=4.0,
+        )
+        animated = Source(
+            SourceType.SHAPE,
+            "Animated",
+            animation_in="fade",
+            animation_out="slide_up",
+            animation_in_duration=1.0,
+            animation_out_duration=1.0,
+        )
+
+        samples_30 = ExportTimelinePlanner.build([track], [animated], 30)
+        samples_60 = ExportTimelinePlanner.build([track], [animated], 60)
+        intro_30 = [sample for sample in samples_30 if sample.animation_phase == "in"]
+        intro_60 = [sample for sample in samples_60 if sample.animation_phase == "in"]
+        outro_30 = [sample for sample in samples_30 if sample.animation_phase == "out"]
+        outro_60 = [sample for sample in samples_60 if sample.animation_phase == "out"]
+
+        self.assertEqual(len(intro_30), 30)
+        self.assertEqual(len(intro_60), 60)
+        self.assertEqual(len(outro_30), 30)
+        self.assertEqual(len(outro_60), 60)
+        self.assertEqual(intro_30[0].animation_progress, 0.0)
+        self.assertEqual(intro_60[0].animation_progress, 0.0)
+        self.assertEqual(intro_30[-1].animation_progress, 1.0)
+        self.assertEqual(intro_60[-1].animation_progress, 1.0)
+        self.assertEqual(intro_30[-1].elapsed_seconds, 1.0)
+        self.assertEqual(intro_60[-1].elapsed_seconds, 1.0)
+        self.assertEqual(outro_30[-1].animation_progress, 1.0)
+        self.assertEqual(outro_60[-1].animation_progress, 1.0)
+        self.assertEqual(outro_30[-1].elapsed_seconds, track.duration_seconds)
+        self.assertEqual(outro_60[-1].elapsed_seconds, track.duration_seconds)
+
+    def test_lyrics_and_now_playing_transitions_follow_output_frame_rate(self) -> None:
+        track = PlaylistTrack(
+            file_path="transitions.mp3",
+            title="Transitions",
+            duration_seconds=2.0,
+            lyrics=[{"start": 0.25, "end": 0.9, "text": "Line"}],
+        )
+        sources = [
+            Source(
+                SourceType.LYRICS,
+                "Lyrics",
+                subtitle_animation="fade",
+                subtitle_animation_duration=0.5,
+            ),
+            Source(
+                SourceType.NOW_PLAYING,
+                "Now playing",
+                now_playing_duration=1.75,
+                now_playing_exit_animation="fade",
+                now_playing_exit_duration=0.5,
+            ),
+        ]
+
+        samples_30 = ExportTimelinePlanner.build([track], sources, 30)
+        samples_60 = ExportTimelinePlanner.build([track], sources, 60)
+        transition_frames_30 = sum(
+            abs(sample.duration_seconds - 1 / 30) < 1e-12
+            for sample in samples_30
+        )
+        transition_frames_60 = sum(
+            abs(sample.duration_seconds - 1 / 60) < 1e-12
+            for sample in samples_60
+        )
+
+        self.assertEqual(transition_frames_30, 30)
+        self.assertEqual(transition_frames_60, 60)
+
     def test_leading_gap_animation_and_clock_keep_existing_sample_contract(self) -> None:
         track = PlaylistTrack(
             file_path="timing.mp3",

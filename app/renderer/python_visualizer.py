@@ -296,26 +296,37 @@ class PythonVisualizerRenderer:
         edges = np.geomspace(35.0, self.sample_rate / 2, bands + 1)
         bins, probes = self._frequency_band_layout(frequencies, edges)
         result = np.zeros((frame_count, bands), dtype=np.float32)
-        for frame_index in range(frame_count):
+        # Construct and transform several independent FFT windows at once.
+        # Keeping the established per-spectrum band reducer preserves the exact
+        # float32 output while removing thousands of Python-level FFT calls.
+        frame_offsets = (
+            np.arange(self.fft_size, dtype=np.int64) - self.fft_size // 2
+        )
+        batch_size = 256
+        for batch_start in range(0, frame_count, batch_size):
             if cancel_event.is_set():
                 raise PythonVisualizerError("Rendering was cancelled.")
-            center = int(frame_index * self.sample_rate / fps)
-            start = center - self.fft_size // 2
-            end = start + self.fft_size
-            segment = np.zeros(self.fft_size, dtype=np.float32)
-            source_start = max(0, start)
-            source_end = min(len(samples), end)
-            if source_end > source_start:
-                target_start = source_start - start
-                segment[target_start:target_start + source_end - source_start] = samples[source_start:source_end]
+            batch_end = min(frame_count, batch_start + batch_size)
+            frame_indices = np.arange(batch_start, batch_end, dtype=np.int64)
+            centers = frame_indices * self.sample_rate // max(1, fps)
+            sample_indices = centers[:, None] + frame_offsets[None, :]
+            valid = (sample_indices >= 0) & (sample_indices < len(samples))
+            segments = np.zeros(sample_indices.shape, dtype=np.float32)
+            segments[valid] = samples[sample_indices[valid]]
             # Normalize FFT magnitude by its window size.  Raw FFT values are much
             # larger than audible amplitude and previously saturated almost every
             # bar, making quiet passages look like a solid rectangle.
-            spectrum = np.abs(np.fft.rfft(segment * window)) / (self.fft_size / 2)
-            values = self._frequency_band_values(
-                spectrum, frequencies, bins, probes,
+            spectra = (
+                np.abs(np.fft.rfft(segments * window, axis=1))
+                / (self.fft_size / 2)
             )
-            result[frame_index] = np.clip(values, 0.0, 2.0)
+            for local_index, spectrum in enumerate(spectra):
+                values = self._frequency_band_values(
+                    spectrum, frequencies, bins, probes,
+                )
+                result[batch_start + local_index] = np.clip(
+                    values, 0.0, 2.0,
+                )
         return result
 
     @staticmethod

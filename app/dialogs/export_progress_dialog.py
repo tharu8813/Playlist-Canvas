@@ -13,10 +13,14 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QProgressBar,
+    QPushButton,
+    QSizePolicy,
+    QSpacerItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -142,11 +146,12 @@ class ExportProgressDialog(QDialog):
 
     cancel_requested = Signal()
     minimize_requested = Signal()
+    _EXPORT_STEPS = ("visuals", "audio", "effects", "encode", "complete")
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setModal(False)
-        self.setMinimumSize(600, 420)
+        self.setMinimumSize(680, 470)
         self._started_at = monotonic()
         self._eta_estimator = ExportEtaEstimator(self._started_at)
         self._cancelling = False
@@ -163,11 +168,38 @@ class ExportProgressDialog(QDialog):
         self._export_settings_summary = ""
         self._export_output_path = ""
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        self.steps_heading = QLabel("Export steps")
+        self.steps_heading.setObjectName("panelTitle")
+        self.steps_widget = QFrame()
+        self.steps_widget.setObjectName("settingsStatusCard")
+        self.steps_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed,
+        )
+        steps_layout = QHBoxLayout(self.steps_widget)
+        steps_layout.setContentsMargins(14, 10, 14, 10)
+        steps_layout.setSpacing(5)
+        self.step_labels: list[QLabel] = []
+        for index, _step in enumerate(self._EXPORT_STEPS):
+            step_label = QLabel()
+            step_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            step_label.setMinimumWidth(88)
+            step_label.setTextFormat(Qt.TextFormat.RichText)
+            self.step_labels.append(step_label)
+            steps_layout.addWidget(step_label, 1)
+            if index < len(self._EXPORT_STEPS) - 1:
+                separator = QLabel("—")
+                separator.setObjectName("mutedLabel")
+                separator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                steps_layout.addWidget(separator)
         self.export_settings_heading = QLabel("Export settings")
         self.export_settings_heading.setObjectName("panelTitle")
         self.export_settings_label = QLabel()
         self.export_settings_label.setObjectName("infoCallout")
         self.export_settings_label.setWordWrap(True)
+        self.export_settings_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum,
+        )
         self.export_settings_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -185,8 +217,19 @@ class ExportProgressDialog(QDialog):
         self.log_heading = QLabel("Activity")
         self.log_heading.setObjectName("panelTitle")
         self.log_output = QTextEdit()
+        self.log_output.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
+        )
         self.log_output.setReadOnly(True)
         self.log_output.document().setMaximumBlockCount(200)
+        self.log_heading.hide()
+        self.log_output.hide()
+        self.details_button = QPushButton("Show technical details")
+        self.details_button.setCheckable(True)
+        self.details_button.setToolTip(
+            "Show detailed processing messages for troubleshooting."
+        )
+        self.details_button.toggled.connect(self._set_details_visible)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self.minimize_button = self.buttons.addButton(
             "Minimize", QDialogButtonBox.ButtonRole.ActionRole,
@@ -197,16 +240,31 @@ class ExportProgressDialog(QDialog):
         progress_row = QHBoxLayout()
         progress_row.addWidget(self.progress_bar, 1)
         progress_row.addWidget(self.percent_label)
+        layout.addWidget(self.steps_heading)
+        layout.addWidget(self.steps_widget)
         layout.addWidget(self.export_settings_heading)
         layout.addWidget(self.export_settings_label)
         layout.addWidget(self.stage_label)
         layout.addLayout(progress_row)
         layout.addWidget(self.detail_label)
         layout.addWidget(self.time_label)
+        layout.addWidget(self.details_button, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self.log_heading)
         layout.addWidget(self.log_output, 1)
+        # When technical details are collapsed, this spacer alone consumes
+        # additional window height. Without it, QVBoxLayout can distribute the
+        # spare height among ordinary cards and labels, making every control
+        # appear to drift apart as the user resizes the dialog. When details
+        # are shown, the log view becomes the only expanding content instead.
+        self.content_spacer = QSpacerItem(
+            0, 0,
+            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Expanding,
+        )
+        layout.addItem(self.content_spacer)
         layout.addWidget(self.buttons)
         self.setWindowTitle("Export progress")
+        self._refresh_steps("Preparing visual frames")
 
     def set_korean(self, korean: bool) -> None:
         """Localize the export-specific labels without changing app-wide language."""
@@ -218,8 +276,16 @@ class ExportProgressDialog(QDialog):
                 "준비된 임시 프레임과 진행 중인 렌더링이 중단됩니다."
             )
             self.setWindowTitle("내보내기 진행 상황")
+            self.steps_heading.setText("내보내기 단계")
             self.export_settings_heading.setText("내보내기 설정")
             self.log_heading.setText("작업 내역")
+            self.details_button.setText(
+                "기술 정보 숨기기" if self.details_button.isChecked()
+                else "기술 정보 보기"
+            )
+            self.details_button.setToolTip(
+                "문제 해결에 필요한 상세 처리 내용을 표시합니다."
+            )
             self.minimize_button.setText("최소화")
             self.cancel_button.setText("취소")
             self.stage_label.setText("내보내기 준비")
@@ -231,12 +297,21 @@ class ExportProgressDialog(QDialog):
                 "Prepared temporary frames and the active render will be discarded."
             )
             self.setWindowTitle("Export progress")
+            self.steps_heading.setText("Export steps")
             self.export_settings_heading.setText("Export settings")
             self.log_heading.setText("Activity")
+            self.details_button.setText(
+                "Hide technical details" if self.details_button.isChecked()
+                else "Show technical details"
+            )
+            self.details_button.setToolTip(
+                "Show detailed processing messages for troubleshooting."
+            )
             self.minimize_button.setText("Minimize")
             self.cancel_button.setText("Cancel")
             self.stage_label.setText("Preparing export")
             self.time_label.setText("Elapsed 00:00 · Calculating remaining time")
+        self._refresh_steps("Preparing visual frames")
 
     def set_cancel_confirmation(self, title: str, message: str) -> None:
         """Customize confirmation text when the dialog tracks a non-export task."""
@@ -284,6 +359,7 @@ class ExportProgressDialog(QDialog):
         """Show activity before a measurable FFmpeg progress stream exists."""
         display_message = self._detail_text(message)
         self.stage_label.setText(self._stage_text(stage))
+        self._refresh_steps(stage)
         self.progress_bar.setRange(0, 0)
         self.percent_label.setText("…")
         self.detail_label.setText(display_message)
@@ -304,6 +380,7 @@ class ExportProgressDialog(QDialog):
         if self.progress_bar.maximum() == 0:
             self.progress_bar.setRange(0, 100)
         self.stage_label.setText(self._stage_text(stage))
+        self._refresh_steps(stage)
         self.progress_bar.setValue(percent)
         self.percent_label.setText(f"{percent}%")
         self.detail_label.setText(display_message)
@@ -312,6 +389,74 @@ class ExportProgressDialog(QDialog):
             self._last_log = display_message
         remaining = self._eta_estimator.update(stage, fraction, now)
         self._update_time_label(remaining, elapsed)
+
+    def _set_details_visible(self, visible: bool) -> None:
+        """Keep implementation terminology optional for ordinary users."""
+        self.log_heading.setVisible(visible)
+        self.log_output.setVisible(visible)
+        self.content_spacer.changeSize(
+            0, 0,
+            QSizePolicy.Policy.Minimum,
+            (
+                QSizePolicy.Policy.Fixed
+                if visible else QSizePolicy.Policy.Expanding
+            ),
+        )
+        if self.layout() is not None:
+            self.layout().invalidate()
+            self.layout().activate()
+        if self._korean:
+            self.details_button.setText(
+                "기술 정보 숨기기" if visible else "기술 정보 보기"
+            )
+        else:
+            self.details_button.setText(
+                "Hide technical details" if visible else "Show technical details"
+            )
+
+    def _refresh_steps(self, stage: str) -> None:
+        """Show completed, active, and upcoming export phases at a glance."""
+        stage_key = self._stage_key(stage)
+        try:
+            active_index = self._EXPORT_STEPS.index(stage_key)
+        except ValueError:
+            active_index = 0
+        names = (
+            ("화면 준비", "오디오 준비", "효과 준비", "영상 만들기", "완료")
+            if self._korean else
+            ("Visuals", "Audio", "Effects", "Create video", "Done")
+        )
+        for index, (label, name) in enumerate(zip(self.step_labels, names, strict=True)):
+            if index < active_index:
+                symbol, color, state = "✓", "#35A56F", "completed"
+                status = "완료" if self._korean else "completed"
+            elif index == active_index:
+                symbol, color, state = "●", "#1685D1", "active"
+                status = "진행 중" if self._korean else "in progress"
+            else:
+                symbol, color, state = "○", "#8793A1", "pending"
+                status = "대기" if self._korean else "waiting"
+            label.setProperty("stepState", state)
+            label.setText(
+                f"<span style='color:{color};font-size:18px;font-weight:700'>"
+                f"{symbol}</span><br><span style='font-weight:600'>{name}</span>"
+            )
+            label.setToolTip(f"{name} · {status}")
+            label.setAccessibleName(f"{name}, {status}")
+
+    @staticmethod
+    def _stage_key(stage: str) -> str:
+        return {
+            "Preparing visual frames": "visuals",
+            "Preparing export": "visuals",
+            "Preparing visual layers": "visuals",
+            "Preparing audio": "audio",
+            "Combining audio": "audio",
+            "Preparing visualizers": "effects",
+            "Encoding video": "encode",
+            "Finalizing export": "encode",
+            "Complete": "complete",
+        }.get(stage, "visuals")
 
     def _update_time_label(
         self, remaining: float | None, elapsed: float | None = None,
@@ -389,13 +534,13 @@ class ExportProgressDialog(QDialog):
         if not self._korean:
             return stage
         return {
-            "Preparing visual frames": "화면 프레임 준비",
+            "Preparing visual frames": "화면 준비",
             "Preparing export": "내보내기 준비",
             "Preparing audio": "오디오 준비",
             "Combining audio": "오디오 결합",
-            "Preparing visualizers": "비주얼라이저 준비",
-            "Preparing visual layers": "시각 레이어 준비",
-            "Encoding video": "영상 인코딩",
+            "Preparing visualizers": "음악 반응 효과 준비",
+            "Preparing visual layers": "추가 화면 준비",
+            "Encoding video": "최종 영상 만들기",
             "Finalizing export": "내보내기 마무리",
             "Preparing download": "다운로드 준비",
             "Downloading FFmpeg": "FFmpeg 다운로드",
@@ -414,6 +559,47 @@ class ExportProgressDialog(QDialog):
             flags=re.IGNORECASE,
         )
         message = re.sub(r"\s*·\s*약\s+[0-9:]+\s+남음\s*$", "", message)
+        korean_capture = re.search(
+            r"화면 준비\s+(\d+)%.*?캡처\s+([\d,]+/[\d,]+)", message,
+        )
+        if korean_capture:
+            return (
+                "장면을 영상으로 준비하는 중 · "
+                f"전체 {korean_capture.group(1)}% · "
+                f"장면 {korean_capture.group(2)}"
+            )
+        korean_buffer = re.search(
+            r"인코더 버퍼 처리 중\s*·\s*([\d,]+/[\d,]+)\s*프레임"
+            r"\s*·\s*(\d+)%",
+            message,
+        )
+        if korean_buffer:
+            return (
+                "화면 구성 요소를 영상으로 변환하는 중 · "
+                f"{korean_buffer.group(1)} 프레임 · {korean_buffer.group(2)}%"
+            )
+        english_capture = re.search(
+            r"visual preparation\s+(\d+)%.*?capture\s+([\d,]+/[\d,]+)",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if english_capture:
+            return (
+                "Preparing scenes for the video · "
+                f"{english_capture.group(1)}% overall · "
+                f"{english_capture.group(2)} scenes"
+            )
+        english_buffer = re.search(
+            r"encoder buffer\s*·\s*([\d,]+/[\d,]+)\s*frames"
+            r"\s*·\s*(\d+)%",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if english_buffer:
+            return (
+                "Converting visual elements into video · "
+                f"{english_buffer.group(1)} frames · {english_buffer.group(2)}%"
+            )
         if not self._korean:
             return message
         translated = {
@@ -429,6 +615,7 @@ class ExportProgressDialog(QDialog):
             "Visualizer frames complete": "비주얼라이저 프레임 준비 완료",
             "Rendering the final video": "최종 영상 렌더링 중",
             "Muxing prepared video and audio": "준비된 영상과 오디오를 결합하는 중",
+            "Finishing the MP4 file": "마지막 프레임을 정리하고 MP4 파일을 마무리하는 중",
             "Audio normalization complete": "오디오 정규화 완료",
             "Export completed": "내보내기 완료",
             "Moving the completed video to the selected location":
@@ -461,6 +648,24 @@ class ExportProgressDialog(QDialog):
                 message.replace("Normalizing audio ", "오디오 정규화 중 · ", 1)
                 .replace(" complete", " 완료")
                 .replace(" total", " 전체")
+            )
+        parallel_audio = re.fullmatch(
+            r"Normalizing (\d+) independent track\(s\) with "
+            r"(\d+) parallel worker\(s\)",
+            message,
+        )
+        if parallel_audio:
+            return (
+                f"독립 오디오 {parallel_audio.group(1)}곡 정규화 준비 · "
+                f"병렬 작업 {parallel_audio.group(2)}개"
+            )
+        normalized_audio = re.fullmatch(
+            r"Normalized (\d+)/(\d+) tracks", message,
+        )
+        if normalized_audio:
+            return (
+                f"오디오 정규화 완료 "
+                f"{normalized_audio.group(1)}/{normalized_audio.group(2)}곡"
             )
         if message.startswith("Normalizing "):
             return "오디오 정규화 중 · " + message.removeprefix("Normalizing ")

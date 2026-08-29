@@ -10,6 +10,7 @@ import subprocess
 import threading
 import uuid
 import zipfile
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,28 @@ class ManagedFFmpegInstallation:
 
     executable: Path
     version: str
+    series: str = ""
+    release_tag: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class FFmpegReleaseOption:
+    """One selectable, checksum-verified Windows GPL build."""
+
+    series: str
+    build: str
+    release_tag: str
+    release_name: str
+    published_at: str
+    archive_name: str
+    archive_url: str
+    checksum_url: str
+    notes: str
+    recommended: bool = False
+
+    @property
+    def install_key(self) -> str:
+        return f"{self.series}-{self.build}"
 
 
 ProgressCallback = Callable[[str, float, str], None]
@@ -43,6 +66,11 @@ class ManagedFFmpegInstaller:
     """Downloads BtbN's GPL Windows build and verifies its release checksum."""
 
     release_api_url = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
+    releases_url = "https://github.com/BtbN/FFmpeg-Builds/releases"
+    # Compatibility baseline selected for Playlist Canvas 1.0.x. Change this
+    # deliberately with an app patch after the render suite passes against a
+    # newer stable branch.
+    recommended_series = "9.0"
     archive_name = "ffmpeg-master-latest-win64-gpl.zip"
     checksum_name = "checksums.sha256"
     max_text_bytes = 16 * 1024 * 1024
@@ -62,6 +90,15 @@ class ManagedFFmpegInstaller:
 
     def current_installation(self) -> ManagedFFmpegInstallation | None:
         """Read the latest completed managed installation, if it still validates."""
+        installation = self.recorded_installation()
+        return installation if installation and self._is_runnable(installation.executable) else None
+
+    def recorded_installation(self) -> ManagedFFmpegInstallation | None:
+        """Read the activation manifest even when its executable is damaged.
+
+        Keeping this separate from :meth:`current_installation` lets Settings
+        offer a safe Delete/Reinstall recovery path for an incomplete install.
+        """
         manifest = self.install_root / "current.json"
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -69,37 +106,167 @@ class ManagedFFmpegInstaller:
             version = str(data["version"])
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
-        return ManagedFFmpegInstallation(executable, version) if self._is_runnable(executable) else None
+        return ManagedFFmpegInstallation(
+            executable, version,
+            str(data.get("series", "")), str(data.get("release_tag", "")),
+        )
+
+    def available_releases(
+        self, cancel_event: threading.Event | None = None,
+    ) -> list[FFmpegReleaseOption]:
+        """Return every stable/master win64 GPL build in the latest manifest."""
+        cancelled = cancel_event or threading.Event()
+        release = self._read_json(self.release_api_url, cancelled)
+        tag = str(release.get("tag_name", "latest") or "latest").strip()
+        name = str(release.get("name", tag) or tag).strip()
+        published_at = str(
+            release.get("published_at", release.get("updated_at", "")) or ""
+        ).strip()
+        body = str(release.get("body", "") or "")
+        raw_assets = release.get("assets", [])
+        if not isinstance(raw_assets, list):
+            raise FFmpegInstallError("The FFmpeg release asset list is invalid.")
+        assets = [asset for asset in raw_assets if isinstance(asset, dict)]
+        checksum_url = next((
+            str(asset.get("browser_download_url", ""))
+            for asset in assets if asset.get("name") == self.checksum_name
+        ), "")
+        if not checksum_url:
+            raise FFmpegInstallError("The FFmpeg release has no checksum manifest.")
+        options: list[FFmpegReleaseOption] = []
+        for asset in assets:
+            archive_name = str(asset.get("name", ""))
+            parsed = self._parse_archive_version(archive_name, body)
+            archive_url = str(asset.get("browser_download_url", ""))
+            if parsed is None or not archive_url:
+                continue
+            series, build = parsed
+            options.append(FFmpegReleaseOption(
+                series=series,
+                build=build,
+                release_tag=tag,
+                release_name=name,
+                published_at=published_at,
+                archive_name=archive_name,
+                archive_url=archive_url,
+                checksum_url=checksum_url,
+                notes=self._release_notes(body, series, build),
+                recommended=series == self.recommended_series,
+            ))
+        if not options:
+            raise FFmpegInstallError("No supported Windows GPL FFmpeg builds were found.")
+        return sorted(options, key=self._release_sort_key)
+
+    @classmethod
+    def _parse_archive_version(
+        cls, archive_name: str, release_body: str,
+    ) -> tuple[str, str] | None:
+        """Accept static win64 GPL archives, excluding shared/debug/LTO builds."""
+        if not archive_name.endswith(".zip") or "-win64-gpl" not in archive_name:
+            return None
+        if any(marker in archive_name for marker in ("-shared", "-debug", "-lto")):
+            return None
+        stable = re.search(r"-win64-gpl-(\d+\.\d+)\.zip$", archive_name)
+        series = stable.group(1) if stable else "master"
+        build = "latest"
+        if series == "master":
+            match = re.search(r"master\s+`([^`]+)`", release_body, re.IGNORECASE)
+        else:
+            match = re.search(
+                rf"(?:^|\n)\s*{re.escape(series)}\s+`([^`]+)`",
+                release_body,
+            )
+        if match:
+            build = match.group(1).strip()
+        return series, build
+
+    @staticmethod
+    def _release_notes(body: str, series: str, build: str) -> str:
+        """Keep a readable upstream release excerpt for confirmation dialogs."""
+        normalized = "\n".join(line.rstrip() for line in body.splitlines()).strip()
+        heading = f"FFmpeg {series} · {build}"
+        if not normalized:
+            return heading
+        # GitHub's generated body can contain large asset tables. Preserve a
+        # bounded excerpt so the UI remains responsive and Detailed Text stays useful.
+        return f"{heading}\n\n{normalized[:6000]}"
+
+    @classmethod
+    def _release_sort_key(cls, option: FFmpegReleaseOption) -> tuple[int, tuple[int, ...]]:
+        if option.recommended:
+            return (0, ())
+        if option.series == "master":
+            return (2, ())
+        try:
+            parts = tuple(-int(part) for part in option.series.split("."))
+        except ValueError:
+            parts = ()
+        return (1, parts)
 
     def install_latest(self, progress: ProgressCallback | None = None,
                        cancel_event: threading.Event | None = None) -> ManagedFFmpegInstallation:
         """Download, checksum-verify, extract, test, and atomically activate FFmpeg."""
         cancelled = cancel_event or threading.Event()
         self._report(progress, "Preparing download", 0.02, "Reading the verified release manifest")
-        tag, archive_url, checksum_url = self._release_assets(cancelled, progress)
+        try:
+            releases = self.available_releases(cancelled)
+            release = next((entry for entry in releases if entry.recommended), releases[0])
+        except FFmpegInstallError:
+            self._report(
+                progress, "Preparing download", 0.04,
+                "GitHub API unavailable; using the official recommended release links",
+            )
+            tag = "latest"
+            base = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+            archive_name = (
+                f"ffmpeg-n{self.recommended_series}-latest-win64-gpl-"
+                f"{self.recommended_series}.zip"
+            )
+            archive_url = f"{base}/{archive_name}"
+            checksum_url = f"{base}/{self.checksum_name}"
+            release = FFmpegReleaseOption(
+                self.recommended_series, "latest", tag, tag, "",
+                archive_name, archive_url, checksum_url,
+                f"FFmpeg {self.recommended_series} latest compatible build", True,
+            )
+        return self.install_release(release, progress, cancelled)
+
+    def install_release(
+        self, release: FFmpegReleaseOption,
+        progress: ProgressCallback | None = None,
+        cancel_event: threading.Event | None = None, *, force: bool = False,
+    ) -> ManagedFFmpegInstallation:
+        """Install one selected release and atomically activate it."""
+        cancelled = cancel_event or threading.Event()
+        tag = release.release_tag
+        archive_url = release.archive_url
+        checksum_url = release.checksum_url
 
         self.install_root.mkdir(parents=True, exist_ok=True)
-        target = self.install_root / "versions" / self._safe_version(tag)
+        target = self.install_root / "versions" / self._safe_version(release.install_key)
         if target.exists():
             executable = self._find_executable(target)
-            if executable and self._is_runnable(executable):
-                installation = ManagedFFmpegInstallation(executable, tag)
+            if not force and executable and self._is_runnable(executable):
+                installation = ManagedFFmpegInstallation(
+                    executable, release.build, release.series, tag,
+                )
                 self._activate(installation)
                 self._report(progress, "Complete", 1.0, "Using the existing verified FFmpeg version")
                 return installation
-            raise FFmpegInstallError(
+            if not force:
+                raise FFmpegInstallError(
                 "An incomplete FFmpeg version folder already exists. Remove it manually before retrying."
-            )
+                )
 
         with TemporaryDirectory(prefix="ffmpeg-download-", dir=self.install_root) as temporary:
             temporary_directory = Path(temporary)
             self._report(progress, "Preparing download", 0.05, "Downloading the checksum manifest")
             checksum_text = self._download_text(checksum_url, cancelled)
-            expected_hash = self._checksum_for_archive(checksum_text, self.archive_name)
+            expected_hash = self._checksum_for_archive(checksum_text, release.archive_name)
             if expected_hash is None:
                 raise FFmpegInstallError("The release checksum manifest does not list the FFmpeg archive.")
             self._report(progress, "Preparing download", 0.07, "Checksum found; starting FFmpeg download")
-            archive = temporary_directory / self.archive_name
+            archive = temporary_directory / release.archive_name
             self._download_file(archive_url, archive, progress, cancelled)
             self._raise_if_cancelled(cancelled)
             actual_hash = self._sha256(archive)
@@ -115,18 +282,68 @@ class ManagedFFmpegInstaller:
             target.parent.mkdir(parents=True, exist_ok=True)
             staging = target.parent / f".{target.name}-{uuid.uuid4().hex}.installing"
             shutil.move(str(executable.parent.parent), str(staging))
+            backup = target.parent / f".{target.name}-{uuid.uuid4().hex}.backup"
             try:
+                if target.exists():
+                    target.replace(backup)
                 staging.replace(target)
             except OSError as error:
                 shutil.rmtree(staging, ignore_errors=True)
+                if backup.exists() and not target.exists():
+                    backup.replace(target)
                 raise FFmpegInstallError("Could not activate the verified FFmpeg installation.") from error
             final_executable = self._find_executable(target)
             if final_executable is None or not self._is_runnable(final_executable):
+                shutil.rmtree(target, ignore_errors=True)
+                if backup.exists():
+                    backup.replace(target)
                 raise FFmpegInstallError("FFmpeg failed its final execution check after installation.")
-            installation = ManagedFFmpegInstallation(final_executable, tag)
+            shutil.rmtree(backup, ignore_errors=True)
+            probed_version = self._probe_version(final_executable) or release.build
+            installation = ManagedFFmpegInstallation(
+                final_executable, probed_version, release.series, tag,
+            )
             self._activate(installation)
         self._report(progress, "Complete", 1.0, "FFmpeg was installed and verified")
         return installation
+
+    def uninstall_current(self) -> ManagedFFmpegInstallation | None:
+        """Remove only the active app-managed version and its activation manifest."""
+        # A broken executable must still be removable through Settings. The
+        # resolved-path guard below keeps deletion scoped to our versions root.
+        installation = self.recorded_installation()
+        if installation is None:
+            return None
+        versions_root = (self.install_root / "versions").resolve()
+        executable = installation.executable.resolve()
+        try:
+            relative = executable.relative_to(versions_root)
+        except ValueError as error:
+            raise FFmpegInstallError(
+                "The configured FFmpeg is not an app-managed installation."
+            ) from error
+        if not relative.parts:
+            raise FFmpegInstallError("The managed FFmpeg path is invalid.")
+        version_root = versions_root / relative.parts[0]
+        try:
+            shutil.rmtree(version_root)
+            (self.install_root / "current.json").unlink(missing_ok=True)
+        except OSError as error:
+            raise FFmpegInstallError("Could not remove the managed FFmpeg installation.") from error
+        return installation
+
+    @staticmethod
+    def _probe_version(executable: Path) -> str:
+        try:
+            result = subprocess.run(
+                [str(executable), "-version"], capture_output=True, text=True,
+                timeout=10, check=False, **hidden_process_kwargs(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        first_line = result.stdout.splitlines()[0] if result.stdout else ""
+        match = re.match(r"ffmpeg version\s+(\S+)", first_line, re.IGNORECASE)
+        return match.group(1) if match else ""
 
     def _release_assets(
         self, cancelled: threading.Event, progress: ProgressCallback | None = None,
@@ -270,6 +487,8 @@ class ManagedFFmpegInstaller:
             temporary.write_text(json.dumps({
                 "version": installation.version,
                 "executable": str(installation.executable),
+                "series": installation.series,
+                "release_tag": installation.release_tag,
                 "source": "BtbN/FFmpeg-Builds",
                 "license": "GPL-3.0-or-later",
             }, ensure_ascii=False, indent=2), encoding="utf-8")

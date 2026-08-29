@@ -34,18 +34,36 @@ from app.services.app_settings_service import (
     RESOLUTIONS,
     VIDEO_ENCODERS,
     AUDIO_BITRATES,
+    EXPORT_NOTIFICATION_MODES,
     AppSettings,
 )
 from app.services.theme_service import Theme
 from app.services.language_pack_service import LanguagePackError
 from app.utils.i18n import Language, LanguageSelection, Translator
 from app.utils.subprocess_utils import hidden_process_kwargs
+from app.ffmpeg.managed_installer import (
+    FFmpegReleaseOption,
+    ManagedFFmpegInstallation,
+)
+from app.services.video_encoder_service import (
+    AUTO_VIDEO_ENCODER,
+    VideoEncoderAdvisor,
+)
+from app.renderer.ffmpeg_renderer import (
+    WORK_MODE_AUTO,
+    WORK_MODE_MAX_SPEED,
+    WORK_MODE_STABLE,
+)
 
 
 class SettingsDialog(QDialog):
     """Edits app-wide render, appearance, and localization preferences."""
 
     download_requested = Signal()
+    update_requested = Signal()
+    reinstall_requested = Signal()
+    delete_requested = Signal()
+    catalog_requested = Signal(bool)
 
     def __init__(self, settings: AppSettings, language: LanguageSelection, theme: Theme,
                  translator: Translator, parent: object | None = None, *,
@@ -55,6 +73,11 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(720, 590)
         self.resize(760, 640)
         self._ffmpeg_installing = False
+        self._ffmpeg_catalog_loading = False
+        self._ffmpeg_catalog_loaded = False
+        self._focus_ffmpeg_install_when_ready = False
+        self._ffmpeg_releases: list[FFmpegReleaseOption] = []
+        self._managed_installation: ManagedFFmpegInstallation | None = None
         self._ffmpeg_status_override: tuple[bool, str] | None = None
         self._active_preview_backend = (
             active_preview_backend or settings.preview_backend
@@ -64,6 +87,18 @@ class SettingsDialog(QDialog):
         self.subtitle_label = QLabel()
         self.subtitle_label.setObjectName("mutedLabel")
         self.subtitle_label.setWordWrap(True)
+        self.ffmpeg_about_card = QFrame()
+        self.ffmpeg_about_card.setObjectName("settingsStatusCard")
+        self.ffmpeg_about_title = QLabel()
+        self.ffmpeg_about_title.setObjectName("panelTitle")
+        self.ffmpeg_about_description = QLabel()
+        self.ffmpeg_about_description.setObjectName("mutedLabel")
+        self.ffmpeg_about_description.setWordWrap(True)
+        ffmpeg_about_layout = QVBoxLayout(self.ffmpeg_about_card)
+        ffmpeg_about_layout.setContentsMargins(14, 11, 14, 11)
+        ffmpeg_about_layout.setSpacing(3)
+        ffmpeg_about_layout.addWidget(self.ffmpeg_about_title)
+        ffmpeg_about_layout.addWidget(self.ffmpeg_about_description)
         self.ffmpeg_edit = QLineEdit(settings.ffmpeg_path)
         self.ffmpeg_edit.setClearButtonEnabled(True)
         self.ffmpeg_browse_button = QPushButton()
@@ -71,6 +106,18 @@ class SettingsDialog(QDialog):
         self.ffmpeg_download_button = QPushButton()
         self.ffmpeg_download_button.setObjectName("primaryButton")
         self.ffmpeg_download_button.setMinimumWidth(180)
+        self.ffmpeg_version_combo = QComboBox()
+        self.ffmpeg_version_combo.setMinimumWidth(260)
+        self.ffmpeg_refresh_versions_button = QPushButton()
+        self.ffmpeg_update_button = QPushButton()
+        self.ffmpeg_reinstall_button = QPushButton()
+        self.ffmpeg_delete_button = QPushButton()
+        self.ffmpeg_delete_button.setObjectName("dangerButton")
+        self.ffmpeg_release_info = QLabel()
+        self.ffmpeg_release_info.setObjectName("mutedLabel")
+        self.ffmpeg_release_info.setWordWrap(True)
+        self.ffmpeg_version_combo.addItem("", None)
+        self.ffmpeg_version_combo.setEnabled(False)
         self.ffmpeg_status_card = QFrame()
         self.ffmpeg_status_card.setObjectName("settingsStatusCard")
         self.ffmpeg_status_dot = QFrame()
@@ -105,9 +152,28 @@ class SettingsDialog(QDialog):
         self.audio_bitrate_combo = QComboBox()
         self.audio_bitrate_combo.addItems(AUDIO_BITRATES)
         self.audio_bitrate_combo.setCurrentText(settings.audio_bitrate)
+        self.work_mode_combo = QComboBox()
+        self.work_mode_combo.addItem("", WORK_MODE_STABLE)
+        self.work_mode_combo.addItem("", WORK_MODE_AUTO)
+        self.work_mode_combo.addItem("", WORK_MODE_MAX_SPEED)
+        self.work_mode_combo.setCurrentIndex(max(
+            0, self.work_mode_combo.findData(settings.work_mode),
+        ))
+        self.work_mode_hint = QLabel()
+        self.work_mode_hint.setObjectName("mutedLabel")
+        self.work_mode_hint.setWordWrap(True)
+        work_mode_panel = QWidget()
+        work_mode_layout = QVBoxLayout(work_mode_panel)
+        work_mode_layout.setContentsMargins(0, 0, 0, 0)
+        work_mode_layout.setSpacing(4)
+        work_mode_layout.addWidget(self.work_mode_combo)
+        work_mode_layout.addWidget(self.work_mode_hint)
+        self.work_mode_combo.currentIndexChanged.connect(
+            self._update_work_mode_hint
+        )
         for combo in (
             self.resolution_combo, self.fps_combo, self.codec_combo,
-            self.preset_combo, self.audio_bitrate_combo,
+            self.preset_combo, self.audio_bitrate_combo, self.work_mode_combo,
         ):
             combo.setMinimumWidth(260)
         self.render_hint_label = QLabel()
@@ -189,6 +255,81 @@ class SettingsDialog(QDialog):
             self._update_preview_backend_restart_hint
         )
 
+        self.export_notifications_check = QCheckBox()
+        self.export_notifications_check.setChecked(
+            settings.export_notifications_enabled
+        )
+        self.export_notification_mode_combo = QComboBox()
+        self.export_notification_mode_combo.addItem("", "unfocused")
+        self.export_notification_mode_combo.addItem("", "always")
+        selected_notification_mode = (
+            settings.export_notification_mode
+            if settings.export_notification_mode in EXPORT_NOTIFICATION_MODES
+            else "unfocused"
+        )
+        self.export_notification_mode_combo.setCurrentIndex(max(
+            0,
+            self.export_notification_mode_combo.findData(
+                selected_notification_mode
+            ),
+        ))
+        self.export_notification_mode_combo.setMinimumWidth(260)
+        self.export_notify_visuals_check = QCheckBox()
+        self.export_notify_audio_check = QCheckBox()
+        self.export_notify_effects_check = QCheckBox()
+        self.export_notify_encode_check = QCheckBox()
+        self.export_notify_complete_check = QCheckBox()
+        self.export_notify_failures_check = QCheckBox()
+        notification_values = (
+            settings.export_notify_visuals,
+            settings.export_notify_audio,
+            settings.export_notify_effects,
+            settings.export_notify_encode,
+            settings.export_notify_complete,
+            settings.export_notify_failures,
+        )
+        for checkbox, checked in zip(
+            self._export_notification_stage_checks(),
+            notification_values,
+            strict=True,
+        ):
+            checkbox.setChecked(checked)
+        notification_stage_widget = QWidget()
+        notification_stage_layout = QGridLayout(notification_stage_widget)
+        notification_stage_layout.setContentsMargins(0, 0, 0, 0)
+        notification_stage_layout.setHorizontalSpacing(18)
+        notification_stage_layout.setVerticalSpacing(5)
+        for index, checkbox in enumerate(
+            self._export_notification_stage_checks()
+        ):
+            notification_stage_layout.addWidget(
+                checkbox, index // 2, index % 2,
+            )
+        self.export_notification_hint = QLabel()
+        self.export_notification_hint.setObjectName("mutedLabel")
+        self.export_notification_hint.setWordWrap(True)
+        notification_group = QGroupBox()
+        notification_form = QFormLayout(notification_group)
+        self.export_notification_master_label = QLabel()
+        self.export_notification_mode_label = QLabel()
+        self.export_notification_steps_label = QLabel()
+        notification_form.addRow(
+            self.export_notification_master_label,
+            self.export_notifications_check,
+        )
+        notification_form.addRow(
+            self.export_notification_mode_label,
+            self.export_notification_mode_combo,
+        )
+        notification_form.addRow(
+            self.export_notification_steps_label,
+            notification_stage_widget,
+        )
+        notification_form.addRow("", self.export_notification_hint)
+        self.export_notifications_check.toggled.connect(
+            self._update_export_notification_ui
+        )
+
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save
         )
@@ -197,6 +338,15 @@ class SettingsDialog(QDialog):
         self.ffmpeg_browse_button.clicked.connect(self._browse_ffmpeg)
         self.ffmpeg_test_button.clicked.connect(self._test_ffmpeg)
         self.ffmpeg_download_button.clicked.connect(self.download_requested.emit)
+        self.ffmpeg_update_button.clicked.connect(self.update_requested.emit)
+        self.ffmpeg_reinstall_button.clicked.connect(self.reinstall_requested.emit)
+        self.ffmpeg_delete_button.clicked.connect(self.delete_requested.emit)
+        self.ffmpeg_refresh_versions_button.clicked.connect(
+            lambda: self.request_ffmpeg_catalog(force=True)
+        )
+        self.ffmpeg_version_combo.currentIndexChanged.connect(
+            self._update_ffmpeg_release_info
+        )
         self.output_browse_button.clicked.connect(self._browse_output)
         self.ffmpeg_edit.textChanged.connect(self._refresh_ffmpeg_status)
         self.language_combo.currentIndexChanged.connect(self._update_language_pack_ui)
@@ -208,10 +358,19 @@ class SettingsDialog(QDialog):
         ffmpeg_row = QHBoxLayout()
         ffmpeg_row.addWidget(self.ffmpeg_edit, 1)
         ffmpeg_row.addWidget(self.ffmpeg_browse_button)
-        ffmpeg_actions = QHBoxLayout()
-        ffmpeg_actions.addStretch()
-        ffmpeg_actions.addWidget(self.ffmpeg_test_button)
-        ffmpeg_actions.addWidget(self.ffmpeg_download_button)
+        version_row = QHBoxLayout()
+        version_row.addWidget(self.ffmpeg_version_combo, 1)
+        version_row.addWidget(self.ffmpeg_refresh_versions_button)
+        ffmpeg_actions_widget = QWidget()
+        ffmpeg_actions = QGridLayout(ffmpeg_actions_widget)
+        ffmpeg_actions.setContentsMargins(0, 0, 0, 0)
+        ffmpeg_actions.setHorizontalSpacing(6)
+        ffmpeg_actions.setVerticalSpacing(6)
+        ffmpeg_actions.addWidget(self.ffmpeg_download_button, 0, 0, 1, 2)
+        ffmpeg_actions.addWidget(self.ffmpeg_update_button, 1, 0)
+        ffmpeg_actions.addWidget(self.ffmpeg_reinstall_button, 1, 1)
+        ffmpeg_actions.addWidget(self.ffmpeg_test_button, 2, 0)
+        ffmpeg_actions.addWidget(self.ffmpeg_delete_button, 2, 1)
         output_row = QHBoxLayout()
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(self.output_browse_button)
@@ -219,9 +378,12 @@ class SettingsDialog(QDialog):
         ffmpeg_group = QGroupBox()
         ffmpeg_form = QFormLayout(ffmpeg_group)
         self.ffmpeg_path_label = QLabel()
+        self.ffmpeg_version_label = QLabel()
         self.output_label = QLabel()
         ffmpeg_form.addRow(self.ffmpeg_path_label, ffmpeg_row)
-        ffmpeg_form.addRow("", ffmpeg_actions)
+        ffmpeg_form.addRow(self.ffmpeg_version_label, version_row)
+        ffmpeg_form.addRow("", self.ffmpeg_release_info)
+        ffmpeg_form.addRow("", ffmpeg_actions_widget)
         ffmpeg_form.addRow("", self.managed_install_label)
 
         status_grid = QGridLayout(self.ffmpeg_status_card)
@@ -241,12 +403,14 @@ class SettingsDialog(QDialog):
         self.crf_label = QLabel()
         self.preset_label = QLabel()
         self.audio_bitrate_label = QLabel()
+        self.work_mode_label = QLabel()
         render_form.addRow(self.resolution_label, self.resolution_combo)
         render_form.addRow(self.fps_label, self.fps_combo)
         render_form.addRow(self.codec_label, self.codec_combo)
         render_form.addRow(self.crf_label, self.crf_spin)
         render_form.addRow(self.preset_label, self.preset_combo)
         render_form.addRow(self.audio_bitrate_label, self.audio_bitrate_combo)
+        render_form.addRow(self.work_mode_label, work_mode_panel)
         render_form.addRow("", self.render_hint_label)
         app_group = QGroupBox()
         app_form = QFormLayout(app_group)
@@ -276,16 +440,19 @@ class SettingsDialog(QDialog):
         export_layout.setContentsMargins(14, 16, 14, 14)
         export_layout.addWidget(output_group)
         export_layout.addWidget(render_group)
+        export_layout.addWidget(notification_group)
         export_layout.addStretch()
         self.ffmpeg_page = QWidget()
         ffmpeg_layout = QVBoxLayout(self.ffmpeg_page)
         ffmpeg_layout.setContentsMargins(14, 16, 14, 14)
+        ffmpeg_layout.addWidget(self.ffmpeg_about_card)
         ffmpeg_layout.addWidget(self.ffmpeg_status_card)
         ffmpeg_layout.addWidget(ffmpeg_group)
         ffmpeg_layout.addStretch()
         self.tabs.addTab(self.general_page, "")
         self.tabs.addTab(self.export_page, "")
         self.tabs.addTab(self.ffmpeg_page, "")
+        self.tabs.currentChanged.connect(self._settings_tab_changed)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 16)
@@ -297,12 +464,140 @@ class SettingsDialog(QDialog):
         self.ffmpeg_group = ffmpeg_group
         self.output_group = output_group
         self.render_group = render_group
+        self.notification_group = notification_group
         self.app_group = app_group
         self.retranslate()
         self._update_smooth_scroll_ui()
+        self._update_work_mode_hint()
         self._update_preview_backend_restart_hint()
         self._refresh_ffmpeg_status()
         self._update_language_pack_ui()
+        self._refresh_ffmpeg_manager_actions()
+
+    def open_ffmpeg_page(self) -> None:
+        """Show the FFmpeg setup controls and highlight the install action."""
+        self.tabs.setCurrentWidget(self.ffmpeg_page)
+        self._focus_ffmpeg_install_when_ready = True
+        self.request_ffmpeg_catalog()
+        if self.ffmpeg_download_button.isEnabled():
+            self.ffmpeg_download_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    @property
+    def selected_ffmpeg_release(self) -> FFmpegReleaseOption | None:
+        data = self.ffmpeg_version_combo.currentData()
+        return data if isinstance(data, FFmpegReleaseOption) else None
+
+    @property
+    def recommended_ffmpeg_release(self) -> FFmpegReleaseOption | None:
+        return next((release for release in self._ffmpeg_releases if release.recommended), None)
+
+    @property
+    def ffmpeg_releases(self) -> tuple[FFmpegReleaseOption, ...]:
+        return tuple(self._ffmpeg_releases)
+
+    @property
+    def managed_installation(self) -> ManagedFFmpegInstallation | None:
+        return self._managed_installation
+
+    def request_ffmpeg_catalog(self, *, force: bool = False) -> None:
+        """Ask the owner to refresh selectable versions once per dialog session."""
+        if self._ffmpeg_catalog_loading or (self._ffmpeg_catalog_loaded and not force):
+            return
+        self._ffmpeg_catalog_loading = True
+        self.ffmpeg_version_combo.setEnabled(False)
+        self.ffmpeg_refresh_versions_button.setEnabled(False)
+        self.ffmpeg_release_info.setText(
+            "사용 가능한 FFmpeg 버전을 확인하고 있습니다…"
+            if self.translator.language is Language.KOREAN else
+            "Checking available FFmpeg versions…"
+        )
+        self.catalog_requested.emit(force)
+
+    def set_ffmpeg_catalog(self, releases: list[FFmpegReleaseOption]) -> None:
+        """Populate version choices with the app-tested branch first."""
+        self._ffmpeg_releases = list(releases)
+        self._ffmpeg_catalog_loading = False
+        self._ffmpeg_catalog_loaded = bool(releases)
+        self.ffmpeg_version_combo.blockSignals(True)
+        self.ffmpeg_version_combo.clear()
+        korean = self.translator.language is Language.KOREAN
+        for release in releases:
+            suffix = "(권장)" if korean and release.recommended else (
+                " (Recommended)" if release.recommended else ""
+            )
+            label = f"{release.series}{suffix}"
+            if release.series == "master":
+                label = "master (개발판)" if korean else "master (Development)"
+            self.ffmpeg_version_combo.addItem(label, release)
+        self.ffmpeg_version_combo.blockSignals(False)
+        self.ffmpeg_version_combo.setEnabled(bool(releases) and not self._ffmpeg_installing)
+        self.ffmpeg_refresh_versions_button.setEnabled(not self._ffmpeg_installing)
+        self._update_ffmpeg_release_info()
+        self._refresh_ffmpeg_manager_actions()
+        if self._focus_ffmpeg_install_when_ready and self.ffmpeg_download_button.isEnabled():
+            self._focus_ffmpeg_install_when_ready = False
+            self.ffmpeg_download_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def set_ffmpeg_catalog_error(self, message: str) -> None:
+        self._ffmpeg_catalog_loading = False
+        self._ffmpeg_catalog_loaded = False
+        self.ffmpeg_refresh_versions_button.setEnabled(True)
+        self.ffmpeg_release_info.setText(
+            ("버전 목록을 불러오지 못했습니다. 새로고침을 눌러 다시 시도하세요.\n"
+             if self.translator.language is Language.KOREAN else
+             "Could not load the version list. Select Refresh to try again.\n")
+            + message
+        )
+        self._refresh_ffmpeg_manager_actions()
+
+    def set_managed_installation(
+        self, installation: ManagedFFmpegInstallation | None,
+    ) -> None:
+        self._managed_installation = installation
+        self._refresh_ffmpeg_manager_actions()
+        self._refresh_ffmpeg_status()
+
+    def _settings_tab_changed(self, _index: int) -> None:
+        if self.tabs.currentWidget() is self.ffmpeg_page:
+            self.request_ffmpeg_catalog()
+
+    def _update_ffmpeg_release_info(self, _index: int = -1) -> None:
+        release = self.selected_ffmpeg_release
+        if release is None:
+            return
+        korean = self.translator.language is Language.KOREAN
+        kind = (
+            "Playlist Canvas 권장 버전" if korean else "Recommended for Playlist Canvas"
+        ) if release.recommended else (
+            "호환성 확인이 필요한 버전" if korean else "Compatibility should be verified"
+        )
+        published = release.published_at[:10] if release.published_at else "-"
+        self.ffmpeg_release_info.setText(
+            f"{kind} · 빌드 {release.build} · 배포 {published}"
+            if korean else
+            f"{kind} · build {release.build} · released {published}"
+        )
+        self.ffmpeg_release_info.setToolTip(release.notes)
+        self._refresh_ffmpeg_manager_actions()
+
+    def _refresh_ffmpeg_manager_actions(self) -> None:
+        release = self.selected_ffmpeg_release
+        current = self._managed_installation
+        interactive = not self._ffmpeg_installing
+        self.ffmpeg_download_button.setEnabled(interactive and release is not None)
+        recommended = self.recommended_ffmpeg_release
+        update_available = bool(
+            current and recommended
+            and (current.series != recommended.series or current.version != recommended.build)
+        )
+        reinstall_available = bool(
+            current and any(
+                release.series == current.series for release in self._ffmpeg_releases
+            )
+        )
+        self.ffmpeg_update_button.setEnabled(interactive and update_available)
+        self.ffmpeg_reinstall_button.setEnabled(interactive and reinstall_available)
+        self.ffmpeg_delete_button.setEnabled(interactive and current is not None)
 
     @property
     def app_settings(self) -> AppSettings:
@@ -316,11 +611,25 @@ class SettingsDialog(QDialog):
             crf=self.crf_spin.value(),
             preset=self.preset_combo.currentText(),
             audio_bitrate=self.audio_bitrate_combo.currentText(),
+            work_mode=str(self.work_mode_combo.currentData() or WORK_MODE_AUTO),
             smooth_scrolling=self.smooth_scroll_check.isChecked(),
             smooth_scroll_duration_ms=self.smooth_scroll_duration_slider.value(),
             preview_backend=str(
                 self.preview_backend_combo.currentData() or "gpu_layers"
             ),
+            export_notifications_enabled=(
+                self.export_notifications_check.isChecked()
+            ),
+            export_notification_mode=str(
+                self.export_notification_mode_combo.currentData()
+                or "unfocused"
+            ),
+            export_notify_visuals=self.export_notify_visuals_check.isChecked(),
+            export_notify_audio=self.export_notify_audio_check.isChecked(),
+            export_notify_effects=self.export_notify_effects_check.isChecked(),
+            export_notify_encode=self.export_notify_encode_check.isChecked(),
+            export_notify_complete=self.export_notify_complete_check.isChecked(),
+            export_notify_failures=self.export_notify_failures_check.isChecked(),
         )
 
     @property
@@ -488,11 +797,15 @@ class SettingsDialog(QDialog):
         except (OSError, subprocess.TimeoutExpired) as error:
             self._show_test_result(False, str(error))
             return
-        encoder = self.codec_combo.currentData()
+        encoder = str(self.codec_combo.currentData())
+        automatic = encoder == AUTO_VIDEO_ENCODER
+        if automatic:
+            encoder = VideoEncoderAdvisor.automatic_encoder()
         if encoders.returncode != 0 or encoder not in encoders.stdout.split():
             self._show_test_result(False, f"Selected encoder is unavailable: {encoder}")
             return
-        self._show_test_result(True, f"{version}\nEncoder available: {encoder}")
+        prefix = "Auto-selected" if automatic else "Encoder available"
+        self._show_test_result(True, f"{version}\n{prefix}: {encoder}")
 
     def _accept_settings(self) -> None:
         """Reject a visibly broken executable path instead of saving silent failure."""
@@ -530,7 +843,10 @@ class SettingsDialog(QDialog):
     def set_ffmpeg_installing(self, installing: bool) -> None:
         """Expose immediate, persistent feedback while the background install runs."""
         self._ffmpeg_installing = installing
-        self.ffmpeg_download_button.setEnabled(not installing)
+        self.ffmpeg_version_combo.setEnabled(
+            not installing and bool(self._ffmpeg_releases)
+        )
+        self.ffmpeg_refresh_versions_button.setEnabled(not installing)
         if installing:
             self._ffmpeg_status_override = (
                 True,
@@ -540,13 +856,14 @@ class SettingsDialog(QDialog):
             )
         else:
             self._ffmpeg_status_override = None
+        self._refresh_ffmpeg_manager_actions()
         self._refresh_ffmpeg_status()
 
     def set_ffmpeg_install_error(self, message: str) -> None:
         """Keep an installation error visible inside Settings after a message box closes."""
         self._ffmpeg_installing = False
-        self.ffmpeg_download_button.setEnabled(True)
         self._ffmpeg_status_override = (False, message)
+        self._refresh_ffmpeg_manager_actions()
         self._refresh_ffmpeg_status()
 
     def _refresh_ffmpeg_status(self, *_args: object) -> None:
@@ -562,7 +879,13 @@ class SettingsDialog(QDialog):
             color = "#F59E0B" if positive else "#EF4444"
         elif path is not None and path.is_file():
             title = "FFmpeg 사용 가능" if korean else "FFmpeg configured"
-            detail = str(path)
+            managed = self._managed_installation
+            detail = (
+                f"관리 설치 · {managed.series or 'FFmpeg'} · {managed.version}\n{path}"
+                if korean and managed else
+                f"Managed install · {managed.series or 'FFmpeg'} · {managed.version}\n{path}"
+                if managed else str(path)
+            )
             color = "#22C55E"
         elif path is not None:
             title = "FFmpeg 파일 없음" if korean else "FFmpeg file not found"
@@ -605,19 +928,53 @@ class SettingsDialog(QDialog):
         self.tabs.setTabText(0, "일반" if korean else "General")
         self.tabs.setTabText(1, "내보내기" if korean else "Export")
         self.tabs.setTabText(2, "FFmpeg")
+        self.ffmpeg_about_title.setText(
+            "FFmpeg이란?" if korean else "What is FFmpeg?"
+        )
+        self.ffmpeg_about_description.setText(
+            "FFmpeg은 영상과 음성을 읽고, 결합하고, 압축하여 최종 동영상 파일로 만드는 "
+            "오픈 소스 미디어 처리 엔진입니다. Playlist Canvas에서는 프로젝트 편집은 "
+            "FFmpeg 없이도 가능하지만 동영상 내보내기에는 필요합니다. 잘 모르겠다면 "
+            "권장 버전을 선택해 설치하면 되며, 프로그램 전용 폴더에 안전하게 설치됩니다."
+            if korean else
+            "FFmpeg is an open-source media engine that reads, combines, and compresses video "
+            "and audio into the final video file. You can edit a Playlist Canvas project without "
+            "FFmpeg, but video export requires it. If you are unsure, install the recommended "
+            "version; it is safely kept in the application-only folder."
+        )
         self.ffmpeg_group.setTitle("FFmpeg 실행 파일" if korean else "FFmpeg executable")
         self.output_group.setTitle("출력 위치" if korean else "Output location")
         self.render_group.setTitle("기본 렌더링" if korean else "Default rendering")
+        self.notification_group.setTitle(
+            "내보내기 알림" if korean else "Export notifications"
+        )
         self.app_group.setTitle("앱" if korean else "Application")
         self.ffmpeg_path_label.setText("FFmpeg 경로" if korean else "FFmpeg path")
+        self.ffmpeg_version_label.setText("설치 버전" if korean else "Version to install")
         self.output_label.setText("기본 출력 폴더" if korean else "Default output folder")
         self.resolution_label.setText("해상도" if korean else "Resolution")
         self.fps_label.setText("FPS")
         self.codec_label.setText("비디오 인코더" if korean else "Video encoder")
+        automatic_index = self.codec_combo.findData(AUTO_VIDEO_ENCODER)
+        if automatic_index >= 0:
+            self.codec_combo.setItemText(
+                automatic_index,
+                "자동 선택 (권장)" if korean else "Automatic (Recommended)",
+            )
         self.crf_label.setText("CRF (낮을수록 고화질)" if korean else "CRF (lower is higher quality)")
         self.preset_label.setText("인코딩 Preset" if korean else "Encoding preset")
         self.audio_bitrate_label.setText(
             "오디오 품질 (AAC)" if korean else "Audio quality (AAC)"
+        )
+        self.work_mode_label.setText("작업 모드" if korean else "Work mode")
+        self.work_mode_combo.setItemText(
+            0, "안정" if korean else "Stable",
+        )
+        self.work_mode_combo.setItemText(
+            1, "자동 (권장)" if korean else "Automatic (Recommended)",
+        )
+        self.work_mode_combo.setItemText(
+            2, "최대 속도" if korean else "Maximum speed",
         )
         self.theme_label.setText("테마" if korean else "Theme")
         self.language_label.setText("언어" if korean else "Language")
@@ -658,11 +1015,71 @@ class SettingsDialog(QDialog):
             if korean else
             "The preview renderer change takes effect after fully closing and restarting the program. It does not affect previews in the current session."
         )
+        self.export_notification_master_label.setText(
+            "알림 사용" if korean else "Notifications"
+        )
+        self.export_notifications_check.setText(
+            "내보내기 진행 알림 사용"
+            if korean else "Enable export progress notifications"
+        )
+        self.export_notification_mode_label.setText(
+            "표시 조건" if korean else "Show when"
+        )
+        self.export_notification_mode_combo.setItemText(
+            0,
+            "프로그램이 포커스 중이 아닐 때만"
+            if korean else "Only when the app is not focused",
+        )
+        self.export_notification_mode_combo.setItemText(
+            1, "항상 표시" if korean else "Always show",
+        )
+        self.export_notification_steps_label.setText(
+            "알림 단계" if korean else "Notify for"
+        )
+        stage_names = (
+            ("화면 준비", "오디오 준비", "효과 준비", "영상 만들기", "완료", "오류 및 취소")
+            if korean else
+            ("Visual preparation", "Audio preparation", "Effects preparation", "Create video", "Completion", "Errors and cancellation")
+        )
+        for checkbox, text in zip(
+            self._export_notification_stage_checks(), stage_names, strict=True,
+        ):
+            checkbox.setText(text)
+        self.export_notification_hint.setText(
+            "선택한 단계가 시작될 때 Windows 알림을 한 번 표시합니다. 운영체제의 알림 설정에서 Playlist Canvas 알림이 차단되어 있으면 표시되지 않을 수 있습니다."
+            if korean else
+            "Shows one Windows notification when each selected stage starts. Notifications may not appear if Playlist Canvas is blocked in system notification settings."
+        )
         self.ffmpeg_browse_button.setText("찾아보기" if korean else "Browse")
         self.ffmpeg_test_button.setText("확인" if korean else "Check")
-        self.ffmpeg_download_button.setText("다운로드" if korean else "Download")
         self.ffmpeg_download_button.setText(
-            "FFmpeg 자동 다운로드 및 설치" if korean else "Download and install FFmpeg"
+            "선택 버전 다운로드 및 설치" if korean else "Download and install selected version"
+        )
+        self.ffmpeg_refresh_versions_button.setText(
+            "새로고침" if korean else "Refresh"
+        )
+        self.ffmpeg_update_button.setText("업데이트" if korean else "Update")
+        self.ffmpeg_reinstall_button.setText("재설치" if korean else "Reinstall")
+        self.ffmpeg_delete_button.setText("삭제" if korean else "Delete")
+        self.ffmpeg_download_button.setToolTip(
+            "콤보 상자에서 선택한 버전을 다운로드하고 SHA-256 검증 후 적용합니다."
+            if korean else
+            "Download the selected version, verify SHA-256, and activate it."
+        )
+        self.ffmpeg_update_button.setToolTip(
+            "현재 관리 설치본을 이 Playlist Canvas 버전의 권장 FFmpeg로 교체합니다."
+            if korean else
+            "Replace the managed install with the FFmpeg version recommended for this Playlist Canvas release."
+        )
+        self.ffmpeg_reinstall_button.setToolTip(
+            "현재 관리 중인 버전을 다시 다운로드·검증하여 교체합니다."
+            if korean else
+            "Download, verify, and replace the currently managed version."
+        )
+        self.ffmpeg_delete_button.setToolTip(
+            "Playlist Canvas가 설치한 FFmpeg만 삭제합니다. 직접 지정한 외부 FFmpeg는 삭제하지 않습니다."
+            if korean else
+            "Delete only FFmpeg installed by Playlist Canvas. External FFmpeg files are never removed."
         )
         self.managed_install_label.setText(
             "Windows 64비트용 BtbN FFmpeg GPL 배포본을 앱 전용 폴더에 내려받고 SHA-256으로 검증합니다."
@@ -685,9 +1102,9 @@ class SettingsDialog(QDialog):
             "Lower CRF increases quality and file size."
         )
         self.codec_combo.setToolTip(
-            "GPU 인코더는 해당 그래픽 드라이버와 FFmpeg 지원이 필요합니다."
+            "자동 선택은 NVIDIA GPU가 감지되면 NVENC를 사용하고, 그렇지 않으면 CPU H.264를 사용합니다. GPU 인코더는 그래픽 드라이버와 FFmpeg 지원이 필요합니다."
             if korean else
-            "GPU encoders require compatible graphics drivers and FFmpeg support."
+            "Automatic selection uses NVENC when an NVIDIA GPU is detected, otherwise CPU H.264. GPU encoders require compatible graphics drivers and FFmpeg support."
         )
         self.preset_combo.setToolTip(
             "느린 preset은 일반적으로 더 작은 파일을 만들지만 인코딩 시간이 길어집니다."
@@ -699,6 +1116,7 @@ class SettingsDialog(QDialog):
         self.theme_combo.setItemText(1, "다크" if korean else "Dark")
         self.theme_combo.setItemText(2, "자동" if korean else "Auto")
         self._update_smooth_scroll_ui()
+        self._update_work_mode_hint()
         self.button_box.button(QDialogButtonBox.StandardButton.Save).setText(
             "저장" if korean else "Save"
         )
@@ -706,8 +1124,65 @@ class SettingsDialog(QDialog):
             "취소" if korean else "Cancel"
         )
         self._refresh_ffmpeg_status()
+        if self._ffmpeg_releases:
+            # Rebuild labels such as "(권장)" after a live language switch.
+            releases = list(self._ffmpeg_releases)
+            selected = self.selected_ffmpeg_release
+            self.set_ffmpeg_catalog(releases)
+            if selected is not None:
+                index = next((
+                    row for row in range(self.ffmpeg_version_combo.count())
+                    if self.ffmpeg_version_combo.itemData(row) == selected
+                ), -1)
+                if index >= 0:
+                    self.ffmpeg_version_combo.setCurrentIndex(index)
         self._update_language_pack_ui()
         self._update_preview_backend_restart_hint()
+        self._update_export_notification_ui()
+
+    def _export_notification_stage_checks(self) -> tuple[QCheckBox, ...]:
+        """Return stage controls in their stable display and persistence order."""
+        return (
+            self.export_notify_visuals_check,
+            self.export_notify_audio_check,
+            self.export_notify_effects_check,
+            self.export_notify_encode_check,
+            self.export_notify_complete_check,
+            self.export_notify_failures_check,
+        )
+
+    def _update_export_notification_ui(self, _checked: object = None) -> None:
+        """Disable subordinate options without discarding their selections."""
+        enabled = self.export_notifications_check.isChecked()
+        self.export_notification_mode_combo.setEnabled(enabled)
+        self.export_notification_hint.setEnabled(enabled)
+        for checkbox in self._export_notification_stage_checks():
+            checkbox.setEnabled(enabled)
+
+    def _update_work_mode_hint(self, _index: int = -1) -> None:
+        """Explain the resource and stability trade-off of preparation modes."""
+        korean = self.translator.language is Language.KOREAN
+        mode = str(self.work_mode_combo.currentData() or WORK_MODE_AUTO)
+        if mode == WORK_MODE_STABLE:
+            text = (
+                "동시 작업을 1개로 제한합니다. 속도는 느리지만 저사양 PC, 4K 작업 또는 메모리가 부족한 환경에 가장 안전합니다."
+                if korean else
+                "Limits preparation to one concurrent job. Slower, but safest for low-end PCs, 4K projects, or limited memory."
+            )
+        elif mode == WORK_MODE_MAX_SPEED:
+            text = (
+                "곡과 레이어 준비에 더 많은 CPU 작업을 사용합니다. 속도는 빠르지만 CPU·메모리 사용량이 증가하며 4K에서는 안전 상한이 자동 적용됩니다."
+                if korean else
+                "Uses more CPU jobs for track and layer preparation. Faster, with higher CPU and memory use; a safety cap still applies at 4K."
+            )
+        else:
+            text = (
+                "PC 성능, 해상도와 작업 수를 기준으로 병렬 처리량을 자동 조절합니다. 대부분의 사용자에게 권장됩니다."
+                if korean else
+                "Adjusts concurrency from PC performance, resolution, and workload. Recommended for most users."
+            )
+        self.work_mode_hint.setText(text)
+        self.work_mode_combo.setToolTip(text)
 
     def _update_preview_backend_restart_hint(self, _index: int = -1) -> None:
         """Explain that renderer changes are intentionally deferred to restart."""

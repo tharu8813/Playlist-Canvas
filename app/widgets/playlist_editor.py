@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.playlist import PlaylistTrack
+from app.services.project_content_service import LYRICS_EXTENSIONS
 from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
 from app.utils.i18n import Translator
 
@@ -30,6 +31,7 @@ class PlaylistList(QListWidget):
     """List view accepting audio-file drops and internal drag reordering."""
 
     files_dropped = Signal(list)
+    lyrics_dropped = Signal(str, str)
     track_double_clicked = Signal(str)
     order_changed = Signal()
     remove_requested = Signal()
@@ -49,7 +51,13 @@ class PlaylistList(QListWidget):
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Accept URLs from Explorer and preserve normal internal dragging."""
-        if event.mimeData().hasUrls() or event.source() is self:
+        supported_url = any(
+            url.isLocalFile()
+            and Path(url.toLocalFile()).suffix.lower()
+            in (AUDIO_EXTENSIONS | LYRICS_EXTENSIONS)
+            for url in event.mimeData().urls()
+        )
+        if supported_url or event.source() is self:
             event.acceptProposedAction()
             return
         event.ignore()
@@ -59,11 +67,33 @@ class PlaylistList(QListWidget):
         self.dragEnterEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        """Import dropped audio files or delegate an internal move to Qt."""
+        """Import media or attach dropped lyrics to the row under the pointer."""
         if event.mimeData().hasUrls() and event.source() is not self:
-            paths = [url.toLocalFile() for url in event.mimeData().urls()]
-            self.files_dropped.emit(paths)
-            event.acceptProposedAction()
+            paths = [
+                url.toLocalFile() for url in event.mimeData().urls()
+                if url.isLocalFile() and url.toLocalFile()
+            ]
+            lyrics_paths = [
+                path for path in paths
+                if Path(path).suffix.lower() in LYRICS_EXTENSIONS
+            ]
+            media_paths = [
+                path for path in paths
+                if Path(path).suffix.lower() in AUDIO_EXTENSIONS
+            ]
+            target_item = self.itemAt(event.position().toPoint())
+            target_id = (
+                str(target_item.data(Qt.ItemDataRole.UserRole))
+                if target_item is not None else ""
+            )
+            for path in lyrics_paths:
+                self.lyrics_dropped.emit(path, target_id)
+            if media_paths:
+                self.files_dropped.emit(media_paths)
+            if lyrics_paths or media_paths:
+                event.acceptProposedAction()
+            else:
+                event.ignore()
             return
         super().dropEvent(event)
 
@@ -151,6 +181,7 @@ class PlaylistEditor(QFrame):
 
     request_files = Signal()
     files_dropped = Signal(list)
+    lyrics_dropped = Signal(str, str)
     track_double_clicked = Signal(str)
 
     def __init__(self, service: PlaylistService, translator: Translator,
@@ -210,6 +241,7 @@ class PlaylistEditor(QFrame):
         self.details_button.clicked.connect(self._show_selected_details)
         self.remove_button.clicked.connect(self.remove_selected)
         self.list_widget.files_dropped.connect(self.files_dropped)
+        self.list_widget.lyrics_dropped.connect(self.lyrics_dropped)
         self.list_widget.order_changed.connect(self._sync_order)
         self.list_widget.remove_requested.connect(self.remove_selected)
         self.list_widget.toggle_requested.connect(self._toggle_selected)
