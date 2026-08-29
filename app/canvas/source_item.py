@@ -115,6 +115,8 @@ class SourceItem(QGraphicsObject):
         self._video_pending_frame: tuple[QImage, object] | None = None
         self._video_filter_generation = 0
         self._image_filter_key: tuple[str, float, float, float] | None = None
+        self._raw_pixmap = QPixmap()
+        self._raw_pixmap_path: str | None = None
         self._lyric_fonts: dict[str, QFont] = {}
         self._lyric_ghost_cache: dict[tuple[object, ...], QPixmap] = {}
         self._lyric_resource_key: tuple[str, int, float, int] | None = None
@@ -344,8 +346,10 @@ class SourceItem(QGraphicsObject):
             image_path, self.source.brightness, self.source.contrast, self.source.blur
         )
         if self.source.source_type is not SourceType.VIDEO and filter_key != self._image_filter_key:
-            raw_pixmap = load_pixmap(image_path) if image_path else QPixmap()
-            self._pixmap = self._apply_image_filters(raw_pixmap)
+            if image_path != self._raw_pixmap_path:
+                self._raw_pixmap = load_pixmap(image_path) if image_path else QPixmap()
+                self._raw_pixmap_path = image_path
+            self._pixmap = self._apply_image_filters(self._raw_pixmap)
             self._image_filter_key = filter_key
         self.update()
 

@@ -28,6 +28,26 @@ from app.preview.text_template import expand_track_template
 from app.services.lyrics_service import LyricsService
 
 
+# Track-driven album covers and ambient backgrounds are re-injected on every
+# captured frame. Filtering them there would re-run the colour/blur pass in the
+# playback loop, so the filtered result is memoised per (artwork, filter) key.
+_FILTERED_TRACK_PIXMAP_CACHE: dict[tuple, QPixmap] = {}
+
+
+def _filtered_track_pixmap(
+    graphics_item: SourceItem, base: QPixmap, key: tuple, *, include_blur: bool = True,
+) -> QPixmap:
+    """Apply the source's brightness/contrast/blur to a track pixmap, memoised."""
+    cached = _FILTERED_TRACK_PIXMAP_CACHE.get(key)
+    if cached is not None:
+        return cached
+    result = graphics_item._apply_image_filters(base, include_blur=include_blur)
+    if len(_FILTERED_TRACK_PIXMAP_CACHE) > 96:
+        _FILTERED_TRACK_PIXMAP_CACHE.clear()
+    _FILTERED_TRACK_PIXMAP_CACHE[key] = result
+    return result
+
+
 class CanvasSnapshot:
     """Captures only the export artboard, without editor handles or workspace chrome."""
 
@@ -783,26 +803,32 @@ class CanvasSnapshot:
                         1.0, elapsed_seconds / max(0.01, track.duration_seconds)
                     ))
                 graphics_item.update()
+            filter_key = (
+                track.file_path, track.cover_path,
+                source.brightness, source.contrast, source.blur,
+            )
             if source.source_type is SourceType.ALBUM_COVER and not source.content_path:
                 original_covers.append((graphics_item, QPixmap(graphics_item._pixmap)))
-                graphics_item._pixmap = graphics_item._apply_image_filters(
-                    QPixmap(track_cover)
+                graphics_item._pixmap = _filtered_track_pixmap(
+                    graphics_item, QPixmap(track_cover), ("cover", *filter_key),
                 )
                 graphics_item.update()
             if source.source_type is SourceType.BACKGROUND and source.background_mode == "album_art":
                 original_backgrounds.append((graphics_item, QPixmap(graphics_item._pixmap)))
                 if source.background_ambient:
-                    graphics_item._pixmap = graphics_item._apply_image_filters(
+                    graphics_item._pixmap = _filtered_track_pixmap(
+                        graphics_item,
                         create_cached_ambient_background(
                             track.file_path, max(1, round(source.width)),
                             max(1, round(source.height)), max(18.0, source.blur),
                             track.cover_path,
                         ),
+                        ("ambient", round(source.width), round(source.height), *filter_key),
                         include_blur=False,
                     )
                 else:
-                    graphics_item._pixmap = graphics_item._apply_image_filters(
-                        QPixmap(track_cover)
+                    graphics_item._pixmap = _filtered_track_pixmap(
+                        graphics_item, QPixmap(track_cover), ("bgcover", *filter_key),
                     )
                 graphics_item.update()
             if source.personal_color_enabled and personal_color.isValid():

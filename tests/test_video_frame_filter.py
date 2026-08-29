@@ -73,6 +73,20 @@ class VideoFrameFilterTests(unittest.TestCase):
         self.assertLess(filtered.pixelColor(4, 4).red(), 255)
         self.assertGreater(filtered.pixelColor(4, 3).red(), 0)
 
+    def test_full_resolution_blur_stays_fast(self) -> None:
+        # The box blur runs on a bounded working image; a full-frame blur must
+        # not regress to the multi-hundred-millisecond cumulative-sum path.
+        from app.video.frame_filter import apply_color_filters
+
+        image = QImage(1920, 1080, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(120, 90, 160))
+        apply_color_filters(image, blur=24.0)  # warm up numpy / Qt
+        start = time.perf_counter()
+        blurred = apply_color_filters(image, blur=24.0)
+        elapsed = time.perf_counter() - start
+        self.assertEqual((blurred.width(), blurred.height()), (1920, 1080))
+        self.assertLess(elapsed, 0.12)
+
     def test_image_element_filters_change_the_rendered_pixmap_quickly(self) -> None:
         with TemporaryDirectory(prefix="playlist-image-filter-") as directory:
             path = Path(directory) / "sample.png"
