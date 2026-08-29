@@ -70,6 +70,16 @@ class RenderResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ExportMetadata:
+    """Container tags and per-track chapters written into the output MP4."""
+
+    title: str = ""
+    artist: str = ""
+    comment: str = ""
+    include_chapters: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class RenderFrame:
     """One Canvas image and its exact on-screen duration."""
 
@@ -245,7 +255,8 @@ class FFmpegRenderer:
                cancel_event: threading.Event | None = None,
                visualizers: list[VisualizerOverlay] | None = None,
                static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer] | None = None,
-               video_clips: list[VideoClipOverlay] | None = None) -> RenderResult:
+               video_clips: list[VideoClipOverlay] | None = None,
+               metadata: "ExportMetadata | None" = None) -> RenderResult:
         """Create a static Canvas video whose audio is the ordered enabled playlist."""
         cancel_event = cancel_event or threading.Event()
         if cancel_event.is_set():
@@ -368,6 +379,9 @@ class FFmpegRenderer:
         target.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix="playlist-video-") as temporary_directory:
             temporary = Path(temporary_directory)
+            metadata_path = self._write_export_ffmetadata(
+                temporary, active_tracks, metadata or ExportMetadata(), target,
+            )
             if prepared_video is not None:
                 prepared_path = prepared_video.path.resolve()
                 visual_sequence = [
@@ -639,9 +653,23 @@ class FFmpegRenderer:
                     ])
                 else:
                     video_arguments.extend(["-i", str(layer_path)])
+            metadata_arguments: list[str] = []
+            if metadata_path is not None:
+                metadata_input_index = (
+                    2 + len(visualizer_paths) + len(video_file_inputs)
+                    + len(static_inputs)
+                )
+                video_arguments.extend(
+                    ["-f", "ffmetadata", "-i", str(metadata_path)]
+                )
+                metadata_arguments = [
+                    "-map_metadata", str(metadata_input_index),
+                    "-map_chapters", str(metadata_input_index),
+                ]
             if direct_mux:
                 video_arguments.extend([
                     "-map", "0:v:0", "-map", "1:a:0",
+                    *metadata_arguments,
                 ])
             elif visualizer_paths or video_clips or static_inputs:
                 video_arguments.extend([
@@ -652,11 +680,13 @@ class FFmpegRenderer:
                         video_input_slots=video_input_slots,
                     ),
                     "-map", "[vout]", "-map", "1:a",
+                    *metadata_arguments,
                 ])
             else:
                 video_arguments.extend([
                     "-vf", self._output_scaling_filter(selected_settings.fps, selected_settings.output_width,
                                                         selected_settings.output_height),
+                    *metadata_arguments,
                 ])
             if direct_mux:
                 video_arguments.extend([
@@ -1607,6 +1637,56 @@ class FFmpegRenderer:
             start = max(cursor, requested)
             cursor = start + track.duration_seconds
         return cursor
+
+    @staticmethod
+    def _ffmetadata_escape(value: str) -> str:
+        for character in ("\\", "=", ";", "#", "\n"):
+            value = value.replace(character, "\\" + character)
+        return value
+
+    def _write_export_ffmetadata(
+        self,
+        temporary: Path,
+        tracks: list[PlaylistTrack],
+        metadata: "ExportMetadata",
+        target: Path,
+    ) -> Path | None:
+        """Write an FFmetadata file with container tags and per-track chapters.
+
+        Returns ``None`` when there is nothing worth embedding so the caller can
+        skip the extra FFmpeg input entirely.
+        """
+        lines = [";FFMETADATA1"]
+        title = metadata.title.strip() or target.stem
+        if title:
+            lines.append(f"title={self._ffmetadata_escape(title)}")
+        if metadata.artist.strip():
+            lines.append(f"artist={self._ffmetadata_escape(metadata.artist.strip())}")
+        comment = metadata.comment.strip() or "Playlist Canvas"
+        lines.append(f"comment={self._ffmetadata_escape(comment)}")
+
+        chapters = metadata.include_chapters and len(tracks) > 1
+        if chapters:
+            windows = self._track_windows(tracks)
+            total = self._timeline_duration(tracks)
+            for index, (track, (start, _duration)) in enumerate(
+                zip(tracks, windows)
+            ):
+                end = windows[index + 1][0] if index + 1 < len(windows) else total
+                start_ms = max(0, round(start * 1000))
+                end_ms = max(start_ms + 1, round(end * 1000))
+                name = (track.title or track.filename or f"Track {index + 1}").strip()
+                lines.extend([
+                    "",
+                    "[CHAPTER]",
+                    "TIMEBASE=1/1000",
+                    f"START={start_ms}",
+                    f"END={end_ms}",
+                    f"title={self._ffmetadata_escape(name)}",
+                ])
+        path = temporary / "metadata.ffmeta"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
 
     @staticmethod
     def _track_windows(tracks: list[PlaylistTrack]) -> list[tuple[float, float]]:

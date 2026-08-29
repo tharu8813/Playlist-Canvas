@@ -11,6 +11,7 @@ from PySide6.QtGui import QImage
 
 from app.models.playlist import PlaylistTrack
 from app.renderer.ffmpeg_renderer import (
+    ExportMetadata,
     FFmpegRenderer,
     RenderCancelledError,
     RenderError,
@@ -43,7 +44,8 @@ class RenderWorker(QThread):
                  settings: RenderSettings | None = None,
                  visualizers: list[VisualizerOverlay] | None = None,
                  static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer] | None = None,
-                 video_clips: list[VideoClipOverlay] | None = None) -> None:
+                 video_clips: list[VideoClipOverlay] | None = None,
+                 metadata: ExportMetadata | None = None) -> None:
         super().__init__()
         self.renderer = renderer
         if isinstance(image, PreparedVideoInput):
@@ -65,6 +67,7 @@ class RenderWorker(QThread):
         self.visualizers = list(visualizers or [])
         self.video_clips = list(video_clips or [])
         self.static_layers = list(static_layers or [])
+        self.metadata = metadata
         self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -78,7 +81,7 @@ class RenderWorker(QThread):
                 self.image, self.tracks, self.output_path, self.settings,
                 progress_callback=self.progress.emit, cancel_event=self._cancel_event,
                 visualizers=self.visualizers, static_layers=self.static_layers,
-                video_clips=self.video_clips,
+                video_clips=self.video_clips, metadata=self.metadata,
             )
         except RenderCancelledError:
             self.cancelled.emit()

@@ -134,6 +134,7 @@ from app.renderer.png_frame_staging import (
 )
 from app.renderer.ffmpeg_renderer import (
     EncoderUnavailableError,
+    ExportMetadata,
     FFmpegNotFoundError,
     FFmpegRenderer,
     RenderCancelledError,
@@ -3790,6 +3791,15 @@ class MainWindow(QMainWindow):
             self._export_dialog.setWindowTitle("내보내기 진행 상황")
             self._export_dialog.cancel_button.setText("취소")
             self._export_dialog.stage_label.setText("내보내기 준비 중")
+        project_title = self.project_settings.title.strip()
+        export_metadata = ExportMetadata(
+            title=(
+                "" if project_title in ("", "Untitled Project", "제목 없는 프로젝트")
+                else project_title
+            ),
+            artist=self.project_settings.author.strip(),
+            comment=self.project_settings.description.strip(),
+        )
         self._render_worker = RenderWorker(
             renderer,
             frames,
@@ -3799,6 +3809,7 @@ class MainWindow(QMainWindow):
             visualizers,
             static_layers,
             video_clips,
+            export_metadata,
         )
         export_dialog = self._export_dialog
         self._render_worker.progress.connect(

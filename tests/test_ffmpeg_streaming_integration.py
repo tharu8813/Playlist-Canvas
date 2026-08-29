@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor, QImage
 
 from app.models.playlist import PlaylistTrack
 from app.renderer.ffmpeg_renderer import (
+    ExportMetadata,
     FFmpegRenderer,
     PreparedStaticOverlayLayer,
     PreparedVideoInput,
@@ -22,6 +23,50 @@ from app.renderer.ffmpeg_renderer import (
     VideoClipOverlay,
 )
 from app.renderer.static_video_stream import StaticVideoStreamEncoder
+
+
+class ExportFfmetadataTests(unittest.TestCase):
+    """FFmetadata container tags and per-track chapters (no FFmpeg required)."""
+
+    def _write(self, tracks, metadata, stem="video"):
+        renderer = FFmpegRenderer.__new__(FFmpegRenderer)
+        with TemporaryDirectory() as directory:
+            path = renderer._write_export_ffmetadata(
+                Path(directory), tracks, metadata, Path(f"/out/{stem}.mp4"),
+            )
+            return path.read_text(encoding="utf-8")
+
+    def test_container_tags_and_contiguous_chapters(self) -> None:
+        tracks = [
+            PlaylistTrack("a.wav", "First; Song = intro", duration_seconds=90.0),
+            PlaylistTrack("b.wav", "Track #2", duration_seconds=120.5),
+            PlaylistTrack("c.wav", "", duration_seconds=45.0),
+        ]
+        text = self._write(tracks, ExportMetadata(
+            title="My Mix", artist="DJ Test", comment="hello",
+        ))
+        self.assertIn("title=My Mix", text)
+        self.assertIn("artist=DJ Test", text)
+        self.assertIn("comment=hello", text)
+        # reserved characters are escaped
+        self.assertIn(r"title=First\; Song \= intro", text)
+        self.assertIn(r"title=Track \#2", text)
+        # empty title falls back to the audio filename
+        self.assertIn("title=c.wav", text)
+        self.assertEqual(text.count("[CHAPTER]"), 3)
+        # chapters are contiguous and cover the whole timeline
+        self.assertIn("START=0\nEND=90000", text)
+        self.assertIn("START=90000\nEND=210500", text)
+        self.assertIn("START=210500\nEND=255500", text)
+
+    def test_single_track_has_no_chapters_and_derives_a_title(self) -> None:
+        text = self._write(
+            [PlaylistTrack("solo.wav", "Solo", duration_seconds=30.0)],
+            ExportMetadata(), stem="my-export",
+        )
+        self.assertNotIn("[CHAPTER]", text)
+        self.assertIn("title=my-export", text)
+        self.assertIn("comment=Playlist Canvas", text)
 
 
 class FFmpegStreamingIntegrationTests(unittest.TestCase):
