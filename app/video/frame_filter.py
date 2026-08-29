@@ -73,13 +73,35 @@ def filter_video_frame(
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
-    result = scaled.convertToFormat(QImage.Format.Format_RGBA8888)
+    return apply_color_filters(
+        scaled,
+        brightness=settings.brightness,
+        contrast=settings.contrast,
+        saturation=settings.saturation,
+        grayscale=settings.grayscale,
+        blur=settings.blur,
+    )
+
+
+def apply_color_filters(
+    image: QImage,
+    *,
+    brightness: float = 0.0,
+    contrast: float = 0.0,
+    saturation: float = 1.0,
+    grayscale: bool = False,
+    blur: float = 0.0,
+) -> QImage:
+    """Return an RGBA8888 copy of *image* with vectorized brightness, contrast,
+    saturation and box-blur applied. Shared by the live-video preview and the
+    static image/background element filters so both look identical."""
+    result = image.convertToFormat(QImage.Format.Format_RGBA8888)
     if (
-        settings.brightness == 0.0
-        and settings.contrast == 0.0
-        and settings.saturation == 1.0
-        and not settings.grayscale
-        and settings.blur <= 0.0
+        brightness == 0.0
+        and contrast == 0.0
+        and saturation == 1.0
+        and not grayscale
+        and blur <= 0.0
     ):
         return result
 
@@ -89,18 +111,16 @@ def filter_video_frame(
     pixels = raw.reshape(height, stride)[:, : width * 4].reshape(height, width, 4)
     rgb = pixels[:, :, :3].astype(np.float32)
 
-    contrast = 1.0 + float(settings.contrast) / 100.0
-    brightness = float(settings.brightness) * 2.55
-    rgb = (rgb - 128.0) * contrast + 128.0 + brightness
-    saturation = 0.0 if settings.grayscale else max(0.0, min(3.0, settings.saturation))
-    if saturation != 1.0:
+    rgb = (rgb - 128.0) * (1.0 + float(contrast) / 100.0) + 128.0 + float(brightness) * 2.55
+    effective_saturation = 0.0 if grayscale else max(0.0, min(3.0, saturation))
+    if effective_saturation != 1.0:
         luminance = (
             rgb[:, :, 0:1] * 0.2126
             + rgb[:, :, 1:2] * 0.7152
             + rgb[:, :, 2:3] * 0.0722
         )
-        rgb = luminance + (rgb - luminance) * saturation
-    radius = max(0, min(40, int(ceil(settings.blur))))
+        rgb = luminance + (rgb - luminance) * effective_saturation
+    radius = max(0, min(40, int(ceil(blur))))
     if radius:
         rgb = _box_blur(_box_blur(rgb, radius, axis=1), radius, axis=0)
     pixels[:, :, :3] = np.clip(rgb, 0.0, 255.0).astype(np.uint8)

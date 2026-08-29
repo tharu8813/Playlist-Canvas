@@ -48,6 +48,12 @@ class PlaylistList(QListWidget):
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setAcceptDrops(True)
         self.setDragEnabled(True)
+        self.setAutoScroll(True)
+        self.setAutoScrollMargin(42)
+        self.setDropIndicatorShown(True)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setUniformItemSizes(True)
         self.setSpacing(4)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self._drop_target_widget: QWidget | None = None
@@ -374,6 +380,10 @@ class PlaylistEditor(QFrame):
         scroll_position = self.list_widget.verticalScrollBar().value()
         self._ignore_order_signal = True
         try:
+            # A service refresh can arrive while an external drag is still over
+            # the list. Clear references to soon-to-be-deleted TrackRow widgets
+            # before QListWidget.clear() rebuilds the presentation.
+            self.list_widget._clear_drop_feedback()
             self.list_widget.clear()
             all_tracks = self.service.tracks
             query = self.search_edit.text().strip().casefold()

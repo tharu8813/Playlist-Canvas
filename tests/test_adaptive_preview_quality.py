@@ -26,10 +26,17 @@ class AdaptivePreviewQualityTests(unittest.TestCase):
         self.assertTrue(recovered.changed)
         self.assertEqual(recovered.factor, 1.0)
 
-    def test_dropped_frame_signal_reduces_quality_and_reset_restores_base(self) -> None:
+    def test_single_coalesced_drop_does_not_reduce_healthy_preview(self) -> None:
+        quality = AdaptivePreviewQuality(0.65)
+        for _ in range(4):
+            state = quality.observe(30.0, 30, dropped_frames=1)
+            self.assertFalse(state.changed)
+            self.assertEqual(state.factor, 1.0)
+
+    def test_sustained_drop_pressure_reduces_quality_and_reset_restores_base(self) -> None:
         quality = AdaptivePreviewQuality(0.55)
-        quality.observe(30.0, 30, dropped_frames=1)
-        reduced = quality.observe(30.0, 30, dropped_frames=1)
+        quality.observe(30.0, 30, dropped_frames=2)
+        reduced = quality.observe(30.0, 30, dropped_frames=2)
         self.assertLess(reduced.scale, 0.55)
         reset = quality.reset(0.72)
         self.assertTrue(reset.changed)

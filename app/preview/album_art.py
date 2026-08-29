@@ -47,6 +47,79 @@ def extract_track_cover(
     return extract_embedded_cover(audio_path)
 
 
+def extract_track_personal_color(
+    audio_path: str | Path, cover_path: str | Path = "",
+) -> QColor:
+    """Return the current track's dominant, display-friendly personal color."""
+    audio = Path(audio_path)
+    override = Path(cover_path) if cover_path else None
+    source_path = ""
+    direct_image = False
+    stat = None
+    try:
+        if override is not None and override.is_file():
+            stat = override.stat()
+            source_path = str(override.resolve())
+            direct_image = True
+        elif audio.is_file():
+            stat = audio.stat()
+            source_path = str(audio.resolve())
+    except OSError:
+        pass
+    if not source_path or stat is None:
+        return QColor()
+    rgba = _cached_personal_color(
+        source_path, direct_image, stat.st_mtime_ns, stat.st_size,
+    )
+    return QColor.fromRgba(rgba) if rgba is not None else QColor()
+
+
+def adjust_personal_color(
+    personal_color: QColor,
+    fallback: str,
+    *,
+    brightness: float = 0.0,
+    saturation: float = 0.0,
+    hue_shift: float = 0.0,
+    strength: float = 1.0,
+) -> str:
+    """Adjust and blend a personal color while preserving channel alpha."""
+    original = QColor(fallback)
+    if not original.isValid():
+        original = QColor("#FFFFFF")
+    if not personal_color.isValid():
+        return original.name(
+            QColor.NameFormat.HexRgb
+            if original.alpha() == 255 else QColor.NameFormat.HexArgb
+        ).upper()
+    adjusted = QColor(personal_color)
+    hue = adjusted.hsvHue()
+    if hue < 0:
+        hue = 0
+    adjusted.setHsv(
+        round((hue + max(-180.0, min(180.0, hue_shift))) % 360),
+        max(0, min(255, round(
+            adjusted.hsvSaturation()
+            + max(-100.0, min(100.0, saturation)) * 2.55
+        ))),
+        max(0, min(255, round(
+            adjusted.value()
+            + max(-100.0, min(100.0, brightness)) * 2.55
+        ))),
+    )
+    amount = max(0.0, min(1.0, strength))
+    result = QColor(
+        round(original.red() + (adjusted.red() - original.red()) * amount),
+        round(original.green() + (adjusted.green() - original.green()) * amount),
+        round(original.blue() + (adjusted.blue() - original.blue()) * amount),
+        original.alpha(),
+    )
+    return result.name(
+        QColor.NameFormat.HexRgb
+        if result.alpha() == 255 else QColor.NameFormat.HexArgb
+    ).upper()
+
+
 def create_ambient_background(cover: QPixmap, width: int, height: int,
                               blur_radius: float = 24.0) -> QPixmap:
     """Create a palette-only, Apple Music-like backdrop from album artwork.
@@ -193,6 +266,32 @@ def _cached_ambient_background(source_path: str, direct_image: bool,
         QPixmap.fromImage(cover_image), width, height, blur_radius_tenths / 10.0,
     )
     return ambient.toImage()
+
+
+@lru_cache(maxsize=256)
+def _cached_personal_color(
+    source_path: str, direct_image: bool,
+    modified_ns: int, file_size: int,
+) -> int | None:
+    """Cache dominant-color extraction once per physical artwork revision."""
+    image = (
+        _cached_image_cover(source_path, modified_ns, file_size)
+        if direct_image else _cached_cover(source_path)
+    )
+    if image.isNull():
+        return None
+    palette = _dominant_colors(QPixmap.fromImage(image))
+    # Album covers often devote most pixels to black, white, or a muted
+    # photographic background. Prefer a visible accent from the dominant
+    # palette while still choosing the brightest neutral for monochrome art.
+    selected = max(
+        palette,
+        key=lambda color: (
+            color.saturation() * 0.68 + color.value() * 0.32
+            - (90.0 if color.value() < 36 else 0.0)
+        ),
+    )
+    return selected.rgba()
 
 
 def _cover_candidates(audio: object) -> list[bytes]:

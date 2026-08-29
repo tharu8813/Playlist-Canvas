@@ -401,7 +401,7 @@ class ExportPreviewDialog(QDialog):
         self._active_overlay_cache_seconds: float | None = None
         self._active_overlay_cache: tuple[tuple[int, VisualizerOverlay], ...] = ()
         self._scaled_overlay_cache: dict[
-            tuple[OverlaySignature, float], tuple[VisualizerOverlay, ...]
+            tuple[OverlaySignature, float, int], tuple[VisualizerOverlay, ...]
         ] = {}
         self._playing = False
         self._advancing_playhead = False
@@ -1578,10 +1578,11 @@ class ExportPreviewDialog(QDialog):
 
     def _scaled_active_overlays(
         self, entries: tuple[tuple[int, VisualizerOverlay], ...],
+        track_index: int,
     ) -> tuple[VisualizerOverlay, ...]:
         """Reuse immutable render-size overlays instead of replacing per frame."""
         signature = tuple(index for index, _overlay in entries)
-        key = (signature, self._active_render_scale)
+        key = (signature, self._active_render_scale, track_index)
         cached = self._scaled_overlay_cache.get(key)
         if cached is not None:
             return cached
@@ -1590,6 +1591,7 @@ class ExportPreviewDialog(QDialog):
                 overlay,
                 width=max(1, round(overlay.width * self._active_render_scale)),
                 height=max(1, round(overlay.height * self._active_render_scale)),
+                **self._personal_overlay_changes(overlay, track_index),
             )
             for _index, overlay in entries
         )
@@ -1597,6 +1599,22 @@ class ExportPreviewDialog(QDialog):
         while len(self._scaled_overlay_cache) > 32:
             self._scaled_overlay_cache.pop(next(iter(self._scaled_overlay_cache)))
         return cached
+
+    @staticmethod
+    def _personal_overlay_changes(
+        overlay: VisualizerOverlay, track_index: int,
+    ) -> dict[str, str]:
+        colors = overlay.personal_colors
+        if not (0 <= track_index < len(colors)):
+            return {}
+        color = colors[track_index]
+        return {
+            "color": color,
+            "particle_secondary_color": color,
+            "level_meter_low_color": color,
+            "level_meter_mid_color": color,
+            "level_meter_high_color": color,
+        }
 
     def _preview_composition_key(
         self, track: PlaylistTrack, phase: str | None,
@@ -2029,7 +2047,14 @@ class ExportPreviewDialog(QDialog):
         analyzed = self._track_levels.get(track.id)
         analysis = analyzed if analyzed is not None else self._idle_overlay_analysis(bands)
         frame_index = max(0, round(elapsed * self.preview_fps))
-        scaled_overlays = self._scaled_active_overlays(active_entries)
+        track_index = next(
+            (index for index, candidate in enumerate(self.tracks)
+             if candidate.id == track.id),
+            -1,
+        )
+        scaled_overlays = self._scaled_active_overlays(
+            active_entries, track_index,
+        )
         self._request_overlay_frames(
             track.id, frame_index, scaled_overlays, overlay_signature, analysis,
         )
@@ -2136,7 +2161,14 @@ class ExportPreviewDialog(QDialog):
             analyzed = self._track_levels.get(track.id)
             analysis = analyzed if analyzed is not None else self._idle_overlay_analysis(bands)
             frame_index = max(0, round(elapsed * self.preview_fps))
-            scaled_overlays = self._scaled_active_overlays(active_entries)
+            track_index = next(
+                (index for index, candidate in enumerate(self.tracks)
+                 if candidate.id == track.id),
+                -1,
+            )
+            scaled_overlays = self._scaled_active_overlays(
+                active_entries, track_index,
+            )
             self._request_overlay_frames(
                 track.id, frame_index, scaled_overlays,
                 overlay_signature, analysis,

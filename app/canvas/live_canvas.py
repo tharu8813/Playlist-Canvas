@@ -341,6 +341,16 @@ class LiveCanvas(QGraphicsView):
     copy_requested = Signal()
     paste_requested = Signal()
     command_requested = Signal(str)
+    nudge_requested = Signal(float, float)
+    edit_requested = Signal(str)
+    rename_requested = Signal()
+
+    _ARROW_DELTAS = {
+        Qt.Key.Key_Left: (-1.0, 0.0),
+        Qt.Key.Key_Right: (1.0, 0.0),
+        Qt.Key.Key_Up: (0.0, -1.0),
+        Qt.Key.Key_Down: (0.0, 1.0),
+    }
 
     def __init__(self, store: SourceStore, translator: Translator,
                  parent: object | None = None) -> None:
@@ -383,6 +393,7 @@ class LiveCanvas(QGraphicsView):
             item = SourceItem(source)
             item.changed_by_user.connect(self._on_item_changed)
             item.duplicate_requested.connect(self._duplicate_source_at)
+            item.edit_requested.connect(self.edit_requested)
             self.scene_model.addItem(item)
         else:
             item.source = source
@@ -764,7 +775,7 @@ class LiveCanvas(QGraphicsView):
         # other sources from mouse hit testing for this synchronous press; once
         # the selected item becomes the scene mouse grabber, move/release events
         # continue to reach it normally.
-        handle_target: SourceItem | None = None
+        handle_target: tuple[SourceItem, str] | None = None
         if button == Qt.MouseButton.LeftButton:
             selected = sorted(
                 (
@@ -776,8 +787,11 @@ class LiveCanvas(QGraphicsView):
             )
             handle_target = next(
                 (
-                    item for item in selected
-                    if self._edit_handle_at_view_position(item, event.pos()) is not None  # type: ignore[union-attr]
+                    (item, handle)
+                    for item in selected
+                    if (handle := self._edit_handle_at_view_position(
+                        item, event.position().toPoint()  # type: ignore[union-attr]
+                    )) is not None
                 ),
                 None,
             )
@@ -785,9 +799,11 @@ class LiveCanvas(QGraphicsView):
             super().mousePressEvent(event)  # type: ignore[arg-type]
             return
 
+        target_item, target_handle = handle_target
+        target_item.prioritize_edit_handle_for_next_press(target_handle)
         blocked_items: list[tuple[SourceItem, Qt.MouseButtons]] = []
         for item in self._items.values():
-            if item is handle_target:
+            if item is target_item:
                 continue
             buttons = item.acceptedMouseButtons()
             if buttons != Qt.MouseButton.NoButton:
@@ -796,6 +812,9 @@ class LiveCanvas(QGraphicsView):
         try:
             super().mousePressEvent(event)  # type: ignore[arg-type]
         finally:
+            # Clear a value that was not consumed (for example if Qt discarded
+            # the press while the scene was changing underneath the pointer).
+            target_item.prioritize_edit_handle_for_next_press(None)
             for item, buttons in blocked_items:
                 item.setAcceptedMouseButtons(buttons)
 
@@ -868,11 +887,27 @@ class LiveCanvas(QGraphicsView):
         self.viewport().unsetCursor()
 
     def keyPressEvent(self, event: object) -> None:
-        """Enable familiar Space+drag hand-tool panning."""
-        if event.key() == Qt.Key.Key_Space:  # type: ignore[union-attr]
+        """Space+drag hand-tool panning and arrow-key nudging of the selection."""
+        key = event.key()  # type: ignore[union-attr]
+        if key == Qt.Key.Key_Space:
             self._space_panning = True
             if not self._panning:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()  # type: ignore[union-attr]
+            return
+        modifiers = event.modifiers()  # type: ignore[union-attr]
+        blocked = (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+        )
+        if key in self._ARROW_DELTAS and not (modifiers & blocked):
+            step = 10.0 if modifiers & Qt.KeyboardModifier.ShiftModifier else 1.0
+            delta_x, delta_y = self._ARROW_DELTAS[key]
+            self.nudge_requested.emit(delta_x * step, delta_y * step)
+            event.accept()  # type: ignore[union-attr]
+            return
+        if key == Qt.Key.Key_F2:
+            self.rename_requested.emit()
             event.accept()  # type: ignore[union-attr]
             return
         super().keyPressEvent(event)  # type: ignore[arg-type]
@@ -898,6 +933,19 @@ class LiveCanvas(QGraphicsView):
         zoom = min(3.0, max(0.2, zoom))
         self.resetTransform()
         self.scale(zoom, zoom)
+        self.zoom_changed.emit(self.transform().m11())
+
+    def zoom_by(self, factor: float) -> None:
+        """Zoom a bounded step around the view centre (keyboard / status-bar)."""
+        current = self.transform().m11()
+        target = min(3.0, max(0.2, current * factor))
+        relative = target / current
+        if abs(relative - 1.0) < 1e-6:
+            return
+        previous_anchor = self.transformationAnchor()
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.scale(relative, relative)
+        self.setTransformationAnchor(previous_anchor)
         self.zoom_changed.emit(self.transform().m11())
 
     def set_theme_colors(self, workspace: QColor, artboard: QColor,

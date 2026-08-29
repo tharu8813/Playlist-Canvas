@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 from PySide6.QtCore import QObject, Signal
 
-from app.models.source import Source
+from app.models.source import Source, SourceType
 from app.models.layer import LayerGroup
 
 
@@ -206,6 +206,14 @@ class SourceStore(QObject):
         source = self._sources.get(source_id)
         if source is None:
             return
+        if source.source_type is SourceType.ALBUM_COVER:
+            # Album artwork is a square source everywhere, including Inspector
+            # edits and multi-selection updates. Canvas resize already supplies
+            # equal values, while a single-field edit mirrors its new value.
+            if "width" in changes:
+                changes["height"] = changes["width"]
+            elif "height" in changes:
+                changes["width"] = changes["height"]
         for name, value in changes.items():
             if hasattr(source, name):
                 setattr(source, name, value)

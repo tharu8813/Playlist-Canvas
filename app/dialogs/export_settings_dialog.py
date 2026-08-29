@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -142,8 +143,12 @@ class ExportSettingsDialog(QDialog):
         layout.addWidget(self.summary_label)
         layout.addWidget(output_group)
         main_columns = QHBoxLayout()
-        main_columns.addWidget(render_group, 1)
-        main_columns.addWidget(quality_group, 1)
+        main_columns.addWidget(
+            render_group, 1, Qt.AlignmentFlag.AlignTop,
+        )
+        main_columns.addWidget(
+            quality_group, 1, Qt.AlignmentFlag.AlignTop,
+        )
         layout.addLayout(main_columns)
         layout.addWidget(advanced_group)
         footer = QHBoxLayout()
@@ -294,8 +299,8 @@ class ExportSettingsDialog(QDialog):
         profile = str(self.quality_mode_combo.currentData() or "balanced")
         descriptions = {
             "balanced": (
-                "화질, 인코딩 시간, 파일 크기의 균형이 좋습니다. 사용 가능한 NVIDIA GPU가 있으면 자동으로 사용합니다.",
-                "A good balance of quality, export time, and file size. An available NVIDIA GPU is used automatically.",
+                "권장 설정입니다. 화질, 인코딩 시간, 파일 크기의 균형이 좋습니다. 사용 가능한 NVIDIA GPU가 있으면 자동으로 사용합니다.",
+                "Recommended default. A good balance of quality, export time, and file size. An available NVIDIA GPU is used automatically.",
             ),
             "fast": (
                 "화질과 용량을 조금 양보하고 더 빠르게 내보냅니다.",

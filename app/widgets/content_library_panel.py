@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDrag, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QCursor, QDrag, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListView,
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QToolButton,
@@ -62,7 +62,35 @@ class ContentListWidget(QListWidget):
             if not pixmap.isNull():
                 drag.setPixmap(pixmap)
 
-        drag.exec(Qt.DropAction.CopyAction, Qt.DropAction.CopyAction)
+        # Returning to Project Content after leaving it is an explicit cancel
+        # gesture. Poll the global pointer during QDrag's nested event loop so
+        # the drag ends immediately instead of waiting for a redundant self-drop.
+        origin_panel = self.parentWidget()
+        has_left_origin = False
+        monitor = QTimer(self)
+        monitor.setInterval(20)
+
+        def cancel_if_returned() -> None:
+            nonlocal has_left_origin
+            if origin_panel is None:
+                return
+            inside_origin = origin_panel.rect().contains(
+                origin_panel.mapFromGlobal(QCursor.pos())
+            )
+            if not inside_origin:
+                has_left_origin = True
+                return
+            if has_left_origin:
+                monitor.stop()
+                QDrag.cancel()
+
+        monitor.timeout.connect(cancel_if_returned)
+        monitor.start()
+        try:
+            drag.exec(Qt.DropAction.CopyAction, Qt.DropAction.CopyAction)
+        finally:
+            monitor.stop()
+            monitor.deleteLater()
 
 
 class ContentLibraryPanel(QWidget):
@@ -125,7 +153,11 @@ class ContentLibraryPanel(QWidget):
         self.list.setObjectName("projectContentList")
         self.list.setIconSize(QSize(38, 38))
         self.list.setSpacing(2)
-        self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.list.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.list.setAutoScroll(True)
+        self.list.setAutoScrollMargin(36)
         self.list.setDragEnabled(True)
         self.list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.list.setDefaultDropAction(Qt.DropAction.CopyAction)
@@ -447,7 +479,15 @@ class ContentLibraryPanel(QWidget):
 
     def _selected_id(self) -> str:
         item = self.list.currentItem()
+        if item is None and self.list.selectedItems():
+            item = self.list.selectedItems()[0]
         return str(item.data(Qt.ItemDataRole.UserRole)) if item is not None else ""
+
+    def _selected_ids(self) -> list[str]:
+        return [
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.list.selectedItems()
+        ]
 
     def _add_selected(self) -> None:
         item = self.list.currentItem()
@@ -470,8 +510,13 @@ class ContentLibraryPanel(QWidget):
         dialog.exec()
 
     def _remove_selected(self) -> None:
-        content_id = self._selected_id()
-        if content_id:
+        content_ids = self._selected_ids()
+        if not content_ids:
+            content_id = self._selected_id()
+            content_ids = [content_id] if content_id else []
+        # Snapshot the IDs first: each service mutation may synchronously refresh
+        # the list and replace its QListWidgetItem objects.
+        for content_id in content_ids:
             self.service.remove(content_id)
 
     def _show_context_menu(self, position: QPoint) -> None:
@@ -564,5 +609,5 @@ class ContentLibraryPanel(QWidget):
         return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
 
     def _update_buttons(self) -> None:
-        enabled = self.list.currentItem() is not None
+        enabled = bool(self.list.selectedItems()) or self.list.currentItem() is not None
         self.remove_button.setEnabled(enabled)

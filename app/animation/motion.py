@@ -18,6 +18,10 @@ class MotionController(QObject):
 
     def fade_in(self, widget: QWidget, duration: int = 180) -> None:
         """Gently fade a panel in after a major workspace state change."""
+        # QGraphicsEffect is exclusive per widget. Never replace an existing
+        # shadow/blur effect just to play a cosmetic fade.
+        if widget.graphicsEffect() is not None:
+            return
         effect = QGraphicsOpacityEffect(widget)
         effect.setOpacity(0.55)
         widget.setGraphicsEffect(effect)
@@ -61,13 +65,29 @@ class MotionController(QObject):
         """Replace an in-flight size animation so rapid reversals stay coherent."""
         key = (id(widget), property_name)
         previous = self._dimension_animations.pop(key, None)
+        start_value = int(start)
         if previous is not None:
             previous.stop()
+            start_value = self._dimension_value(widget, property_name, start_value)
             self._discard(previous)
+
+        end_value = int(end)
+        if start_value == end_value:
+            widget.setProperty(property_name.decode("ascii"), end_value)
+            if on_finished is not None:
+                on_finished()
+            return
+
+        full_distance = max(1, abs(end_value - int(start)))
+        remaining_distance = abs(end_value - start_value)
+        effective_duration = max(
+            80,
+            round(max(1, duration) * min(1.0, remaining_distance / full_distance)),
+        )
         animation = QPropertyAnimation(widget, property_name, self)
-        animation.setDuration(duration)
-        animation.setStartValue(start)
-        animation.setEndValue(end)
+        animation.setDuration(effective_duration)
+        animation.setStartValue(start_value)
+        animation.setEndValue(end_value)
         animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
         def finished() -> None:
@@ -81,6 +101,20 @@ class MotionController(QObject):
         self._animations.append(animation)
         self._dimension_animations[key] = animation
         animation.start()
+
+    @staticmethod
+    def _dimension_value(
+        widget: QWidget, property_name: bytes, fallback: int,
+    ) -> int:
+        if property_name == b"maximumWidth":
+            return int(widget.maximumWidth())
+        if property_name == b"maximumHeight":
+            return int(widget.maximumHeight())
+        value = widget.property(property_name.decode("ascii"))
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
 
     def _discard(self, animation: QPropertyAnimation) -> None:
         if animation in self._animations:

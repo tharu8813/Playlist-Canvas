@@ -76,6 +76,11 @@ class Source:
     visible: bool = True
     locked: bool = False
     fill_color: str = "#7C3AED"
+    personal_color_enabled: bool = False
+    personal_color_brightness: float = 0.0
+    personal_color_saturation: float = 0.0
+    personal_color_hue_shift: float = 0.0
+    personal_color_strength: float = 1.0
     text: str = "Text"
     shape_kind: str = "rectangle"
     progress_style: str = "rounded"
@@ -202,6 +207,11 @@ class Source:
         ):
             self.animation_in_duration = self.animation_duration
             self.animation_out_duration = self.animation_duration
+        if self.source_type is SourceType.ALBUM_COVER:
+            # Cover art is rendered through square frame styles. Normalize old
+            # or externally generated rectangular values at the model boundary
+            # so Canvas, Inspector, Preview, and export all agree.
+            self.height = self.width
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the model to JSON-compatible data."""
@@ -245,6 +255,23 @@ class Source:
                     )
         if not 0.0 <= source.opacity <= 1.0:
             raise ValueError(f"Source '{source.name}' opacity must be between 0 and 1.")
+        if not isinstance(source.personal_color_enabled, bool):
+            raise ValueError(
+                f"Source '{source.name}' personal color flag must be true or false."
+            )
+        personal_color_ranges = {
+            "personal_color_brightness": (-100.0, 100.0),
+            "personal_color_saturation": (-100.0, 100.0),
+            "personal_color_hue_shift": (-180.0, 180.0),
+            "personal_color_strength": (0.0, 1.0),
+        }
+        for name, (minimum, maximum) in personal_color_ranges.items():
+            value = float(getattr(source, name))
+            if not minimum <= value <= maximum:
+                raise ValueError(
+                    f"Source '{source.name}' value for '{name}' must be between "
+                    f"{minimum:g} and {maximum:g}."
+                )
         if source.width <= 0 or source.height <= 0 or source.scale <= 0:
             raise ValueError(f"Source '{source.name}' dimensions and scale must be positive.")
         if source.width > 100_000 or source.height > 100_000 or source.scale > 100:

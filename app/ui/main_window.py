@@ -68,6 +68,7 @@ from app.dialogs.settings_dialog import SettingsDialog
 from app.dialogs.startup_dialog import StartupDialog
 from app.dialogs.track_details_dialog import TrackDetailsDialog
 from app.dialogs.shortcuts_dialog import ShortcutsDialog
+from app.dialogs.text_editor_dialog import TextEditorDialog
 from app.dialogs.about_dialog import AboutDialog
 from app.dialogs.help_dialog import HelpDialog
 from app.dialogs.update_dialogs import UpdateAvailableDialog, UpdateDownloadDialog
@@ -115,6 +116,7 @@ from app.services.update_service import (
 from app.services.update_worker import UpdateCheckWorker, UpdateDownloadWorker
 from app.presets.preset_service import PresetDefinition
 from app.preview.canvas_snapshot import CanvasSnapshot
+from app.preview.album_art import adjust_personal_color, extract_track_personal_color
 from app.preview.export_canvas_capture import ExportCanvasCapturer
 from app.preview.gpu_texture_surface import (
     GPU_TEXTURE_SURFACE_AVAILABLE, GpuTexturePreviewSurface,
@@ -394,6 +396,10 @@ class MainWindow(QMainWindow):
         self._export_preparation_cancel: threading.Event | None = None
         self._close_after_export_cancel = False
         self._export_restore_pending = False
+        self._canvas_fit_pending = False
+        self._canvas_fit_timer = QTimer(self)
+        self._canvas_fit_timer.setSingleShot(True)
+        self._canvas_fit_timer.timeout.connect(self._apply_scheduled_canvas_fit)
         self._notification_tray: QSystemTrayIcon | None = None
         self._export_notified_steps: set[str] = set()
         self._active_export_output_path: Path | None = None
@@ -429,6 +435,7 @@ class MainWindow(QMainWindow):
             self.translator.language is Language.KOREAN, self,
         )
         self.statusBar().addPermanentWidget(self.activity_progress)
+        self._build_zoom_controls()
         self._apply_style()
         self._add_welcome_sources()
         self.translator.language_changed.connect(self.retranslate)
@@ -748,18 +755,10 @@ class MainWindow(QMainWindow):
         # register a second QAction for either sequence, because duplicate window
         # shortcuts become ambiguous and Qt suppresses both activations.
         register("Esc", self._clear_canvas_selection)
-        register("Alt+Left", lambda: self._nudge_selected_sources(-1, 0))
-        register("Alt+Right", lambda: self._nudge_selected_sources(1, 0))
-        register("Alt+Up", lambda: self._nudge_selected_sources(0, -1))
-        register("Alt+Down", lambda: self._nudge_selected_sources(0, 1))
-        register("Alt+Shift+Left", lambda: self._nudge_selected_sources(-10, 0))
-        register("Alt+Shift+Right", lambda: self._nudge_selected_sources(10, 0))
-        register("Alt+Shift+Up", lambda: self._nudge_selected_sources(0, -10))
-        register("Alt+Shift+Down", lambda: self._nudge_selected_sources(0, 10))
-        register("Shift+Left", lambda: self._jump_selected_to_grid(-1, 0))
-        register("Shift+Right", lambda: self._jump_selected_to_grid(1, 0))
-        register("Shift+Up", lambda: self._jump_selected_to_grid(0, -1))
-        register("Shift+Down", lambda: self._jump_selected_to_grid(0, 1))
+        # Arrow-key nudging is handled inside LiveCanvas.keyPressEvent so it only
+        # fires while the Canvas view itself has focus (Arrow = 1px,
+        # Shift+Arrow = 10px), keeping arrow navigation intact in the Layer tree
+        # and every spin box.
         register("Ctrl+Shift+H", lambda: self._center_selected_sources(horizontal=True))
         register("Ctrl+Shift+V", lambda: self._center_selected_sources(horizontal=False))
         register("Ctrl+]", lambda: self._move_selected_to_edge(front=True))
@@ -769,8 +768,11 @@ class MainWindow(QMainWindow):
         register("Ctrl+L", self._toggle_selected_lock)
         register("Ctrl+0", self.canvas_fit)
         register("Ctrl+=", lambda: self._adjust_canvas_zoom(1.15))
+        register("Ctrl++", lambda: self._adjust_canvas_zoom(1.15))
         register("Ctrl+-", lambda: self._adjust_canvas_zoom(1.0 / 1.15))
         register("Home", self.canvas_fit)
+        # F2 rename is handled in LiveCanvas.keyPressEvent so the Layer tree keeps
+        # its own built-in F2 item rename when that panel holds focus.
         QApplication.instance().focusChanged.connect(self._sync_canvas_shortcut_actions)
         self._sync_canvas_shortcut_actions(None, QApplication.focusWidget())
 
@@ -1008,30 +1010,69 @@ class MainWindow(QMainWindow):
         self.store.select(None)
 
     def _adjust_canvas_zoom(self, factor: float) -> None:
-        """Apply a bounded keyboard zoom around the current Canvas view."""
-        self.canvas.set_zoom(self.canvas.transform().m11() * factor)
+        """Apply a bounded keyboard zoom around the Canvas view centre."""
+        self.canvas.zoom_by(factor)
+
+    def _build_zoom_controls(self) -> None:
+        """Add a compact zoom readout and stepper to the status bar."""
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 8, 0)
+        row.setSpacing(1)
+        self.zoom_out_button = QToolButton()
+        self.zoom_out_button.setText("−")
+        self.zoom_out_button.setAutoRaise(True)
+        self.zoom_out_button.clicked.connect(
+            lambda: self._adjust_canvas_zoom(1.0 / 1.15)
+        )
+        self.zoom_reset_button = QToolButton()
+        self.zoom_reset_button.setAutoRaise(True)
+        self.zoom_reset_button.setMinimumWidth(52)
+        self.zoom_reset_button.clicked.connect(self._toggle_canvas_zoom_100)
+        self.zoom_in_button = QToolButton()
+        self.zoom_in_button.setText("+")
+        self.zoom_in_button.setAutoRaise(True)
+        self.zoom_in_button.clicked.connect(lambda: self._adjust_canvas_zoom(1.15))
+        for widget in (self.zoom_out_button, self.zoom_reset_button, self.zoom_in_button):
+            row.addWidget(widget)
+        self.statusBar().addPermanentWidget(container)
+        self.canvas.zoom_changed.connect(self._update_zoom_label)
+        self._update_zoom_label(self.canvas.transform().m11())
+
+    def _update_zoom_label(self, zoom: float) -> None:
+        self.zoom_reset_button.setText(f"{round(zoom * 100)}%")
+
+    def _toggle_canvas_zoom_100(self) -> None:
+        """Switch between 1:1 and fit-to-view from the status bar readout."""
+        if abs(self.canvas.transform().m11() - 1.0) < 0.01:
+            self.canvas.fit_artboard()
+        else:
+            self.canvas.set_zoom(1.0)
 
     def _nudge_selected_sources(self, x_delta: float, y_delta: float) -> None:
         """Move selected sources by an exact keyboard increment."""
         for source in self._selected_editable_sources():
             self.store.update(source.id, x=source.x + x_delta, y=source.y + y_delta)
 
-    def _jump_selected_to_grid(self, horizontal_direction: int, vertical_direction: int) -> None:
-        """Jump selected sources to the next 10px grid path in the requested direction."""
-        grid = 10.0
-        for source in self._selected_editable_sources():
-            if horizontal_direction:
-                value = source.x / grid
-                target = (int(value // 1) + 1) * grid if horizontal_direction > 0 else (
-                    int(-(-value // 1)) - 1
-                ) * grid
-                self.store.update(source.id, x=target)
-            if vertical_direction:
-                value = source.y / grid
-                target = (int(value // 1) + 1) * grid if vertical_direction > 0 else (
-                    int(-(-value // 1)) - 1
-                ) * grid
-                self.store.update(source.id, y=target)
+    def _edit_canvas_source(self, source_id: str) -> None:
+        """Open the in-place editor for a double-clicked Canvas source."""
+        source = self.store.get(source_id)
+        if source is None:
+            return
+        self.store.select(source_id)
+        if source.source_type in {SourceType.TEXT, SourceType.LYRICS}:
+            dialog = TextEditorDialog(source.text, self.translator, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.store.update(source_id, text=dialog.text())
+
+    def _rename_selected_source(self) -> None:
+        """Jump keyboard focus to the Inspector name field for a quick rename."""
+        if self.store.selected is None:
+            return
+        if not self.inspector_panel_action.isChecked():
+            self.inspector_panel_action.setChecked(True)
+        self.inspector.name_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.inspector.name_edit.selectAll()
 
     def _center_selected_sources(self, horizontal: bool) -> None:
         """Center selected sources on the artboard horizontally or vertically."""
@@ -1153,6 +1194,12 @@ class MainWindow(QMainWindow):
         self.file_menu = menu_bar.addMenu("")
         self.file_menu.addAction(self.new_action)
         self.file_menu.addAction(self.open_action)
+        self.recent_projects_menu = self.file_menu.addMenu("")
+        self.recent_projects_menu.aboutToShow.connect(
+            self._rebuild_recent_projects_menu
+        )
+        self.recent_projects.changed.connect(self._rebuild_recent_projects_menu)
+        self._rebuild_recent_projects_menu()
         self.file_menu.addSeparator()
         self.file_menu.addAction(self.save_action)
         self.file_menu.addAction(self.save_as_action)
@@ -1294,6 +1341,80 @@ class MainWindow(QMainWindow):
         self.help_menu.addAction(self.about_action)
         self._sync_canvas_shortcut_actions(None, QApplication.focusWidget())
 
+    def _rebuild_recent_projects_menu(self) -> None:
+        """Populate File > Recent projects from the current valid MRU list."""
+        menu = getattr(self, "recent_projects_menu", None)
+        if not isinstance(menu, QMenu):
+            return
+        menu.clear()
+        korean = self.translator.language is Language.KOREAN
+        projects = self.recent_projects.projects()
+        if not projects:
+            empty_action = menu.addAction(
+                "최근 프로젝트가 없습니다." if korean else "No recent projects"
+            )
+            empty_action.setEnabled(False)
+            return
+
+        for index, path in enumerate(projects, start=1):
+            action = menu.addAction(f"{index}. {path.name}")
+            action.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+            )
+            action.setToolTip(str(path))
+            action.setStatusTip(str(path))
+            action.triggered.connect(
+                lambda _checked=False, selected=Path(path):
+                self._open_recent_project(selected)
+            )
+        menu.addSeparator()
+        clear_action = menu.addAction(
+            "최근 프로젝트 목록 지우기" if korean else "Clear recent projects"
+        )
+        clear_action.triggered.connect(self._confirm_clear_recent_projects)
+
+    def _confirm_clear_recent_projects(self) -> bool:
+        """Clear only the MRU history after an explicit user confirmation."""
+        korean = self.translator.language is Language.KOREAN
+        response = QMessageBox.question(
+            self,
+            "최근 프로젝트 목록 지우기" if korean else "Clear recent projects",
+            (
+                "최근에 연 프로젝트 목록을 모두 지울까요?\n\n"
+                "프로젝트 파일 자체는 삭제되지 않습니다."
+                if korean else
+                "Clear the entire recent projects list?\n\n"
+                "The project files themselves will not be deleted."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return False
+        self.recent_projects.clear()
+        self.statusBar().showMessage(
+            "최근 프로젝트 목록을 지웠습니다."
+            if korean else "Cleared the recent projects list.",
+            3000,
+        )
+        return True
+
+    def _open_recent_project(self, path: Path) -> bool:
+        """Open one MRU entry through the same guarded workflow as File > Open."""
+        project_path = Path(path).expanduser()
+        korean = self.translator.language is Language.KOREAN
+        if not project_path.is_file():
+            self.recent_projects.remove(project_path)
+            QMessageBox.warning(
+                self,
+                "프로젝트를 찾을 수 없음" if korean else "Project not found",
+                f"최근 프로젝트 파일을 찾을 수 없어 목록에서 제거했습니다.\n\n{project_path}"
+                if korean else
+                f"The recent project could not be found and was removed from the list.\n\n{project_path}",
+            )
+            return False
+        return self._open_project_with_confirmation(project_path)
+
     def _build_workspace(self) -> None:
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -1341,6 +1462,9 @@ class MainWindow(QMainWindow):
         self.canvas.copy_requested.connect(self._copy_selected_sources)
         self.canvas.paste_requested.connect(self._paste_sources)
         self.canvas.command_requested.connect(self._handle_canvas_context_command)
+        self.canvas.nudge_requested.connect(self._nudge_selected_sources)
+        self.canvas.edit_requested.connect(self._edit_canvas_source)
+        self.canvas.rename_requested.connect(self._rename_selected_source)
         self.canvas_stack = QStackedWidget()
         self.canvas_stack.setObjectName("canvasWorkspaceStack")
         self.canvas_stack.addWidget(self.canvas)
@@ -1547,11 +1671,22 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         self.sidebar_title = QLabel()
         self.sidebar_title.setObjectName("panelTitle")
-        layout.addWidget(self.sidebar_title)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        self.source_result_label = QLabel()
+        self.source_result_label.setObjectName("sourceResultCount")
+        header.addWidget(self.sidebar_title)
+        header.addStretch()
+        header.addWidget(self.source_result_label)
+        layout.addLayout(header)
 
         self.source_search = QLineEdit()
         self.source_search.setObjectName("sourceSearch")
         self.source_search.setClearButtonEnabled(True)
+        self.source_search.addAction(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView),
+            QLineEdit.ActionPosition.LeadingPosition,
+        )
         self.source_search.textChanged.connect(self._filter_source_cards)
         layout.addWidget(self.source_search)
 
@@ -1565,7 +1700,7 @@ class MainWindow(QMainWindow):
         cards_widget = QWidget()
         cards_layout = QVBoxLayout(cards_widget)
         cards_layout.setContentsMargins(0, 0, 0, 0)
-        cards_layout.setSpacing(8)
+        cards_layout.setSpacing(12)
         descriptions = [
             ("image", SourceType.IMAGE), ("video", SourceType.VIDEO), ("text", SourceType.TEXT), ("shape", SourceType.SHAPE),
             ("progress_bar", SourceType.PROGRESS_BAR), ("album_cover", SourceType.ALBUM_COVER),
@@ -1585,86 +1720,159 @@ class MainWindow(QMainWindow):
         self._source_variant_parents = variant_parents
         self._source_search_terms: dict[SourceType, str] = {}
         description_keys = {source_type: key for key, source_type in descriptions}
-        top_level_types = [
-            source_type for _key, source_type in descriptions
-            if source_type not in variant_parents
-        ]
-        for source_type in top_level_types:
-            group = QFrame()
-            group.setObjectName("sourceTemplateGroup")
-            group_layout = QVBoxLayout(group)
-            group_layout.setContentsMargins(0, 0, 0, 0)
-            group_layout.setSpacing(4)
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(4)
-            button = SourceTemplateButton(source_type.value, source_type.value)
-            button.clicked.connect(
-                lambda checked=False, kind=source_type: self._add_source(kind)
-            )
-            row_layout.addWidget(button, 1)
-            variants = [
-                child for child, parent in variant_parents.items()
-                if parent is source_type
-            ]
-            if variants:
-                toggle = QToolButton()
-                toggle.setObjectName("sourceVariantToggle")
-                toggle.setCheckable(True)
-                toggle.setFixedWidth(30)
-                toggle.setText("▸")
-                toggle.toggled.connect(
-                    lambda expanded, parent_type=source_type: self._set_source_variants_expanded(
-                        parent_type, expanded
-                    )
+        source_categories = (
+            ("basic", (
+                SourceType.TEXT, SourceType.SHAPE, SourceType.IMAGE, SourceType.VIDEO,
+            )),
+            ("playback", (
+                SourceType.LYRICS, SourceType.ALBUM_COVER,
+                SourceType.PROGRESS_BAR, SourceType.TRACK_LIST,
+                SourceType.NOW_PLAYING,
+            )),
+            ("audio", (
+                SourceType.AUDIO_VISUALIZER, SourceType.AUDIO_WAVEFORM,
+                SourceType.AUDIO_LEVEL_METER,
+            )),
+            ("scene", (
+                SourceType.BACKGROUND, SourceType.PARTICLE_OVERLAY,
+            )),
+        )
+        self._source_category_sections: dict[str, QWidget] = {}
+        self._source_category_titles: dict[str, QLabel] = {}
+        self._source_type_categories: dict[SourceType, str] = {}
+        for category, category_types in source_categories:
+            section = QWidget()
+            section.setObjectName("sourceCategorySection")
+            section_layout = QVBoxLayout(section)
+            section_layout.setContentsMargins(0, 0, 0, 0)
+            section_layout.setSpacing(5)
+            category_label = QLabel()
+            category_label.setObjectName("sourceCategoryTitle")
+            section_layout.addWidget(category_label)
+            self._source_category_sections[category] = section
+            self._source_category_titles[category] = category_label
+            cards_layout.addWidget(section)
+            for source_type in category_types:
+                self._source_type_categories[source_type] = category
+                self._add_source_palette_card(
+                    source_type, description_keys, variant_parents,
+                    section_layout,
                 )
-                row_layout.addWidget(toggle)
-                self._source_variant_toggles[source_type] = toggle
-            group_layout.addWidget(row)
-            self._source_buttons[source_type] = button
-            self._source_search_terms[source_type] = (
-                f"{description_keys[source_type]} {source_type.value}"
-            ).lower()
-            if variants:
-                variant_container = QWidget()
-                variant_container.setObjectName("sourceVariantContainer")
-                variant_layout = QVBoxLayout(variant_container)
-                variant_layout.setContentsMargins(18, 0, 0, 0)
-                variant_layout.setSpacing(4)
-                for child_type in variants:
-                    child_button = SourceTemplateButton(
-                        child_type.value, source_type.value
-                    )
-                    child_button.clicked.connect(
-                        lambda checked=False, kind=child_type: self._add_source(kind)
-                    )
-                    self._source_buttons[child_type] = child_button
-                    self._source_search_terms[child_type] = (
-                        f"{description_keys[child_type]} {child_type.value} "
-                        f"{description_keys[source_type]} {source_type.value}"
-                    ).lower()
-                    variant_layout.addWidget(child_button)
-                variant_container.hide()
-                group_layout.addWidget(variant_container)
-                self._source_variant_containers[source_type] = variant_container
-            self._source_card_groups[source_type] = group
-            cards_layout.addWidget(group)
         cards_layout.addStretch(1)
         self.source_cards_scroll.setWidget(cards_widget)
         layout.addWidget(self.source_cards_scroll, 1)
         return panel
 
+    def _add_source_palette_card(
+        self, source_type: SourceType,
+        description_keys: dict[SourceType, str],
+        variant_parents: dict[SourceType, SourceType],
+        section_layout: QVBoxLayout,
+    ) -> None:
+        """Add one top-level palette card and its property-only variants."""
+        group = QFrame()
+        group.setObjectName("sourceTemplateGroup")
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        group_layout.setSpacing(4)
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+        button = SourceTemplateButton(source_type.value, source_type.value)
+        button.set_card_icon(self._source_palette_icon(source_type))
+        button.clicked.connect(
+            lambda checked=False, kind=source_type: self._add_source(kind)
+        )
+        row_layout.addWidget(button, 1)
+        variants = [
+            child for child, parent in variant_parents.items()
+            if parent is source_type
+        ]
+        if variants:
+            toggle = QToolButton()
+            toggle.setObjectName("sourceVariantToggle")
+            toggle.setCheckable(True)
+            toggle.setFixedWidth(30)
+            toggle.setText("▸")
+            toggle.toggled.connect(
+                lambda expanded, parent_type=source_type: self._set_source_variants_expanded(
+                    parent_type, expanded
+                )
+            )
+            row_layout.addWidget(toggle)
+            self._source_variant_toggles[source_type] = toggle
+        group_layout.addWidget(row)
+        self._source_buttons[source_type] = button
+        self._source_search_terms[source_type] = (
+            f"{description_keys[source_type]} {source_type.value}"
+        ).lower()
+        if variants:
+            variant_container = QWidget()
+            variant_container.setObjectName("sourceVariantContainer")
+            variant_layout = QVBoxLayout(variant_container)
+            variant_layout.setContentsMargins(18, 0, 0, 0)
+            variant_layout.setSpacing(4)
+            for child_type in variants:
+                child_button = SourceTemplateButton(
+                    child_type.value, source_type.value
+                )
+                child_button.set_card_icon(
+                    self._source_palette_icon(child_type)
+                )
+                child_button.clicked.connect(
+                    lambda checked=False, kind=child_type: self._add_source(kind)
+                )
+                self._source_buttons[child_type] = child_button
+                self._source_search_terms[child_type] = (
+                    f"{description_keys[child_type]} {child_type.value} "
+                    f"{description_keys[source_type]} {source_type.value}"
+                ).lower()
+                variant_layout.addWidget(child_button)
+            variant_container.hide()
+            group_layout.addWidget(variant_container)
+            self._source_variant_containers[source_type] = variant_container
+        self._source_card_groups[source_type] = group
+        section_layout.addWidget(group)
+
+    def _source_palette_icon(self, source_type: SourceType) -> QIcon:
+        """Return a familiar, theme-aware icon for a source palette card."""
+        icon_types = {
+            SourceType.IMAGE: QStyle.StandardPixmap.SP_FileIcon,
+            SourceType.LOGO: QStyle.StandardPixmap.SP_FileIcon,
+            SourceType.WATERMARK: QStyle.StandardPixmap.SP_FileIcon,
+            SourceType.VIDEO: QStyle.StandardPixmap.SP_MediaPlay,
+            SourceType.TEXT: QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            SourceType.TIME: QStyle.StandardPixmap.SP_BrowserReload,
+            SourceType.SHAPE: QStyle.StandardPixmap.SP_DialogResetButton,
+            SourceType.PROGRESS_BAR: QStyle.StandardPixmap.SP_MediaSeekForward,
+            SourceType.ALBUM_COVER: QStyle.StandardPixmap.SP_DirIcon,
+            SourceType.BACKGROUND: QStyle.StandardPixmap.SP_DesktopIcon,
+            SourceType.AUDIO_VISUALIZER: QStyle.StandardPixmap.SP_MediaVolume,
+            SourceType.AUDIO_WAVEFORM: QStyle.StandardPixmap.SP_MediaVolume,
+            SourceType.AUDIO_LEVEL_METER: QStyle.StandardPixmap.SP_MediaVolume,
+            SourceType.LYRICS: QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            SourceType.TRACK_LIST: QStyle.StandardPixmap.SP_FileDialogListView,
+            SourceType.NOW_PLAYING: QStyle.StandardPixmap.SP_MediaPlay,
+            SourceType.PARTICLE_OVERLAY: QStyle.StandardPixmap.SP_ComputerIcon,
+        }
+        return self.style().standardIcon(
+            icon_types.get(source_type, QStyle.StandardPixmap.SP_FileIcon)
+        )
+
     def _filter_source_cards(self, query: str) -> None:
         """Show only palette sources matching a user-facing name or source type."""
         normalized = query.strip().lower()
+        matched_count = 0
         for parent_type, group in self._source_card_groups.items():
             parent_button = self._source_buttons[parent_type]
             parent_text = (
                 f"{self._source_search_terms.get(parent_type, '')} "
-                f"{parent_button.text()}"
+                f"{parent_button.property('paletteText') or ''}"
             ).lower()
             parent_match = not normalized or normalized in parent_text
+            if parent_match:
+                matched_count += 1
             child_types = [
                 child for child, parent in self._source_variant_parents.items()
                 if parent is parent_type
@@ -1674,9 +1882,11 @@ class MainWindow(QMainWindow):
                 child_button = self._source_buttons[child_type]
                 searchable = (
                     f"{self._source_search_terms.get(child_type, '')} "
-                    f"{child_button.text()}"
+                    f"{child_button.property('paletteText') or ''}"
                 ).lower()
                 child_matches[child_type] = not normalized or normalized in searchable
+                if child_matches[child_type]:
+                    matched_count += 1
                 child_button.setVisible(child_matches[child_type])
             group.setVisible(parent_match or any(child_matches.values()))
             parent_button.setVisible(True)
@@ -1686,6 +1896,19 @@ class MainWindow(QMainWindow):
                 container.setVisible((expanded and not normalized) or (
                     bool(normalized) and any(child_matches.values())
                 ))
+        for category, section in self._source_category_sections.items():
+            section.setVisible(any(
+                not group.isHidden()
+                for source_type, group in self._source_card_groups.items()
+                if self._source_type_categories.get(source_type) == category
+            ))
+        korean = self.translator.language is Language.KOREAN
+        self.source_result_label.setText(
+            f"{matched_count}개 결과" if korean and normalized else
+            f"{matched_count}개" if korean else
+            f"{matched_count} results" if normalized else
+            f"{matched_count} sources"
+        )
 
     def _set_source_variants_expanded(
         self, parent_type: SourceType, expanded: bool,
@@ -1792,6 +2015,31 @@ class MainWindow(QMainWindow):
         }
         return (korean_help if korean else english_help)[source_type]
 
+    def _source_palette_summary(self, source_type: SourceType) -> str:
+        """Return a short secondary line sized for the narrow source palette."""
+        korean = self.translator.language is Language.KOREAN
+        summaries = {
+            SourceType.IMAGE: ("사진과 그래픽", "Photos and graphics"),
+            SourceType.VIDEO: ("영상 클립 재생", "Play video clips"),
+            SourceType.TEXT: ("제목과 동적 정보", "Titles and dynamic info"),
+            SourceType.SHAPE: ("색상 면과 도형", "Color surfaces and shapes"),
+            SourceType.PROGRESS_BAR: ("곡·전체 진행률", "Track or playlist progress"),
+            SourceType.ALBUM_COVER: ("현재 곡의 앨범 커버", "Current album artwork"),
+            SourceType.TIME: ("시간과 재생 위치", "Clock and playback time"),
+            SourceType.LOGO: ("브랜드 로고 이미지", "Brand logo image"),
+            SourceType.WATERMARK: ("반투명 워터마크", "Transparent watermark"),
+            SourceType.BACKGROUND: ("캔버스 전체 배경", "Full Canvas background"),
+            SourceType.AUDIO_VISUALIZER: ("주파수 반응 효과", "Frequency-reactive effect"),
+            SourceType.LYRICS: ("실시간 가사와 자막", "Timed lyrics and subtitles"),
+            SourceType.TRACK_LIST: ("플레이리스트 목록", "Playlist track list"),
+            SourceType.NOW_PLAYING: ("현재 곡 정보 카드", "Current-track info card"),
+            SourceType.AUDIO_WAVEFORM: ("재생 반응 오디오 파형", "Playback-reactive waveform"),
+            SourceType.AUDIO_LEVEL_METER: ("실시간 음량 미터", "Live audio level meter"),
+            SourceType.PARTICLE_OVERLAY: ("파티클과 노이즈 효과", "Particles and noise effects"),
+        }
+        localized = summaries.get(source_type, ("캔버스 요소", "Canvas source"))
+        return localized[0 if korean else 1]
+
     def _source_type_label(self, source_type: SourceType) -> str:
         """Return the same localized source name for menus and palette buttons."""
         korean = self.translator.language is Language.KOREAN
@@ -1839,7 +2087,7 @@ class MainWindow(QMainWindow):
         progress_y = max(title_y + 140.0, height - max(80.0, height * 0.1944))
         progress_y = min(progress_y, height - 24.0)
         self.store.add(Source(SourceType.BACKGROUND, "Background", width=width, height=height,
-                              fill_color="#263042", locked=True, z_index=-10, text=""))
+                              fill_color="#263042", locked=False, z_index=-10, text=""))
         self.store.add(Source(SourceType.TEXT, "Playlist title", x=margin_x, y=title_y,
                               width=title_width,
                               height=100, fill_color="#7C3AED", border_radius=16,
@@ -1861,6 +2109,12 @@ class MainWindow(QMainWindow):
             dimensions = (480.0, 270.0)
         if source_type in {SourceType.AUDIO_VISUALIZER, SourceType.AUDIO_WAVEFORM}:
             dimensions = (460.0, 100.0)
+        if source_type is SourceType.LYRICS:
+            # Timed preview normally displays previous/current/next cues. The
+            # former generic 260x90 box was only large enough for its one-line
+            # editor placeholder, making preview lyrics appear outside the
+            # position chosen on the Canvas.
+            dimensions = (620.0, 220.0)
         if source_type is SourceType.AUDIO_LEVEL_METER:
             dimensions = (80.0, 180.0)
         if source_type is SourceType.PARTICLE_OVERLAY:
@@ -1902,7 +2156,7 @@ class MainWindow(QMainWindow):
             fill_color="#1685D1" if source_type is not SourceType.BACKGROUND else "#263042",
             text=default_text,
             z_index=count,
-            locked=source_type is SourceType.BACKGROUND,
+            locked=False,
         )
         if template_type is SourceType.LOGO:
             source.image_fit_mode = "contain"
@@ -2144,8 +2398,33 @@ class MainWindow(QMainWindow):
             Path(path).suffix.lower() in LYRICS_EXTENSIONS for path in paths
         )
 
+    def _drag_returned_to_project_content(
+        self, event: QDragEnterEvent | QDropEvent,
+    ) -> bool:
+        """Treat the Project Content panel as an invalid target for its own drag."""
+        if event.source() is not self.content_library_panel.list:
+            return False
+        if not self.content_library_panel.isVisible():
+            return False
+        window_position = event.position().toPoint()
+        global_position = self.mapToGlobal(window_position)
+        panel_position = self.content_library_panel.mapFromGlobal(global_position)
+        return self.content_library_panel.rect().contains(panel_position)
+
+    @staticmethod
+    def _reject_returned_project_content_drag(
+        event: QDragEnterEvent | QDropEvent,
+    ) -> None:
+        # Consume IgnoreAction at the top-level window. This prevents the event
+        # from falling through to the normal global file-drop/import path.
+        event.setDropAction(Qt.DropAction.IgnoreAction)
+        event.accept()
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Accept general files globally, but reserve lyrics for Playlist rows."""
+        if self._drag_returned_to_project_content(event):
+            self._reject_returned_project_content_drag(event)
+            return
         paths = self._window_drop_paths(event)
         if paths and not self._drop_contains_lyrics(paths):
             event.acceptProposedAction()
@@ -2160,6 +2439,9 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event: QDropEvent) -> None:
         """Route general file drops while refusing lyrics outside Playlist rows."""
+        if self._drag_returned_to_project_content(event):
+            self._reject_returned_project_content_drag(event)
+            return
         paths = self._window_drop_paths(event)
         if not paths or self._drop_contains_lyrics(paths):
             event.ignore()
@@ -2895,7 +3177,7 @@ class MainWindow(QMainWindow):
         try:
             animation_fps = self._export_animation_sample_rate(render_settings.fps)
             playlist_duration = self._playlist_duration(active_tracks)
-            visualizers = self._export_visualizers()
+            visualizers = self._export_visualizers(active_tracks)
             video_clips = self._export_video_clips(
                 active_tracks, playlist_duration, render_settings.work_mode,
             )
@@ -3409,6 +3691,22 @@ class MainWindow(QMainWindow):
                     )
                 self._finish_export_png_pipeline()
                 static_layers = capturer.static_layers()
+            # Stream encoders can emit drain progress while finish() runs. End
+            # preparation on a stable summary so users can see all streams are done.
+            if self._export_dialog is not None:
+                prepared_streams = max(1, len(stream_keys))
+                preparation_detail = (
+                    f"화면 스트림 {prepared_streams}/{prepared_streams} · 준비 100%"
+                    if korean else
+                    f"Visual streams {prepared_streams}/{prepared_streams} · 100% prepared"
+                )
+                self._export_dialog.update_progress(
+                    "Preparing visual frames", EXPORT_PREPARATION_PROGRESS_WEIGHT,
+                    preparation_detail,
+                )
+                self.activity_progress.update(
+                    "export", EXPORT_PREPARATION_PROGRESS_WEIGHT, preparation_detail,
+                )
             avoided_scene_pixels = max(
                 0,
                 capturer.full_frame_source_pixels
@@ -3533,11 +3831,59 @@ class MainWindow(QMainWindow):
         self._export_dialog.activateWindow()
 
     def changeEvent(self, event: QEvent) -> None:
-        """Restore a hidden export dialog together with the taskbar window."""
+        """React to major taskbar-window transitions after Qt lays them out."""
         super().changeEvent(event)
-        if (event.type() == QEvent.Type.WindowStateChange
-                and self._export_restore_pending and not self.isMinimized()):
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        old_state = (
+            event.oldState() if hasattr(event, "oldState")
+            else Qt.WindowState.WindowNoState
+        )
+        new_state = self.windowState()
+        self._handle_canvas_window_state_change(old_state, new_state)
+        if self._export_restore_pending and not self.isMinimized():
             QTimer.singleShot(0, self._restore_export_dialog_after_minimize)
+
+    def _handle_canvas_window_state_change(
+        self, old_state: Qt.WindowState, new_state: Qt.WindowState,
+    ) -> None:
+        """Fit after maximize/restore without resetting zoom on ordinary resizes."""
+        was_minimized = bool(old_state & Qt.WindowState.WindowMinimized)
+        is_minimized = bool(new_state & Qt.WindowState.WindowMinimized)
+        maximize_changed = bool(
+            old_state & Qt.WindowState.WindowMaximized
+        ) != bool(new_state & Qt.WindowState.WindowMaximized)
+        fullscreen_changed = bool(
+            old_state & Qt.WindowState.WindowFullScreen
+        ) != bool(new_state & Qt.WindowState.WindowFullScreen)
+        if is_minimized:
+            self._canvas_fit_pending = True
+            self._canvas_fit_timer.stop()
+            return
+        if was_minimized or maximize_changed or fullscreen_changed:
+            self._schedule_canvas_fit(100)
+
+    def _schedule_canvas_fit(self, delay_ms: int = 0) -> None:
+        """Coalesce layout-driven fit requests until the Canvas is usable."""
+        self._canvas_fit_pending = True
+        if self.isMinimized():
+            self._canvas_fit_timer.stop()
+            return
+        self._canvas_fit_timer.start(max(0, int(delay_ms)))
+
+    def _apply_scheduled_canvas_fit(self) -> None:
+        """Apply one pending fit without making the project look edited."""
+        if not self._canvas_fit_pending:
+            return
+        if self.isMinimized() or self._inline_preview is not None:
+            return
+        self._canvas_fit_pending = False
+        restoring = self._history_restoring
+        self._history_restoring = True
+        try:
+            self.canvas.fit_artboard()
+        finally:
+            self._history_restoring = restoring
 
     def _open_playlist_preview(self) -> None:
         """Select the bottom Preview tab and start its embedded playback mode."""
@@ -3604,7 +3950,7 @@ class MainWindow(QMainWindow):
             pass
         preview = ExportPreviewDialog(
             self.canvas.scene_model, tracks, self.translator,
-            self._export_visualizers(), executable, self, source_store=self.store,
+            self._export_visualizers(tracks), executable, self, source_store=self.store,
             embedded=True,
             preferred_backend=self._preview_backend_for_session,
         )
@@ -3713,6 +4059,9 @@ class MainWindow(QMainWindow):
             2500,
         )
         self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+        # The left workspace expands for 190 ms when Preview releases its UI
+        # lock. Fit against the final layout, not the transient narrow Canvas.
+        self._schedule_canvas_fit(230)
 
     def _unlock_editor_after_inline_preview(self) -> None:
         """Restore exactly the interaction state that preceded inline preview."""
@@ -3798,15 +4147,30 @@ class MainWindow(QMainWindow):
             end = max(end, cursor)
         return end
 
-    def _export_visualizers(self) -> list[VisualizerOverlay]:
+    def _export_visualizers(
+        self, tracks: list | None = None,
+    ) -> list[VisualizerOverlay]:
         """Translate visible, axis-aligned Canvas visualizers into Python-rendered overlays."""
         overlays: list[VisualizerOverlay] = []
-        for source in self.store.sources():
-            if (source.source_type not in {
-                    SourceType.AUDIO_VISUALIZER, SourceType.AUDIO_WAVEFORM,
-                    SourceType.AUDIO_LEVEL_METER, SourceType.PARTICLE_OVERLAY,
-                } or not source.visible):
-                continue
+        visualizer_sources = [
+            source for source in self.store.sources()
+            if source.source_type in {
+                SourceType.AUDIO_VISUALIZER, SourceType.AUDIO_WAVEFORM,
+                SourceType.AUDIO_LEVEL_METER, SourceType.PARTICLE_OVERLAY,
+            } and source.visible
+        ]
+        active_tracks = list(tracks) if tracks is not None else [
+            track for track in self.playlist_service.tracks if track.enabled
+        ]
+        track_personal_colors = (
+            tuple(
+                extract_track_personal_color(track.file_path, track.cover_path)
+                for track in active_tracks
+            )
+            if any(source.personal_color_enabled for source in visualizer_sources)
+            else ()
+        )
+        for source in visualizer_sources:
             kind = {
                 SourceType.AUDIO_VISUALIZER: "visualizer",
                 SourceType.AUDIO_WAVEFORM: "waveform",
@@ -3825,6 +4189,20 @@ class MainWindow(QMainWindow):
                 height=overlay_height,
                 style=source.visualizer_style,
                 color=source.fill_color,
+                personal_colors=(
+                    tuple(
+                        adjust_personal_color(
+                            color,
+                            source.fill_color,
+                            brightness=source.personal_color_brightness,
+                            saturation=source.personal_color_saturation,
+                            hue_shift=source.personal_color_hue_shift,
+                            strength=source.personal_color_strength,
+                        )
+                        for color in track_personal_colors
+                    )
+                    if source.personal_color_enabled else ()
+                ),
                 opacity=source.opacity,
                 bar_count=source.visualizer_bars,
                 line_width=source.visualizer_line_width,
@@ -4963,7 +5341,9 @@ class MainWindow(QMainWindow):
         self.playlist_service.playlist_changed.connect(self._schedule_history)
         self.playlist_service.playlist_changed.connect(self._synchronize_content_library)
         self.project_content_service.changed.connect(self._schedule_history)
-        self.canvas.zoom_changed.connect(lambda _zoom: self._schedule_history())
+        # Canvas zoom is view state, not document state: it must not mark the
+        # project unsaved or land on the undo stack. Its value is still captured
+        # in _project_document() whenever a real edit or an explicit save runs.
         self.history.changed.connect(self._update_history_actions)
         self.history.changed.connect(
             lambda _can_undo, _can_redo: self.canvas.prune_retired_items(
@@ -5561,15 +5941,21 @@ class MainWindow(QMainWindow):
         )
         if not selected:
             return
+        self._open_project_with_confirmation(Path(selected))
+
+    def _open_project_with_confirmation(self, path: Path) -> bool:
+        """Replace the workspace after safely resolving unsaved changes."""
         previous_project_path = self.current_project_path
         had_unsaved_changes = self._project_dirty
         if not self._confirm_unsaved_changes():
-            return
-        if self._load_project_path(Path(selected)) and had_unsaved_changes:
+            return False
+        loaded = self._load_project_path(Path(path))
+        if loaded and had_unsaved_changes:
             try:
                 self.autosave.clear(previous_project_path)
             except ProjectError as error:
                 self.statusBar().showMessage(str(error), 5000)
+        return loaded
 
     def open_project_path(self, path: Path) -> bool:
         """Open a project requested by Explorer or another external launcher."""
@@ -6000,6 +6386,15 @@ class MainWindow(QMainWindow):
         self.center_horizontal_action.setStatusTip(horizontal_help)
         self.center_vertical_action.setToolTip(vertical_help)
         self.center_vertical_action.setStatusTip(vertical_help)
+        self.zoom_out_button.setToolTip(
+            "축소 (Ctrl+-)" if korean else "Zoom out (Ctrl+-)"
+        )
+        self.zoom_in_button.setToolTip(
+            "확대 (Ctrl+=)" if korean else "Zoom in (Ctrl+=)"
+        )
+        self.zoom_reset_button.setToolTip(
+            "100% ↔ 화면 맞춤" if korean else "100% ↔ fit to view"
+        )
         self.cut_action.setText("잘라내기" if korean else "Cut")
         self.copy_action.setText("복사" if korean else "Copy")
         self.paste_action.setText("붙여넣기" if korean else "Paste")
@@ -6028,6 +6423,10 @@ class MainWindow(QMainWindow):
             else "LRC File Generator"
         )
         self.file_menu.setTitle("파일" if self.translator.language is Language.KOREAN else "File")
+        self.recent_projects_menu.setTitle(
+            "최근 프로젝트" if korean else "Recent projects"
+        )
+        self._rebuild_recent_projects_menu()
         self.project_menu.setTitle("프로젝트" if self.translator.language is Language.KOREAN else "Project")
         self.edit_menu.setTitle("편집" if self.translator.language is Language.KOREAN else "Edit")
         self.insert_menu.setTitle("추가" if self.translator.language is Language.KOREAN else "Add")
@@ -6142,12 +6541,24 @@ class MainWindow(QMainWindow):
         self.source_search.setPlaceholderText(
             "요소 검색…" if korean else "Search sources…"
         )
+        category_titles = {
+            "basic": "기본 요소" if korean else "BASIC",
+            "playback": "재생 정보" if korean else "PLAYBACK",
+            "audio": "오디오 효과" if korean else "AUDIO EFFECTS",
+            "scene": "장면 꾸미기" if korean else "SCENE",
+        }
+        for category, label in self._source_category_titles.items():
+            label.setText(category_titles[category])
         for source_type, button in self._source_buttons.items():
             label = self._source_type_label(source_type)
             is_variant = source_type in self._source_variant_parents
-            suffix = " 템플릿" if korean else " template"
-            button.setText(
-                f"↳  {label}{suffix}" if is_variant else f"+  {label}"
+            title = (
+                f"{label} 템플릿" if korean and is_variant else
+                f"{label} template" if is_variant else label
+            )
+            button.set_card_text(
+                title, self._source_palette_summary(source_type),
+                variant=is_variant,
             )
             self._update_source_button_help(source_type, button, label)
         for parent_type, toggle in self._source_variant_toggles.items():
@@ -6462,7 +6873,21 @@ class MainWindow(QMainWindow):
             #timelineMoveButton {{ min-width: 28px; max-width: 28px; min-height: 28px; padding: 0; font-size: 15px; font-weight: 700; }}
             #panelTitle {{ color: {colors['text']}; font-size: 15px; font-weight: 700; }}
             #mutedLabel {{ color: {colors['muted']}; font-size: 12px; }}
-            #sourceSearch {{ padding-left: 9px; min-height: 22px; }}
+            #sourceSearch {{ padding-left: 7px; min-height: 28px; border-radius: 8px; }}
+            #sourceResultCount {{ color: {colors['muted']}; background: {colors['alternate']}; border: 1px solid {colors['border']}; border-radius: 9px; padding: 2px 7px; font-size: 10px; font-weight: 650; }}
+            #sourceCategoryTitle {{ color: {colors['muted']}; font-size: 10px; font-weight: 750; padding: 5px 3px 2px 3px; }}
+            #sourceTemplateGroup {{ background: transparent; border: 0; }}
+            QPushButton#sourceTemplateButton {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 10px; padding: 0; text-align: left; }}
+            QPushButton#sourceTemplateButton:hover {{ background: {colors['hover']}; border-color: #55B8FF; }}
+            QPushButton#sourceTemplateButton:pressed {{ background: #1685D1; border-color: #1685D1; }}
+            QPushButton#sourceTemplateButton:pressed QLabel {{ color: #FFFFFF; }}
+            QPushButton#sourceTemplateButton[variant="true"] {{ background: {colors['alternate']}; border-radius: 8px; }}
+            #sourceTemplateTitle {{ color: {colors['text']}; font-size: 12px; font-weight: 700; padding: 0; background: transparent; }}
+            #sourceTemplateDescription {{ color: {colors['muted']}; font-size: 10px; padding: 0; background: transparent; }}
+            #sourceTemplateIcon {{ background: {colors['alternate']}; border: 1px solid {colors['border']}; border-radius: 7px; padding: 2px; }}
+            QPushButton#sourceTemplateButton:hover #sourceTemplateIcon {{ border-color: #55B8FF; }}
+            #sourceVariantToggle {{ min-width: 28px; max-width: 28px; min-height: 42px; padding: 0; border-radius: 8px; font-size: 14px; }}
+            #sourceVariantContainer {{ border-left: 2px solid {colors['border']}; }}
             QScrollArea, QListWidget, QTreeWidget, QTableWidget {{ background: {colors['panel']}; color: {colors['text']}; border: 0; }}
             #sourceInspector, #sourceInspector::viewport, #inspectorContent {{ background: {colors['panel']}; color: {colors['text']}; }}
             #inspectorEmptyState {{ color: {colors['muted']}; font-size: 14px; background: {colors['panel']}; }}

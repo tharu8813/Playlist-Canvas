@@ -35,7 +35,7 @@ def ease_in_out_cubic(value: float) -> float:
 
 def slide_distance(width: float, height: float) -> float:
     """Return restrained travel that scales without flying across the Canvas."""
-    return min(96.0, max(24.0, max(float(width), float(height)) * 0.085))
+    return min(112.0, max(28.0, max(float(width), float(height)) * 0.095))
 
 
 def hidden_opacity_factor(style: str) -> float:
@@ -45,9 +45,9 @@ def hidden_opacity_factor(style: str) -> float:
 
 def hidden_scale_factor(style: str) -> float:
     return {
-        "zoom": 0.92,
-        "pop": 0.76,
-        "rotate": 0.94,
+        "zoom": 0.90,
+        "pop": 0.82,
+        "rotate": 0.96,
     }.get(style, 1.0)
 
 

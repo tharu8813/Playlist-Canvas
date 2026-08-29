@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -71,6 +72,30 @@ class VideoFrameFilterTests(unittest.TestCase):
         self.assertEqual((filtered.width(), filtered.height()), (9, 9))
         self.assertLess(filtered.pixelColor(4, 4).red(), 255)
         self.assertGreater(filtered.pixelColor(4, 3).red(), 0)
+
+    def test_image_element_filters_change_the_rendered_pixmap_quickly(self) -> None:
+        with TemporaryDirectory(prefix="playlist-image-filter-") as directory:
+            path = Path(directory) / "sample.png"
+            base = QImage(1280, 720, QImage.Format.Format_ARGB32)
+            base.fill(QColor(90, 110, 130))
+            self.assertTrue(base.save(str(path)))
+
+            source = Source(SourceType.IMAGE, "Filtered image", width=1280, height=720)
+            source.content_path = str(path)
+            item = SourceItem(source)
+            item.apply_source()
+            before = item._pixmap.toImage().pixelColor(640, 360)
+
+            source.brightness = 40.0
+            source.contrast = 25.0
+            source.blur = 6.0
+            start = time.perf_counter()
+            item.apply_source()
+            elapsed = time.perf_counter() - start
+            after = item._pixmap.toImage().pixelColor(640, 360)
+
+            self.assertNotEqual(before.getRgb(), after.getRgb())
+            self.assertLess(elapsed, 1.0)
 
     def test_busy_item_keeps_only_the_newest_decoder_frame(self) -> None:
         item = SourceItem(Source(SourceType.TEXT, "Frame queue"))

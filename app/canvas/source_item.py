@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import atan2, ceil, cos, degrees, radians, sin
+from math import atan2, cos, degrees, radians, sin
 from pathlib import Path
 from time import monotonic
 
@@ -12,11 +12,8 @@ from PySide6.QtGui import (
     QPainterPath, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QGraphicsBlurEffect,
     QGraphicsItem,
     QGraphicsObject,
-    QGraphicsPixmapItem,
-    QGraphicsScene,
     QGraphicsSceneHoverEvent,
     QGraphicsSceneMouseEvent,
 )
@@ -29,6 +26,7 @@ from app.utils.level_meter_painter import paint_level_meter
 from app.utils.particle_painter import paint_particles
 from app.video.frame_filter import (
     VideoFrameFilterSettings, VideoFrameFilterSignals, VideoFrameFilterTask,
+    apply_color_filters,
 )
 from app.video.preview_decoder import (
     VideoDecoderStats, video_position_needs_seek, video_seek_tolerance_ms,
@@ -40,9 +38,11 @@ class SourceItem(QGraphicsObject):
 
     changed_by_user = Signal(str, dict)
     duplicate_requested = Signal(str, float, float)
+    edit_requested = Signal(str)
     video_frame_ready = Signal()
 
     _handle_size = 10.0
+    _middle_handle_min_span = 36.0
     _direct_gpu_pixel_formats = frozenset({
         "Format_RGBA8888", "Format_RGBX8888",
         "Format_BGRA8888", "Format_BGRX8888",
@@ -58,6 +58,7 @@ class SourceItem(QGraphicsObject):
         self._resize_origin_scene = QPointF()
         self._resize_size = (source.width, source.height)
         self._resize_handle: str | None = None
+        self._next_press_edit_handle: str | None = None
         self._resize_anchor_scene = QPointF()
         self._rotating = False
         self._rotation_center_scene = QPointF()
@@ -141,7 +142,13 @@ class SourceItem(QGraphicsObject):
         return QRectF(0, 0, self.source.width, self.source.height)
 
     def resize_handle_rects(self) -> dict[str, QRectF]:
-        """Return the eight resize handles in local item coordinates."""
+        """Return resize handles that have enough room not to crowd each other.
+
+        Corner handles remain available for resizing a very small source.  A
+        middle handle disappears only along a short edge: east/west handles
+        need sufficient height, while north/south handles need sufficient
+        width.  Painting and hit testing both use this same filtered mapping.
+        """
         half = self._handle_size / 2
         width = self.source.width
         height = self.source.height
@@ -155,11 +162,27 @@ class SourceItem(QGraphicsObject):
             "sw": QPointF(0, height),
             "w": QPointF(0, height / 2),
         }
-        return {
+        handles = {
             name: QRectF(point.x() - half, point.y() - half,
                          self._handle_size, self._handle_size)
             for name, point in positions.items()
         }
+        if height < self._middle_handle_min_span:
+            handles.pop("e")
+            handles.pop("w")
+        if width < self._middle_handle_min_span:
+            handles.pop("n")
+            handles.pop("s")
+        return handles
+
+    def prioritize_edit_handle_for_next_press(self, handle: str | None) -> None:
+        """Use the view's tolerant hit-test result for the next mouse press.
+
+        The view works in device pixels while this item receives local
+        coordinates.  Passing the already-resolved handle prevents a cursor at
+        a rounded handle edge from turning into an item move on mouse-down.
+        """
+        self._next_press_edit_handle = handle
 
     def _resize_handle_at(self, position: QPointF, tolerance: float = 0.0) -> str | None:
         """Return the resize handle under *position*, if one is present."""
@@ -223,10 +246,55 @@ class SourceItem(QGraphicsObject):
     @staticmethod
     def _anchor_point_for_size(handle: str, width: float, height: float) -> QPointF:
         """Return the opposite local anchor that stays fixed while resizing."""
-        return QPointF(
-            width if "w" in handle else 0.0,
-            height if "n" in handle else 0.0,
-        )
+        anchors = {
+            "nw": QPointF(width, height),
+            "n": QPointF(width / 2, height),
+            "ne": QPointF(0, height),
+            "e": QPointF(0, height / 2),
+            "se": QPointF(0, 0),
+            "s": QPointF(width / 2, 0),
+            "sw": QPointF(width, 0),
+            "w": QPointF(width, height / 2),
+        }
+        return anchors.get(handle, QPointF(0, 0))
+
+    def _resize_aspect_ratio(
+        self, modifiers: Qt.KeyboardModifiers,
+    ) -> float | None:
+        """Resolve the aspect constraint active for the current resize drag."""
+        alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if self.source.source_type is SourceType.ALBUM_COVER or (alt and shift):
+            return 1.0
+        if not alt:
+            return None
+        width, height = self._resize_size
+        return max(0.001, width / max(0.001, height))
+
+    def _resize_aspect_driver(
+        self, width: float, height: float, handle: str,
+    ) -> str:
+        """Choose the pointer-controlled dimension for a constrained resize."""
+        if handle in {"e", "w"}:
+            return "width"
+        if handle in {"n", "s"}:
+            return "height"
+        original_width, original_height = self._resize_size
+        width_change = abs(width / max(0.001, original_width) - 1.0)
+        height_change = abs(height / max(0.001, original_height) - 1.0)
+        return "width" if width_change >= height_change else "height"
+
+    @staticmethod
+    def _constrain_resize_aspect(
+        width: float, height: float, ratio: float, driver: str,
+    ) -> tuple[float, float]:
+        """Return a minimum-safe size that exactly follows *ratio*."""
+        ratio = max(0.001, ratio)
+        if driver == "height":
+            height = max(24.0, height, 32.0 / ratio)
+            return height * ratio, height
+        width = max(32.0, width, 24.0 * ratio)
+        return width, width / ratio
 
     def _resize_delta(self, scene_position: QPointF) -> QPointF:
         """Convert a scene-space pointer displacement into stable local units."""
@@ -897,49 +965,13 @@ class SourceItem(QGraphicsObject):
             )
         if self.source.brightness == 0 and self.source.contrast == 0 and self.source.blur <= 0:
             return pixmap
-        image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
-        brightness = self.source.brightness * 2.55
-        contrast = 1.0 + self.source.contrast / 100.0
-        for y in range(image.height()):
-            for x in range(image.width()):
-                color = image.pixelColor(x, y)
-                red = max(0, min(255, round((color.red() - 128) * contrast + 128 + brightness)))
-                green = max(0, min(255, round((color.green() - 128) * contrast + 128 + brightness)))
-                blue = max(0, min(255, round((color.blue() - 128) * contrast + 128 + brightness)))
-                color.setRed(red)
-                color.setGreen(green)
-                color.setBlue(blue)
-                image.setPixelColor(x, y, color)
-        if self.source.blur > 0:
-            image = self._quality_blur(image, self.source.blur)
-        return QPixmap.fromImage(image)
-
-    @staticmethod
-    def _quality_blur(image: QImage, radius: float) -> QImage:
-        """Apply Qt's quality blur effect without reducing the source resolution."""
-        blur_radius = max(0.5, min(40.0, radius))
-        margin = max(4, ceil(blur_radius * 2.5))
-        pixmap_item = QGraphicsPixmapItem(QPixmap.fromImage(image))
-        effect = QGraphicsBlurEffect()
-        effect.setBlurRadius(blur_radius)
-        effect.setBlurHints(QGraphicsBlurEffect.BlurHint.QualityHint)
-        pixmap_item.setGraphicsEffect(effect)
-        scene = QGraphicsScene()
-        scene.addItem(pixmap_item)
-        source_rect = QRectF(-margin, -margin, image.width() + margin * 2,
-                             image.height() + margin * 2)
-        scene.setSceneRect(source_rect)
-        blurred = QImage(
-            image.width() + margin * 2,
-            image.height() + margin * 2,
-            QImage.Format.Format_ARGB32_Premultiplied,
+        image = apply_color_filters(
+            pixmap.toImage(),
+            brightness=float(self.source.brightness),
+            contrast=float(self.source.contrast),
+            blur=float(self.source.blur),
         )
-        blurred.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(blurred)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        scene.render(painter, QRectF(0, 0, blurred.width(), blurred.height()), source_rect)
-        painter.end()
-        return blurred.copy(margin, margin, image.width(), image.height())
+        return QPixmap.fromImage(image)
 
     def _sync_transform_origin(self) -> None:
         """Keep Qt rotation and scaling anchored at the visual object centre."""
@@ -1347,6 +1379,13 @@ class SourceItem(QGraphicsObject):
             )
         elif self.source.source_type is SourceType.LYRICS:
             painter.drawRoundedRect(rect, self.source.border_radius, self.source.border_radius)
+            # Preview replaces the single editor placeholder with previous,
+            # current, and next timed cues. Keep that expanded stack inside the
+            # element's actual Canvas rectangle so its apparent position cannot
+            # drift beyond the resize handles, especially for older 90 px-high
+            # lyric elements.
+            painter.save()
+            painter.setClipRect(rect)
             lines = [line for line in (self.source.text or self.source.subtitle_fallback).splitlines() if line.strip()]
             current_line = self.source.subtitle_current_line
             current_line_count = max(1, self.source.subtitle_current_line_count)
@@ -1487,6 +1526,7 @@ class SourceItem(QGraphicsObject):
                 if line_transform_saved:
                     painter.restore()
                 y += line_height
+            painter.restore()
         elif self.source.source_type is SourceType.TRACK_LIST:
             self._paint_track_list(painter, rect)
         elif self.source.source_type is SourceType.NOW_PLAYING:
@@ -1610,7 +1650,10 @@ class SourceItem(QGraphicsObject):
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         """Begin a resize or rotation from one of the selection handles."""
         position = event.pos()
-        edit_handle = self.edit_handle_at(position)
+        edit_handle = self._next_press_edit_handle
+        self._next_press_edit_handle = None
+        if edit_handle is None:
+            edit_handle = self.edit_handle_at(position)
         if edit_handle == "rotate":
             self.setCursor(self.cursor_for_edit_handle(edit_handle, self.rotation()))
             self._rotating = True
@@ -1685,11 +1728,27 @@ class SourceItem(QGraphicsObject):
                 height -= delta.y()
             width = max(32.0, width)
             height = max(24.0, height)
+            aspect_ratio = self._resize_aspect_ratio(event.modifiers())
+            aspect_driver = (
+                self._resize_aspect_driver(width, height, handle)
+                if aspect_ratio is not None else None
+            )
             scene = self.scene()
             if scene is not None and hasattr(scene, "snap_resize"):
                 width, height = scene.snap_resize(  # type: ignore[no-any-return]
                     self, width, height, handle,
                 )
+            if aspect_ratio is not None and aspect_driver is not None:
+                width, height = self._constrain_resize_aspect(
+                    width, height, aspect_ratio, aspect_driver,
+                )
+                # Only the pointer-controlled axis can remain snapped after its
+                # paired dimension is derived from the aspect ratio.
+                if scene is not None:
+                    if aspect_driver == "width" and hasattr(scene, "guide_y"):
+                        scene.guide_y = None  # type: ignore[attr-defined]
+                    elif aspect_driver == "height" and hasattr(scene, "guide_x"):
+                        scene.guide_x = None  # type: ignore[attr-defined]
             self._resize_to(width, height, handle)
             if scene is not None and hasattr(scene, "update_alignment_guides"):
                 scene.update_alignment_guides(self)  # type: ignore[attr-defined]
@@ -1741,6 +1800,14 @@ class SourceItem(QGraphicsObject):
             scene.finish_item_interaction()  # type: ignore[attr-defined]
         else:
             self._commit_user_interaction()
+
+    def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        """Open the matching editor for this source on a left double-click."""
+        if event.button() == Qt.MouseButton.LeftButton and not self.source.locked:
+            self.edit_requested.emit(self.source.id)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def _scene_angle(self, scene_position: QPointF) -> float:
         """Return a stable mouse angle around the fixed scene-space centre."""

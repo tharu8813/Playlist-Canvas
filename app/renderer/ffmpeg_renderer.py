@@ -120,6 +120,7 @@ class VisualizerOverlay:
     height: int
     style: str
     color: str
+    personal_colors: tuple[str, ...] = ()
     opacity: float = 1.0
     bar_count: int = 32
     line_width: float = 3.0

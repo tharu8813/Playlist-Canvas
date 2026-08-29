@@ -299,7 +299,18 @@ class ExportCanvasCapturer:
                     style,
                     max(0.0, min(1.0, raw_progress)),
                 )
-        return (source.id, content_state, animation_state)
+        personal_color_state = (
+            (
+                sample.track.file_path,
+                sample.track.cover_path,
+                source.personal_color_brightness,
+                source.personal_color_saturation,
+                source.personal_color_hue_shift,
+                source.personal_color_strength,
+            )
+            if source.personal_color_enabled else None
+        )
+        return (source.id, content_state, personal_color_state, animation_state)
 
     def _stream_parameters(
         self, stream_key: str,

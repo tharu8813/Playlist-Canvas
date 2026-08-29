@@ -14,9 +14,9 @@ import zipfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QFontMetricsF, QImage
+from PySide6.QtGui import QColor, QFontMetricsF, QImage
 
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
@@ -24,6 +24,7 @@ from app.animation.curves import slide_distance
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.canvas_snapshot import CanvasSnapshot
+from app.preview.album_art import adjust_personal_color, extract_track_personal_color
 from app.preview.export_canvas_capture import ExportCanvasCapturer
 from app.renderer.export_timeline import ExportFrameSample
 from app.renderer.ffmpeg_renderer import (
@@ -99,6 +100,98 @@ class FunctionalRegressionTests(unittest.TestCase):
                 CanvasSnapshot.source_is_capture_invariant(source, duration),
                 source.name,
             )
+
+        personal = Source(
+            SourceType.SHAPE, "Track color", personal_color_enabled=True,
+        )
+        self.assertFalse(
+            CanvasSnapshot.source_is_capture_invariant(personal, duration)
+        )
+
+    def test_personal_color_extracts_artwork_and_restores_configured_color(self) -> None:
+        with TemporaryDirectory(prefix="playlist-personal-color-") as directory:
+            artwork_path = Path(directory) / "cover.png"
+            artwork = QImage(32, 32, QImage.Format.Format_ARGB32)
+            artwork.fill(QColor("#E03030"))
+            self.assertTrue(artwork.save(str(artwork_path)))
+
+            extracted = extract_track_personal_color("missing.wav", artwork_path)
+            self.assertTrue(extracted.isValid())
+            self.assertGreater(extracted.red(), extracted.green() * 2)
+            self.assertGreater(extracted.red(), extracted.blue() * 2)
+
+            scene = CanvasScene()
+            source = Source(
+                SourceType.SHAPE, "Personal shape", x=10, y=10,
+                width=100, height=70, fill_color="#2040D0",
+                personal_color_enabled=True,
+            )
+            scene.addItem(SourceItem(source))
+            track = PlaylistTrack(
+                "missing.wav", "Track", duration_seconds=5.0,
+                cover_path=str(artwork_path),
+            )
+            captured = CanvasSnapshot.capture_track(scene, track, 1, 1, 0.0)
+            rendered = captured.pixelColor(50, 40)
+
+            self.assertGreater(rendered.red(), rendered.blue())
+            self.assertEqual(source.fill_color, "#2040D0")
+
+    def test_personal_color_adjustments_blend_and_preserve_alpha(self) -> None:
+        personal = QColor("#804020")
+        self.assertEqual(
+            adjust_personal_color(personal, "#7F102030", strength=0.0),
+            "#7F102030",
+        )
+        bright = QColor(adjust_personal_color(
+            personal, "#000000", brightness=40.0, strength=1.0,
+        ))
+        dark = QColor(adjust_personal_color(
+            personal, "#000000", brightness=-40.0, strength=1.0,
+        ))
+        self.assertGreater(bright.value(), dark.value())
+        shifted = QColor(adjust_personal_color(
+            personal, "#000000", hue_shift=120.0, strength=1.0,
+        ))
+        self.assertNotEqual(shifted.hsvHue(), personal.hsvHue())
+
+    def test_personal_color_project_values_are_validated(self) -> None:
+        source = Source(
+            SourceType.TEXT, "Personal text", personal_color_enabled=True,
+            personal_color_brightness=25.0,
+            personal_color_saturation=-10.0,
+            personal_color_hue_shift=45.0,
+            personal_color_strength=0.65,
+        )
+        restored = Source.from_dict(source.to_dict())
+        self.assertTrue(restored.personal_color_enabled)
+        self.assertEqual(restored.personal_color_strength, 0.65)
+
+        invalid = source.to_dict()
+        invalid["personal_color_strength"] = 1.1
+        with self.assertRaisesRegex(ValueError, "personal_color_strength"):
+            Source.from_dict(invalid)
+
+    def test_visualizer_personal_color_changes_follow_track_index(self) -> None:
+        overlay = VisualizerOverlay(
+            0, 0, 16, 16, "bars", "#FFFFFF",
+            personal_colors=("#FF0000", "#00FF00"),
+        )
+        changes = ExportPreviewDialog._personal_overlay_changes(overlay, 1)
+        self.assertEqual(changes["color"], "#00FF00")
+        self.assertEqual(changes["particle_secondary_color"], "#00FF00")
+        self.assertEqual(
+            PythonVisualizerRenderer._track_index_at(
+                2.5, ((0.0, 2.0), (2.0, 3.0)),
+            ),
+            1,
+        )
+        self.assertEqual(
+            PythonVisualizerRenderer._track_index_at(
+                8.0, ((0.0, 2.0), (3.0, 2.0)),
+            ),
+            -1,
+        )
 
     def test_capture_invariant_stream_rasterizes_scene_only_once(self) -> None:
         scene = CanvasScene()
@@ -208,6 +301,73 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertEqual(cursor("e", 90.0), Qt.CursorShape.SizeVerCursor)
         self.assertEqual(cursor("n", 45.0), Qt.CursorShape.SizeBDiagCursor)
         self.assertEqual(cursor("rotate"), Qt.CursorShape.CrossCursor)
+
+    def test_small_sources_hide_only_crowded_middle_resize_handles(self) -> None:
+        source = Source(
+            SourceType.SHAPE, "Small", width=32.0, height=24.0,
+        )
+        item = SourceItem(source)
+        item.setSelected(True)
+
+        self.assertEqual(
+            set(item.resize_handle_rects()), {"nw", "ne", "se", "sw"},
+        )
+        source.width = 100.0
+        self.assertEqual(
+            set(item.resize_handle_rects()),
+            {"nw", "n", "ne", "se", "s", "sw"},
+        )
+        source.height = 80.0
+        self.assertEqual(
+            set(item.resize_handle_rects()),
+            {"nw", "n", "ne", "e", "se", "s", "sw", "w"},
+        )
+
+    def test_resize_modifiers_and_album_cover_enforce_requested_aspect(self) -> None:
+        def resize(
+            source: Source, modifiers: Qt.KeyboardModifiers,
+            delta: QPointF,
+        ) -> Source:
+            item = SourceItem(source)
+            item._resizing = True
+            item._resize_origin_scene = QPointF(0, 0)
+            item._resize_size = (source.width, source.height)
+            item._resize_handle = "se"
+            item._resize_anchor_scene = item.mapToScene(QPointF(0, 0))
+            event = SimpleNamespace(
+                scenePos=lambda: delta,
+                modifiers=lambda: modifiers,
+                accept=lambda: None,
+            )
+            item.mouseMoveEvent(event)
+            return source
+
+        preserved = resize(
+            Source(SourceType.SHAPE, "Preserved", width=200, height=100),
+            Qt.KeyboardModifier.AltModifier,
+            QPointF(50, 10),
+        )
+        self.assertAlmostEqual(preserved.width / preserved.height, 2.0)
+
+        square = resize(
+            Source(SourceType.SHAPE, "Square", width=200, height=100),
+            Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier,
+            QPointF(50, 10),
+        )
+        self.assertAlmostEqual(square.width, square.height)
+
+        cover = resize(
+            Source(SourceType.ALBUM_COVER, "Cover", width=180, height=120),
+            Qt.KeyboardModifier.NoModifier,
+            QPointF(60, 10),
+        )
+        self.assertAlmostEqual(cover.width, cover.height)
+
+    def test_album_cover_model_normalizes_rectangular_input(self) -> None:
+        cover = Source(
+            SourceType.ALBUM_COVER, "Cover", width=260, height=140,
+        )
+        self.assertEqual((cover.width, cover.height), (260, 260))
 
     def test_playlist_preview_keeps_audio_stopped_during_leading_gap(self) -> None:
         track = PlaylistTrack(
@@ -1592,6 +1752,48 @@ class FunctionalRegressionTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(item._lyric_line_height(), required)
+
+    def test_preview_lyrics_do_not_paint_outside_the_canvas_element_bounds(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.LYRICS, "Bounded lyrics",
+            x=180, y=210, width=360, height=76,
+            fill_color="#00000000", outline_color="#FFFFFF",
+            font_size=36, subtitle_line_spacing=10,
+            subtitle_context_lines=1, subtitle_next_lines=1,
+            subtitle_animation="none",
+        )
+        scene.addItem(SourceItem(source))
+        track = PlaylistTrack(
+            "track.wav", "Track", duration_seconds=12.0,
+            lyrics=[
+                {"start": 0.0, "end": 2.0, "text": "Previous line"},
+                {"start": 2.0, "end": 6.0, "text": "Current line"},
+                {"start": 6.0, "end": 10.0, "text": "Next line"},
+            ],
+        )
+
+        image = CanvasSnapshot.capture_track(
+            scene, track, 1, 1, 0.0, elapsed_seconds=3.0,
+            transparent=True,
+        )
+        left = round(source.x)
+        right = round(source.x + source.width)
+        top = round(source.y)
+        bottom = round(source.y + source.height)
+        outside_alpha = [
+            image.pixelColor(x, y).alpha()
+            for y in (*range(max(0, top - 80), top),
+                      *range(bottom, min(image.height(), bottom + 80)))
+            for x in range(left, min(image.width(), right + 1))
+        ]
+
+        self.assertTrue(any(
+            image.pixelColor(x, y).alpha() > 0
+            for y in range(top, min(image.height(), bottom))
+            for x in range(left, min(image.width(), right + 1))
+        ))
+        self.assertFalse(any(outside_alpha))
 
     def test_lyric_font_and_blur_cache_survives_unrelated_source_edits(self) -> None:
         source = Source(SourceType.LYRICS, "Lyrics")

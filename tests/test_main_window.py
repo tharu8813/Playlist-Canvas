@@ -19,7 +19,7 @@ from PySide6.QtGui import (QColor, QCloseEvent, QDropEvent, QImage, QMouseEvent,
 from PySide6.QtTest import QTest
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QColorDialog, QDialog, QFileDialog, QFrame,
+    QAbstractItemView, QApplication, QDialog, QFileDialog, QFrame,
     QFormLayout, QGraphicsView, QListView, QMessageBox, QScrollArea, QSizePolicy, QStyle,
     QStyleOptionSpinBox,
     QWidget,
@@ -543,6 +543,11 @@ class MainWindowSafetyTests(unittest.TestCase):
                 ["파일", "프로젝트", "편집", "추가", "보기", "도구", "도움말"],
             )
             self.assertIn(self.window.export_action, self.window.file_menu.actions())
+            self.assertIn(
+                self.window.recent_projects_menu.menuAction(),
+                self.window.file_menu.actions(),
+            )
+            self.assertEqual(self.window.recent_projects_menu.title(), "최근 프로젝트")
             self.assertNotIn(self.window.preview_action, self.window.file_menu.actions())
             self.assertIn(self.window.presets_action, self.window.project_menu.actions())
             self.assertIn(
@@ -572,6 +577,7 @@ class MainWindowSafetyTests(unittest.TestCase):
                 ["File", "Project", "Edit", "Add", "View", "Tools", "Help"],
             )
             self.assertEqual(self.window.exit_action.text(), "Exit")
+            self.assertEqual(self.window.recent_projects_menu.title(), "Recent projects")
             self.assertEqual(
                 self.window.lrc_generator_action.text(), "LRC File Generator"
             )
@@ -585,6 +591,74 @@ class MainWindowSafetyTests(unittest.TestCase):
         finally:
             self.window.translator.set_language(original_language)
             self.application.processEvents()
+
+    def test_file_recent_projects_menu_opens_the_selected_entry(self) -> None:
+        with TemporaryDirectory(prefix="recent-project-menu-") as directory:
+            project_path = Path(directory) / "Recent playlist.pvsproj"
+            project_path.write_bytes(b"recent project placeholder")
+            with patch.object(
+                self.window.recent_projects, "projects",
+                return_value=[project_path.resolve()],
+            ):
+                self.window._rebuild_recent_projects_menu()
+
+            actions = [
+                action for action in self.window.recent_projects_menu.actions()
+                if action.isEnabled() and not action.isSeparator()
+            ]
+            self.assertGreaterEqual(len(actions), 2)
+            self.assertIn(project_path.name, actions[0].text())
+            self.assertEqual(actions[0].toolTip(), str(project_path.resolve()))
+            with patch.object(self.window, "_open_recent_project") as open_recent:
+                actions[0].trigger()
+            open_recent.assert_called_once_with(project_path.resolve())
+
+    def test_recent_project_open_uses_unsaved_change_guard(self) -> None:
+        with TemporaryDirectory(prefix="recent-project-open-") as directory:
+            project_path = Path(directory) / "Guarded.pvsproj"
+            project_path.write_bytes(b"project placeholder")
+            with (
+                patch.object(
+                    self.window, "_confirm_unsaved_changes", return_value=False,
+                ) as confirm,
+                patch.object(self.window, "_load_project_path") as load,
+            ):
+                self.assertFalse(self.window._open_recent_project(project_path))
+            confirm.assert_called_once()
+            load.assert_not_called()
+
+            with (
+                patch.object(
+                    self.window, "_confirm_unsaved_changes", return_value=True,
+                ),
+                patch.object(
+                    self.window, "_load_project_path", return_value=True,
+                ) as load,
+            ):
+                self.assertTrue(self.window._open_recent_project(project_path))
+            load.assert_called_once_with(project_path)
+
+    def test_clear_recent_projects_requires_confirmation(self) -> None:
+        with (
+            patch.object(
+                QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.No,
+            ) as question,
+            patch.object(self.window.recent_projects, "clear") as clear,
+        ):
+            self.assertFalse(self.window._confirm_clear_recent_projects())
+        question.assert_called_once()
+        clear.assert_not_called()
+
+        with (
+            patch.object(
+                QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+            patch.object(self.window.recent_projects, "clear") as clear,
+        ):
+            self.assertTrue(self.window._confirm_clear_recent_projects())
+        clear.assert_called_once()
 
     def test_view_menu_toggles_each_workspace_panel_with_shortcuts(self) -> None:
         settings = QSettings()
@@ -869,6 +943,67 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertFalse(hasattr(self.window, "sidebar_hint"))
         self.assertIs(self.window.source_cards_scroll.parent(), self.window.source_sidebar)
 
+    def test_source_sidebar_groups_rich_cards_and_filters_whole_sections(self) -> None:
+        self.assertEqual(
+            set(self.window._source_category_sections),
+            {"basic", "playback", "audio", "scene"},
+        )
+        image_button = self.window._source_buttons[SourceType.IMAGE]
+        self.assertTrue(image_button.title_label.text())
+        self.assertTrue(image_button.description_label.text())
+        self.assertFalse(image_button.icon_label.pixmap().isNull())
+        self.assertGreaterEqual(image_button.minimumHeight(), 58)
+
+        self.window.source_search.setText("audio_visualizer")
+        self.application.processEvents()
+        self.assertFalse(
+            self.window._source_category_sections["audio"].isHidden()
+        )
+        for category in ("basic", "playback", "scene"):
+            self.assertTrue(
+                self.window._source_category_sections[category].isHidden(),
+                category,
+            )
+        self.assertIn("1", self.window.source_result_label.text())
+
+        self.window.source_search.clear()
+        self.application.processEvents()
+        self.assertTrue(all(
+            not section.isHidden()
+            for section in self.window._source_category_sections.values()
+        ))
+        self.assertIn("17", self.window.source_result_label.text())
+
+    def test_new_lyrics_source_has_room_for_preview_context_lines(self) -> None:
+        self.window._add_source(SourceType.LYRICS)
+        source = self.window.store.selected
+        self.assertIsNotNone(source)
+        self.assertIs(source.source_type, SourceType.LYRICS)
+        self.assertGreaterEqual(source.width, 600)
+        self.assertGreaterEqual(source.height, 200)
+
+    def test_background_defaults_unlocked_and_album_inspector_size_stays_square(self) -> None:
+        welcome_background = next(
+            source for source in self.window.store.sources()
+            if source.source_type is SourceType.BACKGROUND
+        )
+        self.assertFalse(welcome_background.locked)
+
+        self.window._add_source(SourceType.BACKGROUND)
+        self.assertFalse(self.window.store.selected.locked)
+        preset_background = next(
+            source for source in PresetService.all()[0].builder()
+            if source.source_type is SourceType.BACKGROUND
+        )
+        self.assertFalse(preset_background.locked)
+
+        self.window._add_source(SourceType.ALBUM_COVER)
+        cover = self.window.store.selected
+        self.window.store.update(cover.id, width=245.0)
+        self.assertEqual((cover.width, cover.height), (245.0, 245.0))
+        self.window.store.update(cover.id, height=132.0)
+        self.assertEqual((cover.width, cover.height), (132.0, 132.0))
+
     def test_image_variants_expand_under_parent_and_create_parent_sources(self) -> None:
         toggle = self.window._source_variant_toggles[SourceType.IMAGE]
         container = self.window._source_variant_containers[SourceType.IMAGE]
@@ -1102,20 +1237,96 @@ class MainWindowSafetyTests(unittest.TestCase):
 
         transparent = QColor("#334455")
         transparent.setAlpha(0)
-        with patch.object(QColorDialog, "getColor", return_value=transparent) as picker:
+        fake_dialog = MagicMock()
+        fake_dialog.exec.return_value = QDialog.DialogCode.Accepted
+        fake_dialog.selected_color = transparent
+        fake_dialog.personal_settings.return_value = {
+            "personal_color_enabled": False,
+            "personal_color_brightness": 0.0,
+            "personal_color_saturation": 0.0,
+            "personal_color_hue_shift": 0.0,
+            "personal_color_strength": 1.0,
+        }
+        with patch(
+            "app.inspector.source_inspector.ColorEditorDialog",
+            return_value=fake_dialog,
+        ):
             self.window.inspector._choose_color(
                 "fill_color", self.window.inspector.fill_color_button,
             )
 
         self.assertEqual(source.fill_color, "#00334455")
         self.assertEqual(source.opacity, 0.7)
-        self.assertIn(
-            QColorDialog.ColorDialogOption.ShowAlphaChannel,
-            picker.call_args.args,
-        )
         self.assertEqual(
             self.window.inspector.fill_color_button.text(), "Transparent"
         )
+
+    def test_color_editor_dialog_commits_color_and_personal_policy(self) -> None:
+        first = Source(SourceType.TEXT, "First personal color")
+        second = Source(SourceType.SHAPE, "Second personal color")
+        self.window.store.replace([first, second])
+        self.window.store.select_many([first.id, second.id], second.id)
+        inspector = self.window.inspector
+
+        fake_dialog = MagicMock()
+        fake_dialog.exec.return_value = QDialog.DialogCode.Accepted
+        fake_dialog.selected_color = QColor("#123456")
+        fake_dialog.personal_settings.return_value = {
+            "personal_color_enabled": True,
+            "personal_color_brightness": 18.0,
+            "personal_color_saturation": -12.0,
+            "personal_color_hue_shift": 35.0,
+            "personal_color_strength": 0.7,
+        }
+        with patch(
+            "app.inspector.source_inspector.ColorEditorDialog",
+            return_value=fake_dialog,
+        ):
+            inspector._choose_color("fill_color", inspector.fill_color_button)
+
+        for source in (first, second):
+            self.assertEqual(source.fill_color, "#123456")
+            self.assertTrue(source.personal_color_enabled)
+            self.assertEqual(source.personal_color_brightness, 18.0)
+            self.assertEqual(source.personal_color_saturation, -12.0)
+            self.assertEqual(source.personal_color_hue_shift, 35.0)
+            self.assertEqual(source.personal_color_strength, 0.7)
+
+    def test_export_visualizer_receives_each_tracks_personal_color(self) -> None:
+        with TemporaryDirectory(prefix="playlist-visualizer-color-") as directory:
+            red_path = Path(directory) / "red.png"
+            green_path = Path(directory) / "green.png"
+            red = QImage(24, 24, QImage.Format.Format_ARGB32)
+            green = QImage(24, 24, QImage.Format.Format_ARGB32)
+            red.fill(QColor("#E03030"))
+            green.fill(QColor("#30D050"))
+            self.assertTrue(red.save(str(red_path)))
+            self.assertTrue(green.save(str(green_path)))
+
+            source = Source(
+                SourceType.AUDIO_VISUALIZER, "Personal visualizer",
+                fill_color="#FFFFFF", personal_color_enabled=True,
+            )
+            self.window.store.replace([source])
+            tracks = [
+                PlaylistTrack(
+                    "missing-a.wav", "A", duration_seconds=2.0,
+                    cover_path=str(red_path),
+                ),
+                PlaylistTrack(
+                    "missing-b.wav", "B", duration_seconds=2.0,
+                    cover_path=str(green_path),
+                ),
+            ]
+
+            overlays = self.window._export_visualizers(tracks)
+
+        self.assertEqual(len(overlays), 1)
+        self.assertEqual(len(overlays[0].personal_colors), 2)
+        first = QColor(overlays[0].personal_colors[0])
+        second = QColor(overlays[0].personal_colors[1])
+        self.assertGreater(first.red(), first.green())
+        self.assertGreater(second.green(), second.red())
 
     def test_empty_inspector_centers_selection_hint(self) -> None:
         self.window.store.select(None)
@@ -1346,6 +1557,37 @@ class MainWindowSafetyTests(unittest.TestCase):
                 self.assertEqual(
                     self.window.canvas.viewport().cursor().shape(), cursor_shape,
                 )
+
+    def test_canvas_press_uses_the_same_tolerant_handle_as_its_cursor(self) -> None:
+        source = next(
+            source for source in self.window.store.sources() if not source.locked
+        )
+        self.window.store.select(source.id)
+        self.window.show()
+        self.application.processEvents()
+        item = self.window.canvas._items[source.id]
+        scene_center = item.mapToScene(item.content_rect().center())
+        viewport_center = self.window.canvas.mapFromScene(scene_center)
+
+        with patch.object(
+            self.window.canvas, "_edit_handle_at_view_position",
+            side_effect=lambda candidate, _position: (
+                "e" if candidate is item else None
+            ),
+        ):
+            QTest.mousePress(
+                self.window.canvas.viewport(), Qt.MouseButton.LeftButton,
+                pos=viewport_center,
+            )
+            self.assertTrue(item._resizing)
+            self.assertEqual(item._resize_handle, "e")
+            QTest.mouseRelease(
+                self.window.canvas.viewport(), Qt.MouseButton.LeftButton,
+                pos=viewport_center,
+            )
+
+        self.assertFalse(item._resizing)
+        self.assertIsNone(item._resize_handle)
 
     def test_undo_and_redo_keep_moved_source_selected(self) -> None:
         source = self.window.store.sources()[0]
@@ -1913,8 +2155,10 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.window.toolbar.widgetForAction(self.window.preview_action),
         )
 
-        self.window.bottom_tabs.setCurrentIndex(1)
-        QTest.qWait(230)
+        with patch.object(self.window.canvas, "fit_artboard") as fit_artboard:
+            self.window.bottom_tabs.setCurrentIndex(1)
+            QTest.qWait(250)
+        fit_artboard.assert_called_once_with()
 
         self.assertIsNone(self.window._inline_preview)
         self.assertEqual(self.window.bottom_tabs.currentIndex(), 1)
@@ -1938,6 +2182,29 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.window.main_splitter.sizes()[0], expected_sidebar_width, delta=3,
         )
         self.assertEqual(self.window._sidebar_open_width, expected_sidebar_width)
+
+    def test_major_window_state_changes_schedule_canvas_fit(self) -> None:
+        normal = Qt.WindowState.WindowNoState
+        maximized = Qt.WindowState.WindowMaximized
+        minimized = Qt.WindowState.WindowMinimized
+
+        with patch.object(self.window, "_schedule_canvas_fit") as schedule_fit:
+            self.window._handle_canvas_window_state_change(normal, maximized)
+            schedule_fit.assert_called_once_with(100)
+
+        self.window._canvas_fit_pending = False
+        with patch.object(self.window, "_schedule_canvas_fit") as schedule_fit:
+            self.window._handle_canvas_window_state_change(normal, minimized)
+            schedule_fit.assert_not_called()
+            self.assertTrue(self.window._canvas_fit_pending)
+            self.window._handle_canvas_window_state_change(minimized, normal)
+            schedule_fit.assert_called_once_with(100)
+
+    def test_ordinary_window_state_event_does_not_reset_canvas_zoom(self) -> None:
+        normal = Qt.WindowState.WindowNoState
+        with patch.object(self.window, "_schedule_canvas_fit") as schedule_fit:
+            self.window._handle_canvas_window_state_change(normal, normal)
+        schedule_fit.assert_not_called()
 
     def test_empty_preview_tab_returns_to_the_last_editing_tab(self) -> None:
         self.window.bottom_tabs.setCurrentIndex(1)
@@ -4856,10 +5123,11 @@ class MainWindowSafetyTests(unittest.TestCase):
 
     def test_project_content_and_other_item_views_scroll_per_pixel(self) -> None:
         service = self.window.smooth_scroll
+        service.configure(True, 180)
+        self.window.show()
+        self.window.left_tabs.setCurrentWidget(self.window.content_library_panel)
         content_list = self.window.content_library_panel.list
         content_list.addItems([f"Content {index}" for index in range(40)])
-        content_list.resize(220, 180)
-        content_list.show()
         self.application.processEvents()
         wheel = QWheelEvent(
             QPointF(20, 20), QPointF(20, 20), QPoint(), QPoint(0, -120),
@@ -4890,6 +5158,131 @@ class MainWindowSafetyTests(unittest.TestCase):
                 QAbstractItemView.ScrollMode.ScrollPerPixel,
             )
         service._stop_animations()
+
+    def test_project_content_drag_returning_to_source_panel_is_rejected(self) -> None:
+        panel = self.window.content_library_panel
+        source_list = panel.list
+        self.window.show()
+        self.window.left_tabs.setCurrentWidget(panel)
+        panel.show()
+        self.application.processEvents()
+
+        panel_center = panel.rect().center()
+        window_point = panel.mapTo(self.window, panel_center)
+        event = MagicMock()
+        event.source.return_value = source_list
+        event.position.return_value = QPointF(window_point)
+
+        self.assertTrue(self.window._drag_returned_to_project_content(event))
+        self.window.dragEnterEvent(event)
+
+        event.setDropAction.assert_called_once_with(Qt.DropAction.IgnoreAction)
+        event.accept.assert_called_once_with()
+        event.acceptProposedAction.assert_not_called()
+        event.mimeData.assert_not_called()
+
+        outside = self.window.canvas.mapTo(
+            self.window, self.window.canvas.rect().center(),
+        )
+        event.position.return_value = QPointF(outside)
+        self.assertFalse(self.window._drag_returned_to_project_content(event))
+
+    def test_arrow_keys_nudge_selection_and_shift_scales_the_step(self) -> None:
+        source = Source(SourceType.TEXT, "Nudge me", x=100.0, y=100.0)
+        self.window.store.replace([source])
+        self.window.store.select(source.id)
+        self.window.canvas.setFocus()
+        self.application.processEvents()
+
+        QTest.keyClick(self.window.canvas, Qt.Key.Key_Right)
+        QTest.keyClick(self.window.canvas, Qt.Key.Key_Down)
+        self.assertEqual((self.window.store.get(source.id).x,
+                          self.window.store.get(source.id).y), (101.0, 101.0))
+
+        QTest.keyClick(
+            self.window.canvas, Qt.Key.Key_Left, Qt.KeyboardModifier.ShiftModifier,
+        )
+        self.assertEqual(self.window.store.get(source.id).x, 91.0)
+
+    def test_double_clicking_a_text_source_opens_the_expanded_editor(self) -> None:
+        source = Source(SourceType.TEXT, "Editable", text="before")
+        self.window.store.replace([source])
+        self.application.processEvents()
+
+        fake = MagicMock()
+        fake.exec.return_value = QDialog.DialogCode.Accepted
+        fake.text.return_value = "after"
+        with patch("app.ui.main_window.TextEditorDialog", return_value=fake):
+            self.window.canvas.edit_requested.emit(source.id)
+
+        self.assertEqual(self.window.store.get(source.id).text, "after")
+
+    def test_status_bar_zoom_readout_follows_the_canvas(self) -> None:
+        self.window.canvas.set_zoom(1.0)
+        self.application.processEvents()
+        self.assertEqual(self.window.zoom_reset_button.text(), "100%")
+        self.window._adjust_canvas_zoom(1.15)
+        self.application.processEvents()
+        self.assertEqual(self.window.zoom_reset_button.text(), "115%")
+
+    def test_canvas_zoom_is_view_state_not_document_state(self) -> None:
+        self.window._project_dirty = False
+        with patch.object(self.window, "_schedule_history") as schedule:
+            self.window._adjust_canvas_zoom(1.15)
+            self.window.canvas.set_zoom(1.0)
+        schedule.assert_not_called()
+        self.assertFalse(self.window._project_dirty)
+
+    def test_ctrl_plus_and_ctrl_equals_both_zoom_the_canvas_in(self) -> None:
+        sequences = {
+            action.shortcut().toString()
+            for action in self.window._canvas_shortcut_actions
+        }
+        self.assertIn("Ctrl++", sequences)
+        self.assertIn("Ctrl+=", sequences)
+
+    def test_f2_moves_focus_to_the_inspector_name_field(self) -> None:
+        source = Source(SourceType.TEXT, "Rename via F2")
+        self.window.store.replace([source])
+        self.window.store.select(source.id)
+        self.window.show()
+        self.window.canvas.setFocus()
+        self.application.processEvents()
+        QTest.keyClick(self.window.canvas, Qt.Key.Key_F2)
+        self.application.processEvents()
+        self.assertTrue(self.window.inspector.name_edit.hasFocus())
+
+    def test_inspector_groups_collapse_and_remember_their_state(self) -> None:
+        def _restore_group_settings() -> None:
+            settings = QSettings()
+            for key in (
+                "inspector/group_content_expanded",
+                "inspector/group_transform_expanded",
+                "inspector/group_appearance_expanded",
+            ):
+                settings.setValue(key, True)
+        self.addCleanup(_restore_group_settings)
+
+        source = Source(SourceType.TEXT, "Collapse test")
+        self.window.store.replace([source])
+        self.window.store.select(source.id)
+        self.window.show()
+        self.application.processEvents()
+
+        group = self.window.inspector.appearance_group
+        self.assertTrue(group.isCheckable())
+        self.assertTrue(self.window.inspector.opacity_spin.isVisible())
+        group.setChecked(False)
+        self.application.processEvents()
+        self.assertFalse(self.window.inspector.opacity_spin.isVisible())
+        self.assertFalse(
+            QSettings().value(
+                "inspector/group_appearance_expanded", True, type=bool,
+            )
+        )
+        group.setChecked(True)
+        self.application.processEvents()
+        self.assertTrue(self.window.inspector.opacity_spin.isVisible())
 
     def test_left_workspace_combines_sources_content_and_layers_as_tabs(self) -> None:
         tabs = self.window.left_tabs

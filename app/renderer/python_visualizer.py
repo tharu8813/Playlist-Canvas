@@ -8,6 +8,7 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -415,6 +416,8 @@ class PythonVisualizerRenderer:
                 raw_meter, overlay, fps,
             )
         frame_buffer = QImage()
+        colored_overlay = overlay
+        colored_track_index = -2
         for frame_index, selected in enumerate(processed_levels):
             if cancel_event.is_set():
                 self._stop_process(process)
@@ -432,6 +435,23 @@ class PythonVisualizerRenderer:
             timeline_start = max(0.0, float(getattr(overlay, "timeline_start", 0.0)))
             timeline_duration = max(0.0, float(getattr(overlay, "timeline_duration", 0.0)))
             frame_seconds = frame_index / max(1, fps)
+            personal_colors = tuple(getattr(overlay, "personal_colors", ()))
+            track_index = self._track_index_at(frame_seconds, track_windows)
+            if personal_colors and track_index != colored_track_index:
+                selected_color = (
+                    personal_colors[track_index]
+                    if 0 <= track_index < len(personal_colors)
+                    else str(getattr(overlay, "color", "#FFFFFF"))
+                )
+                colored_overlay = replace(
+                    overlay,
+                    color=selected_color,
+                    particle_secondary_color=selected_color,
+                    level_meter_low_color=selected_color,
+                    level_meter_mid_color=selected_color,
+                    level_meter_high_color=selected_color,
+                )
+                colored_track_index = track_index
             visible = not (
                 frame_seconds < timeline_start
                 or (timeline_duration > 0.0
@@ -439,7 +459,7 @@ class PythonVisualizerRenderer:
             )
             if visible:
                 frame_buffer = self._draw_frame(
-                    width, height, overlay, selected, frame_index,
+                    width, height, colored_overlay, selected, frame_index,
                     channel_values=channel_values, image_buffer=frame_buffer,
                     frame_rate=fps, peak_values=peak_values,
                 )
@@ -520,6 +540,16 @@ class PythonVisualizerRenderer:
         if animation_out != "none":
             return animation_out, 1.0, False
         return None
+
+    @staticmethod
+    def _track_index_at(
+        seconds: float, track_windows: Sequence[tuple[float, float]],
+    ) -> int:
+        """Return the active track index, or -1 while the timeline is in a gap."""
+        for index, (start, duration) in enumerate(track_windows):
+            if start <= seconds < start + duration:
+                return index
+        return -1
 
     @staticmethod
     def _apply_animation(

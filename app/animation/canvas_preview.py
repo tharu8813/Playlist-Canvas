@@ -98,48 +98,53 @@ class CanvasAnimationPreviewController(QObject):
         hidden_opacity = normal_opacity * hidden_opacity_factor(style)
 
         group = QParallelAnimationGroup()
-        position = QPropertyAnimation(item, b"pos")
-        scale = QPropertyAnimation(item, b"scale")
-        rotation = QPropertyAnimation(item, b"rotation")
-        opacity = QPropertyAnimation(item, b"opacity")
-        for animation in (position, scale, rotation):
+        motion_easing = (
+            QEasingCurve.Type.OutQuint if entering
+            else QEasingCurve.Type.InQuint
+        )
+
+        def add_property_animation(
+            property_name: bytes, start_value: object, end_value: object,
+            easing: QEasingCurve.Type,
+        ) -> None:
+            """Add only properties that actually move during this style."""
+            if start_value == end_value:
+                return
+            animation = QPropertyAnimation(item, property_name)
             animation.setDuration(duration)
-            animation.setEasingCurve(
-                QEasingCurve.Type.OutQuint if entering
-                else QEasingCurve.Type.InQuint
-            )
-        opacity.setDuration(duration)
-        opacity.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            animation.setStartValue(start_value)
+            animation.setEndValue(end_value)
+            animation.setEasingCurve(easing)
+            group.addAnimation(animation)
+
         if entering:
             item.setPos(hidden_position)
             item.setScale(hidden_scale)
             item.setRotation(hidden_rotation)
             item.setOpacity(hidden_opacity)
-            position.setStartValue(hidden_position)
-            position.setEndValue(normal_position)
-            scale.setStartValue(hidden_scale)
-            scale.setEndValue(normal_scale)
-            rotation.setStartValue(hidden_rotation)
-            rotation.setEndValue(normal_rotation)
-            opacity.setStartValue(hidden_opacity)
-            opacity.setEndValue(normal_opacity)
+            start_position, end_position = hidden_position, normal_position
+            start_scale, end_scale = hidden_scale, normal_scale
+            start_rotation, end_rotation = hidden_rotation, normal_rotation
+            start_opacity, end_opacity = hidden_opacity, normal_opacity
         else:
             item.setPos(normal_position)
             item.setScale(normal_scale)
             item.setRotation(normal_rotation)
             item.setOpacity(normal_opacity)
-            position.setStartValue(normal_position)
-            position.setEndValue(hidden_position)
-            scale.setStartValue(normal_scale)
-            scale.setEndValue(hidden_scale)
-            rotation.setStartValue(normal_rotation)
-            rotation.setEndValue(hidden_rotation)
-            opacity.setStartValue(normal_opacity)
-            opacity.setEndValue(hidden_opacity)
-        group.addAnimation(position)
-        group.addAnimation(scale)
-        group.addAnimation(rotation)
-        group.addAnimation(opacity)
+            start_position, end_position = normal_position, hidden_position
+            start_scale, end_scale = normal_scale, hidden_scale
+            start_rotation, end_rotation = normal_rotation, hidden_rotation
+            start_opacity, end_opacity = normal_opacity, hidden_opacity
+
+        add_property_animation(b"pos", start_position, end_position, motion_easing)
+        add_property_animation(b"scale", start_scale, end_scale, motion_easing)
+        add_property_animation(
+            b"rotation", start_rotation, end_rotation, motion_easing,
+        )
+        add_property_animation(
+            b"opacity", start_opacity, end_opacity,
+            QEasingCurve.Type.InOutCubic,
+        )
         return group
 
     def _restore(self) -> None:

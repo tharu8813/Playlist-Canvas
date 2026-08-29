@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 
 from PySide6.QtCore import QMimeData, QPoint, Qt
-from PySide6.QtGui import QDrag, QMouseEvent
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtGui import QDrag, QIcon, QMouseEvent
+from PySide6.QtWidgets import (
+    QApplication, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
+)
 
 
 SOURCE_TEMPLATE_MIME = "application/x-playlist-canvas-source-template"
@@ -51,6 +53,52 @@ class SourceTemplateButton(QPushButton):
         self.source_type = source_type
         self.parent_type = parent_type
         self._drag_start = QPoint()
+        self.setObjectName("sourceTemplateButton")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(58)
+        self.setProperty("variant", False)
+        card_layout = QHBoxLayout(self)
+        card_layout.setContentsMargins(10, 8, 10, 8)
+        card_layout.setSpacing(9)
+        self.icon_label = QLabel(self)
+        self.icon_label.setObjectName("sourceTemplateIcon")
+        self.icon_label.setFixedSize(26, 26)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(1)
+        self.title_label = QLabel(self)
+        self.title_label.setObjectName("sourceTemplateTitle")
+        self.description_label = QLabel(self)
+        self.description_label.setObjectName("sourceTemplateDescription")
+        for label in (self.title_label, self.description_label):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+            )
+        text_layout.addWidget(self.title_label)
+        text_layout.addWidget(self.description_label)
+        card_layout.addWidget(self.icon_label)
+        card_layout.addLayout(text_layout, 1)
+
+    def set_card_icon(self, icon: QIcon) -> None:
+        """Set the palette icon independently of QPushButton's text layout."""
+        self.icon_label.setPixmap(icon.pixmap(22, 22))
+
+    def set_card_text(self, title: str, description: str, *, variant: bool = False) -> None:
+        """Update the rich card labels without changing click/drag behavior."""
+        self.title_label.setText(title)
+        self.description_label.setText(description)
+        self.setAccessibleName(title)
+        self.setProperty("paletteText", f"{title} {description}")
+        self.setProperty("variant", variant)
+        self.setMinimumHeight(48 if variant else 58)
+        layout = self.layout()
+        if isinstance(layout, QHBoxLayout):
+            layout.setContentsMargins(9, 6 if variant else 8, 10, 6 if variant else 8)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def create_mime_data(self) -> QMimeData:
         """Expose payload creation independently for drop handling and tests."""

@@ -47,11 +47,17 @@ class AdaptivePreviewQuality:
         """Consume one rolling FPS sample and return the current render scale."""
         previous = self.scale
         target = max(1.0, float(target_fps))
-        overloaded = dropped_frames > 0 or (
+        pressure_drops = max(0, int(dropped_frames))
+        # A single coalesced GPU frame is normal around seeks, tab changes, and
+        # other short UI bursts. Treating every one-off drop as overload caused
+        # repeated cache invalidation and visible resolution pulsing even while
+        # presentation FPS remained healthy. Require either sustained low FPS or
+        # multiple pending-frame drops in the same rolling sample.
+        overloaded = pressure_drops >= 2 or (
             actual_fps > 0.0 and actual_fps < target * 0.78
         )
         stable = (
-            dropped_frames == 0 and actual_fps >= target * 0.93
+            pressure_drops == 0 and actual_fps >= target * 0.93
         )
         if overloaded:
             self._overloaded_samples += 1

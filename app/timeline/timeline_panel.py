@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPushButton,
     QTableWidget,
@@ -37,14 +38,18 @@ class TimelineSpinBox(QDoubleSpinBox):
         self.setKeyboardTracking(False)
         self.setMinimumWidth(82)
 
-    def textFromValue(self, value: float) -> str:
-        """Format seconds into hour-aware timecode."""
+    @staticmethod
+    def format_timecode(value: float) -> str:
+        """Format seconds without allocating a temporary QWidget."""
         seconds = max(0, round(value))
         hours, remainder = divmod(seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         if hours:
             return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
+
+    def textFromValue(self, value: float) -> str:
+        return self.format_timecode(value)
 
     def valueFromText(self, text: str) -> float:
         """Parse plain seconds, ``MM:SS``, or ``HH:MM:SS`` input."""
@@ -107,6 +112,19 @@ class TimelinePanel(QFrame):
         self.source_table = QTableWidget(0, 3)
         self.source_table.setObjectName("timelineSourceTable")
         self._configure_table(self.source_table)
+        track_header = self.track_table.horizontalHeader()
+        track_header.setStretchLastSection(False)
+        track_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        track_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in (2, 3, 4):
+            track_header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents,
+            )
+        source_header = self.source_table.horizontalHeader()
+        source_header.setStretchLastSection(False)
+        source_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        source_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        source_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.track_page = self._table_page(self.track_table)
         self.source_page = self._table_page(self.source_table)
         self.tabs.addTab(self.track_page, "")
@@ -139,8 +157,11 @@ class TimelinePanel(QFrame):
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         table.setAlternatingRowColors(True)
         table.setShowGrid(False)
+        table.setWordWrap(False)
         table.setFrameShape(QFrame.Shape.NoFrame)
         table.verticalHeader().setVisible(False)
         table.verticalHeader().setDefaultSectionSize(38)
@@ -168,6 +189,10 @@ class TimelinePanel(QFrame):
         """Rebuild timeline rows from the playlist and source stores."""
         if self._refreshing:
             return
+        selected_track_id = self._selected_track_id()
+        selected_source_id = self._selected_source_id()
+        track_scroll = self.track_table.verticalScrollBar().value()
+        source_scroll = self.source_table.verticalScrollBar().value()
         self._refreshing = True
         try:
             timeline_tracks = self.playlist.timeline_tracks()
@@ -183,21 +208,16 @@ class TimelinePanel(QFrame):
                 start_editor.setMinimum(minimum_start)
                 start_editor.setValue(max(start, minimum_start))
                 start_editor.setToolTip(
-                    f"Minimum {TimelineSpinBox().textFromValue(minimum_start)}"
+                    f"Minimum {TimelineSpinBox.format_timecode(minimum_start)}"
                 )
                 start_editor.valueChanged.connect(
                     lambda value, identifier=track.id: self._on_track_start_changed(identifier, value)
                 )
                 self.track_table.setCellWidget(row, 2, start_editor)
                 duration = QTableWidgetItem(track.duration_label)
-                end_item = QTableWidgetItem(TimelineSpinBox().textFromValue(end))
+                end_item = QTableWidgetItem(TimelineSpinBox.format_timecode(end))
                 self.track_table.setItem(row, 3, duration)
                 self.track_table.setItem(row, 4, end_item)
-            self.track_table.setColumnWidth(0, 44)
-            self.track_table.setColumnWidth(1, 330)
-            self.track_table.setColumnWidth(2, 110)
-            self.track_table.setColumnWidth(3, 82)
-            self.track_table.horizontalHeader().setStretchLastSection(True)
 
             source_list = self.sources.sources()
             self.source_table.setRowCount(len(source_list))
@@ -222,14 +242,28 @@ class TimelinePanel(QFrame):
                 )
                 self.source_table.setCellWidget(row, 1, start_editor)
                 self.source_table.setCellWidget(row, 2, duration_editor)
-            self.source_table.setColumnWidth(0, 320)
-            self.source_table.setColumnWidth(1, 112)
-            self.source_table.horizontalHeader().setStretchLastSection(True)
             total = max((end for _track, _start, end in timeline_tracks), default=0.0)
+            total_label = TimelineSpinBox.format_timecode(total)
             self.summary.setText(
-                f"{len(timeline_tracks)}곡 · 총 {TimelineSpinBox().textFromValue(total)}"
+                f"{len(timeline_tracks)}곡 · 총 {total_label}"
                 if self.translator.language.value == "ko" else
-                f"{len(timeline_tracks)} tracks · {TimelineSpinBox().textFromValue(total)}"
+                f"{len(timeline_tracks)} tracks · {total_label}"
+            )
+            self._restore_row_selection(
+                self.track_table, 0, selected_track_id,
+            )
+            self._restore_row_selection(
+                self.source_table, 0, selected_source_id,
+            )
+            QTimer.singleShot(
+                0,
+                lambda value=track_scroll:
+                    self.track_table.verticalScrollBar().setValue(value),
+            )
+            QTimer.singleShot(
+                0,
+                lambda value=source_scroll:
+                    self.source_table.verticalScrollBar().setValue(value),
             )
         finally:
             self._refreshing = False
@@ -249,7 +283,27 @@ class TimelinePanel(QFrame):
     def _selected_track_id(self) -> str | None:
         row = self.track_table.currentRow()
         item = self.track_table.item(row, 0) if row >= 0 else None
-        return item.data(Qt.ItemDataRole.UserRole) if item else None
+        return str(item.data(Qt.ItemDataRole.UserRole)) if item else None
+
+    def _selected_source_id(self) -> str | None:
+        row = self.source_table.currentRow()
+        item = self.source_table.item(row, 0) if row >= 0 else None
+        return str(item.data(Qt.ItemDataRole.UserRole)) if item else None
+
+    @staticmethod
+    def _restore_row_selection(
+        table: QTableWidget, id_column: int, identifier: str | None,
+    ) -> None:
+        if not identifier:
+            return
+        for row in range(table.rowCount()):
+            item = table.item(row, id_column)
+            if item is not None and str(
+                item.data(Qt.ItemDataRole.UserRole)
+            ) == identifier:
+                table.selectRow(row)
+                table.setCurrentCell(row, id_column)
+                return
 
     def _move_selected_track(self, direction: int) -> None:
         track_id = self._selected_track_id()
@@ -265,7 +319,7 @@ class TimelinePanel(QFrame):
             self.playlist.set_start_time(track_id, value)
         finally:
             self._refreshing = False
-        QTimer.singleShot(0, self.refresh)
+        self.schedule_refresh()
 
     def _on_source_timing_changed(self, source_id: str, field: str, value: float) -> None:
         """Commit one source timing field without destroying the active spin box."""
@@ -276,7 +330,7 @@ class TimelinePanel(QFrame):
             self.sources.update(source_id, **{field: value})
         finally:
             self._refreshing = False
-        QTimer.singleShot(0, self.refresh)
+        self.schedule_refresh()
 
     def _select_source_on_canvas(self) -> None:
         """Select a source in Canvas and Inspector from its timeline row."""

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QSettings, Signal
 from PySide6.QtGui import QColor, QFontDatabase
 from PySide6.QtWidgets import (
     QCheckBox,
-    QColorDialog,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -26,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.source import Source, SourceType
+from app.dialogs.color_editor_dialog import ColorEditorDialog
 from app.dialogs.text_editor_dialog import TextEditorDialog
 from app.dialogs.video_source_dialog import VideoSourceDialog
 from app.services.source_store import SourceStore
@@ -458,6 +458,13 @@ class SourceInspector(QScrollArea):
         layout.addWidget(self.appearance_group)
         layout.addStretch()
 
+        for group, settings_key in (
+            (self.content_group, "inspector/group_content_expanded"),
+            (self.transform_group, "inspector/group_transform_expanded"),
+            (self.appearance_group, "inspector/group_appearance_expanded"),
+        ):
+            self._make_group_collapsible(group, settings_key)
+
         self._editors = [
             self.name_edit, self.text_edit, self.expand_text_button,
             self.file_path_edit, self.file_button,
@@ -548,6 +555,30 @@ class SourceInspector(QScrollArea):
         self._form_labels[key] = label
         self._field_widgets[key] = widget
         layout.addRow(label, widget)
+
+    @staticmethod
+    def _make_group_collapsible(group: QGroupBox, settings_key: str) -> None:
+        """Let the user fold a property section by clicking its title checkbox.
+
+        The section's form layout is moved onto a body widget so toggling the
+        group's checkable title simply shows or hides that body, and the folded
+        state is remembered across sessions.
+        """
+        body = QWidget()
+        body.setLayout(group.layout())
+        shell = QVBoxLayout(group)
+        shell.setContentsMargins(6, 2, 6, 6)
+        shell.addWidget(body)
+        group.setCheckable(True)
+        expanded = QSettings().value(settings_key, True, type=bool)
+        group.setChecked(bool(expanded))
+        body.setVisible(bool(expanded))
+
+        def _on_toggled(checked: bool) -> None:
+            body.setVisible(checked)
+            QSettings().setValue(settings_key, checked)
+
+        group.toggled.connect(_on_toggled)
 
     def _property_help_text(self, key: str) -> str:
         """Return localized, user-facing guidance for one Inspector property."""
@@ -1215,14 +1246,15 @@ class SourceInspector(QScrollArea):
         if source is None:
             return
         korean = self.translator.language.value == "ko"
-        color = QColorDialog.getColor(
+        dialog = ColorEditorDialog(
             QColor(str(getattr(source, field))),
+            source,
+            self.translator,
+            "색상 편집" if korean else "Edit color",
             self,
-            "색상 및 투명도" if korean else "Color and transparency",
-            QColorDialog.ColorDialogOption.ShowAlphaChannel,
         )
-        if color.isValid():
-            self._update(field, self._serialized_color(color))
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._commit_color_dialog(dialog, "source", field)
 
     def _update_gradient_enabled(self, enabled: bool) -> None:
         self._update_nested("gradient", "enabled", enabled)
@@ -1232,17 +1264,15 @@ class SourceInspector(QScrollArea):
         if source is None:
             return
         korean = self.translator.language.value == "ko"
-        color = QColorDialog.getColor(
+        dialog = ColorEditorDialog(
             QColor(str(getattr(source.gradient, field))),
+            source,
+            self.translator,
+            "그라데이션 색상 편집" if korean else "Edit gradient color",
             self,
-            "그라데이션 색상 및 투명도" if korean
-            else "Gradient color and transparency",
-            QColorDialog.ColorDialogOption.ShowAlphaChannel,
         )
-        if color.isValid():
-            self._update_nested(
-                "gradient", field, self._serialized_color(color)
-            )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._commit_color_dialog(dialog, "gradient", field)
 
     def _update_shadow(self, field: str, value: object) -> None:
         if self._updating:
@@ -1265,16 +1295,36 @@ class SourceInspector(QScrollArea):
         source = self.store.get(self._source_id)
         if source is None:
             return
-        color = QColorDialog.getColor(
+        korean = self.translator.language.value == "ko"
+        dialog = ColorEditorDialog(
             QColor(source.shadow.color),
+            source,
+            self.translator,
+            "그림자 색상 편집" if korean else "Edit shadow color",
             self,
-            "그림자 색상 및 투명도"
-            if self.translator.language.value == "ko"
-            else "Shadow color and transparency",
-            QColorDialog.ColorDialogOption.ShowAlphaChannel,
         )
-        if color.isValid():
-            self._update_shadow("color", self._serialized_color(color))
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._commit_color_dialog(dialog, "shadow", "color")
+
+    def _commit_color_dialog(
+        self, dialog: ColorEditorDialog, target: str, field: str,
+    ) -> None:
+        """Apply color and personal-color policy as one Inspector edit."""
+        color = self._serialized_color(dialog.selected_color)
+        personal = dialog.personal_settings()
+        self._applying_batch = True
+        try:
+            for source in self._selected_sources():
+                if target == "source":
+                    setattr(source, field, color)
+                else:
+                    setattr(getattr(source, target), field, color)
+                for setting, value in personal.items():
+                    setattr(source, setting, value)
+                self.store.source_changed.emit(source)
+        finally:
+            self._applying_batch = False
+        self._refresh_current_selection()
 
     def _set_enabled(self, enabled: bool) -> None:
         for editor in self._editors:
