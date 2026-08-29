@@ -13,6 +13,7 @@ import shutil
 import threading
 from time import monotonic
 import traceback as traceback_module
+import tempfile
 from tempfile import TemporaryDirectory
 
 from PySide6.QtCore import (QByteArray, QEvent, QEventLoop, QMimeData, QProcess, QSettings,
@@ -2929,6 +2930,106 @@ class MainWindow(QMainWindow):
         )
         self._notify_export_stage(stage)
 
+    @staticmethod
+    def _format_bytes(count: int) -> str:
+        value = float(max(0, count))
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024.0:
+                return f"{value:.1f} {unit}"
+            value /= 1024.0
+        return f"{value:.1f} TB"
+
+    def _prepare_export_staging_space(
+        self, render_settings: RenderSettings, duration_seconds: float,
+        layer_count: int, use_streamed_visuals: bool, korean: bool,
+    ) -> bool:
+        """Redirect frame staging to the output drive if the temp drive is short,
+        and warn before starting when neither drive has comfortable room.
+
+        Returns ``False`` only when the user declines to continue anyway.
+        """
+        raw_frame_bytes = max(
+            1, render_settings.output_width * render_settings.output_height * 3
+        )
+        seconds = max(0.0, duration_seconds)
+        # ffv1 / libx264rgb (or deflated PNGs) on Canvas content: conservatively
+        # ~40% of raw RGB, once per visual layer.
+        intermediate = int(
+            raw_frame_bytes * render_settings.fps * seconds
+            * 0.4 * max(1, layer_count if use_streamed_visuals else 1)
+        )
+        final_video = int(raw_frame_bytes * render_settings.fps * seconds * 0.08)
+        temp_need = int(intermediate * 1.3)
+        output_need = int(intermediate * 0.4) + final_video
+
+        def free_bytes(location: Path) -> int | None:
+            try:
+                return shutil.disk_usage(location).free
+            except OSError:
+                return None
+
+        system_temp = Path(tempfile.gettempdir())
+        output_parent = (
+            self._active_export_output_path.parent
+            if self._active_export_output_path is not None else None
+        )
+        staging_dir: Path | None = None
+        temp_free = free_bytes(system_temp)
+        if (
+            temp_free is not None
+            and temp_free < int(temp_need * 1.15)
+            and output_parent is not None
+        ):
+            output_free = free_bytes(output_parent)
+            if (
+                output_free is not None
+                and output_free > int((temp_need + output_need) * 1.2)
+            ):
+                staging_dir = output_parent
+                LOGGER.info(
+                    "Staging export frames on the output drive (%s); the system "
+                    "temporary drive is short on space.", output_parent,
+                )
+        self._clear_export_frame_staging()
+        self._export_frame_staging = TemporaryDirectory(
+            prefix="playlist-video-frames-",
+            dir=str(staging_dir) if staging_dir is not None else None,
+        )
+        self._export_frame_index = 0
+
+        checks = [(Path(self._export_frame_staging.name), temp_need)]
+        if output_parent is not None:
+            checks.append((output_parent, output_need))
+        shortfalls: list[str] = []
+        for location, required in checks:
+            free = free_bytes(location)
+            if free is not None and free < int(required * 1.15):
+                drive = location.anchor or str(location)
+                shortfalls.append(
+                    f"{drive}  —  {self._format_bytes(free)} free / "
+                    f"~{self._format_bytes(required)} needed"
+                )
+        if not shortfalls:
+            return True
+        detail = "\n".join(shortfalls)
+        answer = QMessageBox.warning(
+            self,
+            "저장 공간 부족 가능성" if korean else "Low disk space",
+            (
+                "무손실 중간 파일과 최종 영상을 저장할 임시/출력 공간이 부족할 수 "
+                "있습니다. 내보내는 도중 공간이 모자라면 실패할 수 있습니다.\n\n"
+                f"{detail}\n\n그래도 계속 진행할까요?"
+                if korean else
+                "The temporary or output drive may not have enough room for the "
+                "lossless intermediate files and the final video, so the export "
+                "could fail partway through.\n\n"
+                f"{detail}\n\nContinue anyway?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def _export_video(self) -> None:
         """Render the static Canvas and enabled playlist tracks to an MP4 file."""
         korean = self.translator.language is Language.KOREAN
@@ -3232,6 +3333,11 @@ class MainWindow(QMainWindow):
                     )
                     use_streamed_visuals = False
                     break
+            if not self._prepare_export_staging_space(
+                render_settings, playlist_duration, len(z_bands),
+                use_streamed_visuals, korean,
+            ):
+                raise RenderCancelledError("Export cancelled at the disk-space check.")
             stream_specs: list[tuple[str, Path, bool, int]] = []
             if use_streamed_visuals:
                 assert self._export_frame_staging is not None

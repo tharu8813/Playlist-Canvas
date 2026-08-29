@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import os
+import tempfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
@@ -5283,6 +5284,70 @@ class MainWindowSafetyTests(unittest.TestCase):
         group.setChecked(True)
         self.application.processEvents()
         self.assertTrue(self.window.inspector.opacity_spin.isVisible())
+
+    def test_format_bytes_scales_units(self) -> None:
+        self.assertEqual(self.window._format_bytes(0), "0.0 B")
+        self.assertEqual(self.window._format_bytes(2048), "2.0 KB")
+        self.assertEqual(self.window._format_bytes(5 * 1024**3), "5.0 GB")
+
+    def test_export_staging_relocates_to_output_drive_when_temp_is_short(self) -> None:
+        from collections import namedtuple
+        Usage = namedtuple("Usage", "total used free")
+        with TemporaryDirectory(prefix="export-output-") as output_directory:
+            self.window._active_export_output_path = (
+                Path(output_directory) / "video.mp4"
+            )
+            settings = RenderSettings(
+                fps=30, output_width=1920, output_height=1080,
+            )
+
+            output_root = str(Path(output_directory).resolve())
+
+            def fake_usage(path: object) -> object:
+                if str(Path(str(path)).resolve()).startswith(output_root):
+                    return Usage(0, 0, 900 * 1024**3)       # output drive: 900 GB
+                return Usage(0, 0, 200 * 1024**2)           # temp drive: 200 MB
+
+            with (
+                patch("app.ui.main_window.shutil.disk_usage", side_effect=fake_usage),
+                patch.object(QMessageBox, "warning") as warning,
+            ):
+                proceed = self.window._prepare_export_staging_space(
+                    settings, 120.0, 2, True, korean=False,
+                )
+
+            self.assertTrue(proceed)
+            warning.assert_not_called()  # output drive has room, so no warning
+            self.assertIsNotNone(self.window._export_frame_staging)
+            staging = Path(self.window._export_frame_staging.name).resolve()
+            self.assertTrue(
+                str(staging).startswith(str(Path(output_directory).resolve()))
+            )
+        self.window._clear_export_frame_staging()
+
+    def test_export_low_space_on_both_drives_asks_before_continuing(self) -> None:
+        from collections import namedtuple
+        Usage = namedtuple("Usage", "total used free")
+        self.window._active_export_output_path = Path(
+            tempfile.gettempdir()
+        ) / "video.mp4"
+        settings = RenderSettings(fps=30, output_width=1920, output_height=1080)
+        with (
+            patch(
+                "app.ui.main_window.shutil.disk_usage",
+                return_value=Usage(0, 0, 50 * 1024**2),
+            ),
+            patch.object(
+                QMessageBox, "warning",
+                return_value=QMessageBox.StandardButton.No,
+            ) as warning,
+        ):
+            proceed = self.window._prepare_export_staging_space(
+                settings, 120.0, 2, True, korean=False,
+            )
+        self.assertFalse(proceed)
+        warning.assert_called_once()
+        self.window._clear_export_frame_staging()
 
     def test_dependent_inspector_fields_hide_until_their_toggle_is_active(self) -> None:
         source = Source(SourceType.IMAGE, "Conditional", width=300.0, height=200.0)
