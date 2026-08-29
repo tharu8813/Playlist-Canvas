@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import atan2, cos, degrees, radians, sin
+from math import atan2, cos, degrees, pi, radians, sin
 from pathlib import Path
 from time import monotonic
 
@@ -44,6 +44,7 @@ class SourceItem(QGraphicsObject):
 
     _handle_size = 10.0
     _middle_handle_min_span = 36.0
+    _STROKE_OFFSET_CACHE: dict[int, tuple[tuple[int, int], ...]] = {}
     _direct_gpu_pixel_formats = frozenset({
         "Format_RGBA8888", "Format_RGBX8888",
         "Format_BGRA8888", "Format_BGRX8888",
@@ -1123,29 +1124,46 @@ class SourceItem(QGraphicsObject):
             self._draw_text(painter, text_rect, flags, line)
             painter.restore()
 
+    @staticmethod
+    def _stroke_offsets(radius: int) -> tuple[tuple[int, int], ...]:
+        """Return de-duplicated ring offsets that tile a disk of *radius* px.
+
+        Concentric rings give a uniform outline at any width; the earlier
+        eight-point pattern bulged at the corners and left gaps once the width
+        grew past a few pixels.
+        """
+        cached = SourceItem._STROKE_OFFSET_CACHE.get(radius)
+        if cached is not None:
+            return cached
+        step = max(1, round(radius / 4))
+        points: set[tuple[int, int]] = set()
+        ring = step
+        while ring <= radius:
+            count = max(8, round(2.0 * pi * ring / step))
+            for index in range(count):
+                angle = 2.0 * pi * index / count
+                points.add((round(ring * cos(angle)), round(ring * sin(angle))))
+            ring += step
+        points.discard((0, 0))
+        offsets = tuple(sorted(points))
+        SourceItem._STROKE_OFFSET_CACHE[radius] = offsets
+        return offsets
+
     def _draw_text(
         self, painter: QPainter, rect: QRectF, flags: int, text: str,
     ) -> None:
         """Draw ``text`` with the configured glyph outline behind its fill.
 
-        The stroke is approximated by repeating the glyphs in the outline colour
-        at ring offsets before the fill pass, which keeps the surrounding
-        ``drawText`` alignment, wrapping and eliding behaviour untouched.
+        The stroke repeats the glyphs in the outline colour across a disk of
+        offsets before the fill pass, which keeps the surrounding ``drawText``
+        alignment, wrapping and eliding behaviour untouched.
         """
         width = float(self.source.text_stroke_width)
         if width > 0.0:
             fill_pen = painter.pen()
             painter.setPen(QColor(self.source.text_stroke_color))
-            rings = (width, width / 2.0) if width >= 2.0 else (width,)
-            for radius in rings:
-                for offset_x, offset_y in (
-                    (-radius, 0.0), (radius, 0.0), (0.0, -radius), (0.0, radius),
-                    (-radius, -radius), (radius, -radius),
-                    (-radius, radius), (radius, radius),
-                ):
-                    painter.drawText(
-                        rect.translated(offset_x, offset_y), flags, text,
-                    )
+            for offset_x, offset_y in self._stroke_offsets(max(1, round(width))):
+                painter.drawText(rect.translated(offset_x, offset_y), flags, text)
             painter.setPen(fill_pen)
         painter.drawText(rect, flags, text)
 

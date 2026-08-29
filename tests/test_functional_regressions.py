@@ -214,6 +214,20 @@ class FunctionalRegressionTests(unittest.TestCase):
                 f"{source_type.value}: text outline did not render",
             )
 
+    def test_text_stroke_offsets_tile_a_uniform_disk(self) -> None:
+        for radius in (3, 6, 12):
+            offsets = SourceItem._stroke_offsets(radius)
+            self.assertNotIn((0, 0), offsets)
+            self.assertLessEqual(len(offsets), 90)  # bounded regardless of width
+            reach = max(dx * dx + dy * dy for dx, dy in offsets) ** 0.5
+            self.assertGreater(reach, radius - 1.5)  # covers the full radius
+            self.assertLess(reach, radius + 1.5)     # no corner bulge past it
+            # more than the eight compass points, and some genuinely off-axis
+            self.assertGreater(len(offsets), 12)
+            self.assertTrue(any(
+                dx != 0 and dy != 0 and abs(dx) != abs(dy) for dx, dy in offsets
+            ))
+
     def test_text_stroke_width_is_validated(self) -> None:
         payload = Source(
             SourceType.TEXT, "Bad stroke", text_stroke_width=40.0,
