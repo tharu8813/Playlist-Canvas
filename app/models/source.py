@@ -91,6 +91,8 @@ class Source:
     font_weight: int = 600
     text_alignment: str = "center"
     text_overflow: str = "wrap"
+    text_stroke_color: str = "#000000"
+    text_stroke_width: float = 0.0
     content_path: str = ""
     video_paths: list[str] = field(default_factory=list)
     video_timing_mode: str = "timeline"
@@ -292,6 +294,10 @@ class Source:
             raise ValueError(f"Source '{source.name}' video speed is out of range.")
         if not 0.0 <= source.video_saturation <= 3.0:
             raise ValueError(f"Source '{source.name}' video saturation is out of range.")
+        if not 0.0 <= float(source.text_stroke_width) <= 12.0:
+            raise ValueError(
+                f"Source '{source.name}' text stroke width must be between 0 and 12."
+            )
         bounded_integers = {
             "visualizer_bars": (4, 96),
             "subtitle_context_lines": (0, 6),

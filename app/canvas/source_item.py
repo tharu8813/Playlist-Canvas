@@ -1120,8 +1120,34 @@ class SourceItem(QGraphicsObject):
                 flags |= Qt.TextFlag.TextSingleLine
             else:
                 flags |= Qt.TextFlag.TextWordWrap
-            painter.drawText(text_rect, flags, line)
+            self._draw_text(painter, text_rect, flags, line)
             painter.restore()
+
+    def _draw_text(
+        self, painter: QPainter, rect: QRectF, flags: int, text: str,
+    ) -> None:
+        """Draw ``text`` with the configured glyph outline behind its fill.
+
+        The stroke is approximated by repeating the glyphs in the outline colour
+        at ring offsets before the fill pass, which keeps the surrounding
+        ``drawText`` alignment, wrapping and eliding behaviour untouched.
+        """
+        width = float(self.source.text_stroke_width)
+        if width > 0.0:
+            fill_pen = painter.pen()
+            painter.setPen(QColor(self.source.text_stroke_color))
+            rings = (width, width / 2.0) if width >= 2.0 else (width,)
+            for radius in rings:
+                for offset_x, offset_y in (
+                    (-radius, 0.0), (radius, 0.0), (0.0, -radius), (0.0, radius),
+                    (-radius, -radius), (radius, -radius),
+                    (-radius, radius), (radius, radius),
+                ):
+                    painter.drawText(
+                        rect.translated(offset_x, offset_y), flags, text,
+                    )
+            painter.setPen(fill_pen)
+        painter.drawText(rect, flags, text)
 
     def paint(
         self,
@@ -1558,8 +1584,12 @@ class SourceItem(QGraphicsObject):
                         )
                 painter.setFont(lyric_font)
                 painter.setPen(line_color)
-                painter.drawText(QRectF(rect.left() + 12, current_y, rect.width() - 24, line_height),
-                                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap, line)
+                self._draw_text(
+                    painter,
+                    QRectF(rect.left() + 12, current_y, rect.width() - 24, line_height),
+                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
+                    line,
+                )
                 if line_transform_saved:
                     painter.restore()
                 y += line_height
@@ -1592,20 +1622,20 @@ class SourceItem(QGraphicsObject):
             label_font = QFont(self.source.font_family, max(9, min(20, int(self.source.font_size * 0.56))))
             label_font.setWeight(QFont.Weight.DemiBold)
             painter.setFont(label_font)
-            painter.drawText(rect.adjusted(16, 12, -16, -8), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, label.upper())
+            self._draw_text(painter, rect.adjusted(16, 12, -16, -8), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, label.upper())
             title_font = QFont(self.source.font_family, max(14, min(52, int(self.source.font_size * 1.22))))
             title_font.setWeight(QFont.Weight.Bold)
             painter.setFont(title_font)
-            painter.drawText(rect.adjusted(16, rect.height() * 0.25, -16, -rect.height() * 0.34),
-                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap, title)
+            self._draw_text(painter, rect.adjusted(16, rect.height() * 0.25, -16, -rect.height() * 0.34),
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap, title)
             if details:
                 detail_color = QColor(text_color)
                 detail_color.setAlpha(190)
                 painter.setPen(detail_color)
                 detail_font = QFont(self.source.font_family, max(10, min(24, int(self.source.font_size * 0.68))))
                 painter.setFont(detail_font)
-                painter.drawText(rect.adjusted(16, rect.height() * 0.66, -16, -10),
-                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom | Qt.TextFlag.TextWordWrap, details)
+                self._draw_text(painter, rect.adjusted(16, rect.height() * 0.66, -16, -10),
+                                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom | Qt.TextFlag.TextWordWrap, details)
         else:
             painter.drawRoundedRect(rect, self.source.border_radius,
                                     self.source.border_radius)
@@ -1651,7 +1681,8 @@ class SourceItem(QGraphicsObject):
                         text_rect.left(), top + index * line_height,
                         text_rect.width(), line_height,
                     )
-                    painter.drawText(
+                    self._draw_text(
+                        painter,
                         line_rect,
                         alignment | Qt.AlignmentFlag.AlignVCenter
                         | Qt.TextFlag.TextSingleLine,
@@ -1659,7 +1690,8 @@ class SourceItem(QGraphicsObject):
                     )
                 painter.restore()
             else:
-                painter.drawText(
+                self._draw_text(
+                    painter,
                     text_rect,
                     flags | Qt.TextFlag.TextWordWrap,
                     text,

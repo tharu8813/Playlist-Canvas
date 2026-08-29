@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QColor, QFontMetricsF, QImage
+from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter
 
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
@@ -179,6 +179,47 @@ class FunctionalRegressionTests(unittest.TestCase):
                 SourceType.ALBUM_COVER, image_fit_mode="stretch", brightness=-45.0,
             )
             self.assertLess(sum(dark_cover[:3]), sum(plain_cover[:3]))
+
+    def test_text_glyph_outline_renders_for_text_bearing_sources(self) -> None:
+        for source_type in (
+            SourceType.TEXT, SourceType.TIME, SourceType.LYRICS,
+            SourceType.NOW_PLAYING, SourceType.TRACK_LIST,
+        ):
+            source = Source(
+                source_type, "WWWW", text="WWWW", x=0, y=0, width=360, height=160,
+                font_size=44.0, outline_color="#FFFFFF",
+                text_stroke_color="#FF0000", text_stroke_width=4.0,
+            )
+            item = SourceItem(source)
+
+            def red_glyph_pixels() -> int:
+                frame = QImage(360, 160, QImage.Format.Format_ARGB32)
+                frame.fill(QColor("#101010"))
+                painter = QPainter(frame)
+                item.paint(painter, None, None)
+                painter.end()
+                return sum(
+                    1
+                    for y in range(0, 160, 2)
+                    for x in range(0, 360, 2)
+                    if frame.pixelColor(x, y).red() > 150
+                    and frame.pixelColor(x, y).green() < 80
+                )
+
+            with_stroke = red_glyph_pixels()
+            source.text_stroke_width = 0.0
+            without_stroke = red_glyph_pixels()
+            self.assertGreater(
+                with_stroke, without_stroke + 10,
+                f"{source_type.value}: text outline did not render",
+            )
+
+    def test_text_stroke_width_is_validated(self) -> None:
+        payload = Source(
+            SourceType.TEXT, "Bad stroke", text_stroke_width=40.0,
+        ).to_dict()
+        with self.assertRaisesRegex(ValueError, "text stroke width"):
+            Source.from_dict(payload)
 
     def test_personal_color_adjustments_blend_and_preserve_alpha(self) -> None:
         personal = QColor("#804020")

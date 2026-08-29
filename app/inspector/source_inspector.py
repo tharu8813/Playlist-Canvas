@@ -406,6 +406,8 @@ class SourceInspector(QScrollArea):
         font_layout.addWidget(self.font_add_button)
         self.fill_color_button = self._color_button()
         self.outline_color_button = self._color_button()
+        self.text_stroke_color_button = self._color_button()
+        self.text_stroke_width_spin = self._spin(0, 12, 0.5)
         self.gradient_check = QCheckBox()
         self.gradient_start_button = self._color_button()
         self.gradient_end_button = self._color_button()
@@ -439,6 +441,8 @@ class SourceInspector(QScrollArea):
             ("outline", self.outline_spin), ("font_size", self.font_size_spin),
             ("font_family", font_row),
             ("fill_color", self.fill_color_button), ("outline_color", self.outline_color_button),
+            ("text_stroke_color", self.text_stroke_color_button),
+            ("text_stroke_width", self.text_stroke_width_spin),
             ("gradient", self.gradient_check), ("gradient_start", self.gradient_start_button),
             ("gradient_end", self.gradient_end_button), ("blur", self.blur_spin),
             ("brightness", self.brightness_spin), ("contrast", self.contrast_spin),
@@ -513,7 +517,9 @@ class SourceInspector(QScrollArea):
             self.width_spin, self.height_spin, self.rotation_spin, self.scale_spin,
             self.opacity_spin, self.radius_spin, self.outline_spin, self.font_size_spin,
             self.font_family_combo, self.font_add_button,
-            self.fill_color_button, self.outline_color_button, self.gradient_check,
+            self.fill_color_button, self.outline_color_button,
+            self.text_stroke_color_button, self.text_stroke_width_spin,
+            self.gradient_check,
             self.gradient_start_button, self.gradient_end_button, self.z_spin,
             self.blur_spin, self.brightness_spin, self.contrast_spin, self.shadow_check,
             self.shadow_color_button, self.shadow_opacity_spin, self.shadow_blur_spin,
@@ -612,6 +618,8 @@ class SourceInspector(QScrollArea):
             "font_family": ("텍스트에 사용할 글꼴입니다. 글꼴 추가 버튼으로 TTF 또는 OTF 파일을 등록할 수 있습니다.", "Font used for text. Add Font can register a TTF or OTF file."),
             "fill_color": ("도형, 텍스트 또는 효과의 주 색상입니다. 색상 창에서 알파를 0으로 설정하면 요소 전체 투명도는 유지하면서 배경만 완전히 투명하게 만들 수 있습니다.", "Primary fill or background color. Set alpha to 0 in the color dialog to make the background fully transparent without changing overall source opacity."),
             "outline_color": ("윤곽선에 사용할 색상입니다. 윤곽선 두께가 0보다 클 때 보입니다.", "Outline color, visible when outline width is greater than zero."),
+            "text_stroke_color": ("글자 자체에 두르는 테두리 색상입니다. 테두리 두께가 0보다 클 때 보입니다.", "Colour of the outline drawn around the glyphs, visible when the text outline width is greater than zero."),
+            "text_stroke_width": ("글자 둘레에 그리는 테두리 두께(px)입니다. 0이면 테두리가 없습니다.", "Thickness in pixels of the outline drawn around each glyph. 0 disables it."),
             "gradient": ("단색 대신 시작 색과 끝 색이 이어지는 그라데이션 채우기를 사용합니다.", "Uses a blend between start and end colors instead of a solid fill."),
             "gradient_start": ("그라데이션이 시작되는 쪽의 색상입니다.", "Color at the start of the gradient."),
             "gradient_end": ("그라데이션이 끝나는 쪽의 색상입니다.", "Color at the end of the gradient."),
@@ -776,6 +784,8 @@ class SourceInspector(QScrollArea):
             "font_family",
             source_type in text_types,
         )
+        self._set_field_visible("text_stroke_color", source_type in text_types)
+        self._set_field_visible("text_stroke_width", source_type in text_types)
         self._set_field_visible(
             "file", source_type in self.IMAGE_BACKED_TYPES
             and source_type is not SourceType.VIDEO
@@ -1067,6 +1077,12 @@ class SourceInspector(QScrollArea):
         )
         self.outline_color_button.clicked.connect(
             lambda: self._choose_color("outline_color", self.outline_color_button)
+        )
+        self.text_stroke_color_button.clicked.connect(
+            lambda: self._choose_color("text_stroke_color", self.text_stroke_color_button)
+        )
+        self.text_stroke_width_spin.valueChanged.connect(
+            lambda _value: self._update("text_stroke_width", self.text_stroke_width_spin.value())
         )
         self.gradient_check.toggled.connect(self._update_gradient_enabled)
         self.gradient_start_button.clicked.connect(
@@ -1380,7 +1396,10 @@ class SourceInspector(QScrollArea):
             "border_radius": ("모서리 반경", "Border radius"), "outline": ("윤곽선", "Outline"),
             "font_size": ("글꼴 크기", "Font size"), "font_family": ("글꼴", "Font"),
             "fill_color": ("채우기 색", "Fill color"),
-            "outline_color": ("윤곽선 색", "Outline color"), "gradient": ("그라데이션", "Gradient"),
+            "outline_color": ("윤곽선 색", "Outline color"),
+            "text_stroke_color": ("글자 테두리 색", "Text outline color"),
+            "text_stroke_width": ("글자 테두리 두께", "Text outline width"),
+            "gradient": ("그라데이션", "Gradient"),
             "gradient_start": ("시작 색", "Start color"), "gradient_end": ("끝 색", "End color"),
             "blur": ("블러", "Blur"), "brightness": ("밝기", "Brightness"), "contrast": ("대비", "Contrast"),
             "shadow": ("그림자", "Shadow"), "shadow_color": ("그림자 색", "Shadow color"),
@@ -1883,6 +1902,7 @@ class SourceInspector(QScrollArea):
             "particle_seed": self.particle_seed_spin,
             "blur": self.blur_spin, "brightness": self.brightness_spin,
             "contrast": self.contrast_spin,
+            "text_stroke_width": self.text_stroke_width_spin,
             "animation_in_duration": self.animation_in_duration_spin,
             "animation_out_duration": self.animation_out_duration_spin,
             "shadow.opacity": self.shadow_opacity_spin,
@@ -1913,6 +1933,7 @@ class SourceInspector(QScrollArea):
             "particle_secondary_color": self.particle_secondary_color_button,
             "fill_color": self.fill_color_button,
             "outline_color": self.outline_color_button,
+            "text_stroke_color": self.text_stroke_color_button,
             "gradient.start_color": self.gradient_start_button,
             "gradient.end_color": self.gradient_end_button,
             "shadow.color": self.shadow_color_button,
@@ -2032,6 +2053,8 @@ class SourceInspector(QScrollArea):
             self._set_color_button(self.progress_track_color_button, source.progress_track_color)
             self._set_color_button(self.fill_color_button, source.fill_color)
             self._set_color_button(self.outline_color_button, source.outline_color)
+            self._set_color_button(self.text_stroke_color_button, source.text_stroke_color)
+            self.text_stroke_width_spin.setValue(source.text_stroke_width)
             self.gradient_check.setChecked(source.gradient.enabled)
             self._set_color_button(self.gradient_start_button, source.gradient.start_color)
             self._set_color_button(self.gradient_end_button, source.gradient.end_color)
