@@ -7,10 +7,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QLineF, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
-    QAction, QColor, QContextMenuEvent, QDragEnterEvent, QDropEvent, QKeySequence,
-    QPainter, QPen, QWheelEvent,
+    QAction, QColor, QContextMenuEvent, QCursor, QDragEnterEvent, QDropEvent,
+    QKeySequence, QPainter, QPen, QWheelEvent,
 )
-from PySide6.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QMenu
+from PySide6.QtWidgets import (
+    QApplication, QGraphicsScene, QGraphicsView, QLabel, QMenu,
+)
 
 from app.canvas.source_item import SourceItem
 from app.models.source import Source
@@ -386,6 +388,17 @@ class LiveCanvas(QGraphicsView):
         store.sources_replaced.connect(self.replace_sources)
         store.selection_set_changed.connect(self._select_sources_from_store)
 
+        self._interaction_hint = QLabel(self.viewport())
+        self._interaction_hint.setObjectName("canvasInteractionHint")
+        self._interaction_hint.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self._interaction_hint.setStyleSheet(
+            "background: rgba(16,20,28,0.86); color: #F5F7FA;"
+            " padding: 3px 7px; border-radius: 5px; font-weight: 600;"
+        )
+        self._interaction_hint.hide()
+
     def add_source(self, source: Source) -> None:
         """Create or reactivate a source graphics item."""
         item = self._retired_items.pop(source.id, None)
@@ -394,6 +407,7 @@ class LiveCanvas(QGraphicsView):
             item.changed_by_user.connect(self._on_item_changed)
             item.duplicate_requested.connect(self._duplicate_source_at)
             item.edit_requested.connect(self.edit_requested)
+            item.interaction_hint.connect(self._show_interaction_hint)
             self.scene_model.addItem(item)
         else:
             item.source = source
@@ -455,6 +469,23 @@ class LiveCanvas(QGraphicsView):
         item = self._items.get(source.id)
         if item:
             item.apply_source()
+
+    def _show_interaction_hint(self, text: str) -> None:
+        """Float a size / angle read-out near the pointer while dragging a handle."""
+        if not text:
+            self._interaction_hint.hide()
+            return
+        self._interaction_hint.setText(text)
+        self._interaction_hint.adjustSize()
+        pointer = self.viewport().mapFromGlobal(QCursor.pos())
+        x = pointer.x() + 16
+        y = pointer.y() + 16
+        hint = self._interaction_hint
+        x = max(4, min(x, self.viewport().width() - hint.width() - 4))
+        y = max(4, min(y, self.viewport().height() - hint.height() - 4))
+        hint.move(x, y)
+        hint.show()
+        hint.raise_()
 
     def _on_item_changed(self, source_id: str, changes: dict) -> None:
         self.store.update(source_id, **changes)

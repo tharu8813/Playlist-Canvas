@@ -69,7 +69,7 @@ class ShortcutsDialog(QDialog):
                 ("Ctrl+D", "선택 요소 복제" if korean else "Duplicate selected sources"),
                 ("Ctrl+A", "표시 중인 요소 전체 선택" if korean else "Select all visible sources"),
                 ("Esc", "선택 해제" if korean else "Clear selection"),
-                ("Delete", "선택 요소 삭제" if korean else "Delete selected sources"),
+                ("Delete / Backspace", "선택 요소 삭제" if korean else "Delete selected sources"),
                 ("F2", "선택 요소 이름 편집" if korean else "Rename the selected source"),
                 ("Ctrl+Z / Ctrl+Shift+Z", "실행 취소 / 다시 실행" if korean else "Undo / redo"),
             ]),

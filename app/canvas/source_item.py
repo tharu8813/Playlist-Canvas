@@ -39,6 +39,7 @@ class SourceItem(QGraphicsObject):
     changed_by_user = Signal(str, dict)
     duplicate_requested = Signal(str, float, float)
     edit_requested = Signal(str)
+    interaction_hint = Signal(str)
     video_frame_ready = Signal()
 
     _handle_size = 10.0
@@ -1711,6 +1712,7 @@ class SourceItem(QGraphicsObject):
             self.source.rotation = rotation % 360.0
             self.setRotation(self.source.rotation)
             self._queue_user_changes({"rotation": self.source.rotation})
+            self.interaction_hint.emit(f"{self.source.rotation:.0f}°")
             event.accept()
             return
         if self._resizing:
@@ -1752,6 +1754,9 @@ class SourceItem(QGraphicsObject):
             self._resize_to(width, height, handle)
             if scene is not None and hasattr(scene, "update_alignment_guides"):
                 scene.update_alignment_guides(self)  # type: ignore[attr-defined]
+            self.interaction_hint.emit(
+                f"{self.source.width:.0f} × {self.source.height:.0f}"
+            )
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -1761,6 +1766,7 @@ class SourceItem(QGraphicsObject):
         if self._rotating:
             self._rotating = False
             self.unsetCursor()
+            self.interaction_hint.emit("")
             scene = self.scene()
             if scene is not None and hasattr(scene, "finish_item_interaction"):
                 scene.finish_item_interaction()  # type: ignore[attr-defined]
@@ -1772,6 +1778,7 @@ class SourceItem(QGraphicsObject):
             self._resizing = False
             self._resize_handle = None
             self.unsetCursor()
+            self.interaction_hint.emit("")
             scene = self.scene()
             if scene is not None and hasattr(scene, "finish_item_interaction"):
                 scene.finish_item_interaction()  # type: ignore[attr-defined]

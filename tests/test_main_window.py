@@ -5284,6 +5284,27 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.application.processEvents()
         self.assertTrue(self.window.inspector.opacity_spin.isVisible())
 
+    def test_delete_action_also_accepts_backspace(self) -> None:
+        sequences = {
+            sequence.toString() for sequence in self.window.delete_action.shortcuts()
+        }
+        self.assertIn("Del", sequences)
+        self.assertIn("Backspace", sequences)
+
+    def test_canvas_shows_and_clears_the_resize_readout(self) -> None:
+        source = Source(SourceType.TEXT, "Readout", width=200.0, height=100.0)
+        self.window.store.replace([source])
+        self.application.processEvents()
+        item = self.window.canvas._items[source.id]
+
+        item.interaction_hint.emit("240 × 160")
+        self.assertFalse(self.window.canvas._interaction_hint.isHidden())
+        self.assertEqual(
+            self.window.canvas._interaction_hint.text(), "240 × 160",
+        )
+        item.interaction_hint.emit("")
+        self.assertTrue(self.window.canvas._interaction_hint.isHidden())
+
     def test_left_workspace_combines_sources_content_and_layers_as_tabs(self) -> None:
         tabs = self.window.left_tabs
 

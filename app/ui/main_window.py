@@ -540,7 +540,10 @@ class MainWindow(QMainWindow):
         # temporarily disabled with Alt instead of a persistent toolbar toggle.
         self.snap_action = QAction(self)
         self.delete_action = QAction(self)
-        self.delete_action.setShortcut(QKeySequence.StandardKey.Delete)
+        self.delete_action.setShortcuts([
+            QKeySequence(QKeySequence.StandardKey.Delete),
+            QKeySequence(Qt.Key.Key_Backspace),
+        ])
         self.delete_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
         )
