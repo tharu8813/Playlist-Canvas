@@ -953,8 +953,14 @@ class SourceItem(QGraphicsObject):
             + descender_guard,
         )
 
-    def _apply_image_filters(self, pixmap: QPixmap) -> QPixmap:
-        """Apply non-destructive brightness, contrast, and soft blur to an image source."""
+    def _apply_image_filters(
+        self, pixmap: QPixmap, *, include_blur: bool = True,
+    ) -> QPixmap:
+        """Apply non-destructive brightness, contrast, and soft blur to an image source.
+
+        ``include_blur`` is disabled for the album-art ambient background, which
+        already produces its own large blur while it is built.
+        """
         if pixmap.isNull():
             return pixmap
         maximum_dimension = max(pixmap.width(), pixmap.height())
@@ -964,15 +970,34 @@ class SourceItem(QGraphicsObject):
                 round(pixmap.height() * 4096 / maximum_dimension),
                 Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
             )
-        if self.source.brightness == 0 and self.source.contrast == 0 and self.source.blur <= 0:
+        blur = float(self.source.blur) if include_blur else 0.0
+        if self.source.brightness == 0 and self.source.contrast == 0 and blur <= 0:
             return pixmap
         image = apply_color_filters(
             pixmap.toImage(),
             brightness=float(self.source.brightness),
             contrast=float(self.source.contrast),
-            blur=float(self.source.blur),
+            blur=blur,
         )
         return QPixmap.fromImage(image)
+
+    def _adjust_fill_color(self, color: QColor) -> QColor:
+        """Apply this source's brightness/contrast to a solid or gradient fill.
+
+        Colour and gradient backgrounds have no bitmap for
+        :meth:`_apply_image_filters` to touch, so the same math is applied to
+        the paint colour directly. This keeps "darken the background" working
+        identically in the editor, preview, and export.
+        """
+        brightness = self.source.brightness * 2.55
+        contrast = 1.0 + self.source.contrast / 100.0
+        if brightness == 0.0 and contrast == 1.0:
+            return color
+        adjusted = QColor(color)
+        adjusted.setRed(max(0, min(255, round((color.red() - 128) * contrast + 128 + brightness))))
+        adjusted.setGreen(max(0, min(255, round((color.green() - 128) * contrast + 128 + brightness))))
+        adjusted.setBlue(max(0, min(255, round((color.blue() - 128) * contrast + 128 + brightness))))
+        return adjusted
 
     def _sync_transform_origin(self) -> None:
         """Keep Qt rotation and scaling anchored at the visual object centre."""
@@ -1107,11 +1132,18 @@ class SourceItem(QGraphicsObject):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.save()
         painter.setOpacity(self.source.opacity)
-        fill = QBrush(QColor(self.source.fill_color))
+        # Colour / gradient backgrounds carry no bitmap, so brightness and
+        # contrast are folded into the paint colour here instead.
+        tint = (
+            self._adjust_fill_color
+            if self.source.source_type is SourceType.BACKGROUND and self._pixmap.isNull()
+            else (lambda color: color)
+        )
+        fill = QBrush(tint(QColor(self.source.fill_color)))
         if self.source.gradient.enabled:
             gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-            gradient.setColorAt(0, QColor(self.source.gradient.start_color))
-            gradient.setColorAt(1, QColor(self.source.gradient.end_color))
+            gradient.setColorAt(0, tint(QColor(self.source.gradient.start_color)))
+            gradient.setColorAt(1, tint(QColor(self.source.gradient.end_color)))
             fill = QBrush(gradient)
         pen = (
             QPen(QColor(self.source.outline_color), self.source.outline_width)

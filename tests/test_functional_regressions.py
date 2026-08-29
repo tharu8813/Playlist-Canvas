@@ -137,6 +137,49 @@ class FunctionalRegressionTests(unittest.TestCase):
             self.assertGreater(rendered.red(), rendered.blue())
             self.assertEqual(source.fill_color, "#2040D0")
 
+    def test_image_and_background_filters_reach_preview_and_export_capture(self) -> None:
+        with TemporaryDirectory(prefix="playlist-image-filter-") as directory:
+            art = Path(directory) / "photo.png"
+            image = QImage(64, 64, QImage.Format.Format_ARGB32)
+            image.fill(QColor(120, 140, 160))
+            self.assertTrue(image.save(str(art)))
+
+            track = PlaylistTrack(
+                "missing.wav", "Track", duration_seconds=5.0,
+                cover_path=str(art),
+            )
+
+            def captured_center(
+                source_type: SourceType, **source_kwargs: object,
+            ) -> tuple[int, int, int, int]:
+                scene = CanvasScene()
+                source = Source(
+                    source_type, "Filtered", x=10, y=10, width=100, height=70,
+                    **source_kwargs,  # type: ignore[arg-type]
+                )
+                scene.addItem(SourceItem(source))
+                frame = CanvasSnapshot.capture_track(scene, track, 1, 1, 0.0)
+                return frame.pixelColor(50, 40).getRgb()
+
+            # Background element in image mode.
+            plain_bg = captured_center(
+                SourceType.BACKGROUND, background_mode="image", content_path=str(art),
+            )
+            dark_bg = captured_center(
+                SourceType.BACKGROUND, background_mode="image", content_path=str(art),
+                brightness=-45.0,
+            )
+            self.assertLess(sum(dark_bg[:3]), sum(plain_bg[:3]))
+
+            # Track-driven album cover (no explicit content_path).
+            plain_cover = captured_center(
+                SourceType.ALBUM_COVER, image_fit_mode="stretch",
+            )
+            dark_cover = captured_center(
+                SourceType.ALBUM_COVER, image_fit_mode="stretch", brightness=-45.0,
+            )
+            self.assertLess(sum(dark_cover[:3]), sum(plain_cover[:3]))
+
     def test_personal_color_adjustments_blend_and_preserve_alpha(self) -> None:
         personal = QColor("#804020")
         self.assertEqual(

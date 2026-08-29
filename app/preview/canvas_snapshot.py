@@ -785,18 +785,25 @@ class CanvasSnapshot:
                 graphics_item.update()
             if source.source_type is SourceType.ALBUM_COVER and not source.content_path:
                 original_covers.append((graphics_item, QPixmap(graphics_item._pixmap)))
-                graphics_item._pixmap = QPixmap(track_cover)
+                graphics_item._pixmap = graphics_item._apply_image_filters(
+                    QPixmap(track_cover)
+                )
                 graphics_item.update()
             if source.source_type is SourceType.BACKGROUND and source.background_mode == "album_art":
                 original_backgrounds.append((graphics_item, QPixmap(graphics_item._pixmap)))
-                graphics_item._pixmap = (
-                    create_cached_ambient_background(
-                        track.file_path, max(1, round(source.width)),
-                        max(1, round(source.height)), max(18.0, source.blur),
-                        track.cover_path,
+                if source.background_ambient:
+                    graphics_item._pixmap = graphics_item._apply_image_filters(
+                        create_cached_ambient_background(
+                            track.file_path, max(1, round(source.width)),
+                            max(1, round(source.height)), max(18.0, source.blur),
+                            track.cover_path,
+                        ),
+                        include_blur=False,
                     )
-                    if source.background_ambient else QPixmap(track_cover)
-                )
+                else:
+                    graphics_item._pixmap = graphics_item._apply_image_filters(
+                        QPixmap(track_cover)
+                    )
                 graphics_item.update()
             if source.personal_color_enabled and personal_color.isValid():
                 fields = CanvasSnapshot._personal_color_fields(source)
