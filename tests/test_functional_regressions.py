@@ -1468,7 +1468,7 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(item.pos().x(), source.x)
         self.assertAlmostEqual(item.opacity(), 1.0)
 
-    def test_moving_animation_fades_evenly_across_its_exit(self) -> None:
+    def test_moving_animation_stays_legible_then_fades_without_end_pop(self) -> None:
         scene = CanvasScene()
         source = Source(
             SourceType.SHAPE, "Smooth exit", x=100, y=80,
@@ -1484,16 +1484,97 @@ class FunctionalRegressionTests(unittest.TestCase):
             return QImage(1, 1, QImage.Format.Format_ARGB32)
 
         with patch.object(CanvasSnapshot, "capture", side_effect=inspect_opacity):
-            for elapsed in (3.25, 3.5, 3.75):
+            for elapsed in (3.25, 3.5, 3.75, 3.99):
                 CanvasSnapshot.capture_track(
                     scene, track, 1, 1, 0.0, animation_phase="out",
                     elapsed_seconds=elapsed, animation_phase_duration=1.0,
                 )
 
-        self.assertEqual(len(observed), 3)
-        self.assertAlmostEqual(observed[0], 0.9375)
-        self.assertAlmostEqual(observed[1], 0.5)
-        self.assertAlmostEqual(observed[2], 0.0625)
+        self.assertEqual(len(observed), 4)
+        # A slide exit lingers a little longer than a plain fade so it stays
+        # readable while it travels, but keeps dropping every frame and is
+        # nearly gone before the window ends (no final-frame pop).
+        self.assertGreater(observed[0], observed[1])
+        self.assertGreater(observed[1], observed[2])
+        self.assertGreater(observed[2], observed[3])
+        self.assertGreater(observed[0], 0.6)
+        self.assertLess(observed[2], 0.2)
+        self.assertLess(observed[3], 0.02)
+
+    def test_exit_and_entrance_opacity_curves_are_bounded_and_distinct(self) -> None:
+        from app.animation.curves import entrance_opacity, exit_opacity
+
+        styles = ("fade", "slide_left", "zoom", "pop", "rotate")
+        for style in styles:
+            for progress in (i / 20 for i in range(21)):
+                self.assertGreaterEqual(entrance_opacity(style, progress), 0.0)
+                self.assertLessEqual(entrance_opacity(style, progress), 1.0)
+                self.assertGreaterEqual(exit_opacity(style, progress), 0.0)
+                self.assertLessEqual(exit_opacity(style, progress), 1.0)
+            self.assertAlmostEqual(entrance_opacity(style, 0.0), 0.0)
+            self.assertAlmostEqual(entrance_opacity(style, 1.0), 1.0)
+            self.assertAlmostEqual(exit_opacity(style, 0.0), 1.0)
+            self.assertAlmostEqual(exit_opacity(style, 1.0), 0.0)
+        # Every exit fade keeps dropping (monotonic, no mid-window rebound).
+        for style in styles:
+            values = [exit_opacity(style, i / 20) for i in range(21)]
+            self.assertTrue(all(a >= b - 1e-9 for a, b in zip(values, values[1:])))
+        # The styles genuinely differ at the mid-point of the exit.
+        midpoints = {exit_opacity(style, 0.5) for style in styles}
+        self.assertGreaterEqual(len(midpoints), 4)
+
+    def test_timeline_windowed_source_fades_at_its_own_edges(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.SHAPE, "Windowed", x=40, y=40, width=200, height=140,
+            fill_color="#FFFFFF", shape_kind="rectangle",
+            timeline_start=3.0, timeline_duration=6.0,
+            animation_in="fade", animation_in_duration=1.0,
+            animation_out="fade", animation_out_duration=1.0,
+        )
+        scene.addItem(SourceItem(source))
+        track = PlaylistTrack("missing.wav", "Track", duration_seconds=20.0)
+
+        def brightness(seconds: float) -> int:
+            frame = CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0,
+                timeline_seconds=seconds, elapsed_seconds=seconds,
+            )
+            return frame.pixelColor(120, 100).red()
+
+        self.assertLess(brightness(2.9), 40)          # before its window
+        self.assertLess(brightness(3.3), brightness(3.7))   # fading in
+        self.assertGreater(brightness(3.7), 150)
+        self.assertGreater(brightness(6.0), 240)      # steady, fully shown
+        self.assertGreater(brightness(8.3), brightness(8.8))  # fading out
+        self.assertLess(brightness(9.1), 40)          # after its window
+
+    def test_animation_opacity_survives_source_item_paint(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.SHAPE, "Fading", x=0, y=0, width=120, height=120,
+            fill_color="#FFFFFF", shape_kind="rectangle",
+        )
+        item = SourceItem(source)
+        scene.addItem(item)
+        frame = QImage(120, 120, QImage.Format.Format_ARGB32)
+
+        def render() -> int:
+            frame.fill(QColor("#000000"))
+            painter = QPainter(frame)
+            item.paint(painter, None, None)
+            painter.end()
+            return frame.pixelColor(60, 60).red()
+
+        painter_full = render()
+        painter = QPainter(frame)
+        painter.setOpacity(0.4)  # what QGraphicsScene applies for a fading item
+        frame.fill(QColor("#000000"))
+        item.paint(painter, None, None)
+        painter.end()
+        half = frame.pixelColor(60, 60).red()
+        self.assertGreater(painter_full, 240)
+        self.assertLess(half, painter_full - 80)
 
     def test_pop_and_rotate_animations_restore_source_transform(self) -> None:
         scene = CanvasScene()

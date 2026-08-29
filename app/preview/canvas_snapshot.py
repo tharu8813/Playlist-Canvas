@@ -13,6 +13,8 @@ from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.animation.curves import (
     ease_in_out_cubic, ease_in_quint, ease_out_quint,
+    entrance_opacity as entrance_opacity_curve,
+    exit_opacity as exit_opacity_curve,
     hidden_rotation_offset, hidden_scale_factor,
     slide_distance,
 )
@@ -866,23 +868,27 @@ class CanvasSnapshot:
                     graphics_item, original, gradient_original,
                 ))
                 graphics_item.update()
-            if animation_phase:
-                style = graphics_item.source.animation_in if animation_phase == "in" else graphics_item.source.animation_out
+            window_phase, window_progress = CanvasSnapshot._timeline_window_phase(
+                source, global_seconds,
+            )
+            source_has_window = source.timeline_start > 0.0 or source.timeline_duration > 0.0
+            phase = window_phase if source_has_window else animation_phase
+            if phase:
+                style = source.animation_in if phase == "in" else source.animation_out
                 if style != "none":
-                    if animation_phase_duration is not None:
+                    if window_phase is not None:
+                        local_progress = window_progress
+                    elif animation_phase_duration is not None:
                         configured_duration = (
-                            graphics_item.source.animation_in_duration
-                            if animation_phase == "in"
-                            else graphics_item.source.animation_out_duration
+                            source.animation_in_duration
+                            if phase == "in"
+                            else source.animation_out_duration
                         )
                         effective_duration = max(
                             0.001,
-                            min(
-                                configured_duration,
-                                animation_phase_duration,
-                            ),
+                            min(configured_duration, animation_phase_duration),
                         )
-                        if animation_phase == "in":
+                        if phase == "in":
                             raw_progress = elapsed_seconds / effective_duration
                         else:
                             source_exit_start = max(
@@ -891,21 +897,20 @@ class CanvasSnapshot:
                             raw_progress = (
                                 elapsed_seconds - source_exit_start
                             ) / effective_duration
-                        phase_progress = max(0.0, min(1.0, raw_progress))
+                        local_progress = max(0.0, min(1.0, raw_progress))
                     else:
                         # Backwards-compatible path for isolated callers that only
                         # provide normalized animation progress.
-                        phase_progress = max(0.0, min(1.0, animation_progress))
-                    local_progress = max(0.0, min(1.0, phase_progress))
+                        local_progress = max(0.0, min(1.0, animation_progress))
                     motion_progress = (
                         ease_out_quint(local_progress)
-                        if animation_phase == "in" else
+                        if phase == "in" else
                         1.0 - ease_in_quint(local_progress)
                     )
                     opacity_progress = (
-                        ease_in_out_cubic(local_progress)
-                        if animation_phase == "in" else
-                        1.0 - ease_in_out_cubic(local_progress)
+                        entrance_opacity_curve(style, local_progress)
+                        if phase == "in" else
+                        exit_opacity_curve(style, local_progress)
                     )
                     original_transforms.append((
                         graphics_item, graphics_item.pos(), graphics_item.scale(),
@@ -916,15 +921,14 @@ class CanvasSnapshot:
                     if style in {"zoom", "pop", "rotate"}:
                         hidden_scale = hidden_scale_factor(style)
                         graphics_item.setScale(
-                            graphics_item.source.scale
+                            source.scale
                             * (hidden_scale + (1.0 - hidden_scale) * motion_progress)
                         )
                     if style == "rotate":
                         graphics_item.setRotation(
-                            graphics_item.source.rotation
-                            + hidden_rotation_offset(
-                                style, animation_phase == "in",
-                            ) * (1.0 - motion_progress)
+                            source.rotation
+                            + hidden_rotation_offset(style, phase == "in")
+                            * (1.0 - motion_progress)
                         )
                     distance = slide_distance(
                         source.width, source.height,
@@ -934,7 +938,10 @@ class CanvasSnapshot:
                         "slide_up": (0.0, -distance), "slide_down": (0.0, distance),
                     }.get(style)
                     if offset:
-                        graphics_item.setPos(graphics_item.pos().x() + offset[0], graphics_item.pos().y() + offset[1])
+                        graphics_item.setPos(
+                            graphics_item.pos().x() + offset[0],
+                            graphics_item.pos().y() + offset[1],
+                        )
         try:
             effective_capture_rect = capture_rect
             used_partial_render = False
@@ -1018,6 +1025,34 @@ class CanvasSnapshot:
                 graphics_item.setRotation(rotation)
                 graphics_item.setOpacity(opacity)
                 graphics_item._suppress_position_sync = False
+
+    @staticmethod
+    def _timeline_window_phase(
+        source: Source, global_seconds: float,
+    ) -> tuple[str | None, float]:
+        """Return the in/out phase for a source at its own timeline-window edge.
+
+        Sources restricted to a portion of the playlist previously appeared and
+        vanished with a hard cut. When they carry an entrance or exit style,
+        animate them across that style's duration on either side of the window.
+        """
+        start = source.timeline_start
+        duration = source.timeline_duration
+        if start <= 0.0 and duration <= 0.0:
+            return None, 1.0
+        in_duration = (
+            source.animation_in_duration if source.animation_in != "none" else 0.0
+        )
+        out_duration = (
+            source.animation_out_duration if source.animation_out != "none" else 0.0
+        )
+        if in_duration > 0.0 and start <= global_seconds < start + in_duration:
+            return "in", (global_seconds - start) / in_duration
+        if duration > 0.0 and out_duration > 0.0:
+            end = start + duration
+            if end - out_duration <= global_seconds < end:
+                return "out", (global_seconds - (end - out_duration)) / out_duration
+        return None, 1.0
 
     @staticmethod
     def _personal_color_fields(source: Source) -> tuple[str, ...]:

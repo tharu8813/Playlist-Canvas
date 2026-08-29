@@ -1161,7 +1161,10 @@ class SourceItem(QGraphicsObject):
         rect = self.content_rect()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.save()
-        painter.setOpacity(self.source.opacity)
+        # Multiply, never replace: the scene sets the painter opacity to this
+        # item's animated QGraphicsItem.opacity() before paint(), and the entrance
+        # / exit fades rely on that being carried through.
+        painter.setOpacity(painter.opacity() * self.source.opacity)
         # Colour / gradient backgrounds carry no bitmap, so brightness and
         # contrast are folded into the paint colour here instead.
         tint = (

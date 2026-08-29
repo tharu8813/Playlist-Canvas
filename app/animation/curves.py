@@ -43,6 +43,54 @@ def hidden_opacity_factor(style: str) -> float:
     return 0.0 if style != "none" else 1.0
 
 
+_SLIDE_STYLES = frozenset(
+    {"slide_left", "slide_right", "slide_up", "slide_down"}
+)
+
+
+def entrance_opacity(style: str, progress: float) -> float:
+    """Opacity 0..1 while a source appears, shaped to match its motion style."""
+    progress = clamp_progress(progress)
+    if style in _SLIDE_STYLES:
+        # Become readable quickly, then let the slide finish underneath.
+        return progress ** 0.6
+    if style == "zoom":
+        # Grows into place, so the reveal trails the scale slightly.
+        return progress ** 1.6
+    if style == "pop":
+        # Snap in almost instantly for a punchy arrival.
+        return progress ** 0.35
+    if style == "rotate":
+        # Steady reveal while it unwinds.
+        return progress
+    return ease_in_out_cubic(progress)
+
+
+def exit_opacity(style: str, progress: float) -> float:
+    """Remaining opacity 1..0 while a source leaves, shaped per motion style.
+
+    Every curve is monotonically decreasing and reaches near-zero well before
+    the end, so no style snaps out on the final frame; they differ only in how
+    the fade is weighted across the exit.
+    """
+    progress = clamp_progress(progress)
+    if style in _SLIDE_STYLES:
+        # Stay legible as it travels, then fade over the second half.
+        return (1.0 - progress) ** 1.3
+    if style == "zoom":
+        # Dissolve quickly and early while it shrinks away.
+        return (1.0 - progress) ** 3.0
+    if style == "pop":
+        # Hold, then drop out for a punchy exit.
+        if progress < 0.5:
+            return 1.0
+        return 1.0 - ((progress - 0.5) / 0.5) ** 1.5
+    if style == "rotate":
+        # Spin away at a constant, linear fade.
+        return 1.0 - progress
+    return 1.0 - ease_in_out_cubic(progress)
+
+
 def hidden_scale_factor(style: str) -> float:
     return {
         "zoom": 0.90,
