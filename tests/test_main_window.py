@@ -5284,6 +5284,44 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.application.processEvents()
         self.assertTrue(self.window.inspector.opacity_spin.isVisible())
 
+    def test_dependent_inspector_fields_hide_until_their_toggle_is_active(self) -> None:
+        source = Source(SourceType.IMAGE, "Conditional", width=300.0, height=200.0)
+        self.window.store.replace([source])
+        self.window.store.select(source.id)
+        self.window.show()
+        self.application.processEvents()
+        inspector = self.window.inspector
+        widgets = inspector._field_widgets
+
+        # Gradient stops hide until "use gradient" is on.
+        self.assertTrue(widgets["gradient_start"].isHidden())
+        self.assertTrue(widgets["gradient_end"].isHidden())
+        inspector.gradient_check.setChecked(True)
+        self.application.processEvents()
+        self.assertFalse(widgets["gradient_start"].isHidden())
+        inspector.gradient_check.setChecked(False)
+        self.application.processEvents()
+        self.assertTrue(widgets["gradient_start"].isHidden())
+
+        # Outline colour follows the outline width.
+        self.assertTrue(widgets["outline_color"].isHidden())
+        inspector.outline_spin.setValue(4.0)
+        self.application.processEvents()
+        self.assertFalse(widgets["outline_color"].isHidden())
+
+        # Shadow sub-fields follow the shadow toggle.
+        self.assertTrue(widgets["shadow_color"].isHidden())
+        inspector.shadow_check.setChecked(True)
+        self.application.processEvents()
+        self.assertFalse(widgets["shadow_color"].isHidden())
+
+        # Exit-animation duration hides while the style is "none".
+        self.assertTrue(widgets["animation_out_duration"].isHidden())
+        index = inspector.animation_out_combo.findData("fade")
+        inspector.animation_out_combo.setCurrentIndex(index)
+        self.application.processEvents()
+        self.assertFalse(widgets["animation_out_duration"].isHidden())
+
     def test_delete_action_also_accepts_backspace(self) -> None:
         sequences = {
             sequence.toString() for sequence in self.window.delete_action.shortcuts()

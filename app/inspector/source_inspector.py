@@ -861,6 +861,43 @@ class SourceInspector(QScrollArea):
             self._set_field_visible(key, source_type is SourceType.PARTICLE_OVERLAY)
         for key in ("blur", "brightness", "contrast", "shadow", "shadow_color", "shadow_opacity", "shadow_blur", "shadow_x", "shadow_y"):
             self._set_field_visible(key, source_type in self.IMAGE_BACKED_TYPES)
+        self._hide_inactive_dependent_fields(source)
+
+    def _hide_inactive_dependent_fields(self, source: Source | None) -> None:
+        """Show sub-properties only while their enabling toggle or value is set.
+
+        Runs after the type-based pass. Rows that have no independent type rule
+        (gradient/outline/animation-duration) are toggled both ways here; rows
+        that are already type-gated (shadow, level meter, lyric context) are
+        only hidden when their toggle is off and left to the type pass to show.
+        """
+        if source is None:
+            return
+        toggled_both_ways = {
+            "gradient_start": source.gradient.enabled,
+            "gradient_end": source.gradient.enabled,
+            "outline_color": source.outline_width > 0.0,
+            "animation_in_duration": source.animation_in != "none",
+            "animation_out_duration": source.animation_out != "none",
+        }
+        for key, active in toggled_both_ways.items():
+            if key in self._field_widgets:
+                self._set_field_visible(key, active)
+        hidden_when_off = {
+            "text_stroke_color": source.text_stroke_width > 0.0,
+            "shadow_color": source.shadow.enabled,
+            "shadow_opacity": source.shadow.enabled,
+            "shadow_blur": source.shadow.enabled,
+            "shadow_x": source.shadow.enabled,
+            "shadow_y": source.shadow.enabled,
+            "level_meter_peak_hold": source.level_meter_show_peak,
+            "level_meter_peak_decay": source.level_meter_show_peak,
+            "subtitle_previous_opacity": source.subtitle_context_lines > 0,
+            "subtitle_previous_blur": source.subtitle_context_lines > 0,
+        }
+        for key, active in hidden_when_off.items():
+            if not active and key in self._field_widgets:
+                self._set_field_visible(key, False)
 
     @staticmethod
     def _spin(minimum: float, maximum: float, step: float) -> QDoubleSpinBox:
