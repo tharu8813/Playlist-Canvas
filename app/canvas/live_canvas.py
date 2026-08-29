@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from math import ceil, floor
+from pathlib import Path
 
 from PySide6.QtCore import QLineF, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QMenu
 
 from app.canvas.source_item import SourceItem
 from app.models.source import Source
+from app.services.project_content_service import LYRICS_EXTENSIONS
 from app.services.source_store import SourceStore
 from app.utils.i18n import Translator
 from app.widgets.source_template_button import (
@@ -540,7 +542,10 @@ class LiveCanvas(QGraphicsView):
         # Project Content deliberately starts a CopyAction drag.  Do not rely
         # on acceptProposedAction() here: a source/model action mismatch can
         # otherwise leave the Canvas showing the forbidden-drop cursor.
-        if self._local_drop_paths(event):
+        paths = self._local_drop_paths(event)
+        if paths and not any(
+            Path(path).suffix.lower() in LYRICS_EXTENSIONS for path in paths
+        ):
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
             return
@@ -555,7 +560,10 @@ class LiveCanvas(QGraphicsView):
                 return
             event.ignore()
             return
-        if self._local_drop_paths(event):
+        paths = self._local_drop_paths(event)
+        if paths and not any(
+            Path(path).suffix.lower() in LYRICS_EXTENSIONS for path in paths
+        ):
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
             return
@@ -575,7 +583,9 @@ class LiveCanvas(QGraphicsView):
             return
 
         paths = self._local_drop_paths(event)
-        if not paths:
+        if not paths or any(
+            Path(path).suffix.lower() in LYRICS_EXTENSIONS for path in paths
+        ):
             event.ignore()
             return
         self.files_dropped.emit(paths, self.mapToScene(event.position().toPoint()))

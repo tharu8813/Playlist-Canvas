@@ -270,6 +270,16 @@ class ContentLibraryPanel(QWidget):
             self.list.setIconSize(QSize(22, 22) if mode == "compact" else QSize(38, 38))
             self.list.setSpacing(0 if mode == "compact" else 2)
 
+        # QListView view/movement changes may reset drag/drop-related state.
+        # Re-apply the source-only drag policy after presentation settings.
+        self.list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.list.setDragEnabled(True)
+        self.list.setAcceptDrops(False)
+        self.list.setDefaultDropAction(Qt.DropAction.CopyAction)
+        set_drag_actions = getattr(self.list, "setSupportedDragActions", None)
+        if callable(set_drag_actions):
+            set_drag_actions(Qt.DropAction.CopyAction)
+
     def refresh(self) -> None:
         selected_id = self._selected_id()
         self.list.clear()

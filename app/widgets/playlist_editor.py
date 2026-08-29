@@ -6,7 +6,9 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent, QMouseEvent
+from PySide6.QtGui import (
+    QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QKeyEvent, QMouseEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -40,6 +42,7 @@ class PlaylistList(QListWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("playlistList")
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
@@ -47,55 +50,141 @@ class PlaylistList(QListWidget):
         self.setDragEnabled(True)
         self.setSpacing(4)
         self.setFrameShape(QFrame.Shape.NoFrame)
+        self._drop_target_widget: QWidget | None = None
         self.model().rowsMoved.connect(self.order_changed)
 
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        """Accept URLs from Explorer and preserve normal internal dragging."""
-        supported_url = any(
-            url.isLocalFile()
-            and Path(url.toLocalFile()).suffix.lower()
-            in (AUDIO_EXTENSIONS | LYRICS_EXTENSIONS)
+    @staticmethod
+    def _local_paths(event: QDragEnterEvent | QDragMoveEvent | QDropEvent) -> list[str]:
+        if not event.mimeData().hasUrls():
+            return []
+        return [
+            path
             for url in event.mimeData().urls()
-        )
-        if supported_url or event.source() is self:
-            event.acceptProposedAction()
-            return
-        event.ignore()
+            if url.isLocalFile() and (path := url.toLocalFile())
+        ]
 
-    def dragMoveEvent(self, event: QDragEnterEvent) -> None:
-        """Keep a valid drag indicator for supported source data."""
-        self.dragEnterEvent(event)
+    @staticmethod
+    def _refresh_style(widget: QWidget) -> None:
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+        widget.update()
+
+    def _set_drop_active(self, active: bool) -> None:
+        if bool(self.property("dropActive")) == active:
+            return
+        self.setProperty("dropActive", active)
+        self._refresh_style(self)
+        self.viewport().update()
+
+    def _set_drop_target(self, item: QListWidgetItem | None) -> None:
+        widget = self.itemWidget(item) if item is not None else None
+        if widget is self._drop_target_widget:
+            return
+        if self._drop_target_widget is not None:
+            self._drop_target_widget.setProperty("dropTarget", False)
+            self._refresh_style(self._drop_target_widget)
+        self._drop_target_widget = widget
+        if widget is not None:
+            widget.setProperty("dropTarget", True)
+            self._refresh_style(widget)
+
+    def _clear_drop_feedback(self) -> None:
+        self._set_drop_target(None)
+        self._set_drop_active(False)
+
+    def _update_external_drag(
+        self, event: QDragEnterEvent | QDragMoveEvent,
+    ) -> bool:
+        paths = self._local_paths(event)
+        lyrics_paths = [
+            path for path in paths
+            if Path(path).suffix.lower() in LYRICS_EXTENSIONS
+        ]
+        media_paths = [
+            path for path in paths
+            if Path(path).suffix.lower() in AUDIO_EXTENSIONS
+        ]
+        if not lyrics_paths and not media_paths:
+            self._clear_drop_feedback()
+            event.ignore()
+            return False
+
+        target_item = self.itemAt(event.position().toPoint())
+        # Lyrics belong to one exact track.  Even inside the Playlist, keep the
+        # forbidden cursor until the pointer is over a real track row.
+        if lyrics_paths and target_item is None:
+            self._clear_drop_feedback()
+            event.ignore()
+            return False
+
+        self._set_drop_active(True)
+        self._set_drop_target(target_item if lyrics_paths else None)
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        return True
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Accept audio anywhere in the list and lyrics only on a track row."""
+        if event.source() is self:
+            self._clear_drop_feedback()
+            super().dragEnterEvent(event)
+            return
+        self._update_external_drag(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        """Highlight the exact lyric target while the drag cursor moves."""
+        if event.source() is self:
+            self._clear_drop_feedback()
+            super().dragMoveEvent(event)
+            return
+        self._update_external_drag(event)
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        """Remove temporary drag-over highlighting when the pointer leaves."""
+        self._clear_drop_feedback()
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        """Import media or attach dropped lyrics to the row under the pointer."""
-        if event.mimeData().hasUrls() and event.source() is not self:
-            paths = [
-                url.toLocalFile() for url in event.mimeData().urls()
-                if url.isLocalFile() and url.toLocalFile()
-            ]
-            lyrics_paths = [
-                path for path in paths
-                if Path(path).suffix.lower() in LYRICS_EXTENSIONS
-            ]
-            media_paths = [
-                path for path in paths
-                if Path(path).suffix.lower() in AUDIO_EXTENSIONS
-            ]
-            target_item = self.itemAt(event.position().toPoint())
-            target_id = (
-                str(target_item.data(Qt.ItemDataRole.UserRole))
-                if target_item is not None else ""
-            )
-            for path in lyrics_paths:
-                self.lyrics_dropped.emit(path, target_id)
-            if media_paths:
-                self.files_dropped.emit(media_paths)
-            if lyrics_paths or media_paths:
-                event.acceptProposedAction()
-            else:
-                event.ignore()
+        """Import audio or attach lyrics only to the highlighted track row."""
+        if event.source() is self:
+            self._clear_drop_feedback()
+            super().dropEvent(event)
             return
-        super().dropEvent(event)
+
+        paths = self._local_paths(event)
+        lyrics_paths = [
+            path for path in paths
+            if Path(path).suffix.lower() in LYRICS_EXTENSIONS
+        ]
+        media_paths = [
+            path for path in paths
+            if Path(path).suffix.lower() in AUDIO_EXTENSIONS
+        ]
+        target_item = self.itemAt(event.position().toPoint())
+
+        # Do not emit a lyrics signal with an empty track id.  Ignoring here
+        # keeps the drop forbidden and avoids the old "drop on a track" popup.
+        if lyrics_paths and target_item is None:
+            self._clear_drop_feedback()
+            event.ignore()
+            return
+
+        target_id = (
+            str(target_item.data(Qt.ItemDataRole.UserRole))
+            if target_item is not None else ""
+        )
+        self._clear_drop_feedback()
+
+        for path in lyrics_paths:
+            self.lyrics_dropped.emit(path, target_id)
+        if media_paths:
+            self.files_dropped.emit(media_paths)
+        if lyrics_paths or media_paths:
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            return
+        event.ignore()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Expose common playlist editing actions without fragile global shortcuts."""

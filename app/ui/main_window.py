@@ -85,7 +85,7 @@ from app.models.project import CanvasSettings, ProjectDocument, ProjectSettings
 from app.services.project_service import ProjectError, ProjectService
 from app.services.project_save_worker import ProjectSaveWorker
 from app.services.project_media_service import ProjectMediaService
-from app.services.project_content_service import ProjectContentService
+from app.services.project_content_service import LYRICS_EXTENSIONS, ProjectContentService
 from app.services.recent_projects_service import RecentProjectsService
 from app.services.autosave_service import AutosaveService
 from app.services.history_service import HistoryService
@@ -2128,23 +2128,40 @@ class MainWindow(QMainWindow):
         )
         return True
 
+    @staticmethod
+    def _window_drop_paths(event: QDragEnterEvent | QDropEvent) -> list[str]:
+        if not event.mimeData().hasUrls():
+            return []
+        return [
+            path
+            for url in event.mimeData().urls()
+            if url.isLocalFile() and (path := url.toLocalFile())
+        ]
+
+    @staticmethod
+    def _drop_contains_lyrics(paths: list[str]) -> bool:
+        return any(
+            Path(path).suffix.lower() in LYRICS_EXTENSIONS for path in paths
+        )
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        """Accept local file URLs dropped anywhere outside a specialized child widget."""
-        if event.mimeData().hasUrls() and any(
-            url.isLocalFile() for url in event.mimeData().urls()
-        ):
+        """Accept general files globally, but reserve lyrics for Playlist rows."""
+        paths = self._window_drop_paths(event)
+        if paths and not self._drop_contains_lyrics(paths):
             event.acceptProposedAction()
             return
+        # A lyric drag rejected by child widgets must stay rejected here too;
+        # otherwise it bubbles to MainWindow and the cursor becomes allowed.
         event.ignore()
 
     def dragMoveEvent(self, event: QDragEnterEvent) -> None:
-        """Keep the whole application window available as a drop target."""
+        """Keep lyrics forbidden everywhere except a Playlist track target."""
         self.dragEnterEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        """Route project, image, and audio file drops from the overall workspace."""
-        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
-        if not paths:
+        """Route general file drops while refusing lyrics outside Playlist rows."""
+        paths = self._window_drop_paths(event)
+        if not paths or self._drop_contains_lyrics(paths):
             event.ignore()
             return
         self._handle_dropped_files(paths)
@@ -6451,8 +6468,10 @@ class MainWindow(QMainWindow):
             #inspectorEmptyState {{ color: {colors['muted']}; font-size: 14px; background: {colors['panel']}; }}
             QHeaderView::section {{ background: {colors['alternate']}; color: {colors['text']}; border: 0; border-bottom: 1px solid {colors['border']}; padding: 5px; }}
             QTreeWidget::item:selected, QListWidget::item:selected {{ background: #1685D1; color: #FFFFFF; border-radius: 5px; }}
+            #playlistList[dropActive="true"] {{ border: 1px solid #1685D1; border-radius: 8px; }}
             #trackRow {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 8px; }}
             #trackRow:hover {{ background: {colors['hover']}; }}
+            #trackRow[dropTarget="true"] {{ background: {colors['hover']}; border: 2px solid #1685D1; }}
             QGroupBox {{ color: {colors['text']}; font-weight: 600; border: 1px solid {colors['border']}; border-radius: 8px; margin-top: 10px; padding: 10px 7px 7px 7px; }}
             QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}
             QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{ background: {colors['field']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 6px; padding: 5px; min-height: 18px; selection-background-color: #1685D1; selection-color: #FFFFFF; }}
