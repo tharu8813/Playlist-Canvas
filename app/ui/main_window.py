@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from heapq import heappop, heappush
 import json
 import logging
 from pathlib import Path
@@ -19,8 +18,8 @@ from tempfile import TemporaryDirectory
 from PySide6.QtCore import (QByteArray, QEvent, QEventLoop, QMimeData, QProcess, QSettings,
                             QStandardPaths, Qt, QTimer)
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QCloseEvent, QDragEnterEvent,
-                           QDropEvent, QFontDatabase, QIcon, QImage, QImageWriter,
-                           QKeySequence, QPainter, QPalette, QPen, QPixmap)
+                           QDropEvent, QFontDatabase, QIcon, QImage, QImageReader,
+                           QImageWriter, QKeySequence, QPainter, QPalette, QPen, QPixmap)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -28,6 +27,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -116,17 +116,15 @@ from app.services.update_service import (
 )
 from app.services.update_worker import UpdateCheckWorker, UpdateDownloadWorker
 from app.presets.preset_service import PresetDefinition
+from app.presets.user_preset_service import UserPresetError, UserPresetService
 from app.preview.canvas_snapshot import CanvasSnapshot
-from app.preview.album_art import adjust_personal_color, extract_track_personal_color
-from app.preview.export_canvas_capture import ExportCanvasCapturer
+from app.preview.album_art import (
+    adjust_personal_color, extract_track_cover, extract_track_personal_color,
+)
+from app.preview.export_plan import build_export_plan, canvas_render_scale
+from app.preview.export_session import ExportSession, PngStaging
 from app.preview.gpu_texture_surface import (
     GPU_TEXTURE_SURFACE_AVAILABLE, GpuTexturePreviewSurface,
-)
-from app.renderer.export_timeline import ExportFrameSample, ExportTimelinePlanner
-from app.renderer.static_video_stream import (
-    DirectVideoEncodingProfile,
-    StaticVideoStreamEncoder,
-    StaticVideoStreamError,
 )
 from app.renderer.png_frame_staging import (
     PngFrameStagingCancelled,
@@ -142,8 +140,6 @@ from app.renderer.ffmpeg_renderer import (
     RenderError,
     RenderFrame,
     RenderSettings,
-    PreparedVideoInput,
-    PreparedStaticOverlayLayer,
     RenderResult,
     VisualizerOverlay,
     VideoClipOverlay,
@@ -342,6 +338,9 @@ class MainWindow(QMainWindow):
             self._finish_canvas_animation_preview
         )
         self._animation_preview_active = False
+        self._animation_preview_cancel_armed = False
+        self.store.source_changed.connect(self._cancel_animation_preview)
+        self.store.selection_set_changed.connect(self._cancel_animation_preview)
         self._inline_preview: ExportPreviewDialog | None = None
         self._inline_preview_controls: QWidget | None = None
         self._inline_preview_track_panel: QWidget | None = None
@@ -386,6 +385,7 @@ class MainWindow(QMainWindow):
         self._sidebar_transition = False
         self._panel_transition_serial = {"left": 0, "right": 0, "bottom": 0}
         self._render_worker: RenderWorker | None = None
+        self._active_export_session: ExportSession | None = None
         self._export_frame_staging: TemporaryDirectory[str] | None = None
         self._export_frame_index = 0
         self._export_capture_count = 0
@@ -440,6 +440,8 @@ class MainWindow(QMainWindow):
         self._build_zoom_controls()
         self._apply_style()
         self._add_welcome_sources()
+        if QSettings().value("interface/sample_data_preview", False, type=bool):
+            self.sample_data_action.setChecked(True)
         self.translator.language_changed.connect(self.retranslate)
         self.translator.language_changed.connect(
             lambda: self.activity_progress.set_korean(
@@ -538,6 +540,11 @@ class MainWindow(QMainWindow):
         self.grid_action.setChecked(True)
         self.grid_action.toggled.connect(self._toggle_grid)
         toolbar.addAction(self.grid_action)
+        self.sample_data_action = QAction(self)
+        self.sample_data_action.setCheckable(True)
+        self.sample_data_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self.sample_data_action.toggled.connect(self._toggle_sample_data)
+        toolbar.addAction(self.sample_data_action)
         # Kept as a non-toolbar action for legacy translated text; snapping is now
         # temporarily disabled with Alt instead of a persistent toolbar toggle.
         self.snap_action = QAction(self)
@@ -1121,6 +1128,17 @@ class MainWindow(QMainWindow):
         for source in selected:
             self.store.update(source.id, locked=should_lock)
 
+    def _unlock_all_sources(self) -> None:
+        """Clear the lock flag on every locked source, from any entry point."""
+        unlocked = self.store.unlock_all()
+        if unlocked:
+            korean = self.translator.language is Language.KOREAN
+            self.statusBar().showMessage(
+                f"{unlocked}개 요소의 잠금을 해제했습니다." if korean
+                else f"Unlocked {unlocked} source(s).",
+                3000,
+            )
+
     def _handle_canvas_context_command(self, command: str) -> None:
         """Route Canvas menu commands through the editor's shared operations."""
         handlers = {
@@ -1138,10 +1156,13 @@ class MainWindow(QMainWindow):
             "align_top": lambda: self._align_selected_sources("top"),
             "align_vcenter": lambda: self._align_selected_sources("vcenter"),
             "align_bottom": lambda: self._align_selected_sources("bottom"),
+            "distribute_horizontal": lambda: self._distribute_selected_sources("horizontal"),
+            "distribute_vertical": lambda: self._distribute_selected_sources("vertical"),
             "group": self._group_selected_sources,
             "ungroup": self._ungroup_selected_sources,
             "toggle_visible": self._toggle_selected_visibility,
             "toggle_lock": self._toggle_selected_lock,
+            "unlock_all_layers": self._unlock_all_sources,
             "select_all": self._select_all_canvas_sources,
             "fit_canvas": self.canvas_fit,
         }
@@ -1180,6 +1201,29 @@ class MainWindow(QMainWindow):
                 self.store.update(source.id, y=(top + bottom - height) / 2)
             elif mode == "bottom":
                 self.store.update(source.id, y=bottom - height)
+
+    def _distribute_selected_sources(self, axis: str) -> None:
+        """Space three or more selected sources with equal gaps along one axis.
+
+        The outermost two sources keep their positions; the ones between them
+        are moved so every gap between adjacent edges is identical.
+        """
+        sources = self._selected_editable_sources()
+        if len(sources) < 3:
+            return
+        horizontal = axis == "horizontal"
+        ordered = sorted(sources, key=lambda source: source.x if horizontal else source.y)
+        extents = [
+            (source.width if horizontal else source.height) * source.scale
+            for source in ordered
+        ]
+        start = ordered[0].x if horizontal else ordered[0].y
+        end = (ordered[-1].x if horizontal else ordered[-1].y) + extents[-1]
+        gap = (end - start - sum(extents)) / (len(ordered) - 1)
+        cursor = start
+        for source, extent in zip(ordered, extents):
+            self.store.update(source.id, **{"x" if horizontal else "y": cursor})
+            cursor += extent + gap
 
     def _toggle_selected_visibility(self) -> None:
         """Show or hide all selected Canvas sources as one operation."""
@@ -1224,6 +1268,9 @@ class MainWindow(QMainWindow):
         self.project_menu.addAction(self.project_settings_action)
         self.project_menu.addSeparator()
         self.project_menu.addAction(self.presets_action)
+        self.save_preset_action = QAction(self)
+        self.save_preset_action.triggered.connect(self._save_current_as_preset)
+        self.project_menu.addAction(self.save_preset_action)
         self.project_menu.addAction(self.ai_project_builder_action)
         self.project_menu.addSeparator()
         self.upgrade_project_action = QAction(self)
@@ -1298,6 +1345,7 @@ class MainWindow(QMainWindow):
         self.view_menu = menu_bar.addMenu("")
         self.view_menu.addAction(self.fit_action)
         self.view_menu.addAction(self.grid_action)
+        self.view_menu.addAction(self.sample_data_action)
         self.view_menu.addSeparator()
         self.view_menu.addAction(self.panels_action)
         self.view_menu.addAction(self.inspector_panel_action)
@@ -1491,7 +1539,10 @@ class MainWindow(QMainWindow):
             self.canvas_stack.setCurrentWidget(self.canvas)
         center_layout.addWidget(self.canvas_stack, 1)
         top_splitter.addWidget(center)
-        self.inspector = SourceInspector(self.store, self.translator)
+        self.inspector = SourceInspector(
+            self.store, self.translator,
+            tracks_provider=lambda: self.playlist_service.tracks,
+        )
         self.inspector.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding,
         )
@@ -3030,6 +3081,136 @@ class MainWindow(QMainWindow):
         )
         return answer == QMessageBox.StandardButton.Yes
 
+    def _report_export_preparation_progress(
+        self, fraction: float, detail: str,
+    ) -> None:
+        """Show one Canvas-preparation progress update from the export session."""
+        if self._export_dialog is None:
+            return
+        self._export_dialog.update_progress(
+            "Preparing visual frames", fraction, detail,
+        )
+        self.activity_progress.update("export", fraction, detail)
+
+    def _cancel_active_export_session(self) -> None:
+        """Stop the running export session's encoders and PNG pipeline, if any."""
+        session = self._active_export_session
+        self._active_export_session = None
+        if session is not None:
+            session.cancel_streams()
+        else:
+            self._cancel_export_png_pipeline()
+
+    def _resolve_export_render_settings(
+        self, renderer: FFmpegRenderer, requested_app_settings: AppSettings,
+        output: str, save_as_default: bool,
+    ) -> tuple[list, RenderSettings, AppSettings, str, bool] | None:
+        """Resolve the encoder and run the export preflight.
+
+        Returns ``(active_tracks, render_settings, effective_app_settings,
+        encoder_label, automatic)`` on success, or ``None`` when the user
+        cancelled or the preflight failed (a dialog was already shown).
+        """
+        korean = self.translator.language is Language.KOREAN
+        automatic_encoder = (
+            requested_app_settings.video_codec == AUTO_VIDEO_ENCODER
+        )
+        effective_encoder = (
+            VideoEncoderAdvisor.automatic_encoder()
+            if automatic_encoder else requested_app_settings.video_codec
+        )
+        selected_app_settings = replace(
+            requested_app_settings, video_codec=effective_encoder,
+        )
+        active_tracks = [track for track in self.playlist_service.tracks if track.enabled]
+        if not active_tracks:
+            QMessageBox.warning(
+                self,
+                "내보내기 오류" if korean else "Export error",
+                "내보낼 음악을 하나 이상 선택하세요."
+                if korean else "Select at least one music track to export.",
+            )
+            return None
+        render_settings = selected_app_settings.render_settings()
+        try:
+            renderer.preflight_export(active_tracks, output, render_settings)
+        except EncoderUnavailableError as error:
+            if not (
+                automatic_encoder
+                and effective_encoder == NVIDIA_H264_ENCODER
+            ):
+                QMessageBox.critical(
+                    self,
+                    "내보내기 사전 검사 실패" if korean else "Export preflight failed",
+                    str(error),
+                )
+                return None
+            answer = QMessageBox.warning(
+                self,
+                "NVIDIA 인코더 사용 실패" if korean else "NVIDIA encoder failed",
+                (
+                    "NVIDIA GPU를 감지하여 NVENC 인코더를 자동으로 시도했지만 "
+                    "사용할 수 없습니다. 그래픽 드라이버, 다른 프로그램의 GPU 인코딩 "
+                    "사용 또는 FFmpeg 호환성 문제일 수 있습니다.\n\n"
+                    f"오류 내용:\n{error}\n\n"
+                    "CPU H.264 인코더로 다시 검사하고 내보내기를 계속할까요? "
+                    "속도는 느릴 수 있지만 결과 영상의 해상도와 FPS는 유지됩니다."
+                )
+                if korean else
+                (
+                    "An NVIDIA GPU was detected and NVENC was tried automatically, "
+                    "but it could not be used. The GPU driver, another application's "
+                    "encoder session, or FFmpeg compatibility may be the cause.\n\n"
+                    f"Error:\n{error}\n\n"
+                    "Retry the preflight and continue export with CPU H.264? It may "
+                    "be slower, but the output resolution and FPS will be preserved."
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return None
+            effective_encoder = CPU_H264_ENCODER
+            selected_app_settings = replace(
+                requested_app_settings, video_codec=effective_encoder,
+            )
+            render_settings = selected_app_settings.render_settings()
+            try:
+                renderer.preflight_export(active_tracks, output, render_settings)
+            except RenderError as cpu_error:
+                QMessageBox.critical(
+                    self,
+                    "CPU 인코더 검사 실패" if korean else "CPU encoder check failed",
+                    str(cpu_error),
+                )
+                return None
+        except RenderError as error:
+            QMessageBox.critical(
+                self, "내보내기 사전 검사 실패" if korean else "Export preflight failed",
+                str(error),
+            )
+            return None
+        if save_as_default:
+            # Preserve "Automatic" as the preference; the concrete encoder is
+            # selected again for the hardware available at the next export.
+            self.settings_service.save(requested_app_settings)
+        encoder_name = next(
+            (
+                label for label, codec in VIDEO_ENCODERS.items()
+                if codec == selected_app_settings.video_codec
+            ),
+            selected_app_settings.video_codec,
+        )
+        if automatic_encoder:
+            encoder_name = (
+                f"자동 선택 → {encoder_name}"
+                if korean else f"Automatic → {encoder_name}"
+            )
+        return (
+            active_tracks, render_settings, selected_app_settings,
+            encoder_name, automatic_encoder,
+        )
+
     def _export_video(self) -> None:
         """Render the static Canvas and enabled playlist tracks to an MP4 file."""
         korean = self.translator.language is Language.KOREAN
@@ -3091,102 +3272,42 @@ class MainWindow(QMainWindow):
         if export_options.exec() != export_options.DialogCode.Accepted:
             return
         requested_app_settings = export_options.app_settings
-        automatic_encoder = (
-            requested_app_settings.video_codec == AUTO_VIDEO_ENCODER
-        )
-        effective_encoder = (
-            VideoEncoderAdvisor.automatic_encoder()
-            if automatic_encoder else requested_app_settings.video_codec
-        )
-        selected_app_settings = replace(
-            requested_app_settings, video_codec=effective_encoder,
-        )
         quality_profile_name = export_options.quality_mode_combo.currentText()
         output = str(export_options.output_path)
-        active_tracks = [track for track in self.playlist_service.tracks if track.enabled]
-        if not active_tracks:
-            QMessageBox.warning(
-                self,
-                "내보내기 오류" if korean else "Export error",
-                "내보낼 음악을 하나 이상 선택하세요."
-                if korean else "Select at least one music track to export.",
-            )
+        resolved = self._resolve_export_render_settings(
+            renderer, requested_app_settings, output,
+            export_options.save_as_default,
+        )
+        if resolved is None:
             return
-        render_settings = selected_app_settings.render_settings()
-        try:
-            renderer.preflight_export(active_tracks, output, render_settings)
-        except EncoderUnavailableError as error:
-            if not (
-                automatic_encoder
-                and effective_encoder == NVIDIA_H264_ENCODER
-            ):
-                QMessageBox.critical(
-                    self,
-                    "내보내기 사전 검사 실패" if korean else "Export preflight failed",
-                    str(error),
-                )
-                return
-            answer = QMessageBox.warning(
+        (
+            active_tracks, render_settings, selected_app_settings,
+            encoder_name, automatic_encoder,
+        ) = resolved
+        render_scale = canvas_render_scale(
+            self.canvas.scene_model, render_settings,
+        )
+        upscale_warnings = self._export_upscale_warnings(
+            active_tracks, render_settings, render_scale, korean,
+        )
+        if upscale_warnings:
+            listed = "\n".join(upscale_warnings[:5])
+            if QMessageBox.question(
                 self,
-                "NVIDIA 인코더 사용 실패" if korean else "NVIDIA encoder failed",
+                "낮은 해상도 이미지" if korean else "Low-resolution images",
                 (
-                    "NVIDIA GPU를 감지하여 NVENC 인코더를 자동으로 시도했지만 "
-                    "사용할 수 없습니다. 그래픽 드라이버, 다른 프로그램의 GPU 인코딩 "
-                    "사용 또는 FFmpeg 호환성 문제일 수 있습니다.\n\n"
-                    f"오류 내용:\n{error}\n\n"
-                    "CPU H.264 인코더로 다시 검사하고 내보내기를 계속할까요? "
-                    "속도는 느릴 수 있지만 결과 영상의 해상도와 FPS는 유지됩니다."
-                )
-                if korean else
-                (
-                    "An NVIDIA GPU was detected and NVENC was tried automatically, "
-                    "but it could not be used. The GPU driver, another application's "
-                    "encoder session, or FFmpeg compatibility may be the cause.\n\n"
-                    f"Error:\n{error}\n\n"
-                    "Retry the preflight and continue export with CPU H.264? It may "
-                    "be slower, but the output resolution and FPS will be preserved."
+                    "다음 이미지 소스는 원본 해상도보다 크게 표시되어 흐릿할 수 "
+                    f"있습니다:\n\n{listed}\n\n더 큰 이미지를 사용하면 화질이 "
+                    "좋아집니다. 그대로 내보낼까요?"
+                    if korean else
+                    "These image sources are shown larger than their source "
+                    f"resolution and may look soft:\n\n{listed}\n\nUsing larger "
+                    "images improves quality. Export anyway?"
                 ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+                QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
                 return
-            effective_encoder = CPU_H264_ENCODER
-            selected_app_settings = replace(
-                requested_app_settings, video_codec=effective_encoder,
-            )
-            render_settings = selected_app_settings.render_settings()
-            try:
-                renderer.preflight_export(active_tracks, output, render_settings)
-            except RenderError as cpu_error:
-                QMessageBox.critical(
-                    self,
-                    "CPU 인코더 검사 실패" if korean else "CPU encoder check failed",
-                    str(cpu_error),
-                )
-                return
-        except RenderError as error:
-            QMessageBox.critical(
-                self, "내보내기 사전 검사 실패" if korean else "Export preflight failed",
-                str(error),
-            )
-            return
-        if export_options.save_as_default:
-            # Preserve "Automatic" as the preference; the concrete encoder is
-            # selected again for the hardware available at the next export.
-            self.settings_service.save(requested_app_settings)
-        encoder_name = next(
-            (
-                label for label, codec in VIDEO_ENCODERS.items()
-                if codec == selected_app_settings.video_codec
-            ),
-            selected_app_settings.video_codec,
-        )
-        if automatic_encoder:
-            encoder_name = (
-                f"자동 선택 → {encoder_name}"
-                if korean else f"Automatic → {encoder_name}"
-            )
         work_mode_name = {
             WORK_MODE_STABLE: "안정" if korean else "Stable",
             WORK_MODE_AUTO: "자동" if korean else "Automatic",
@@ -3271,574 +3392,64 @@ class MainWindow(QMainWindow):
             )
             self._resume_close_after_export_cancel()
             return
-        active_stream_encoders: dict[str, StaticVideoStreamEncoder] = {}
-
-        def cancel_static_streams() -> None:
-            for encoder in tuple(active_stream_encoders.values()):
-                encoder.cancel()
-            active_stream_encoders.clear()
-            self._cancel_export_png_pipeline()
-
+        self._active_export_session = None
         try:
             animation_fps = self._export_animation_sample_rate(render_settings.fps)
             playlist_duration = self._playlist_duration(active_tracks)
-            visualizers = self._export_visualizers(active_tracks)
+            visualizers = self._export_visualizers(active_tracks, render_scale)
             video_clips = self._export_video_clips(
                 active_tracks, playlist_duration, render_settings.work_mode,
+                render_scale,
             )
-            sources = self.store.sources()
-            dynamic_visualizer_ids = {source.id for source in sources
-                                      if source.source_type in {
-                                          SourceType.AUDIO_VISUALIZER, SourceType.AUDIO_WAVEFORM,
-                                          SourceType.AUDIO_LEVEL_METER, SourceType.PARTICLE_OVERLAY,
-                                          SourceType.VIDEO,
-                                      } and source.visible}
-            broad_z_bands = CanvasSnapshot.z_bands(
-                self.canvas.scene_model, dynamic_visualizer_ids,
+            plan = build_export_plan(
+                self.canvas.scene_model, active_tracks, self.store.sources(),
+                render_settings, playlist_duration, visualizers, video_clips,
+                renderer, animation_fps,
             )
-            preserve_direct_stream = (
-                len(broad_z_bands) == 1 and not visualizers and not video_clips
-            )
-            z_bands = (
-                broad_z_bands
-                if preserve_direct_stream else
-                CanvasSnapshot.split_mixed_capture_bands(
-                    self.canvas.scene_model,
-                    dynamic_visualizer_ids,
-                    broad_z_bands,
-                    playlist_duration,
-                )
-            )
-            LOGGER.info(
-                "Canvas capture bands: broad=%d split=%d direct_preserved=%s",
-                len(broad_z_bands), len(z_bands), preserve_direct_stream,
-            )
-            direct_final_stream = (
-                len(z_bands) == 1 and not visualizers and not video_clips
-            )
-            use_streamed_visuals = True
-            required_stream_encoders = [] if direct_final_stream else ["libx264rgb"]
-            if len(z_bands) > 1:
-                required_stream_encoders.append("ffv1")
-            for stream_encoder_name in required_stream_encoders:
-                try:
-                    renderer.ensure_encoder_available(stream_encoder_name)
-                except RenderError as error:
-                    # Custom FFmpeg builds may omit the lossless RGB encoder.
-                    # Preserve the known-good PNG path instead of making those
-                    # installations unable to export otherwise supported videos.
-                    LOGGER.warning(
-                        "Lossless Canvas streaming unavailable; using PNG staging: %s",
-                        error,
-                    )
-                    use_streamed_visuals = False
-                    break
             if not self._prepare_export_staging_space(
-                render_settings, playlist_duration, len(z_bands),
-                use_streamed_visuals, korean,
+                render_settings, playlist_duration, len(plan.z_bands),
+                plan.use_streamed_visuals, korean,
             ):
                 raise RenderCancelledError("Export cancelled at the disk-space check.")
-            stream_specs: list[tuple[str, Path, bool, int]] = []
-            if use_streamed_visuals:
-                assert self._export_frame_staging is not None
-                stream_root = Path(self._export_frame_staging.name)
-                stream_specs.append(("base", stream_root / "canvas-base.mkv", False, 3))
-                stream_specs.extend(
-                    (
-                        f"layer:{index}",
-                        stream_root / f"canvas-layer-{index:02d}.mkv",
-                        True,
-                        2,
-                    )
-                    for index, _band in enumerate(z_bands[1:])
-                )
-
-            stream_timeline_samples = ExportTimelinePlanner.build_by_z_band(
-                active_tracks,
-                sources,
-                dynamic_visualizer_ids,
-                z_bands,
-                animation_fps,
+            stream_root = (
+                Path(self._export_frame_staging.name)
+                if plan.use_streamed_visuals and self._export_frame_staging is not None
+                else None
             )
-            if (
-                not stream_timeline_samples
-                or any(not samples for samples in stream_timeline_samples.values())
-            ):
-                raise RenderError(
-                    "The export timeline does not contain any renderable duration."
-                )
-            independent_capture_count = sum(
-                len(samples) for samples in stream_timeline_samples.values()
-            )
-            total_preparation_captures = max(1, independent_capture_count)
-            invariant_stream_keys: set[str] = set()
-            sparse_invariant_stream_keys: set[str] = set()
-            state_key_skipped_captures = 0
-
-            def pump_preparation_ui(track_number: int, stream_key: str) -> None:
-                """Keep the preparation dialog responsive during visual staging."""
-                completed_captures = min(
-                    self._export_capture_count, total_preparation_captures,
-                )
-                if (
-                    completed_captures % 4 != 0
-                    and completed_captures != total_preparation_captures
-                ) or self._export_dialog is None:
-                    return
-                track_position = f"{track_number}/{len(active_tracks)}"
-                preparation_fraction = (
-                    completed_captures / total_preparation_captures
-                )
-                overall_fraction = (
-                    preparation_fraction * EXPORT_PREPARATION_PROGRESS_WEIGHT
-                )
-                preparation_percent = round(preparation_fraction * 100)
-                if use_streamed_visuals:
-                    korean_detail = (
-                        f"장면을 영상으로 준비하는 중 · {track_position}번 곡 · "
-                        f"전체 {preparation_percent}% · 장면 "
-                        f"{completed_captures:,}/{total_preparation_captures:,}"
-                    )
-                    english_detail = (
-                        f"Preparing scenes for the video · track {track_position} · "
-                        f"{preparation_percent}% overall · "
-                        f"{completed_captures:,}/{total_preparation_captures:,} scenes"
-                    )
-                else:
-                    pending_png_frames = (
+            export_session = ExportSession(
+                scene=self.canvas.scene_model,
+                renderer=renderer,
+                plan=plan,
+                render_settings=render_settings,
+                active_tracks=active_tracks,
+                stream_root=stream_root,
+                preparation_cancel=preparation_cancel,
+                korean=korean,
+                staging=PngStaging(
+                    stage_frame=self._stage_export_frame,
+                    start_pipeline=lambda capacity: self._start_export_png_pipeline(
+                        preparation_cancel, queue_capacity=capacity,
+                    ),
+                    finish_pipeline=self._finish_export_png_pipeline,
+                    cancel_pipeline=self._cancel_export_png_pipeline,
+                    pending_frames=lambda: (
                         self._export_png_pipeline.pending_frames
                         if self._export_png_pipeline is not None else 0
-                    )
-                    korean_detail = (
-                        f"장면을 영상으로 준비하는 중 · {track_position}번 곡 · "
-                        f"전체 {preparation_percent}% · 장면 "
-                        f"{completed_captures:,}/{total_preparation_captures:,} · "
-                        f"저장 대기 {pending_png_frames}개"
-                    )
-                    english_detail = (
-                        f"Preparing scenes for the video · track {track_position} · "
-                        f"{preparation_percent}% overall · "
-                        f"{completed_captures:,}/{total_preparation_captures:,} scenes · "
-                        f"{pending_png_frames} waiting to save"
-                    )
-                self._export_dialog.update_progress(
-                    "Preparing visual frames",
-                    overall_fraction,
-                    korean_detail if korean else english_detail,
-                )
-                self.activity_progress.update(
-                    "export", overall_fraction,
-                    korean_detail if korean else english_detail,
-                )
-                QApplication.processEvents()
-                if preparation_cancel.is_set():
-                    raise RenderCancelledError("Export preparation was cancelled.")
-
-            def ensure_preparation_not_cancelled() -> None:
-                if preparation_cancel.is_set():
-                    raise RenderCancelledError("Export preparation was cancelled.")
-            def stage_streamed_frame(
-                image: QImage, duration_seconds: float, stream_key: str,
-            ) -> RenderFrame:
-                encoder = active_stream_encoders.get(stream_key)
-                if encoder is None:
-                    raise RenderError("Invalid streamed Canvas frame configuration.")
-                self._export_capture_count += 1
-                try:
-                    encoder.submit(image, duration_seconds)
-                except StaticVideoStreamError as error:
-                    if preparation_cancel.is_set():
-                        raise RenderCancelledError(
-                            "Export preparation was cancelled."
-                        ) from error
-                    raise RenderError(str(error)) from error
-                return RenderFrame(
-                    encoder.output_path,
-                    max(0.001, duration_seconds),
-                )
-
-            sparse_stream_frames: dict[str, list[RenderFrame]] = {}
-
-            def stage_export_stream_frame(
-                image: QImage, duration_seconds: float, stream_key: str,
-            ) -> RenderFrame:
-                # Do not expand one invariant Canvas image into every CFR frame
-                # through a CPU-only intermediate encoder. Preserve the single
-                # lossless image and duration; the final graph applies output FPS.
-                if (
-                    use_streamed_visuals
-                    and stream_key in sparse_invariant_stream_keys
-                ):
-                    rendered = self._stage_export_frame(
-                        image, duration_seconds, stream_key,
-                    )
-                    sparse_stream_frames.setdefault(stream_key, []).append(rendered)
-                    return rendered
-                return stage_streamed_frame(image, duration_seconds, stream_key)
-
-            capturer = ExportCanvasCapturer(
-                self.canvas.scene_model,
-                active_tracks,
-                playlist_duration,
-                dynamic_visualizer_ids,
-                z_bands,
-                (
-                    stage_export_stream_frame
-                    if use_streamed_visuals
-                    else self._stage_export_frame
-                ),
-                ensure_preparation_not_cancelled,
-                pump_preparation_ui,
-                retain_static_frames=not use_streamed_visuals,
-            )
-            invariant_stream_keys = capturer.invariant_stream_keys
-            sparse_invariant_stream_keys = (
-                set(invariant_stream_keys) if not direct_final_stream else set()
-            )
-            if use_streamed_visuals and sparse_invariant_stream_keys:
-                self._start_export_png_pipeline(
-                    preparation_cancel,
+                    ),
                     queue_capacity=self._export_png_queue_capacity(render_settings),
-                )
-                stream_specs = [
-                    spec for spec in stream_specs
-                    if spec[0] not in sparse_invariant_stream_keys
-                ]
-            stream_keys = [
-                "base", *(f"layer:{index}" for index in range(len(z_bands) - 1)),
-            ]
-            for stream_key in stream_keys:
-                if stream_key in invariant_stream_keys:
-                    continue
-                original_samples = stream_timeline_samples[stream_key]
-                coalesced_samples = capturer.coalesce_samples(
-                    original_samples, stream_key,
-                )
-                state_key_skipped_captures += (
-                    len(original_samples) - len(coalesced_samples)
-                )
-                stream_timeline_samples[stream_key] = coalesced_samples
-            total_preparation_captures = max(
-                1,
-                sum(
-                    1 if stream_key in invariant_stream_keys
-                    else len(stream_timeline_samples[stream_key])
-                    for stream_key in stream_keys
                 ),
-            )
-            LOGGER.info(
-                "Canvas independent timelines: band_captures=%d "
-                "optimized_captures=%d state_key_skipped=%d per_stream=%s",
-                independent_capture_count,
-                total_preparation_captures,
-                state_key_skipped_captures,
-                ",".join(
-                    f"{key}:{len(stream_timeline_samples[key])}"
-                    for key in stream_keys
+                layer_worker_count=lambda count: self._export_layer_worker_count(
+                    render_settings, count,
                 ),
+                report_progress=self._report_export_preparation_progress,
+                pump_ui=QApplication.processEvents,
             )
-            if use_streamed_visuals:
-                duration_tolerance = 1e-6 * max(1.0, playlist_duration)
-                streamed_results = {}
-                stream_wait_last_update: dict[str, float] = {}
-
-                def pump_stream_wait_ui(stream_key: str) -> None:
-                    """Repaint and expose FFmpeg drain progress for long still runs."""
-                    QApplication.processEvents()
-                    if preparation_cancel.is_set() or self._export_dialog is None:
-                        return
-                    now = monotonic()
-                    if now - stream_wait_last_update.get(stream_key, 0.0) < 0.15:
-                        return
-                    stream_wait_last_update[stream_key] = now
-                    encoder = active_stream_encoders.get(stream_key)
-                    if encoder is None:
-                        return
-                    expected_frames = max(
-                        1, round(playlist_duration * render_settings.fps),
-                    )
-                    encoded_frames = min(
-                        int(getattr(encoder, "frame_count", 0)), expected_frames,
-                    )
-                    encoded_percent = round(encoded_frames / expected_frames * 100)
-                    capture_fraction = min(
-                        1.0,
-                        self._export_capture_count / total_preparation_captures,
-                    )
-                    overall_fraction = (
-                        capture_fraction * EXPORT_PREPARATION_PROGRESS_WEIGHT
-                    )
-                    detail = (
-                        "화면 구성 요소를 영상으로 변환하는 중 · "
-                        f"{encoded_frames:,}/{expected_frames:,} 프레임 · "
-                        f"{encoded_percent}%"
-                        if korean else
-                        "Converting visual elements into video · "
-                        f"{encoded_frames:,}/{expected_frames:,} frames · "
-                        f"{encoded_percent}%"
-                    )
-                    self._export_dialog.update_progress(
-                        "Preparing visual frames", overall_fraction, detail,
-                    )
-                    self.activity_progress.update(
-                        "export", overall_fraction, detail,
-                    )
-
-                # Each Canvas capture still touches the Qt scene only on the UI
-                # thread. Independent base/Z-band encoders consume those images
-                # concurrently, bounded to two processes to avoid 4K RAM spikes.
-                layer_parallelism = self._export_layer_worker_count(
-                    render_settings, len(stream_specs),
-                )
-                LOGGER.info(
-                    "Canvas layer preparation: streams=%d parallel_encoders=%d "
-                    "sparse_invariant=%d",
-                    len(stream_specs), layer_parallelism,
-                    len(sparse_invariant_stream_keys),
-                )
-                for stream_key in stream_keys:
-                    if stream_key in sparse_invariant_stream_keys:
-                        capturer.capture_invariant_stream(
-                            stream_timeline_samples[stream_key][0],
-                            stream_key,
-                            playlist_duration,
-                        )
-                for batch_start in range(0, len(stream_specs), layer_parallelism):
-                    batch = stream_specs[
-                        batch_start:batch_start + layer_parallelism
-                    ]
-                    try:
-                        for (
-                            stream_key, output_path, preserve_alpha, queue_capacity,
-                        ) in batch:
-                            active_stream_encoders[stream_key] = StaticVideoStreamEncoder(
-                                renderer.executable,
-                                output_path,
-                                render_settings.fps,
-                                queue_capacity=queue_capacity,
-                                preserve_alpha=preserve_alpha,
-                                producer_cancel_event=preparation_cancel,
-                                producer_wait_callback=(
-                                    lambda key=stream_key: pump_stream_wait_ui(key)
-                                ),
-                                direct_profile=(
-                                    DirectVideoEncodingProfile(
-                                        render_settings.output_width,
-                                        render_settings.output_height,
-                                        render_settings.video_codec,
-                                        tuple(renderer._video_encoding_arguments(render_settings)),
-                                    )
-                                    if direct_final_stream and stream_key == "base"
-                                    else None
-                                ),
-                            )
-                        for stream_key, _path, _alpha, _capacity in batch:
-                            if stream_key in invariant_stream_keys:
-                                capturer.capture_invariant_stream(
-                                    stream_timeline_samples[stream_key][0],
-                                    stream_key,
-                                    playlist_duration,
-                                )
-                        pending_samples: list[
-                            tuple[float, int, int, str, ExportFrameSample]
-                        ] = []
-                        batch_keys = [item[0] for item in batch]
-                        for stream_order, stream_key in enumerate(batch_keys):
-                            if stream_key in invariant_stream_keys:
-                                continue
-                            samples = stream_timeline_samples[stream_key]
-                            first = samples[0]
-                            heappush(pending_samples, (
-                                first.timeline_seconds,
-                                stream_order,
-                                0,
-                                stream_key,
-                                first,
-                            ))
-                        while pending_samples:
-                            (
-                                _timeline_seconds,
-                                stream_order,
-                                sample_index,
-                                stream_key,
-                                sample,
-                            ) = heappop(pending_samples)
-                            capturer.capture_stream(sample, stream_key)
-                            next_index = sample_index + 1
-                            samples = stream_timeline_samples[stream_key]
-                            if next_index < len(samples):
-                                next_sample = samples[next_index]
-                                heappush(pending_samples, (
-                                    next_sample.timeline_seconds,
-                                    stream_order,
-                                    next_index,
-                                    stream_key,
-                                    next_sample,
-                                ))
-                        for stream_key, _path, _alpha, _capacity in batch:
-                            encoder = active_stream_encoders[stream_key]
-                            LOGGER.info(
-                                "Draining Canvas stream: key=%s written_frames=%d "
-                                "expected_frames=%d",
-                                stream_key,
-                                int(getattr(encoder, "frame_count", 0)),
-                                max(1, round(playlist_duration * render_settings.fps)),
-                            )
-                            streamed = encoder.finish()
-                            active_stream_encoders.pop(stream_key, None)
-                            if abs(
-                                streamed.duration_seconds - playlist_duration
-                            ) > duration_tolerance:
-                                difference = (
-                                    streamed.duration_seconds - playlist_duration
-                                )
-                                raise RenderError(
-                                    "A streamed Canvas timeline does not match the playlist "
-                                    f"duration (expected {playlist_duration:.6f}s, got "
-                                    f"{streamed.duration_seconds:.6f}s, difference "
-                                    f"{difference:+.6f}s)."
-                                )
-                            expected_alpha = stream_key != "base"
-                            if streamed.has_alpha_stream != expected_alpha:
-                                raise RenderError(
-                                    "A streamed Canvas layer has an invalid alpha configuration."
-                                )
-                            streamed_results[stream_key] = streamed
-                    except StaticVideoStreamError as error:
-                        cancel_static_streams()
-                        if preparation_cancel.is_set():
-                            raise RenderCancelledError(
-                                "Export preparation was cancelled."
-                            ) from error
-                        raise RenderError(str(error)) from error
-                    except Exception:
-                        cancel_static_streams()
-                        raise
-                if sparse_invariant_stream_keys:
-                    self._finish_export_png_pipeline()
-                if "base" in sparse_invariant_stream_keys:
-                    frames = sparse_stream_frames["base"]
-                    LOGGER.info(
-                        "Sparse invariant Canvas base: images=%d duration=%.3fs",
-                        len(frames), playlist_duration,
-                    )
-                else:
-                    streamed = streamed_results["base"]
-                    frames = PreparedVideoInput(
-                        streamed.path,
-                        playlist_duration,
-                        streamed.width,
-                        streamed.height,
-                        streamed.fps,
-                        ready_for_mux=direct_final_stream,
-                        encoded_codec=(
-                            render_settings.video_codec if direct_final_stream else ""
-                        ),
-                    )
-                    try:
-                        stream_bytes = streamed.path.stat().st_size
-                    except OSError:
-                        stream_bytes = -1
-                    LOGGER.info(
-                        "Streamed Canvas summary: frames=%d duration=%.3fs "
-                        "resolution=%dx%d queue_peak=%d file_bytes=%d",
-                        streamed.frame_count,
-                        streamed.duration_seconds,
-                        streamed.width,
-                        streamed.height,
-                        streamed.peak_buffered_frames,
-                        stream_bytes,
-                    )
-                static_layers = [
-                    (
-                        StaticOverlayLayer(
-                            z_min if z_min is not None else -10_000.0,
-                            sparse_stream_frames[f"layer:{index}"],
-                            *capturer.stream_origin(f"layer:{index}"),
-                        )
-                        if f"layer:{index}" in sparse_invariant_stream_keys else
-                        PreparedStaticOverlayLayer(
-                            z_min if z_min is not None else -10_000.0,
-                            PreparedVideoInput(
-                                streamed_results[f"layer:{index}"].path,
-                                playlist_duration,
-                                streamed_results[f"layer:{index}"].width,
-                                streamed_results[f"layer:{index}"].height,
-                                streamed_results[f"layer:{index}"].fps,
-                            ),
-                            *capturer.stream_origin(f"layer:{index}"),
-                        )
-                    )
-                    for index, (z_min, _z_max) in enumerate(z_bands[1:])
-                ]
-            else:
-                self._start_export_png_pipeline(
-                    preparation_cancel,
-                    queue_capacity=self._export_png_queue_capacity(render_settings),
-                )
-                captured_stream_frames: dict[str, list[RenderFrame]] = {}
-                for stream_key in stream_keys:
-                    samples = stream_timeline_samples[stream_key]
-                    if stream_key in invariant_stream_keys:
-                        captured_stream_frames[stream_key] = [
-                            capturer.capture_invariant_stream(
-                                samples[0], stream_key, playlist_duration,
-                            )
-                        ]
-                    else:
-                        captured_stream_frames[stream_key] = [
-                            capturer.capture_stream(sample, stream_key)
-                            for sample in samples
-                        ]
-                frames = captured_stream_frames["base"]
-                if self._export_dialog is not None:
-                    self._export_dialog.update_progress(
-                        "Preparing visual frames",
-                        EXPORT_PREPARATION_PROGRESS_WEIGHT,
-                        "남은 화면 프레임을 저장하고 있습니다."
-                        if korean else
-                        "Finishing the remaining background frame writes.",
-                    )
-                self._finish_export_png_pipeline()
-                static_layers = capturer.static_layers()
-            # Stream encoders can emit drain progress while finish() runs. End
-            # preparation on a stable summary so users can see all streams are done.
-            if self._export_dialog is not None:
-                prepared_streams = max(1, len(stream_keys))
-                preparation_detail = (
-                    f"화면 스트림 {prepared_streams}/{prepared_streams} · 준비 100%"
-                    if korean else
-                    f"Visual streams {prepared_streams}/{prepared_streams} · 100% prepared"
-                )
-                self._export_dialog.update_progress(
-                    "Preparing visual frames", EXPORT_PREPARATION_PROGRESS_WEIGHT,
-                    preparation_detail,
-                )
-                self.activity_progress.update(
-                    "export", EXPORT_PREPARATION_PROGRESS_WEIGHT, preparation_detail,
-                )
-            avoided_scene_pixels = max(
-                0,
-                capturer.full_frame_source_pixels
-                - capturer.scene_render_source_pixels,
-            )
-            avoided_percent = (
-                avoided_scene_pixels
-                / max(1, capturer.full_frame_source_pixels)
-                * 100.0
-            )
-            LOGGER.info(
-                "Canvas partial-region rendering: captures=%d "
-                "scene_pixels=%d full_frame_pixels=%d avoided=%.1f%%",
-                capturer.partial_render_capture_count,
-                capturer.scene_render_source_pixels,
-                capturer.full_frame_source_pixels,
-                avoided_percent,
-            )
-            if preparation_cancel.is_set():
-                raise RenderCancelledError("Export preparation was cancelled.")
+            self._active_export_session = export_session
+            artifacts = export_session.run()
+            frames = artifacts.frames
+            static_layers = artifacts.static_layers
         except RenderCancelledError:
-            cancel_static_streams()
+            self._cancel_active_export_session()
             self._export_preparation_cancel = None
             self._clear_export_frame_staging()
             if self._export_dialog:
@@ -3856,7 +3467,7 @@ class MainWindow(QMainWindow):
             self._resume_close_after_export_cancel()
             return
         except RenderError as error:
-            cancel_static_streams()
+            self._cancel_active_export_session()
             self._export_preparation_cancel = None
             self._clear_export_frame_staging()
             if self._export_dialog:
@@ -3872,7 +3483,7 @@ class MainWindow(QMainWindow):
             self._resume_close_after_export_cancel()
             return
         except Exception as error:
-            cancel_static_streams()
+            self._cancel_active_export_session()
             self._export_preparation_cancel = None
             self._clear_export_frame_staging()
             if self._export_dialog:
@@ -4217,42 +3828,59 @@ class MainWindow(QMainWindow):
         self._update_alignment_toolbar_actions()
 
     def _preview_source_animation(self, source_id: str) -> None:
-        """Play one source's configured animation directly on the Canvas."""
-        if self._animation_preview_active:
-            return
+        """Play one source's configured animation directly on the Canvas.
+
+        The preview is non-blocking: the window stays interactive and the very
+        next user action (a click, key press, selection change or edit) stops it
+        and snaps the source back to its real position.
+        """
         source = self.store.get(source_id)
         item = self.canvas._items.get(source_id)
         if source is None or item is None:
             return
+        if self._animation_preview_active:
+            self.animation_preview_controller.cancel()
         self._animation_preview_active = True
+        self._animation_preview_cancel_armed = False
         korean = self.translator.language is Language.KOREAN
-        self.activity_progress.begin(
-            "animation_preview",
-            "애니메이션 미리보기" if korean else "Animation preview",
-            detail=source.name,
-        )
         self.statusBar().showMessage(
-            "애니메이션 미리보기 재생 중 · 편집이 잠겼습니다."
+            "애니메이션 미리보기 재생 중 · 다른 동작을 하면 중단됩니다."
             if korean else
-            "Playing animation preview · Editing is locked."
+            "Playing animation preview · Any further action stops it.",
+            2500,
         )
-        self.setEnabled(False)
         if not self.animation_preview_controller.preview(item, source):
             self._finish_canvas_animation_preview()
+            return
+        self.canvas.viewport().installEventFilter(self)
+        QTimer.singleShot(0, self._arm_animation_preview_cancel)
+
+    def _arm_animation_preview_cancel(self) -> None:
+        """Start honouring cancel triggers once the launching edit has settled."""
+        if self._animation_preview_active:
+            self._animation_preview_cancel_armed = True
+
+    def _cancel_animation_preview(self, *_args: object) -> None:
+        """Stop an armed preview in response to any further user action."""
+        if self._animation_preview_active and self._animation_preview_cancel_armed:
+            self.animation_preview_controller.cancel()
+
+    def eventFilter(self, watched: object, event: QEvent) -> bool:
+        if self._animation_preview_cancel_armed and event.type() in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.KeyPress,
+            QEvent.Type.Wheel,
+        ):
+            self.animation_preview_controller.cancel()
+        return super().eventFilter(watched, event)
 
     def _finish_canvas_animation_preview(self) -> None:
         """Restore interaction after the Canvas preview returns to its source state."""
         if not self._animation_preview_active:
             return
         self._animation_preview_active = False
-        self.activity_progress.finish("animation_preview")
-        self.setEnabled(True)
-        korean = self.translator.language is Language.KOREAN
-        self.statusBar().showMessage(
-            "애니메이션 미리보기가 끝났습니다."
-            if korean else "Animation preview finished.",
-            2500,
-        )
+        self._animation_preview_cancel_armed = False
+        self.canvas.viewport().removeEventFilter(self)
         self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
 
     @staticmethod
@@ -4267,10 +3895,86 @@ class MainWindow(QMainWindow):
             end = max(end, cursor)
         return end
 
+    def _export_upscale_warnings(
+        self, active_tracks: list, render_settings: RenderSettings,
+        render_scale: float, korean: bool,
+    ) -> list[str]:
+        """List raster sources FFmpeg would visibly enlarge past their pixels.
+
+        Vector content is now rasterised at the export resolution, so a
+        low-resolution album cover or imported image is the remaining soft spot.
+        A source is flagged once its on-screen area exceeds 1.5x its native area.
+        """
+        output_w = max(1, render_settings.output_width)
+        output_h = max(1, render_settings.output_height)
+
+        def native_size(path: str) -> tuple[int, int]:
+            if not path:
+                return (0, 0)
+            size = QImageReader(path).size()
+            return (max(0, size.width()), max(0, size.height()))
+
+        # Every album-art source shares the track covers; rate the weakest one.
+        cover_native = (0, 0)
+        for track in active_tracks:
+            pixmap = extract_track_cover(track.file_path, track.cover_path)
+            if pixmap.isNull():
+                continue
+            current = (pixmap.width(), pixmap.height())
+            cover_native = current if cover_native == (0, 0) else (
+                min(cover_native[0], current[0]),
+                min(cover_native[1], current[1]),
+            )
+
+        warnings: list[str] = []
+        for source in self.store.sources():
+            if not source.visible:
+                continue
+            stype = source.source_type
+            element_shown = (
+                round(source.width * source.scale * render_scale),
+                round(source.height * source.scale * render_scale),
+            )
+            if stype in {SourceType.IMAGE, SourceType.LOGO, SourceType.WATERMARK}:
+                native, shown = native_size(source.content_path), element_shown
+            elif stype is SourceType.ALBUM_COVER:
+                native = (
+                    native_size(source.content_path)
+                    if source.content_path else cover_native
+                )
+                shown = element_shown
+            elif stype is SourceType.BACKGROUND and source.background_mode == "image":
+                native, shown = native_size(source.content_path), (output_w, output_h)
+            elif stype is SourceType.BACKGROUND and source.background_mode == "album_art":
+                native, shown = cover_native, (output_w, output_h)
+            else:
+                continue
+            if native[0] <= 0 or native[1] <= 0:
+                continue
+            scale_up = (
+                shown[0] * shown[1] / (native[0] * native[1])
+            ) ** 0.5
+            if scale_up < 1.5:
+                continue
+            label = source.name or stype.value
+            warnings.append(
+                f"· {label}: {native[0]}×{native[1]} → "
+                + (
+                    f"약 {shown[0]}×{shown[1]} ({scale_up:.1f}배 확대)"
+                    if korean else
+                    f"about {shown[0]}×{shown[1]} ({scale_up:.1f}x upscale)"
+                )
+            )
+        return warnings
+
     def _export_visualizers(
-        self, tracks: list | None = None,
+        self, tracks: list | None = None, render_scale: float = 1.0,
     ) -> list[VisualizerOverlay]:
-        """Translate visible, axis-aligned Canvas visualizers into Python-rendered overlays."""
+        """Translate visible, axis-aligned Canvas visualizers into Python-rendered overlays.
+
+        ``render_scale`` (>= 1.0) maps Canvas coordinates onto the export's final
+        pixel grid so an overlay stays aligned with the up-rendered base stream.
+        """
         overlays: list[VisualizerOverlay] = []
         visualizer_sources = [
             source for source in self.store.sources()
@@ -4301,12 +4005,16 @@ class MainWindow(QMainWindow):
             overlay_height = max(8, round(source.height * source.scale))
             # QGraphicsItem scales around its centre.  Use the same transformed
             # top-left point for FFmpeg, otherwise scaled visualizers drift down
-            # and right compared with the Canvas placement.
+            # and right compared with the Canvas placement.  ``render_scale``
+            # then lifts every measure onto the export's pixel grid (identity at
+            # 1.0 since ``round(int * 1.0) == int``).
+            overlay_x = round(source.x + (source.width - overlay_width) / 2.0)
+            overlay_y = round(source.y + (source.height - overlay_height) / 2.0)
             overlays.append(VisualizerOverlay(
-                x=round(source.x + (source.width - overlay_width) / 2.0),
-                y=round(source.y + (source.height - overlay_height) / 2.0),
-                width=overlay_width,
-                height=overlay_height,
+                x=round(overlay_x * render_scale),
+                y=round(overlay_y * render_scale),
+                width=max(8, round(overlay_width * render_scale)),
+                height=max(8, round(overlay_height * render_scale)),
                 style=source.visualizer_style,
                 color=source.fill_color,
                 personal_colors=(
@@ -4325,7 +4033,7 @@ class MainWindow(QMainWindow):
                 ),
                 opacity=source.opacity,
                 bar_count=source.visualizer_bars,
-                line_width=source.visualizer_line_width,
+                line_width=source.visualizer_line_width * render_scale,
                 sensitivity=source.visualizer_sensitivity,
                 reactivity=source.visualizer_reactivity,
                 noise_gate=source.visualizer_noise_gate,
@@ -4354,7 +4062,7 @@ class MainWindow(QMainWindow):
                 level_meter_min_level=source.level_meter_min_level,
                 level_meter_max_level=source.level_meter_max_level,
                 level_meter_segments=source.level_meter_segments,
-                level_meter_gap=source.level_meter_gap,
+                level_meter_gap=source.level_meter_gap * render_scale,
                 level_meter_show_peak=source.level_meter_show_peak,
                 level_meter_peak_hold=source.level_meter_peak_hold,
                 level_meter_peak_decay=source.level_meter_peak_decay,
@@ -4362,8 +4070,8 @@ class MainWindow(QMainWindow):
                 level_meter_low_color=source.level_meter_low_color,
                 level_meter_mid_color=source.level_meter_mid_color,
                 level_meter_high_color=source.level_meter_high_color,
-                particle_min_size=source.particle_min_size,
-                particle_max_size=source.particle_max_size,
+                particle_min_size=source.particle_min_size * render_scale,
+                particle_max_size=source.particle_max_size * render_scale,
                 particle_opacity=source.particle_opacity,
                 particle_direction=source.particle_direction,
                 particle_drift=source.particle_drift,
@@ -4412,9 +4120,13 @@ class MainWindow(QMainWindow):
 
     def _export_video_clips(
         self, tracks: list, playlist_duration: float,
-        work_mode: str = WORK_MODE_AUTO,
+        work_mode: str = WORK_MODE_AUTO, render_scale: float = 1.0,
     ) -> list[VideoClipOverlay]:
-        """Expand visible video elements into deterministic FFmpeg clip intervals."""
+        """Expand visible video elements into deterministic FFmpeg clip intervals.
+
+        ``render_scale`` (>= 1.0) lifts clip geometry onto the export's final
+        pixel grid to stay aligned with the up-rendered base Canvas stream.
+        """
         clips: list[VideoClipOverlay] = []
         duration_cache: dict[str, float] = {}
 
@@ -4499,26 +4211,30 @@ class MainWindow(QMainWindow):
                 ):
                     overlay_width = max(8, round(source.width * source.scale))
                     overlay_height = max(8, round(source.height * source.scale))
+                    # ``round(int * 1.0) == int`` keeps this identical when the
+                    # export matches the canvas resolution.
+                    clip_x = round(source.x + (source.width - overlay_width) / 2.0)
+                    clip_y = round(source.y + (source.height - overlay_height) / 2.0)
                     clips.append(VideoClipOverlay(
                         path=Path(occurrence.path),
                         timeline_start=occurrence.timeline_start,
                         duration_seconds=occurrence.duration_seconds,
                         media_start_seconds=occurrence.media_start_seconds,
-                        x=round(source.x + (source.width - overlay_width) / 2.0),
-                        y=round(source.y + (source.height - overlay_height) / 2.0),
-                        width=overlay_width,
-                        height=overlay_height,
+                        x=round(clip_x * render_scale),
+                        y=round(clip_y * render_scale),
+                        width=max(8, round(overlay_width * render_scale)),
+                        height=max(8, round(overlay_height * render_scale)),
                         z_index=source.z_index,
                         rotation=source.rotation,
                         opacity=source.opacity,
                         fit_mode=source.image_fit_mode,
                         fill_color=source.fill_color,
-                        border_radius=source.border_radius * source.scale,
+                        border_radius=source.border_radius * source.scale * render_scale,
                         brightness=source.brightness,
                         contrast=source.contrast,
                         saturation=source.video_saturation,
                         grayscale=source.video_grayscale,
-                        blur=source.blur,
+                        blur=source.blur * render_scale,
                         speed=source.video_speed,
                         loop_input=occurrence.loop_media,
                     ))
@@ -4731,8 +4447,9 @@ class MainWindow(QMainWindow):
     def _launch_update_setup(self, installer: Path) -> None:
         """Resolve unsaved work, start the verified Setup, and close the old version."""
         korean = self.translator.language is Language.KOREAN
-        if (self._animation_preview_active
-                or (self._render_worker and self._render_worker.isRunning())
+        if self._animation_preview_active:
+            self.animation_preview_controller.cancel()
+        if ((self._render_worker and self._render_worker.isRunning())
                 or (self._ffmpeg_install_worker and self._ffmpeg_install_worker.isRunning())):
             QMessageBox.warning(
                 self,
@@ -5316,13 +5033,52 @@ class MainWindow(QMainWindow):
             message = "Preset applied. Press Ctrl+Z to undo."
         self.statusBar().showMessage(message, 4000)
 
+    def _save_current_as_preset(self) -> None:
+        """Save every current canvas source as a reusable user preset."""
+        korean = self.translator.language is Language.KOREAN
+        sources = self.store.sources()
+        if not sources:
+            QMessageBox.information(
+                self,
+                "프리셋으로 저장" if korean else "Save as preset",
+                "캔버스에 저장할 요소가 없습니다."
+                if korean else "The canvas has no sources to save.",
+            )
+            return
+        name, accepted = QInputDialog.getText(
+            self,
+            "프리셋으로 저장" if korean else "Save as preset",
+            "프리셋 이름" if korean else "Preset name",
+        )
+        if not accepted or not name.strip():
+            return
+        artboard = self.canvas.scene_model.artboard_rect
+        try:
+            preset = UserPresetService.save(
+                name, sources, artboard.width(), artboard.height(),
+            )
+        except (UserPresetError, OSError) as error:
+            QMessageBox.warning(
+                self,
+                "저장 실패" if korean else "Save failed",
+                str(error),
+            )
+            return
+        self.statusBar().showMessage(
+            f"'{preset.name('ko')}' 프리셋을 저장했습니다. 디자인 프리셋 창에서 다시 사용할 수 있습니다."
+            if korean else
+            f"Saved preset '{preset.name('en')}'. Reuse it from the Design Presets dialog.",
+            5000,
+        )
+
     @staticmethod
     def _preset_sources_for_canvas(
         preset: PresetDefinition, canvas_width: float, canvas_height: float,
     ) -> list[Source]:
-        """Adapt a 1280×720 design to the project without changing its ratio."""
+        """Adapt a preset's authored layout to the project without changing its ratio."""
         return MainWindow._adapt_sources_to_canvas(
-            preset.builder(), 1280.0, 720.0, canvas_width, canvas_height,
+            preset.builder(), preset.source_width, preset.source_height,
+            canvas_width, canvas_height,
         )
 
     @staticmethod
@@ -6477,6 +6233,18 @@ class MainWindow(QMainWindow):
         self.canvas.scene_model.update()
         self._schedule_history()
 
+    def _toggle_sample_data(self, enabled: bool) -> None:
+        """Preview text tokens against sample-track data on the editing canvas."""
+        korean = self.translator.language is Language.KOREAN
+        self.canvas.scene_model.set_sample_data_mode(enabled, korean)
+        QSettings().setValue("interface/sample_data_preview", enabled)
+        self.statusBar().showMessage(
+            ("샘플 데이터 미리보기: 켜짐" if enabled else "샘플 데이터 미리보기: 꺼짐")
+            if korean else
+            ("Sample-data preview: on" if enabled else "Sample-data preview: off"),
+            2500,
+        )
+
     def retranslate(self) -> None:
         """Refresh all user-interface strings for the active language."""
         text = self.translator.text
@@ -6528,12 +6296,29 @@ class MainWindow(QMainWindow):
             "디자인 프리셋" if self.translator.language is Language.KOREAN
             else "Design Presets"
         )
+        self.save_preset_action.setText(
+            "현재 캔버스를 프리셋으로 저장…"
+            if self.translator.language is Language.KOREAN
+            else "Save current canvas as preset…"
+        )
         self.ai_project_builder_action.setText(
             "AI 프로젝트 빌더" if self.translator.language is Language.KOREAN
             else "AI Project Builder"
         )
         self.fit_action.setText(text("fit_canvas"))
         self.grid_action.setText(text("grid"))
+        self.sample_data_action.setText(
+            "샘플 데이터 미리보기" if korean else "Preview with sample data"
+        )
+        sample_data_help = (
+            "편집 캔버스에서 %title% 같은 토큰을 샘플 곡 정보로 바꿔 보여줍니다. (Ctrl+Shift+P)"
+            if korean else
+            "Show %title%-style tokens filled with sample track info on the editing canvas. (Ctrl+Shift+P)"
+        )
+        self.sample_data_action.setToolTip(sample_data_help)
+        self.sample_data_action.setStatusTip(sample_data_help)
+        if self.sample_data_action.isChecked():
+            self.canvas.scene_model.set_sample_data_mode(True, korean)
         self.delete_action.setText(text("delete"))
         self.export_action.setText(text("export"))
         self.preview_action.setText("미리보기" if self.translator.language is Language.KOREAN else "Preview")
@@ -6772,8 +6557,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         if self._animation_preview_active:
-            event.ignore()
-            return
+            self.animation_preview_controller.cancel()
         if self._inline_preview is not None:
             self._finish_inline_preview()
         if self._export_preparation_cancel is not None:

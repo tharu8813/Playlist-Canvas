@@ -15,13 +15,26 @@ from PySide6.QtWidgets import (
 )
 
 from app.canvas.source_item import SourceItem
+from app.models.playlist import PlaylistTrack
 from app.models.source import Source
+from app.preview.text_template import build_sample_track
 from app.services.project_content_service import LYRICS_EXTENSIONS
 from app.services.source_store import SourceStore
 from app.utils.i18n import Translator
 from app.widgets.source_template_button import (
     SOURCE_TEMPLATE_MIME,
     read_source_template_mime,
+)
+
+_SAMPLE_LYRIC_EN = (
+    "This is where the lyric line appears\n"
+    "The next line follows right after\n"
+    "and the song keeps going"
+)
+_SAMPLE_LYRIC_KO = (
+    "이 곡의 가사가 여기에 표시됩니다\n"
+    "다음 가사 줄이 이어서 나타납니다\n"
+    "그리고 노래가 계속됩니다"
 )
 
 
@@ -43,6 +56,11 @@ class CanvasScene(QGraphicsScene):
         self.grid_color = QColor(255, 255, 255, 18)
         self.artboard_border_color = QColor("#5F6B7A")
         self.suppress_render_background = False
+        # When on, SourceItem renders text tokens (``%title%`` …) expanded
+        # against ``sample_track`` so the editing canvas previews real content.
+        self.sample_data_mode = False
+        self.sample_track: PlaylistTrack = build_sample_track(False)
+        self.sample_lyric = _SAMPLE_LYRIC_EN
         self.guide_x: float | None = None
         self.guide_y: float | None = None
         self._painted_guide_x: float | None = None
@@ -52,6 +70,15 @@ class CanvasScene(QGraphicsScene):
         self._interactive_snap_delta = QPointF()
         self._snap_candidates_x: list[float] | None = None
         self._snap_candidates_y: list[float] | None = None
+
+    def set_sample_data_mode(self, enabled: bool, korean: bool = False) -> None:
+        """Toggle the sample-data text preview and repaint every source item."""
+        self.sample_data_mode = bool(enabled)
+        self.sample_track = build_sample_track(korean)
+        self.sample_lyric = _SAMPLE_LYRIC_KO if korean else _SAMPLE_LYRIC_EN
+        for item in self.items():
+            if isinstance(item, SourceItem):
+                item.update()
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
         """Draw workspace, artboard and grid behind source items."""
@@ -657,6 +684,11 @@ class LiveCanvas(QGraphicsView):
             self._add_context_action(
                 menu, "모두 선택" if korean else "Select all", "select_all", "Ctrl+A",
             )
+            self._add_context_action(
+                menu, "모든 잠금 해제" if korean else "Unlock all layers",
+                "unlock_all_layers",
+                enabled=any(source.locked for source in self.store.sources()),
+            )
             menu.addSeparator()
             self._add_context_action(
                 menu, "캔버스에 맞추기" if korean else "Fit Canvas", "fit_canvas", "Ctrl+0",
@@ -730,6 +762,18 @@ class LiveCanvas(QGraphicsView):
         for label, command in alignment_labels:
             self._add_context_action(
                 align_menu, label, command, enabled=editable_count >= 2,
+            )
+        align_menu.addSeparator()
+        distribute_labels = (
+            (("가로 간격 균등", "distribute_horizontal"),
+             ("세로 간격 균등", "distribute_vertical"))
+            if korean else
+            (("Distribute horizontal spacing", "distribute_horizontal"),
+             ("Distribute vertical spacing", "distribute_vertical"))
+        )
+        for label, command in distribute_labels:
+            self._add_context_action(
+                align_menu, label, command, enabled=editable_count >= 3,
             )
 
         organize_menu = QMenu("그룹" if korean else "Group", menu)

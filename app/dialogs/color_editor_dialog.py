@@ -6,6 +6,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -23,7 +24,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.models.playlist import PlaylistTrack
 from app.models.source import Source
+from app.preview.album_art import adjust_personal_color, extract_track_personal_color
 from app.utils.i18n import Translator
 
 
@@ -81,10 +84,12 @@ class ColorEditorDialog(QDialog):
         translator: Translator,
         title: str,
         parent: QWidget | None = None,
+        tracks: list[PlaylistTrack] | None = None,
     ) -> None:
         super().__init__(parent)
         self.translator = translator
         self._korean = translator.language.value == "ko"
+        self._tracks = list(tracks or [])
         self._initial_color = QColor(initial_color)
         if not self._initial_color.isValid():
             self._initial_color = QColor("#FFFFFF")
@@ -210,6 +215,32 @@ class ColorEditorDialog(QDialog):
         personal_form.addRow("적용 강도" if self._korean else "Strength", self.personal_strength)
         personal_group_layout.addLayout(personal_form)
         personal_page_layout.addWidget(personal_group)
+
+        self.personal_preview_group = QGroupBox(
+            "곡별 미리보기" if self._korean else "Per-track preview"
+        )
+        preview_layout = QFormLayout(self.personal_preview_group)
+        self.personal_track_combo = QComboBox()
+        for track in self._tracks:
+            self.personal_track_combo.addItem(track.title or track.filename)
+        preview_layout.addRow(
+            "미리볼 곡" if self._korean else "Preview track",
+            self.personal_track_combo,
+        )
+        self.personal_preview_swatch = QFrame()
+        self.personal_preview_swatch.setObjectName("colorPreview")
+        self.personal_preview_swatch.setMinimumHeight(48)
+        preview_layout.addRow(
+            "결과 색상" if self._korean else "Result color",
+            self.personal_preview_swatch,
+        )
+        self.personal_preview_note = QLabel()
+        self.personal_preview_note.setObjectName("mutedLabel")
+        self.personal_preview_note.setWordWrap(True)
+        preview_layout.addRow("", self.personal_preview_note)
+        if not self._tracks:
+            self.personal_preview_group.setVisible(False)
+        personal_page_layout.addWidget(self.personal_preview_group)
         personal_page_layout.addStretch(1)
 
         footer = QHBoxLayout()
@@ -228,8 +259,18 @@ class ColorEditorDialog(QDialog):
         root.addLayout(footer)
 
         self.personal_check.toggled.connect(self._sync_personal_controls)
+        for spin in (
+            self.personal_brightness, self.personal_saturation,
+            self.personal_hue, self.personal_strength,
+        ):
+            spin.valueChanged.connect(self._refresh_personal_preview)
+        self.personal_track_combo.currentIndexChanged.connect(
+            self._refresh_personal_preview
+        )
+        self.personal_check.toggled.connect(self._refresh_personal_preview)
         self._sync_personal_controls()
         self._set_color(self._initial_color)
+        self._refresh_personal_preview()
 
     @staticmethod
     def _row(slider: QSlider, spin: QSpinBox) -> QWidget:
@@ -290,6 +331,7 @@ class ColorEditorDialog(QDialog):
             self.preview.set_current(color)
         finally:
             self._syncing = False
+        self._refresh_personal_preview()
 
     def _sliders_changed(self, _value: int) -> None:
         if self._syncing:
@@ -331,6 +373,45 @@ class ColorEditorDialog(QDialog):
             self.personal_hue, self.personal_strength,
         ):
             widget.setEnabled(self.personal_check.isChecked())
+
+    def _refresh_personal_preview(self, *_args: object) -> None:
+        """Recompute the selected track's personal color with current adjustments."""
+        if not getattr(self, "_tracks", None):
+            return
+        index = self.personal_track_combo.currentIndex()
+        if not 0 <= index < len(self._tracks):
+            return
+        track = self._tracks[index]
+        personal = extract_track_personal_color(track.file_path, track.cover_path)
+        result_hex = adjust_personal_color(
+            personal,
+            self._serialized(self._color),
+            brightness=float(self.personal_brightness.value()),
+            saturation=float(self.personal_saturation.value()),
+            hue_shift=float(self.personal_hue.value()),
+            strength=self.personal_strength.value() / 100.0,
+        )
+        self.personal_preview_swatch.setStyleSheet(
+            f"background:{result_hex}; border:1px solid rgba(120,130,145,0.7); "
+            "border-radius:10px;"
+        )
+        if not personal.isValid():
+            self.personal_preview_note.setText(
+                "이 곡은 앨범 아트가 없어 위에서 지정한 기준 색상을 사용합니다."
+                if self._korean else
+                "This track has no artwork, so the base color above is used."
+            )
+        elif not self.personal_check.isChecked():
+            self.personal_preview_note.setText(
+                "퍼스널 컬러가 꺼져 있어 실제로는 적용되지 않습니다. (미리보기만 표시)"
+                if self._korean else
+                "Personal color is off, so this is a preview only."
+            )
+        else:
+            self.personal_preview_note.setText(
+                f"미리보기 결과: {result_hex}" if self._korean
+                else f"Preview result: {result_hex}"
+            )
 
     @staticmethod
     def _serialized(color: QColor) -> str:

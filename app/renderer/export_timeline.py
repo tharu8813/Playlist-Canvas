@@ -7,6 +7,7 @@ from typing import Sequence
 
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
+from app.preview.album_art import AMBIENT_FLOW_HZ
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +95,20 @@ class ExportTimelinePlanner:
                             or source.timeline_duration > 0.0
                         ):
                             gap_points.add(boundary)
+                if any(
+                    source.source_type is SourceType.BACKGROUND
+                    and source.background_mode == "album_art"
+                    and source.background_ambient
+                    for source in sources
+                ):
+                    # The ambient-blur background keeps flowing between tracks;
+                    # without full-rate points here it would freeze during the
+                    # silent gap.  Matches the stable-region schedule.
+                    flow_steps = max(1, round(gap * AMBIENT_FLOW_HZ))
+                    gap_points.update(
+                        cursor + gap * step / flow_steps
+                        for step in range(flow_steps + 1)
+                    )
                 gap_phase = "out" if previous_track is not None else "in"
                 if previous_track is not None:
                     previous_intro, gap_phase_duration = (
@@ -256,6 +271,23 @@ class ExportTimelinePlanner:
             sample_points.update(
                 intro + stable * step / progress_steps
                 for step in range(progress_steps + 1)
+            )
+
+        if any(
+            source.source_type is SourceType.BACKGROUND
+            and source.background_mode == "album_art"
+            and source.background_ambient
+            for source in sources
+        ):
+            # The ambient-blur background flows continuously (Apple Music
+            # style).  Like the progress bar it needs a full-rate schedule or
+            # export would freeze it on one capture-invariant frame.
+            # AMBIENT_FLOW_HZ matches the phase quantisation used to dedupe
+            # frames downstream, so a finer rate would just coalesce.
+            flow_steps = max(1, round(stable * AMBIENT_FLOW_HZ))
+            sample_points.update(
+                intro + stable * step / flow_steps
+                for step in range(flow_steps + 1)
             )
 
         has_time_text = any(

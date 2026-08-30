@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QItemSelectionModel, Qt, QTimer, Signal
-from PySide6.QtGui import QDropEvent
+from PySide6.QtGui import QBrush, QColor, QDropEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -88,6 +88,7 @@ class LayerPanel(QFrame):
         self.up_button = QPushButton("↑")
         self.down_button = QPushButton("↓")
         self.back_button = QPushButton("⇊")
+        self.unlock_all_button = QPushButton()
         self.group_button = QPushButton()
         self.ungroup_button = QPushButton()
         controls.addWidget(self.front_button)
@@ -95,6 +96,7 @@ class LayerPanel(QFrame):
         controls.addWidget(self.down_button)
         controls.addWidget(self.back_button)
         controls.addStretch()
+        controls.addWidget(self.unlock_all_button)
         controls.addWidget(self.group_button)
         controls.addWidget(self.ungroup_button)
         layout.addLayout(controls)
@@ -108,6 +110,7 @@ class LayerPanel(QFrame):
         self.back_button.clicked.connect(lambda: self._move_to_edge(False))
         self.group_button.clicked.connect(self._create_group)
         self.ungroup_button.clicked.connect(self._ungroup)
+        self.unlock_all_button.clicked.connect(lambda: self.store.unlock_all())
         store.source_added.connect(lambda _source: self.schedule_refresh())
         store.source_removed.connect(lambda _source_id: self.schedule_refresh())
         store.source_changed.connect(lambda _source: self.schedule_refresh())
@@ -127,6 +130,11 @@ class LayerPanel(QFrame):
         )
         self.group_button.setText("그룹" if korean else "Group")
         self.ungroup_button.setText("해제" if korean else "Ungroup")
+        self.unlock_all_button.setText("잠금 해제" if korean else "Unlock all")
+        self.unlock_all_button.setToolTip(
+            "잠긴 모든 레이어의 잠금을 해제합니다." if korean else
+            "Unlock every locked layer."
+        )
         self.front_button.setToolTip("맨 앞으로" if korean else "Bring to front")
         self.up_button.setToolTip("한 단계 앞으로" if korean else "Move forward")
         self.down_button.setToolTip("한 단계 뒤로" if korean else "Move backward")
@@ -210,6 +218,8 @@ class LayerPanel(QFrame):
 
         QTimer.singleShot(0, perform_refresh)
 
+    _LOCKED_FOREGROUND = QBrush(QColor("#E0603A"))
+
     def _source_item(self, source: Source) -> QTreeWidgetItem:
         item = QTreeWidgetItem([source.name, "", ""])
         item.setData(0, Qt.ItemDataRole.UserRole, source.id)
@@ -219,6 +229,12 @@ class LayerPanel(QFrame):
             | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled
             | Qt.ItemFlag.ItemIsEditable
         ) & ~Qt.ItemFlag.ItemIsDropEnabled
+        if source.locked:
+            # A locked source is not selectable on the Canvas; keep the Layer row
+            # consistent while its lock checkbox stays clickable (unlock path).
+            flags &= ~Qt.ItemFlag.ItemIsSelectable
+            for column in range(3):
+                item.setForeground(column, self._LOCKED_FOREGROUND)
         item.setFlags(flags)
         item.setCheckState(1, Qt.CheckState.Checked if source.visible else Qt.CheckState.Unchecked)
         item.setCheckState(2, Qt.CheckState.Checked if source.locked else Qt.CheckState.Unchecked)
@@ -228,12 +244,17 @@ class LayerPanel(QFrame):
         return item
 
     def selected_source_ids(self) -> list[str]:
-        """Return all selected source identifiers, excluding group headings."""
-        return [
-            item.data(0, Qt.ItemDataRole.UserRole)
-            for item in self.tree.selectedItems()
-            if item.data(0, self._kind_role) == "source"
-        ]
+        """Return selected source identifiers, excluding groups and locked rows."""
+        ids: list[str] = []
+        for item in self.tree.selectedItems():
+            if item.data(0, self._kind_role) != "source":
+                continue
+            source_id = item.data(0, Qt.ItemDataRole.UserRole)
+            source = self.store.get(str(source_id))
+            if source is not None and source.locked:
+                continue
+            ids.append(source_id)
+        return ids
 
     def _item_changed(self, item: QTreeWidgetItem, column: int) -> None:
         if self._refreshing:
@@ -377,6 +398,9 @@ class LayerPanel(QFrame):
         self.up_button.setEnabled(can_forward)
         self.down_button.setEnabled(can_backward)
         self.back_button.setEnabled(can_backward)
+        locked_count = sum(source.locked for source in ordered)
+        self.unlock_all_button.setEnabled(locked_count > 0)
+        self.unlock_all_button.setVisible(locked_count > 0)
         self.group_button.setEnabled(len(selected) >= 2)
         selected_groups = {
             item.data(0, self._group_role)

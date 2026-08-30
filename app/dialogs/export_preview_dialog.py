@@ -2946,6 +2946,15 @@ class ExportPreviewDialog(QDialog):
             if korean else
             f"Render {factor}% · ×{self._active_render_scale:.3f}"
         )
+        self.performance_scale_label.setToolTip(
+            "부드러운 재생을 위해 미리보기는 최종 해상도보다 낮게 렌더링됩니다. "
+            "내보낸 영상은 선택한 출력 해상도로 선명하게 렌더링되므로 실제 "
+            "결과물은 이 미리보기보다 또렷합니다."
+            if korean else
+            "The preview renders below the final resolution for smooth playback. "
+            "The exported video is rendered at the selected output resolution, so "
+            "the finished file is sharper than this preview."
+        )
         stats = (
             getattr(self.gpu_surface, "upload_stats", None)
             if self.gpu_preview_enabled and self.gpu_surface is not None else None

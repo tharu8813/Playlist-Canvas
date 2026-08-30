@@ -98,7 +98,10 @@ from app.services.video_encoder_service import (
     NVIDIA_H264_ENCODER,
     VideoEncoderAdvisor,
 )
-from app.renderer.static_video_stream import StaticVideoStreamResult
+from app.renderer.static_video_stream import (
+    DirectVideoEncodingProfile,
+    StaticVideoStreamResult,
+)
 from app.presets.preset_service import PresetService
 
 
@@ -108,6 +111,17 @@ class MainWindowSafetyTests(unittest.TestCase):
         cls.application = QApplication.instance() or QApplication([])
         cls.application.setApplicationName("Playlist Canvas Tests")
         cls.application.setOrganizationName("Playlist Canvas Tests")
+        # Isolate user presets from the developer's real preset folder.
+        cls._preset_dir = tempfile.mkdtemp(prefix="pc-presets-")
+        cls._prev_preset_dir = os.environ.get("PLAYLIST_CANVAS_PRESET_DIR")
+        os.environ["PLAYLIST_CANVAS_PRESET_DIR"] = cls._preset_dir
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls._prev_preset_dir is None:
+            os.environ.pop("PLAYLIST_CANVAS_PRESET_DIR", None)
+        else:
+            os.environ["PLAYLIST_CANVAS_PRESET_DIR"] = cls._prev_preset_dir
 
     def setUp(self) -> None:
         # Main-window UI assertions use the Korean baseline unless a test opts
@@ -2019,10 +2033,13 @@ class MainWindowSafetyTests(unittest.TestCase):
             "move_forward", "move_backward", "bring_front", "send_back",
             "center_horizontal", "center_vertical", "align_left",
             "align_hcenter", "align_right", "align_top", "align_vcenter",
-            "align_bottom", "group", "ungroup", "toggle_visible",
+            "align_bottom", "distribute_horizontal", "distribute_vertical",
+            "group", "ungroup", "toggle_visible",
             "toggle_lock", "select_all",
         }.issubset(actions))
         self.assertTrue(actions["align_left"].isEnabled())
+        # Distribute needs three sources; only two are selected here.
+        self.assertFalse(actions["distribute_horizontal"].isEnabled())
         self.assertFalse(actions["ungroup"].isEnabled())
 
         actions["align_left"].trigger()
@@ -2045,10 +2062,13 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.window.canvas._create_context_menu(None)
         )
         self.assertEqual(
-            set(empty_actions), {"paste", "select_all", "fit_canvas"},
+            set(empty_actions),
+            {"paste", "select_all", "unlock_all_layers", "fit_canvas"},
         )
+        # Two sources are locked above, so the unlock-all command is offered.
+        self.assertTrue(empty_actions["unlock_all_layers"].isEnabled())
 
-    def test_canvas_animation_preview_locks_editing_and_restores_source(self) -> None:
+    def test_canvas_animation_preview_is_non_blocking_and_restores_source(self) -> None:
         source = self.window.store.sources()[0]
         self.window.store.update(
             source.id,
@@ -2068,24 +2088,180 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.window._preview_source_animation(source.id)
         self.assertTrue(self.window._animation_preview_active)
         self.assertTrue(self.window.animation_preview_controller.active)
-        self.assertFalse(self.window.isEnabled())
+        # The preview is non-blocking: the window stays interactive.
+        self.assertTrue(self.window.isEnabled())
         self.assertNotEqual(item.pos(), original_position)
         self.assertEqual(source.to_dict(), original_model)
 
-        close_event = QCloseEvent()
-        self.window.closeEvent(close_event)
-        self.assertFalse(close_event.isAccepted())
-
-        QTest.qWait(700)
+        # Once armed, any further user action stops the preview immediately.
+        QTest.qWait(1)
+        self.window.store.source_changed.emit(source)
         self.assertFalse(self.window._animation_preview_active)
         self.assertFalse(self.window.animation_preview_controller.active)
-        self.assertTrue(self.window.isEnabled())
         self.assertEqual(item.pos(), original_position)
         self.assertEqual(item.scale(), original_scale)
         self.assertEqual(item.opacity(), original_opacity)
+
+    def test_canvas_animation_preview_completes_when_left_alone(self) -> None:
+        source = self.window.store.sources()[0]
+        self.window.store.update(
+            source.id, animation_in="slide_left", animation_out="zoom",
+            animation_in_duration=0.1, animation_out_duration=0.1,
+        )
+        self.window.store.select(source.id)
+        source = self.window.store.get(source.id)
+        item = self.window.canvas._items[source.id]
+        original_position = QPointF(item.pos())
+
+        self.window._preview_source_animation(source.id)
+        QTest.qWait(900)
+        self.assertFalse(self.window._animation_preview_active)
+        self.assertEqual(item.pos(), original_position)
         self.assertTrue(item.isSelected())
         self.assertEqual(self.window.store.selected.id, source.id)
-        self.assertEqual(source.to_dict(), original_model)
+
+    def test_sample_data_preview_expands_text_tokens_on_canvas(self) -> None:
+        self.window._add_source(SourceType.TEXT)
+        source = self.window.store.selected
+        self.window.store.update(source.id, text="%title% - %artist%")
+        item = self.window.canvas._items[source.id]
+
+        self.assertEqual(item._render_text(), "%title% - %artist%")
+
+        self.window.sample_data_action.setChecked(True)
+        rendered = item._render_text()
+        self.assertNotIn("%title%", rendered)
+        self.assertNotIn("%artist%", rendered)
+        self.assertNotEqual(rendered, "%title% - %artist%")
+        self.assertTrue(self.window.canvas.scene_model.sample_data_mode)
+
+        self.window.sample_data_action.setChecked(False)
+        self.assertEqual(item._render_text(), "%title% - %artist%")
+        self.assertFalse(self.window.canvas.scene_model.sample_data_mode)
+
+    def test_distribute_spacing_evens_gaps_and_keeps_outermost(self) -> None:
+        ids: list[str] = []
+        for x, width in ((0, 100), (140, 60), (400, 120), (700, 40)):
+            self.window._add_source(SourceType.SHAPE)
+            source = self.window.store.selected
+            self.window.store.update(
+                source.id, x=float(x), y=0.0,
+                width=float(width), height=50.0, scale=1.0,
+            )
+            ids.append(source.id)
+        self.window.store.select_many(ids, ids[-1])
+
+        self.window._handle_canvas_context_command("distribute_horizontal")
+        by_id = {source.id: source for source in self.window.store.sources()}
+        ordered = sorted((by_id[i] for i in ids), key=lambda s: s.x)
+        gaps = [
+            round(ordered[k + 1].x - (ordered[k].x + ordered[k].width), 3)
+            for k in range(len(ordered) - 1)
+        ]
+        self.assertEqual(len(set(gaps)), 1)
+        self.assertEqual(ordered[0].x, 0.0)
+        self.assertAlmostEqual(ordered[-1].x, 700.0)
+
+        # Fewer than three selected sources leave positions untouched.
+        self.window.store.select_many(ids[:2], ids[1])
+        before = by_id[ids[0]].x
+        self.window._handle_canvas_context_command("distribute_horizontal")
+        self.assertEqual(by_id[ids[0]].x, before)
+
+    def test_unlock_all_sources_from_canvas_menu_and_layer_panel(self) -> None:
+        self.window._add_source(SourceType.TEXT)
+        first = self.window.store.selected
+        self.window._add_source(SourceType.SHAPE)
+        second = self.window.store.selected
+        self.window.store.update(first.id, locked=True)
+        self.window.store.update(second.id, locked=True)
+        self.application.processEvents()
+
+        panel = self.window.layer_panel
+        self.assertFalse(panel.unlock_all_button.isHidden())
+        self.assertTrue(panel.unlock_all_button.isEnabled())
+
+        menu = self.window.canvas._create_context_menu(None)
+        unlock_action = next(
+            action for action in menu.actions()
+            if action.data() == "unlock_all_layers"
+        )
+        self.assertTrue(unlock_action.isEnabled())
+
+        self.window._handle_canvas_context_command("unlock_all_layers")
+        self.assertEqual(
+            sum(source.locked for source in self.window.store.sources()), 0
+        )
+        self.application.processEvents()
+        self.assertTrue(panel.unlock_all_button.isHidden())
+
+        # The empty-canvas action is disabled again once nothing is locked.
+        menu = self.window.canvas._create_context_menu(None)
+        unlock_action = next(
+            action for action in menu.actions()
+            if action.data() == "unlock_all_layers"
+        )
+        self.assertFalse(unlock_action.isEnabled())
+
+    def test_save_reapply_and_delete_user_preset(self) -> None:
+        from app.presets.user_preset_service import UserPresetService, all_presets
+
+        self.window._add_source(SourceType.TEXT)
+        self.window._add_source(SourceType.SHAPE)
+        original = sorted(s.source_type.value for s in self.window.store.sources())
+
+        with patch(
+            "app.ui.main_window.QInputDialog.getText",
+            return_value=("My Layout", True),
+        ):
+            self.window._save_current_as_preset()
+
+        saved = UserPresetService.all()
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].name("en"), "My Layout")
+        self.assertTrue(saved[0].editable)
+        self.assertIn(
+            saved[0].identifier, {p.identifier for p in all_presets()}
+        )
+
+        self.window.store.replace([])
+        self.window._apply_preset(saved[0])
+        self.assertEqual(
+            sorted(s.source_type.value for s in self.window.store.sources()),
+            original,
+        )
+        # Applied sources get fresh ids so repeated applies never collide.
+        self.window._apply_preset(saved[0])
+        ids = [s.id for s in self.window.store.sources()]
+        self.assertEqual(len(ids), len(set(ids)))
+
+        self.assertTrue(UserPresetService.delete(saved[0].identifier))
+        self.assertEqual(UserPresetService.all(), [])
+
+    def test_preset_dialog_lists_and_exports_user_presets(self) -> None:
+        from app.presets.user_preset_service import UserPresetService
+        from app.dialogs.preset_dialog import DesignPresetDialog
+
+        self.window._add_source(SourceType.TEXT)
+        preset = UserPresetService.save(
+            "Portable One", self.window.store.sources(), 1280.0, 720.0,
+        )
+        dialog = DesignPresetDialog(self.window.translator, self.window)
+        try:
+            labels = [
+                dialog.list_widget.item(row).text()
+                for row in range(dialog.list_widget.count())
+            ]
+            self.assertIn("Portable One", labels)
+            export_path = Path(self._preset_dir) / "exported.pcpreset.json"
+            UserPresetService.export_to(preset.identifier, export_path)
+            self.assertTrue(export_path.is_file())
+            reimported = UserPresetService.import_from(export_path)
+            self.assertEqual(reimported.name("en"), "Portable One")
+        finally:
+            dialog.close()
+            for definition in UserPresetService.all():
+                UserPresetService.delete(definition.identifier)
 
     def test_preview_tab_embeds_canvas_controls_and_restores_editing_tab(self) -> None:
         track = PlaylistTrack(
@@ -2392,6 +2568,10 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertFalse(preview.performance_bar.isHidden())
         self.assertEqual(preview.frame_rate_label.toolTip(), "")
         self.assertTrue(preview.performance_scale_label.text())
+        # The preview renders below final resolution; tell the user the export
+        # will be sharper so a soft preview is not mistaken for a soft export.
+        scale_tip = preview.performance_scale_label.toolTip()
+        self.assertTrue("또렷" in scale_tip or "sharper" in scale_tip)
 
         second = preview.track_list.item(1)
         preview.track_list.itemDoubleClicked.emit(second)
@@ -4554,6 +4734,56 @@ class MainWindowSafetyTests(unittest.TestCase):
             )
             self.assertEqual(ambient.size(), QSize(320, 180))
 
+    def test_ambient_album_background_flows_over_time(self) -> None:
+        from PySide6.QtGui import QPainter
+        from app.canvas.live_canvas import CanvasScene
+        from app.canvas.source_item import SourceItem
+        from app.preview.album_art import AMBIENT_FLOW_HZ
+        from app.preview.canvas_snapshot import CanvasSnapshot
+
+        with TemporaryDirectory(prefix="playlist-ambient-flow-") as directory:
+            cover_path = Path(directory) / "flow-cover.png"
+            art = QImage(120, 120, QImage.Format.Format_ARGB32)
+            art.fill(QColor("#20308A"))
+            painter = QPainter(art)
+            painter.fillRect(0, 0, 60, 120, QColor("#E8532A"))
+            painter.fillRect(60, 0, 60, 120, QColor("#2EC7A0"))
+            painter.end()
+            self.assertTrue(art.save(str(cover_path)))
+
+            frame_a = create_cached_ambient_background(
+                "missing.mp3", 240, 135, 24.0, cover_path, phase=0.0,
+            )
+            frame_b = create_cached_ambient_background(
+                "missing.mp3", 240, 135, 24.0, cover_path, phase=6.0,
+            )
+            self.assertEqual(frame_a.size(), QSize(240, 135))
+            self.assertNotEqual(frame_a.toImage(), frame_b.toImage())
+            # Sub-step phase changes land in the same cached flow frame.
+            near = create_cached_ambient_background(
+                "missing.mp3", 240, 135, 24.0, cover_path,
+                phase=1.0 / AMBIENT_FLOW_HZ / 4.0,
+            )
+            self.assertEqual(frame_a.toImage(), near.toImage())
+
+            scene = CanvasScene()
+            background = Source(
+                SourceType.BACKGROUND, "BG", width=1280, height=720, z_index=-20,
+                background_mode="album_art", background_ambient=True,
+            )
+            scene.addItem(SourceItem(background))
+            track = PlaylistTrack(
+                "missing.wav", "Track", duration_seconds=60.0,
+                cover_path=str(cover_path),
+            )
+            captured_start = CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=0.0,
+            )
+            captured_later = CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=5.0,
+            )
+            self.assertNotEqual(captured_start, captured_later)
+
     def test_track_lyrics_dialog_previews_audio_with_synchronized_lyrics(self) -> None:
         saved_volumes: list[int] = []
         volume_reader = patch(
@@ -5349,6 +5579,45 @@ class MainWindowSafetyTests(unittest.TestCase):
         warning.assert_called_once()
         self.window._clear_export_frame_staging()
 
+    def test_export_warns_when_a_raster_source_is_upscaled_past_its_pixels(self) -> None:
+        with TemporaryDirectory(prefix="playlist-upscale-warn-") as directory:
+            small = Path(directory) / "small.png"
+            big = Path(directory) / "big.png"
+            self.assertTrue(
+                QImage(160, 90, QImage.Format.Format_ARGB32).save(str(small))
+            )
+            self.assertTrue(
+                QImage(1920, 1080, QImage.Format.Format_ARGB32).save(str(big))
+            )
+            soft = Source(
+                SourceType.IMAGE, "Tiny logo", width=1280.0, height=720.0,
+                content_path=str(small),
+            )
+            crisp = Source(
+                SourceType.IMAGE, "Sharp art", width=1280.0, height=720.0,
+                content_path=str(big),
+            )
+            self.window.store.replace([soft, crisp])
+            track = PlaylistTrack("song.wav", "Song", duration_seconds=2.0)
+
+            fhd = RenderSettings(output_width=1920, output_height=1080)
+            warnings = self.window._export_upscale_warnings(
+                [track], fhd, 1.5, korean=False,
+            )
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("Tiny logo", warnings[0])
+            self.assertNotIn("Sharp art", warnings[0])
+
+            # Shrink the tiny image on the canvas until it fits its own pixels.
+            soft.width = soft.height = 100.0
+            self.window.store.replace([soft, crisp])
+            self.assertEqual(
+                self.window._export_upscale_warnings(
+                    [track], fhd, 1.5, korean=False,
+                ),
+                [],
+            )
+
     def test_dependent_inspector_fields_hide_until_their_toggle_is_active(self) -> None:
         source = Source(SourceType.IMAGE, "Conditional", width=300.0, height=200.0)
         self.window.store.replace([source])
@@ -5911,7 +6180,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             with (
                 patch("app.ui.main_window.FFmpegRenderer") as renderer_type,
                 patch("app.ui.main_window.RenderWorker", WorkerStub),
-                patch("app.ui.main_window.StaticVideoStreamEncoder", EncoderStub),
+                patch("app.preview.export_session.StaticVideoStreamEncoder", EncoderStub),
                 patch("app.ui.main_window.ExportSettingsDialog.exec",
                       return_value=QDialog.DialogCode.Accepted),
                 patch.object(CanvasSnapshot, "z_bands", return_value=[(None, None)]),
@@ -5921,6 +6190,12 @@ class MainWindowSafetyTests(unittest.TestCase):
                 patch.object(QMessageBox, "critical") as critical_message,
             ):
                 renderer_type.return_value.ensure_encoder_available.return_value = None
+                renderer_type.return_value.direct_encoding_profile.side_effect = (
+                    lambda settings: DirectVideoEncodingProfile(
+                        settings.output_width, settings.output_height,
+                        settings.video_codec, (),
+                    )
+                )
                 self.window._export_video()
 
             critical_message.assert_not_called()
@@ -5977,6 +6252,33 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(duration.call_count, 3)
         self.assertGreaterEqual(maximum_running, 2)
         self.assertEqual(len(clips), 3)
+
+    def test_video_clip_geometry_and_blur_follow_the_export_render_scale(self) -> None:
+        with TemporaryDirectory(prefix="clip-render-scale-") as raw_directory:
+            clip_path = Path(raw_directory) / "clip.mp4"
+            clip_path.touch()
+            source = Source(
+                SourceType.VIDEO, "Overlay clip",
+                x=100.0, y=50.0, width=400.0, height=300.0,
+                blur=8.0, border_radius=20.0,
+                video_timing_mode="timeline", video_paths=[str(clip_path)],
+            )
+            self.window.store.add(source)
+            track = PlaylistTrack("song.wav", "Song", duration_seconds=3.0)
+
+            with patch.object(
+                PlaylistService, "_probe_duration", return_value=3.0,
+            ):
+                base = self.window._export_video_clips([track], 3.0, render_scale=1.0)
+                scaled = self.window._export_video_clips(
+                    [track], 3.0, WORK_MODE_AUTO, 1.5,
+                )
+
+        self.assertEqual((base[0].width, base[0].height), (400, 300))
+        self.assertEqual((scaled[0].width, scaled[0].height), (600, 450))
+        self.assertEqual((scaled[0].x, scaled[0].y), (150, 75))
+        self.assertAlmostEqual(scaled[0].blur, 12.0)
+        self.assertAlmostEqual(scaled[0].border_radius, 30.0)
 
     def test_dynamic_export_streams_base_and_transparent_z_bands(self) -> None:
         track = PlaylistTrack(
@@ -6082,7 +6384,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             with (
                 patch("app.ui.main_window.FFmpegRenderer") as renderer_type,
                 patch("app.ui.main_window.RenderWorker", WorkerStub),
-                patch("app.ui.main_window.StaticVideoStreamEncoder", EncoderStub),
+                patch("app.preview.export_session.StaticVideoStreamEncoder", EncoderStub),
                 patch("app.ui.main_window.ExportSettingsDialog.exec",
                       return_value=QDialog.DialogCode.Accepted),
                 patch.object(CanvasSnapshot, "z_bands",

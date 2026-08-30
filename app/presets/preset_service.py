@@ -18,6 +18,12 @@ class PresetDefinition:
     korean_description: str
     english_description: str
     builder: Callable[[], list[Source]]
+    # Coordinate space the builder authors in; the target canvas is adapted from
+    # these dimensions. User presets record the canvas they were captured on.
+    source_width: float = 1280.0
+    source_height: float = 720.0
+    # True for user-saved presets, which the picker lets you delete or export.
+    editable: bool = False
 
     def name(self, language: str) -> str:
         return self.korean_name if language == "ko" else self.english_name
@@ -271,264 +277,177 @@ def _lyrics(x: float, y: float, width: float, height: float, color: str, z: int,
     )
 
 
-def spotify() -> list[Source]:
-    """Album-led dark layout with left cover and right metadata stack."""
+def aurora() -> list[Source]:
+    """Teal-to-violet gradient with a large centred cover and mirrored waveform."""
     return [
-        _background("#121212", "#1B2530"),
-        _panel("Metadata card", 520, 128, 650, 460, "#1F1F1F", 0, 28),
-        _cover(105, 150, 370, "#1DB954", 2),
-        _text("Playlist label", "PLAYLIST · %track% / %track_total%", 570, 175, 500, 36, "#1DB954", 16, 3),
-        _text("Song title", "%title%", 570, 238, 530, 94, "#FFFFFF", 42, 4, weight=700, animation_in="slide_right", animation_out="slide_left"),
-        _text("Artist", "%artist%", 570, 348, 480, 42, "#D1D5DB", 21, 5, animation_in="slide_right", animation_out="slide_left"),
-        _text("Album", "%album%", 570, 396, 480, 34, "#8E9AA6", 16, 6, animation_in="slide_right", animation_out="slide_left"),
-        _visualizer(570, 456, 500, 54, "#1DB954", 7, style="bars", bars=36),
-        _progress(570, 544, 500, "#1DB954", 8, style="spotify", track_color="#2C3741"),
-        _text("Time", "%current_time% / %total_time%", 570, 566, 500, 28, "#9CA3AF", 13, 9, alignment="right"),
+        _background("#0B1F2A", "#3B1F55"),
+        _particles("#59E0C7", -1, style="dust", density=30, speed=0.4, opacity=0.2),
+        _cover(475, 54, 330, "#2FC6B6", 2, radius=28),
+        _text("Playlist label", "AURORA MIX · %track% / %track_total%", 300, 400, 680, 28, "#7FE9D8", 15, 3, alignment="center"),
+        _text("Song title", "%title%", 200, 436, 880, 78, "#FFFFFF", 38, 4, alignment="center", weight=700),
+        _text("Artist", "%artist% — %album%", 220, 518, 840, 32, "#C9B6E6", 18, 5, alignment="center"),
+        _waveform(140, 574, 1000, 66, "#59E0C7", 6, style="mirror", points=80),
+        _progress(240, 652, 800, "#B98CE8", 7, style="apple", track_color="#2A3A4A"),
+        _text("Time", "%current_time% / %total_time%", 240, 676, 800, 22, "#8FA6B8", 12, 8, alignment="center"),
     ]
 
 
-def apple_music() -> list[Source]:
-    """Bright, centered editorial cover layout."""
+def cassette() -> list[Source]:
+    """Retro mixtape layout on a warm cream sleeve with a scrolling track list."""
     return [
-        _background("#F6F7FB", "#E5E9F5", mode="album_art", ambient=True),
-        _panel("Center card", 340, 55, 600, 610, "#FFFFFF", 0, 34),
-        _cover(490, 105, 300, "#FA2D55", 2, radius=34),
-        _text("Playlist label", "NOW PLAYING", 420, 430, 440, 30, "#FA2D55", 14, 3, alignment="center"),
-        _text("Song title", "%title%", 390, 470, 500, 72, "#19191C", 36, 4, alignment="center", weight=700, animation_in="zoom", animation_out="fade"),
-        _text("Artist", "%artist%", 400, 547, 480, 34, "#555764", 19, 5, alignment="center", animation_in="fade", animation_out="fade"),
-        _text("Album", "%album%", 400, 583, 480, 28, "#858794", 14, 6, alignment="center"),
-        _progress(425, 625, 430, "#FA2D55", 7, style="apple", track_color="#D9DCE5"),
-        _text("Playback time", "%current_time% / %total_time%  ·  %track% of %track_total%", 425, 646, 430, 23, "#858794", 12, 8, alignment="center"),
+        _background("#2B2016", "#4A3722"),
+        _panel("Sleeve", 66, 88, 700, 512, "#F2E4CC", 0, 16),
+        _text("Label", "SIDE A · MIXTAPE", 108, 126, 540, 34, "#8A6A3C", 17, 3),
+        _text("Song title", "%title%", 108, 176, 620, 96, "#2B2016", 40, 4, weight=800, animation_in="slide_right", animation_out="slide_left"),
+        _text("Artist", "%artist%", 108, 282, 560, 34, "#6E5636", 19, 5, animation_in="slide_right", animation_out="slide_left"),
+        _text("Album", "%album%", 108, 322, 560, 28, "#9A8055", 14, 6),
+        _visualizer(108, 398, 616, 58, "#C98A3C", 7, style="bars", bars=32),
+        _progress(108, 494, 616, "#8A6A3C", 8, style="rounded", track_color="#D8C4A2"),
+        _text("Time", "%current_time% / %total_time%", 108, 520, 616, 26, "#9A8055", 13, 9),
+        _cover(820, 132, 320, "#C98A3C", 2, radius=14, frame="polaroid", animation_in="slide_left", animation_out="slide_right"),
+        _track_list(820, 496, 340, 132, "#E7C79A", 10, count=3, style="scroll"),
     ]
 
 
-def k_pop() -> list[Source]:
-    """Poster-like diagonal composition with bold visualizer."""
+def midnight() -> list[Source]:
+    """Deep-navy typographic layout with a hairline progress bar."""
     return [
-        _background("#250D50", "#ED3D9A"),
-        _panel("Title plate", 62, 72, 650, 210, "#16062E", 0, 30, 0.72),
-        _cover(790, 95, 345, "#6E42FF", 2, radius=16, animation_in="slide_left", animation_out="slide_right"),
-        _text("Playlist label", "K-POP // %track%", 105, 108, 530, 32, "#FFD53D", 17, 3),
-        _text("Song title", "%title%", 105, 150, 555, 95, "#FFFFFF", 47, 4, weight=800, animation_in="slide_right", animation_out="slide_left"),
-        _text("Artist album", "%artist% — %album%", 105, 248, 555, 38, "#F7C8E2", 18, 5, animation_in="slide_right", animation_out="slide_left"),
-        _visualizer(100, 378, 1030, 126, "#FFD53D", 6, style="mirror", bars=58),
-        _progress(100, 565, 1030, "#FFFFFF", 7, style="rounded", track_color="#633080"),
-        _text("Time", "%current_time%", 100, 588, 500, 28, "#F7C8E2", 13, 8),
-        _text("Total time", "%total_time%", 630, 588, 500, 28, "#F7C8E2", 13, 8, alignment="right"),
+        _background("#0A1120", "#111C33"),
+        _text("Playlist", "PLAYLIST / %track%", 130, 128, 700, 32, "#5B7CB0", 15, 1),
+        _text("Song title", "%title%", 128, 192, 940, 130, "#F4F7FF", 54, 2, weight=700, animation_in="slide_right", animation_out="slide_left"),
+        _text("Artist", "%artist%", 130, 336, 720, 40, "#AEBEDC", 22, 3, animation_in="fade", animation_out="fade"),
+        _text("Album", "%album%", 130, 384, 720, 30, "#6E7F9E", 15, 4),
+        _visualizer(130, 466, 880, 42, "#3E64A8", 5, style="line", bars=48),
+        _progress(130, 544, 880, "#7FA8E6", 6, style="youtube", track_color="#1E2C46"),
+        _text("Time", "%current_time%", 130, 566, 420, 24, "#6E7F9E", 12, 7),
+        _text("Total", "%total_time% · %track% / %track_total%", 660, 566, 350, 24, "#6E7F9E", 12, 7, alignment="right"),
     ]
 
 
-def lofi() -> list[Source]:
-    """Warm asymmetrical late-night layout with the cover on the right."""
+def bubblegum() -> list[Source]:
+    """Pastel pink and mint card with a plump capsule visualizer."""
     return [
-        _background("#273041", "#705543"),
-        _panel("Text area", 90, 125, 590, 450, "#182232", 0, 26, 0.7),
-        _cover(760, 145, 350, "#B6825B", 2, radius=48, animation_in="slide_left", animation_out="slide_right"),
-        _text("Playlist", "late night beats", 135, 175, 430, 42, "#D9B58E", 24, 3, surface=TRANSPARENT),
-        _text("Song title", "%title%", 135, 260, 485, 92, "#FFF5E9", 40, 4, weight=600, animation_in="slide_up", animation_out="slide_down"),
-        _text("Artist", "%artist%", 135, 365, 420, 38, "#E9D7C3", 19, 5, animation_in="slide_up", animation_out="slide_down"),
-        _text("Album", "%album%", 135, 410, 420, 30, "#BFC2C8", 15, 6),
-        _visualizer(135, 468, 420, 45, "#D5A16D", 7, style="wave", bars=30),
-        _progress(135, 535, 420, "#D5A16D", 8, style="rounded", track_color="#4E5967"),
-        _text("Track", "track %track% · %current_time% / %total_time%", 135, 555, 420, 28, "#BFC2C8", 13, 9),
+        _background("#FFE3F1", "#DDF6F0"),
+        _panel("Card", 150, 88, 980, 544, "#FFFFFF", 0, 40, 0.92),
+        _particles("#FFC1DE", 1, style="dust", density=26, speed=0.35, opacity=0.3),
+        _cover(210, 162, 300, "#FF9CC9", 2, radius=40),
+        _text("Playlist", "SWEET BEATS · %track% / %track_total%", 560, 165, 480, 32, "#FF6FB0", 15, 3),
+        _text("Song title", "%title%", 560, 216, 500, 100, "#3A2E36", 36, 4, weight=800, animation_in="slide_right", animation_out="slide_left"),
+        _text("Artist", "%artist%", 560, 326, 480, 34, "#8A6E80", 19, 5, animation_in="slide_right", animation_out="slide_left"),
+        _visualizer(560, 396, 480, 74, "#57D2C0", 6, style="capsule", bars=22),
+        _progress(210, 548, 860, "#FF8FC4", 7, style="apple", track_color="#F0D7E5"),
+        _text("Time", "%current_time% / %total_time%", 210, 574, 860, 26, "#8A6E80", 13, 8, alignment="center"),
     ]
 
 
-def minimal() -> list[Source]:
-    """Cover-free typography-first layout for a clean playlist video."""
+def noir() -> list[Source]:
+    """Black-and-white cinema layout with letterbox bars and a lower third."""
     return [
-        _background("#F8FAFC"),
-        _panel("Accent line", 104, 125, 12, 425, "#1E293B", 0, 6),
-        _text("Playlist", "PLAYLIST / %track%", 150, 130, 680, 36, "#64748B", 15, 1),
-        _text("Song title", "%title%", 150, 205, 880, 120, "#0F172A", 56, 2, weight=700, animation_in="slide_right", animation_out="slide_left"),
-        _text("Artist", "%artist%", 150, 350, 650, 42, "#334155", 23, 3, animation_in="fade", animation_out="fade"),
-        _text("Album", "%album%", 150, 403, 650, 32, "#64748B", 16, 4),
-        _progress(150, 535, 830, "#0F172A", 5, style="youtube", track_color="#CBD5E1"),
-        _text("Time", "%current_time%", 150, 558, 360, 26, "#64748B", 13, 6),
-        _text("Total", "%total_time%", 620, 558, 360, 26, "#64748B", 13, 6, alignment="right"),
-        _text("Counter", "%track% / %track_total%", 1030, 535, 130, 45, "#0F172A", 18, 7, alignment="right"),
+        _background("#050505", "#1E1E1E"),
+        _particles("#FFFFFF", -1, style="dust", density=18, speed=0.22, opacity=0.10),
+        _panel("Top bar", 0, 0, 1280, 66, "#000000", 0, 0),
+        _panel("Bottom bar", 0, 654, 1280, 66, "#000000", 1, 0),
+        _panel("Lower third", 0, 430, 1280, 224, "#0A0A0A", 2, 0, 0.72),
+        _cover(90, 456, 168, "#8C8C8C", 3, radius=4, animation_in="slide_right", animation_out="slide_left"),
+        _text("Playlist", "NOIR SESSION  ·  TRACK %track% / %track_total%", 300, 452, 780, 26, "#9C9C9C", 13, 4),
+        _text("Song title", "%title%", 300, 486, 840, 66, "#FFFFFF", 34, 5, weight=700, animation_in="slide_up", animation_out="slide_down"),
+        _text("Artist album", "%artist%  —  %album%", 300, 560, 780, 30, "#C8C8C8", 16, 6, animation_in="fade", animation_out="fade"),
+        _progress(300, 608, 840, "#FFFFFF", 7, style="rounded", track_color="#333333"),
+        _text("Time", "%current_time% / %total_time%", 300, 626, 840, 22, "#8C8C8C", 12, 8, alignment="right"),
     ]
 
 
-def neon() -> list[Source]:
-    """High-energy visualizer-first layout with small cover art."""
+def sunset() -> list[Source]:
+    """Warm orange-to-purple scene with a circular cover and dotted visualizer."""
     return [
-        _background("#070711", "#1B1038"),
-        _panel("Neon frame", 65, 62, 1150, 595, "#0C0C1D", 0, 30, 0.82),
-        _cover(110, 110, 210, "#0DCAF0", 2, radius=20),
-        _text("Playlist", "NEON FREQUENCY · %track% / %track_total%", 365, 115, 650, 34, "#0DCAF0", 17, 3),
-        _text("Song title", "%title%", 365, 165, 700, 76, "#FFFFFF", 39, 4, weight=700, animation_in="zoom", animation_out="zoom"),
-        _text("Artist album", "%artist%  //  %album%", 365, 252, 650, 34, "#F72585", 17, 5, animation_in="fade", animation_out="fade"),
-        _visualizer(135, 360, 1010, 125, "#F72585", 6, style="spectrum", bars=64),
-        _progress(135, 555, 1010, "#0DCAF0", 7, style="spotify", track_color="#25203E"),
-        _text("Time", "%current_time% / %total_time%", 135, 580, 1010, 26, "#938CB4", 13, 8, alignment="center"),
+        _background("#FF7E3D", "#5B2A86"),
+        _panel("Info", 636, 118, 500, 484, "#2A123F", 0, 30, 0.7),
+        _cover(118, 160, 400, "#FFB067", 2, radius=200),
+        _text("Playlist", "SUNSET DRIVE", 688, 172, 420, 30, "#FFC48A", 16, 3),
+        _text("Song title", "%title%", 688, 228, 424, 96, "#FFFFFF", 31, 4, weight=700, animation_in="slide_left", animation_out="slide_right"),
+        _text("Artist", "%artist%", 688, 336, 420, 32, "#F0CBE6", 18, 5, animation_in="slide_left", animation_out="slide_right"),
+        _text("Album", "%album%", 688, 374, 420, 26, "#C79ECB", 14, 6),
+        _visualizer(688, 436, 420, 58, "#FFB067", 7, style="dots", bars=26),
+        _progress(688, 526, 420, "#FF9F5A", 8, style="rounded", track_color="#4A2A5E"),
+        _text("Track", "%track% / %track_total% · %current_time%", 688, 554, 420, 26, "#C79ECB", 13, 9),
     ]
 
 
-def dark_modern() -> list[Source]:
-    """Magazine-like split screen, tuned for long metadata names."""
+def terminal() -> list[Source]:
+    """CRT-green monospace console with a spectrum readout and track list."""
     return [
-        _background("#10151E"),
-        _panel("Cover zone", 770, 0, 510, 720, "#182231", 0, 0),
-        _cover(845, 145, 310, "#3F72AF", 2, radius=10, animation_in="slide_left", animation_out="slide_right"),
-        _text("Playlist", "CURATED PLAYLIST", 105, 120, 560, 34, "#77A5D3", 16, 3),
-        _text("Song title", "%title%", 105, 205, 570, 135, "#F8FAFC", 48, 4, weight=700, animation_in="slide_right", animation_out="slide_left"),
-        _text("Artist", "%artist%", 105, 365, 520, 38, "#C6D3E0", 20, 5, animation_in="slide_right", animation_out="slide_left"),
-        _text("Album", "%album%", 105, 415, 520, 32, "#7F93A7", 16, 6),
-        _visualizer(105, 482, 540, 48, "#77A5D3", 7, style="line", bars=38),
-        _progress(105, 560, 540, "#3F72AF", 8, style="rounded", track_color="#2A3746"),
-        _text("Counter", "%track% / %track_total%", 105, 584, 540, 28, "#7F93A7", 13, 9),
+        _background("#02110A", "#04240F"),
+        _panel("Console", 68, 60, 1144, 600, "#031A0E", 0, 8, 0.9),
+        _text("Prompt", "user@playlist:~$ now-playing --track %track%", 108, 92, 940, 28, "#3BE07A", 14, 2, animation_in="fade", animation_out="fade"),
+        _text("Song title", "%title%", 108, 138, 940, 66, "#B6FFD1", 33, 3, weight=700, animation_in="fade", animation_out="fade"),
+        _text("Artist album", "  artist: %artist%    album: %album%", 108, 214, 940, 26, "#59C98B", 15, 4, animation_in="fade", animation_out="fade"),
+        _visualizer(108, 286, 1000, 150, "#3BE07A", 5, style="spectrum", bars=64),
+        _track_list(108, 470, 1000, 96, "#59C98B", 6, count=3, style="compact"),
+        _progress(108, 590, 1000, "#3BE07A", 7, style="youtube", track_color="#0C3A1E"),
+        _text("Time", "[ %current_time% / %total_time% ]", 108, 614, 1000, 24, "#59C98B", 12, 8, alignment="right"),
     ]
 
 
-def glassmorphism() -> list[Source]:
-    """Layered translucent cards with centered metadata."""
+def gallery() -> list[Source]:
+    """Quiet white-gallery layout with a framed cover and museum caption."""
     return [
-        _background("#2B5876", "#4E4376"),
-        _panel("Glass card", 160, 85, 960, 550, "#EEF6FF", 0, 32, 0.15),
-        _cover(235, 170, 300, "#8DA8D8", 2, radius=30),
-        _text("Playlist", "GLASS PLAYLIST · %track%", 600, 170, 390, 34, "#E9F6FF", 16, 3),
-        _text("Song title", "%title%", 600, 235, 405, 96, "#FFFFFF", 38, 4, weight=700, animation_in="slide_right", animation_out="slide_left"),
-        _text("Artist", "%artist%", 600, 350, 385, 36, "#E1EBFF", 19, 5, animation_in="slide_right", animation_out="slide_left"),
-        _text("Album", "%album%", 600, 393, 385, 30, "#C5D4EE", 15, 6),
-        _visualizer(600, 458, 385, 48, "#C5E7FF", 7, style="wave", bars=36),
-        _progress(235, 550, 770, "#FFFFFF", 8, style="apple", track_color="#C5E7FF"),
-        _text("Time", "%current_time%", 235, 572, 350, 26, "#E1EBFF", 13, 9),
-        _text("Duration", "%total_time%", 655, 572, 350, 26, "#E1EBFF", 13, 9, alignment="right"),
+        _background("#F4F1EA"),
+        _panel("Wall shadow", 456, 78, 372, 360, "#E4DFD4", 0, 4),
+        _cover(474, 90, 336, "#C9BFA8", 2, radius=6, frame="polaroid", animation_in="fade", animation_out="fade"),
+        _text("Index", "No. %track% / %track_total%", 340, 470, 600, 24, "#9A9484", 13, 5, alignment="center"),
+        _text("Caption title", "%title%", 340, 500, 600, 44, "#20201C", 24, 3, alignment="center", weight=700, animation_in="fade", animation_out="fade"),
+        _text("Caption meta", "%artist%,  %album%", 340, 546, 600, 28, "#6A665C", 15, 4, alignment="center", animation_in="fade", animation_out="fade"),
+        _progress(430, 600, 420, "#20201C", 6, style="rounded", track_color="#D8D2C4"),
+        _text("Time", "%current_time% / %total_time%", 430, 622, 420, 22, "#9A9484", 12, 7, alignment="center"),
     ]
 
 
-def radio_wave() -> list[Source]:
-    """Broadcast dashboard arrangement with a dominant waveform."""
+def pulse() -> list[Source]:
+    """Bold colour-block layout with a large mirrored visualizer."""
     return [
-        _background("#101E2F", "#1D3557"),
-        _panel("Broadcast panel", 65, 65, 1150, 590, "#0B1522", 0, 24, 0.88),
-        _text("Station", "ON AIR  •  PLAYLIST RADIO", 110, 108, 610, 32, "#FFB703", 16, 2),
-        _text("Song title", "%title%", 110, 160, 800, 75, "#FFFFFF", 39, 3, weight=700, animation_in="slide_up", animation_out="slide_down"),
-        _text("Artist album", "%artist% — %album%", 110, 248, 800, 35, "#B8C9DB", 18, 4, animation_in="slide_up", animation_out="slide_down"),
-        _cover(955, 105, 180, "#FFB703", 5, radius=90),
-        _visualizer(110, 350, 1000, 115, "#FFB703", 6, style="wave", bars=58),
-        _progress(110, 535, 1000, "#FFB703", 7, style="youtube", track_color="#2D4862"),
-        _text("Elapsed", "%current_time%", 110, 560, 300, 26, "#B8C9DB", 13, 8),
-        _text("Remaining", "%total_time%  •  %track% / %track_total%", 670, 560, 440, 26, "#B8C9DB", 13, 8, alignment="right"),
+        _background("#12121A"),
+        _panel("Color block", 0, 0, 468, 720, "#FF3366", 0, 0),
+        _panel("Accent block", 0, 520, 468, 200, "#1F1F2E", 1, 0),
+        _cover(70, 118, 328, "#FFFFFF", 2, radius=12, animation_in="slide_right", animation_out="slide_left"),
+        _text("Playlist", "PULSE · %track% / %track_total%", 520, 108, 700, 32, "#FF3366", 16, 3),
+        _text("Song title", "%title%", 520, 158, 700, 132, "#FFFFFF", 52, 4, weight=800, animation_in="slide_right", animation_out="slide_left"),
+        _text("Artist", "%artist%", 520, 320, 660, 40, "#B7B7C6", 21, 5, animation_in="fade", animation_out="fade"),
+        _visualizer(520, 398, 700, 150, "#FF3366", 6, style="mirror", bars=52),
+        _progress(520, 598, 700, "#FF3366", 7, style="spotify", track_color="#2A2A3A"),
+        _text("Time", "%current_time% / %total_time%", 520, 624, 700, 26, "#8E8E9E", 13, 8),
     ]
 
 
-def cinematic() -> list[Source]:
-    """Cinematic lower-third layout which leaves ample room for background art."""
+def frost() -> list[Source]:
+    """Frosted-glass blue layout with a stereo meter and track-start card."""
     return [
-        _background("#0A0D12", "#27364B"),
-        _panel("Lower third", 0, 470, 1280, 250, "#080B10", 0, 0, 0.83),
-        _cover(90, 500, 160, "#D4A373", 2, radius=8, animation_in="slide_right", animation_out="slide_left"),
-        _text("Playlist", "CINEMATIC PLAYLIST  /  TRACK %track%", 300, 510, 700, 28, "#D4A373", 14, 3),
-        _text("Song title", "%title%", 300, 548, 780, 56, "#FFFFFF", 31, 4, weight=700, animation_in="slide_up", animation_out="slide_down"),
-        _text("Artist album", "%artist%  ·  %album%", 300, 610, 700, 30, "#CBD5E1", 16, 5, animation_in="fade", animation_out="fade"),
-        _progress(300, 662, 790, "#D4A373", 6, style="rounded", track_color="#3A4758"),
-        _text("Time", "%current_time% / %total_time%", 860, 510, 230, 26, "#CBD5E1", 12, 7, alignment="right"),
+        _background("#1C3E5A", "#2E5A7A", mode="album_art", ambient=True),
+        _panel("Glass", 150, 92, 980, 532, "#DDEEFF", 0, 30, 0.16),
+        _cover(210, 162, 300, "#9FC4E0", 2, radius=26, frame="glass"),
+        _text("Playlist", "FROST · %track% / %track_total%", 560, 162, 470, 32, "#E6F3FF", 15, 3),
+        _text("Song title", "%title%", 560, 214, 480, 96, "#FFFFFF", 36, 4, weight=700, animation_in="slide_right", animation_out="slide_left"),
+        _text("Artist", "%artist%  ·  %album%", 560, 324, 470, 34, "#CFE3F5", 18, 5, animation_in="slide_right", animation_out="slide_left"),
+        _meter(1058, 162, 34, 300, "#BFE0F5", 6, mode="stereo"),
+        _now_playing(560, 388, 470, 96, "#2E5A7A", 7, style="glass", seconds=2.6, exit_style="slide_up"),
+        _progress(210, 544, 820, "#FFFFFF", 8, style="apple", track_color="#BFE0F5"),
+        _text("Time", "%current_time% / %total_time%", 210, 570, 820, 26, "#CFE3F5", 13, 9, alignment="center"),
     ]
-
-
-def vinyl_room() -> list[Source]:
-    """Vinyl-inspired arrangement with a circular cover and compact details."""
-    return [
-        _background("#211D1A", "#493D32"),
-        _panel("Info panel", 655, 125, 470, 470, "#312820", 0, 28),
-        _cover(130, 160, 390, "#D8A65D", 2, radius=195, animation_in="zoom", animation_out="zoom"),
-        _text("Playlist", "VINYL SESSION", 710, 180, 340, 30, "#D8A65D", 16, 3),
-        _text("Song title", "%title%", 710, 245, 350, 95, "#FFF7EB", 36, 4, weight=700, animation_in="slide_left", animation_out="slide_right"),
-        _text("Artist", "%artist%", 710, 355, 350, 34, "#E6CCAA", 19, 5, animation_in="slide_left", animation_out="slide_right"),
-        _text("Album", "%album%", 710, 400, 350, 30, "#AFA091", 15, 6),
-        _visualizer(710, 458, 340, 45, "#D8A65D", 7, style="dots", bars=28),
-        _progress(710, 535, 340, "#D8A65D", 8, style="rounded", track_color="#59483A"),
-        _text("Track", "%track% / %track_total%", 710, 557, 340, 25, "#AFA091", 13, 9, alignment="right"),
-    ]
-
-
-def _enhance_phase5c(sources: list[Source], profile: str) -> list[Source]:
-    """Apply the Phase 5 source set to a legacy preset with a distinct composition."""
-    cover = next((source for source in sources if source.source_type is SourceType.ALBUM_COVER), None)
-    if profile in {"apple_music", "glassmorphism"} and cover:
-        cover.album_frame_style = "glass"
-    elif profile in {"vinyl_room", "radio_wave"} and cover:
-        cover.album_frame_style = "circle"
-    elif profile in {"kpop", "dark_modern"} and cover:
-        cover.album_frame_style = "polaroid"
-    visualizer_style = {
-        "spotify": "capsule", "kpop": "led", "neon": "arc",
-        "dark_modern": "center", "vinyl_room": "capsule",
-    }.get(profile)
-    if visualizer_style:
-        for source in sources:
-            if source.source_type is SourceType.AUDIO_VISUALIZER:
-                source.visualizer_style = visualizer_style
-
-    additions: dict[str, list[Source]] = {
-        "spotify": [
-            _track_list(105, 545, 370, 105, "#B8C6BE", 11, count=3, style="scroll"),
-            _now_playing(570, 136, 500, 90, "#176B43", 12, style="glass", seconds=2.6, exit_style="slide_up"),
-        ],
-        "apple_music": [
-            _particles("#FA2D55", 1, style="dust", density=28, speed=0.45, opacity=0.22),
-            _now_playing(420, 290, 440, 105, "#FA2D55", 12, style="glass", seconds=2.5, exit_style="zoom"),
-            _lyrics(380, 210, 520, 190, "#232632", 13, style="minimal"),
-        ],
-        "kpop": [
-            _particles("#FF7BC6", 1, style="neon", density=72, speed=1.45, opacity=0.38),
-            _now_playing(760, 515, 370, 72, "#6E42FF", 12, style="card", seconds=2.0, exit_style="slide_down"),
-        ],
-        "lofi": [
-            _particles("#F4D6AC", 1, style="noise", density=95, speed=0.32, opacity=0.18),
-            _track_list(760, 520, 350, 108, "#E9D7C3", 12, count=3, style="scroll"),
-            _lyrics(135, 210, 470, 150, "#FFF5E9", 13),
-        ],
-        "minimal": [
-            _track_list(825, 185, 330, 260, "#334155", 10, count=5, style="compact"),
-            _now_playing(150, 455, 410, 62, "#0F172A", 11, style="minimal", seconds=2.2, exit_style="fade"),
-        ],
-        "neon": [
-            _particles("#0DCAF0", 1, style="neon", density=105, speed=1.8, opacity=0.45),
-            _meter(1160, 365, 28, 120, "#0DCAF0", 12, mode="led"),
-            _lyrics(250, 255, 780, 82, "#F4EFFF", 13, style="neon"),
-        ],
-        "dark_modern": [
-            _meter(1165, 155, 22, 310, "#77A5D3", 11, mode="stereo"),
-            _track_list(795, 510, 365, 110, "#C6D3E0", 12, count=3, style="compact"),
-        ],
-        "glassmorphism": [
-            _particles("#E9F6FF", 1, style="dust", density=35, speed=0.5, opacity=0.28),
-            _now_playing(600, 248, 385, 108, "#89A6D8", 12, style="glass", seconds=2.5, exit_style="slide_up"),
-        ],
-        "radio_wave": [
-            _meter(1140, 350, 35, 115, "#FFB703", 12, mode="led"),
-        ],
-        "cinematic": [
-            _now_playing(300, 340, 530, 98, "#172334", 10, style="glass", seconds=2.8, exit_style="fade"),
-            _particles("#D4A373", 1, style="dust", density=24, speed=0.35, opacity=0.16),
-            _lyrics(300, 355, 760, 95, "#F8FAFC", 11, style="minimal"),
-        ],
-        "vinyl_room": [
-            _particles("#D8A65D", 1, style="dust", density=54, speed=0.38, opacity=0.28),
-            _waveform(130, 585, 390, 48, "#D8A65D", 12, style="mirror", points=52),
-        ],
-    }
-    return [*sources, *additions[profile]]
 
 
 class PresetService:
     """Exposes the track-aware visual preset catalog."""
 
     _presets = [
-        PresetDefinition("spotify", "Spotify", "Spotify", "파형과 현재/다음 곡 목록을 갖춘 다크 플레이어", "Dark player with waveform and track queue", lambda: _enhance_phase5c(spotify(), "spotify")),
-        PresetDefinition("apple_music", "Apple Music", "Apple Music", "글래스 커버와 부드러운 파티클의 중앙 카드", "Centered card with glass cover and soft particles", lambda: _enhance_phase5c(apple_music(), "apple_music")),
-        PresetDefinition("kpop", "K-POP", "K-POP", "네온 파티클과 트랙 전환 카드가 있는 포스터", "Poster layout with neon particles and transition card", lambda: _enhance_phase5c(k_pop(), "kpop")),
-        PresetDefinition("lofi", "Lo-Fi", "Lo-Fi", "노이즈 질감과 스크롤 트랙 목록의 야간 무드", "Night mood with grain texture and scrolling track list", lambda: _enhance_phase5c(lofi(), "lofi")),
-        PresetDefinition("minimal", "Minimal", "Minimal", "타이포그래피와 큐 목록을 강조한 미니멀 화면", "Typography-first screen with a clean queue", lambda: _enhance_phase5c(minimal(), "minimal")),
-        PresetDefinition("neon", "Neon", "Neon", "고밀도 네온 파티클과 LED 레벨 미터", "High-energy particles with an LED level meter", lambda: _enhance_phase5c(neon(), "neon")),
-        PresetDefinition("dark_modern", "Dark Modern", "Dark Modern", "폴라로이드 커버, 레벨 미터, 컴팩트 큐", "Editorial split screen with meter and compact queue", lambda: _enhance_phase5c(dark_modern(), "dark_modern")),
-        PresetDefinition("glassmorphism", "Glassmorphism", "Glassmorphism", "글래스 프레임과 곡 시작 카드를 갖춘 투명 UI", "Glass UI with framed cover and track-start card", lambda: _enhance_phase5c(glassmorphism(), "glassmorphism")),
-        PresetDefinition("radio_wave", "라디오 웨이브", "Radio Wave", "대형 가로 파형과 방송용 LED 레벨 미터", "Broadcast layout with waveform and LED level meter", lambda: _enhance_phase5c(radio_wave(), "radio_wave")),
-        PresetDefinition("cinematic", "시네마틱", "Cinematic", "미세한 질감과 곡 전환 카드가 있는 시네마틱 화면", "Cinematic lower third with texture and transition card", lambda: _enhance_phase5c(cinematic(), "cinematic")),
-        PresetDefinition("vinyl_room", "바이닐 룸", "Vinyl Room", "원형 커버, 먼지 질감, 아날로그 파형", "Analog room with circular cover, dust and waveform", lambda: _enhance_phase5c(vinyl_room(), "vinyl_room")),
+        PresetDefinition("aurora", "오로라", "Aurora", "청록–보라 그라데이션과 중앙 대형 커버, 미러 파형", "Teal-violet gradient with a centred cover and mirrored waveform", aurora),
+        PresetDefinition("cassette", "카세트", "Cassette", "크림·브라운 레트로 카세트와 스크롤 트랙 목록", "Retro cream-and-brown mixtape with a scrolling track list", cassette),
+        PresetDefinition("midnight", "미드나잇", "Midnight", "딥네이비 타이포 중심 화면과 얇은 진행 표시줄", "Deep-navy type-first screen with a hairline progress bar", midnight),
+        PresetDefinition("bubblegum", "버블검", "Bubblegum", "파스텔 핑크·민트 라운드 카드와 캡슐 비주얼라이저", "Pastel pink-and-mint card with a capsule visualizer", bubblegum),
+        PresetDefinition("noir", "느와르", "Noir", "흑백 시네마 레터박스와 로우어서드 타이포", "Black-and-white cinema letterbox with a lower third", noir),
+        PresetDefinition("sunset", "선셋", "Sunset", "오렌지→퍼플 하늘과 원형 커버, 도트 비주얼라이저", "Orange-to-purple sky with a circular cover and dotted visualizer", sunset),
+        PresetDefinition("terminal", "터미널", "Terminal", "CRT 그린 모노스페이스 콘솔과 스펙트럼, 트랙 목록", "CRT-green monospace console with a spectrum and track list", terminal),
+        PresetDefinition("gallery", "갤러리", "Gallery", "화이트 갤러리 벽의 액자형 커버와 캡션 메타데이터", "Framed cover on a white gallery wall with a museum caption", gallery),
+        PresetDefinition("pulse", "펄스", "Pulse", "볼드 컬러블록과 대형 미러 비주얼라이저", "Bold colour-block layout with a large mirrored visualizer", pulse),
+        PresetDefinition("frost", "프로스트", "Frost", "프로스트 글래스 블루 톤과 스테레오 레벨미터, 곡 시작 카드", "Frosted-glass blue tones with a stereo meter and track-start card", frost),
     ]
 
     @classmethod

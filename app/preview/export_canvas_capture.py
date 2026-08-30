@@ -12,6 +12,7 @@ from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
+from app.preview.album_art import AMBIENT_FLOW_HZ
 from app.preview.canvas_snapshot import CanvasSnapshot
 from app.preview.text_template import expand_track_template
 from app.renderer.export_timeline import ExportFrameSample
@@ -34,12 +35,16 @@ class ExportCanvasCapturer:
         after_capture: Callable[[int, str], None],
         *,
         retain_static_frames: bool = True,
+        output_scale: float = 1.0,
     ) -> None:
         self.scene = scene
         self.tracks = list(tracks)
         self.playlist_duration = playlist_duration
         self.dynamic_source_ids = set(dynamic_source_ids)
         self.z_bands = list(z_bands)
+        # 1.0 keeps the historic artboard-resolution capture; export passes the
+        # output/artboard ratio so the vector scene is rasterised at final size.
+        self.output_scale = max(1.0, float(output_scale))
         self.stage_frame = stage_frame
         self.ensure_not_cancelled = ensure_not_cancelled
         self.after_capture = after_capture
@@ -238,16 +243,22 @@ class ExportCanvasCapturer:
                 or (sample.track.file_path, sample.track.cover_path),
             )
         elif source.source_type is SourceType.BACKGROUND:
-            content_state = (
-                "background",
-                (
+            if source.background_mode == "album_art":
+                background_state: object = (
                     sample.track.file_path,
                     sample.track.cover_path,
                     source.background_ambient,
                 )
-                if source.background_mode == "album_art"
-                else source.background_mode,
-            )
+                if source.background_ambient:
+                    # The ambient colour field drifts, so a new frame is needed
+                    # at the flow rate even while the track stays the same.
+                    background_state = (
+                        *background_state,
+                        round(global_seconds * AMBIENT_FLOW_HZ),
+                    )
+            else:
+                background_state = source.background_mode
+            content_state = ("background", background_state)
         elif source.source_type in {
             SourceType.IMAGE,
             SourceType.SHAPE,
@@ -379,6 +390,7 @@ class ExportCanvasCapturer:
                 render_metrics=render_metrics,
                 capture_rect=fixed_capture_rect,
                 band_source_items=self._stream_source_items.get(stream_key),
+                output_scale=self.output_scale,
                 **common,
             )
             artboard = self.scene.artboard_rect
@@ -462,6 +474,6 @@ class ExportCanvasCapturer:
             return 0, 0
         artboard = self.scene.artboard_rect
         return (
-            round(capture_rect.left() - artboard.left()),
-            round(capture_rect.top() - artboard.top()),
+            round((capture_rect.left() - artboard.left()) * self.output_scale),
+            round((capture_rect.top() - artboard.top()) * self.output_scale),
         )

@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.utils.i18n import Language, Translator
-from app.presets.preset_service import PresetDefinition, PresetService
+from app.presets.preset_service import PresetDefinition
+from app.presets.user_preset_service import all_presets
 
 
 CANVAS_PRESETS: tuple[tuple[str, int, int], ...] = (
@@ -77,7 +78,7 @@ class NewProjectDialog(QDialog):
         self.design_preset_label = QLabel()
         self.design_preset_combo = QComboBox()
         self.design_preset_combo.addItem("", None)
-        for preset in PresetService.all():
+        for preset in all_presets():
             self.design_preset_combo.addItem(
                 preset.name(self.translator.language.value), preset.identifier,
             )
@@ -126,7 +127,7 @@ class NewProjectDialog(QDialog):
         """Return the optional design used to populate the new project."""
         identifier = self.design_preset_combo.currentData()
         return next(
-            (preset for preset in PresetService.all()
+            (preset for preset in all_presets()
              if preset.identifier == identifier),
             None,
         )
@@ -208,10 +209,11 @@ class NewProjectDialog(QDialog):
         self.design_preset_combo.setItemText(
             0, "기본 프로젝트" if korean else "Default project"
         )
-        for index, preset in enumerate(PresetService.all(), start=1):
-            self.design_preset_combo.setItemText(
-                index, preset.name(self.translator.language.value)
-            )
+        for index, preset in enumerate(all_presets(), start=1):
+            if index < self.design_preset_combo.count():
+                self.design_preset_combo.setItemText(
+                    index, preset.name(self.translator.language.value)
+                )
         selected_index = self.design_preset_combo.findData(selected_identifier)
         self.design_preset_combo.setCurrentIndex(max(0, selected_index))
         self._design_preset_changed(self.design_preset_combo.currentIndex())

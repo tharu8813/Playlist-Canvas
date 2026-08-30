@@ -1295,6 +1295,23 @@ class FFmpegRenderer:
             f"{suffix}"
         )
 
+    def direct_encoding_profile(
+        self, settings: RenderSettings,
+    ) -> "DirectVideoEncodingProfile":
+        """Describe how to encode an opaque Canvas stream straight to the final codec.
+
+        Callers that stream Canvas frames use this instead of reaching into the
+        renderer's private encoding arguments.
+        """
+        from app.renderer.static_video_stream import DirectVideoEncodingProfile
+
+        return DirectVideoEncodingProfile(
+            settings.output_width,
+            settings.output_height,
+            settings.video_codec,
+            tuple(self._video_encoding_arguments(settings)),
+        )
+
     @staticmethod
     def _video_encoding_arguments(settings: RenderSettings) -> list[str]:
         """Return quality controls compatible with CPU and common GPU encoders."""

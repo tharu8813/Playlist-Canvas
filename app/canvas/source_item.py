@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 
 from app.models.source import Source, SourceType
+from app.preview.text_template import expand_sample_template
 from app.utils.font_loader import load_application_font
 from app.utils.image_loader import load_pixmap
 from app.utils.level_meter_painter import paint_level_meter
@@ -335,6 +336,9 @@ class SourceItem(QGraphicsObject):
         self.setZValue(self.source.z_index)
         self.setVisible(self.source.visible)
         self.setFlag(QGraphicsItem.ItemIsMovable, not self.source.locked)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, not self.source.locked)
+        if self.source.locked and self.isSelected():
+            self.setSelected(False)
         image_path = self.source.content_path
         if self.source.source_type is SourceType.BACKGROUND and self.source.background_mode != "image":
             image_path = ""
@@ -1036,7 +1040,7 @@ class SourceItem(QGraphicsObject):
 
         padding = max(0.0, min(40.0, source.track_list_item_padding))
         inner = rect.adjusted(padding, padding, -padding, -padding)
-        lines = (source.text or source.name).splitlines()[:max(1, source.track_list_count)]
+        lines = (self._render_text() or source.name).splitlines()[:max(1, source.track_list_count)]
         if not lines or inner.isEmpty():
             return
         current_row = source.track_list_current_row
@@ -1148,6 +1152,28 @@ class SourceItem(QGraphicsObject):
         offsets = tuple(sorted(points))
         SourceItem._STROKE_OFFSET_CACHE[radius] = offsets
         return offsets
+
+    _SAMPLE_TEXT_TYPES = frozenset({
+        SourceType.TEXT, SourceType.TIME, SourceType.TRACK_LIST,
+        SourceType.NOW_PLAYING, SourceType.LYRICS,
+    })
+
+    def _render_text(self) -> str:
+        """Return the text to paint, expanding tokens under the sample preview."""
+        text = self.source.text
+        scene = self.scene()
+        if (scene is None or not getattr(scene, "sample_data_mode", False)
+                or self.source.source_type not in self._SAMPLE_TEXT_TYPES):
+            return text
+        track = getattr(scene, "sample_track", None)
+        if track is None:
+            return text
+        if self.source.source_type is SourceType.LYRICS:
+            return str(getattr(scene, "sample_lyric", "") or text)
+        template = text
+        if self.source.source_type is SourceType.TIME and "%" not in text:
+            template = "%track_current_time%"
+        return expand_sample_template(template, track)
 
     def _draw_text(
         self, painter: QPainter, rect: QRectF, flags: int, text: str,
@@ -1470,7 +1496,7 @@ class SourceItem(QGraphicsObject):
             # lyric elements.
             painter.save()
             painter.setClipRect(rect)
-            lines = [line for line in (self.source.text or self.source.subtitle_fallback).splitlines() if line.strip()]
+            lines = [line for line in (self._render_text() or self.source.subtitle_fallback).splitlines() if line.strip()]
             current_line = self.source.subtitle_current_line
             current_line_count = max(1, self.source.subtitle_current_line_count)
             has_current_line = 0 <= current_line < len(lines)
@@ -1635,7 +1661,7 @@ class SourceItem(QGraphicsObject):
             elif card_color.lightness() > 220 and text_color.lightness() > 190:
                 text_color = QColor("#172033")
             painter.drawRoundedRect(rect, self.source.border_radius, self.source.border_radius)
-            lines = [line for line in (self.source.text or "NOW PLAYING").splitlines() if line.strip()]
+            lines = [line for line in (self._render_text() or "NOW PLAYING").splitlines() if line.strip()]
             label = lines[0] if lines else "NOW PLAYING"
             title = lines[1] if len(lines) > 1 else self.source.name
             details = " · ".join(lines[2:]) if len(lines) > 2 else ""
@@ -1676,7 +1702,7 @@ class SourceItem(QGraphicsObject):
                 "right": Qt.AlignmentFlag.AlignRight,
             }.get(self.source.text_alignment, Qt.AlignmentFlag.AlignHCenter)
             text_rect = rect.adjusted(12, 6, -12, -6)
-            text = self.source.text or self.source.name
+            text = self._render_text() or self.source.name
             flags = alignment | Qt.AlignmentFlag.AlignVCenter
             overflow_types = {SourceType.TEXT, SourceType.TRACK_LIST}
             if self.source.source_type in overflow_types and self.source.text_overflow != "wrap":

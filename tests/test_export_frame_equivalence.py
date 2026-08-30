@@ -712,6 +712,34 @@ class ExportFrameEquivalenceTests(unittest.TestCase):
             len(legacy_samples) * len(broad_bands),
         )
 
+    def test_output_scale_rasterizes_canvas_at_final_resolution(self) -> None:
+        """A >1 output scale must render the vector scene larger, not upscale it."""
+        scene = CanvasScene()
+        scene.set_artboard_size(160, 90)
+        scene.addItem(SourceItem(Source(
+            SourceType.TEXT, "Title", x=8, y=18, width=144, height=54,
+            text="Static playlist", font_size=22,
+        )))
+        track = PlaylistTrack("scale.wav", "Scale", duration_seconds=1.0)
+        sample = ExportFrameSample(track, 1, 0.0, 1.0, 0.0, 0.0)
+        staged: list[RenderFrame] = []
+
+        def stage(image: QImage, seconds: float, _key: str) -> RenderFrame:
+            frame = RenderFrame(image.copy(), seconds)
+            staged.append(frame)
+            return frame
+
+        capturer = ExportCanvasCapturer(
+            scene, [track], 1.0, set(), [(None, None)], stage,
+            lambda: None, lambda _track, _key: None, output_scale=2.0,
+        )
+        capturer.capture_stream(sample, "base")
+
+        self.assertEqual(capturer.output_scale, 2.0)
+        self.assertEqual(
+            (staged[0].image.width(), staged[0].image.height()), (320, 180),
+        )
+
     def test_animated_source_remains_on_pixel_identical_legacy_path(self) -> None:
         """Animation samples must never be collapsed by the safe-frame cache."""
         scene = CanvasScene()

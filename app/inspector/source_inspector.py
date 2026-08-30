@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt, QSettings, Signal
 from PySide6.QtGui import QColor, QFontDatabase
 from PySide6.QtWidgets import (
@@ -49,10 +51,12 @@ class SourceInspector(QScrollArea):
     }
 
     def __init__(self, store: SourceStore, translator: Translator,
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None,
+                 tracks_provider: Callable[[], list] | None = None) -> None:
         super().__init__(parent)
         self.store = store
         self.translator = translator
+        self._tracks_provider = tracks_provider
         self._updating = False
         self._applying_batch = False
         self._source_id: str | None = None
@@ -1085,6 +1089,8 @@ class SourceInspector(QScrollArea):
         self.animation_out_combo.currentIndexChanged.connect(lambda _index: self._update("animation_out", self.animation_out_combo.currentData()))
         self.animation_in_combo.currentIndexChanged.connect(self._update_animation_preview_button)
         self.animation_out_combo.currentIndexChanged.connect(self._update_animation_preview_button)
+        self.animation_in_combo.currentIndexChanged.connect(self._autoplay_animation_preview)
+        self.animation_out_combo.currentIndexChanged.connect(self._autoplay_animation_preview)
         self.animation_in_duration_spin.valueChanged.connect(
             lambda value: self._update("animation_in_duration", value)
         )
@@ -1294,6 +1300,14 @@ class SourceInspector(QScrollArea):
         self.video_settings_button.setToolTip(description)
         self.video_settings_button.setAccessibleDescription(description)
 
+    def _dialog_tracks(self) -> list:
+        if self._tracks_provider is None:
+            return []
+        try:
+            return list(self._tracks_provider())
+        except Exception:  # pragma: no cover - provider is best-effort
+            return []
+
     def _choose_color(self, field: str, _button: QPushButton) -> None:
         source = self.store.get(self._source_id)
         if source is None:
@@ -1305,6 +1319,7 @@ class SourceInspector(QScrollArea):
             self.translator,
             "색상 편집" if korean else "Edit color",
             self,
+            tracks=self._dialog_tracks(),
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._commit_color_dialog(dialog, "source", field)
@@ -1323,6 +1338,7 @@ class SourceInspector(QScrollArea):
             self.translator,
             "그라데이션 색상 편집" if korean else "Edit gradient color",
             self,
+            tracks=self._dialog_tracks(),
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._commit_color_dialog(dialog, "gradient", field)
@@ -1355,6 +1371,7 @@ class SourceInspector(QScrollArea):
             self.translator,
             "그림자 색상 편집" if korean else "Edit shadow color",
             self,
+            tracks=self._dialog_tracks(),
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._commit_color_dialog(dialog, "shadow", "color")
@@ -1394,6 +1411,14 @@ class SourceInspector(QScrollArea):
 
     def _request_animation_preview(self) -> None:
         if self._source_id and self.animation_preview_button.isEnabled():
+            self.animation_preview_requested.emit(self._source_id)
+
+    def _autoplay_animation_preview(self, _index: object = None) -> None:
+        """Play the animation on the Canvas as soon as the user picks a style."""
+        if self._updating or not self._source_id:
+            return
+        if (self.animation_in_combo.currentData() != "none"
+                or self.animation_out_combo.currentData() != "none"):
             self.animation_preview_requested.emit(self._source_id)
 
     def _show_empty_state(self, visible: bool) -> None:

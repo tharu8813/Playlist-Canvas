@@ -58,6 +58,38 @@ def expand_track_template(template: str, track: PlaylistTrack, track_number: int
     )
 
 
+def build_sample_track(korean: bool = False) -> PlaylistTrack:
+    """Return placeholder track metadata for the editor's sample-data preview.
+
+    The editing canvas normally shows raw tokens such as ``%title%``.  When the
+    sample-data preview is on, tokens are expanded against this obviously fake
+    track so the layout reads the way it will once a real song is loaded.
+    """
+    if korean:
+        return PlaylistTrack(
+            "sample-track.mp3", "샘플 곡 제목", "샘플 아티스트", "샘플 앨범",
+            duration_seconds=214.0,
+        )
+    return PlaylistTrack(
+        "sample-track.mp3", "Sample Track Title", "Sample Artist", "Sample Album",
+        duration_seconds=214.0,
+    )
+
+
+SAMPLE_TRACK_NUMBER = 3
+SAMPLE_TRACK_TOTAL = 12
+SAMPLE_TRACK_ELAPSED_SECONDS = 42.0
+SAMPLE_PLAYLIST_DURATION_SECONDS = 1_680.0
+
+
+def expand_sample_template(template: str, track: PlaylistTrack) -> str:
+    """Expand a text template against sample-track metadata for the editor."""
+    return expand_track_template(
+        template, track, SAMPLE_TRACK_NUMBER, SAMPLE_TRACK_TOTAL, 0.0,
+        SAMPLE_TRACK_ELAPSED_SECONDS, SAMPLE_PLAYLIST_DURATION_SECONDS,
+    )
+
+
 def format_timestamp(seconds: float) -> str:
     """Format a duration as MM:SS or HH:MM:SS for display templates."""
     total = max(0, int(seconds))

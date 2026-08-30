@@ -218,6 +218,22 @@ class SourceStore(QObject):
             if hasattr(source, name):
                 setattr(source, name, value)
         self.source_changed.emit(source)
+        if changes.get("locked") is True and source_id in self._selected_ids:
+            # A locked source cannot be selected anywhere, so drop it from the
+            # shared Canvas/Layer/Inspector selection the moment it is locked.
+            self.select_many(
+                [entry for entry in self._selected_ids if entry != source_id],
+                self._selected_id if self._selected_id != source_id else None,
+            )
+
+    def unlock_all(self) -> int:
+        """Clear the lock flag on every locked source; return how many changed."""
+        locked_ids = [
+            source_id for source_id, source in self._sources.items() if source.locked
+        ]
+        for source_id in locked_ids:
+            self.update(source_id, locked=False)
+        return len(locked_ids)
 
     def replace(self, sources: Iterable[Source], groups: Iterable[LayerGroup] = ()) -> None:
         """Replace the collection, primarily for future project loading."""

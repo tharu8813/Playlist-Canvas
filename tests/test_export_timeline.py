@@ -28,6 +28,58 @@ class ExportTimelinePlannerTests(unittest.TestCase):
             for sample in samples_60
         ))
 
+    def test_ambient_album_background_gets_a_full_flow_rate_schedule(self) -> None:
+        from app.preview.album_art import AMBIENT_FLOW_HZ
+
+        track = PlaylistTrack(
+            file_path="ambient.mp3", title="Ambient", duration_seconds=2.0,
+        )
+        ambient_bg = Source(
+            SourceType.BACKGROUND, "Cover",
+            background_mode="album_art", background_ambient=True,
+        )
+        static_bg = Source(
+            SourceType.BACKGROUND, "Solid", background_mode="album_art",
+        )
+
+        flowing = ExportTimelinePlanner.build([track], [ambient_bg], 30)
+        frozen = ExportTimelinePlanner.build([track], [static_bg], 30)
+
+        self.assertEqual(len(frozen), 1)
+        self.assertEqual(len(flowing), round(2.0 * AMBIENT_FLOW_HZ))
+        self.assertAlmostEqual(
+            sum(sample.duration_seconds for sample in flowing), 2.0, places=12,
+        )
+        elapsed = [round(sample.elapsed_seconds, 4) for sample in flowing]
+        self.assertEqual(len(set(elapsed)), len(elapsed))
+
+    def test_ambient_album_background_flows_through_track_gaps(self) -> None:
+        from app.preview.album_art import AMBIENT_FLOW_HZ
+
+        first = PlaylistTrack(
+            file_path="first.mp3", title="First", duration_seconds=1.0,
+        )
+        second = PlaylistTrack(
+            file_path="second.mp3", title="Second", duration_seconds=1.0,
+            start_time_seconds=2.0,
+        )
+        ambient_bg = Source(
+            SourceType.BACKGROUND, "Cover",
+            background_mode="album_art", background_ambient=True,
+        )
+
+        samples = ExportTimelinePlanner.build([first, second], [ambient_bg], 30)
+        gap_samples = [
+            sample for sample in samples
+            if 1.0 <= sample.timeline_seconds < 2.0
+        ]
+
+        self.assertEqual(len(gap_samples), round(1.0 * AMBIENT_FLOW_HZ))
+        self.assertTrue(all(sample.track is first for sample in gap_samples))
+        self.assertAlmostEqual(
+            sum(sample.duration_seconds for sample in samples), 3.0, places=12,
+        )
+
     def test_element_animations_scale_with_selected_output_frame_rate(self) -> None:
         track = PlaylistTrack(
             file_path="animation.mp3", title="Animation", duration_seconds=4.0,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from base64 import b64decode
 from collections import Counter
 from functools import lru_cache
+from math import sin
 from pathlib import Path
 
 from mutagen import File as MutagenFile
@@ -120,50 +121,90 @@ def adjust_personal_color(
     ).upper()
 
 
+# How many distinct ambient-background frames are produced per second of the
+# final video. The colour field drifts slowly, so this low rate looks smooth
+# while keeping preview and export cheap. The export state key uses the same
+# rate so it re-captures the background exactly this often.
+AMBIENT_FLOW_HZ = 12
+
+# The soft colour field is painted at this long-edge resolution and then scaled
+# up. Every element is a blurred blob, so the upscale is visually lossless.
+_AMBIENT_FIELD_LONG_EDGE = 360
+# Radians per second of video for the drift. Small = a slow, river-like current.
+_AMBIENT_FLOW_SPEED = 0.9
+
+_PaletteEntry = tuple[tuple[int, int, int], float]
+_Palette = tuple[_PaletteEntry, ...]
+
+
+def _render_ambient_field(palette: _Palette, width: int, height: int,
+                          blur_radius: float, phase: float) -> QImage:
+    """Paint the drifting, palette-weighted colour field for one instant.
+
+    Each dominant colour is a soft radial blob whose centre follows a slow,
+    non-repeating Lissajous path, so the field reads as a flowing current
+    rather than orbiting dots. Blob strength tracks the colour's image share.
+    """
+    if not palette or width <= 0 or height <= 0:
+        return QImage()
+    image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+    base = QColor(*palette[0][0])
+    hue = base.hue() if base.hue() >= 0 else 215
+    base.setHsv(hue, min(255, base.saturation() + 22),
+                max(22, int(base.value() * 0.42)))
+    image.fill(base)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    t = phase * _AMBIENT_FLOW_SPEED
+    reach = max(width, height) * (0.52 + min(0.16, blur_radius / 200.0))
+    for index, (rgb, weight) in enumerate(palette[1:], start=1):
+        fx = 0.10 + 0.037 * index
+        fy = 0.083 + 0.041 * index
+        px = index * 1.7
+        py = index * 2.9 + 0.6
+        cx = width * (0.5 + 0.30 * sin(t * fx + px) + 0.12 * sin(t * fx * 2.3 + px * 1.6))
+        cy = height * (0.5 + 0.30 * sin(t * fy + py) + 0.12 * sin(t * fy * 1.9 + py * 1.3))
+        blob_radius = max(1.0, reach * (0.82 + 0.22 * sin(t * 0.31 + index)))
+        glow = QRadialGradient(cx, cy, blob_radius)
+        vivid = QColor(*rgb)
+        alpha = max(70, min(225, round(130 + 180 * weight)))
+        vivid.setAlpha(alpha)
+        glow.setColorAt(0.0, vivid)
+        glow.setColorAt(0.58, QColor(vivid.red(), vivid.green(), vivid.blue(), round(alpha * 0.4)))
+        glow.setColorAt(1.0, QColor(vivid.red(), vivid.green(), vivid.blue(), 0))
+        painter.fillRect(0, 0, width, height, QBrush(glow))
+    shade = QColor("#05070C")
+    shade.setAlpha(40)
+    painter.fillRect(0, 0, width, height, shade)
+    painter.end()
+    return image
+
+
 def create_ambient_background(cover: QPixmap, width: int, height: int,
-                              blur_radius: float = 24.0) -> QPixmap:
+                              blur_radius: float = 24.0,
+                              phase: float = 0.0) -> QPixmap:
     """Create a palette-only, Apple Music-like backdrop from album artwork.
 
-    The cover itself is intentionally not enlarged behind the UI.  Instead, a
-    few dominant colors are rendered as oversized, very soft radial blobs so
-    faces, text, and photographic details cannot remain visible.
+    ``phase`` is the elapsed video time in seconds; advancing it drifts the
+    colour field. The cover itself is never shown, only its dominant colours.
     """
     if cover.isNull() or width <= 0 or height <= 0:
         return QPixmap()
-    palette = _dominant_colors(cover)
-    base_color = palette[0]
-    base_color = QColor(base_color)
-    hue = base_color.hue() if base_color.hue() >= 0 else 215
-    base_color.setHsv(hue, min(255, base_color.saturation() + 18),
-                      max(18, int(base_color.value() * 0.32)))
-    image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
-    image.fill(base_color)
-    painter = QPainter(image)
-    positions = ((0.18, 0.30), (0.78, 0.23), (0.55, 0.82), (0.92, 0.72))
-    radius = max(width, height) * (0.50 + min(0.18, blur_radius / 180))
-    for index, color in enumerate(palette[1:]):
-        center_x = width * positions[index][0]
-        center_y = height * positions[index][1]
-        glow = QRadialGradient(center_x, center_y, radius)
-        vivid = QColor(color)
-        vivid.setAlpha(150 if index < 2 else 105)
-        edge = QColor(vivid)
-        edge.setAlpha(0)
-        glow.setColorAt(0.0, vivid)
-        glow.setColorAt(0.72, QColor(vivid.red(), vivid.green(), vivid.blue(), vivid.alpha() // 3))
-        glow.setColorAt(1.0, edge)
-        painter.fillRect(0, 0, width, height, QBrush(glow))
-    shade = QColor("#05070C")
-    shade.setAlpha(65)
-    painter.fillRect(0, 0, width, height, shade)
-    painter.end()
-    return QPixmap.fromImage(image)
+    field = _render_ambient_field(
+        _dominant_palette(cover), int(width), int(height), blur_radius, phase,
+    )
+    return QPixmap.fromImage(field) if not field.isNull() else QPixmap()
 
 
 def create_cached_ambient_background(audio_path: str | Path, width: int, height: int,
                                      blur_radius: float = 24.0,
-                                     cover_path: str | Path = "") -> QPixmap:
-    """Return a per-track ambient backdrop without rebuilding it every frame."""
+                                     cover_path: str | Path = "",
+                                     phase: float = 0.0) -> QPixmap:
+    """Return the ambient backdrop for one instant, reusing cached work.
+
+    Palette extraction is cached per artwork; the drifting field is cached per
+    quantised ``phase`` step so paused playback and repeated frames are free.
+    """
     audio = Path(audio_path)
     override = Path(cover_path) if cover_path else None
     if width <= 0 or height <= 0:
@@ -183,11 +224,26 @@ def create_cached_ambient_background(audio_path: str | Path, width: int, height:
         pass
     if not source_path or stat is None:
         return QPixmap()
-    image = _cached_ambient_background(
-        source_path, direct_image, stat.st_mtime_ns, stat.st_size, width, height,
-        round(max(0.0, blur_radius) * 10),
+    palette = _cached_ambient_palette(
+        source_path, direct_image, stat.st_mtime_ns, stat.st_size,
     )
-    return QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+    if not palette:
+        return QPixmap()
+    width = max(1, int(width))
+    height = max(1, int(height))
+    field_scale = min(1.0, _AMBIENT_FIELD_LONG_EDGE / max(width, height))
+    small_w = max(2, round(width * field_scale))
+    small_h = max(2, round(height * field_scale))
+    phase_step = round(max(0.0, float(phase)) * AMBIENT_FLOW_HZ)
+    field = _cached_ambient_field(
+        palette, small_w, small_h, round(max(0.0, blur_radius) * 10), phase_step,
+    )
+    if field.isNull():
+        return QPixmap()
+    return QPixmap.fromImage(field.scaled(
+        width, height, Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    ))
 
 
 def _dominant_colors(cover: QPixmap) -> list[QColor]:
@@ -220,6 +276,33 @@ def _dominant_colors(cover: QPixmap) -> list[QColor]:
     return colors
 
 
+def _dominant_palette(cover: QPixmap) -> _Palette:
+    """Return up to five ``(rgb, weight)`` pairs, weight = share of the artwork."""
+    if cover.isNull():
+        return ()
+    sample = cover.toImage().scaled(
+        48, 48, Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    ).convertToFormat(QImage.Format.Format_ARGB32)
+    counts: Counter[tuple[int, int, int]] = Counter()
+    for y in range(sample.height()):
+        for x in range(sample.width()):
+            color = sample.pixelColor(x, y)
+            if color.alpha() < 40:
+                continue
+            counts[(color.red() // 32 * 32, color.green() // 32 * 32,
+                    color.blue() // 32 * 32)] += 1
+    if not counts:
+        return (((32, 38, 51), 0.5), ((66, 83, 107), 0.3), ((118, 91, 142), 0.2))
+    ordered = sorted(
+        counts.items(),
+        key=lambda item: item[1] * (1.25 if QColor(*item[0]).saturation() > 65 else 1.0),
+        reverse=True,
+    )[:5]
+    total = sum(count for _rgb, count in ordered) or 1
+    return tuple((rgb, count / total) for rgb, count in ordered)
+
+
 @lru_cache(maxsize=128)
 def _cached_cover(audio_path: str) -> QImage:
     """Read cover bytes from common Mutagen tag representations."""
@@ -250,22 +333,27 @@ def _cached_image_cover(
     return image if not image.isNull() else QImage()
 
 
-@lru_cache(maxsize=128)
-def _cached_ambient_background(source_path: str, direct_image: bool,
-                               modified_ns: int, file_size: int,
-                               width: int, height: int,
-                               blur_radius_tenths: int) -> QImage:
-    """Cache the expensive palette extraction and radial-paint work as QImage."""
+@lru_cache(maxsize=64)
+def _cached_ambient_palette(source_path: str, direct_image: bool,
+                            modified_ns: int, file_size: int) -> _Palette:
+    """Cache the dominant palette (with weights) once per physical artwork."""
     cover_image = (
         _cached_image_cover(source_path, modified_ns, file_size) if direct_image
         else _cached_cover(source_path)
     )
     if cover_image.isNull():
-        return QImage()
-    ambient = create_ambient_background(
-        QPixmap.fromImage(cover_image), width, height, blur_radius_tenths / 10.0,
+        return ()
+    return _dominant_palette(QPixmap.fromImage(cover_image))
+
+
+@lru_cache(maxsize=192)
+def _cached_ambient_field(palette: _Palette, small_width: int, small_height: int,
+                          blur_radius_tenths: int, phase_step: int) -> QImage:
+    """Cache the small drifting colour field per quantised phase step."""
+    return _render_ambient_field(
+        palette, small_width, small_height, blur_radius_tenths / 10.0,
+        phase_step / AMBIENT_FLOW_HZ,
     )
-    return ambient.toImage()
 
 
 @lru_cache(maxsize=256)

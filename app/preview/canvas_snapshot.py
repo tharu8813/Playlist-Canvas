@@ -21,6 +21,7 @@ from app.animation.curves import (
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.album_art import (
+    AMBIENT_FLOW_HZ,
     adjust_personal_color,
     create_cached_ambient_background,
     extract_track_cover,
@@ -28,6 +29,11 @@ from app.preview.album_art import (
 )
 from app.preview.text_template import expand_track_template
 from app.services.lyrics_service import LyricsService
+
+# Editor preview never asks for more than the artboard resolution, but export
+# renders the vector scene at the target output resolution so text and shapes
+# stay crisp instead of being bicubic-upscaled by FFmpeg afterwards.
+_MAX_CAPTURE_SCALE = 8.0
 
 
 # Track-driven album covers and ambient backgrounds are re-injected on every
@@ -68,7 +74,7 @@ class CanvasSnapshot:
         source_rect = requested_rect.intersected(artboard)
         if source_rect.isEmpty():
             source_rect = QRectF(artboard.left(), artboard.top(), 1.0, 1.0)
-        scale = max(0.25, min(1.0, output_scale))
+        scale = max(0.25, min(_MAX_CAPTURE_SCALE, output_scale))
         width = max(1, round(source_rect.width() * scale))
         height = max(1, round(source_rect.height() * scale))
         image_format = (
@@ -277,7 +283,7 @@ class CanvasSnapshot:
         output_scale: float,
     ) -> QImage:
         """Place a cropped transparent render into a full-size export frame."""
-        scale = max(0.25, min(1.0, output_scale))
+        scale = max(0.25, min(_MAX_CAPTURE_SCALE, output_scale))
         image = QImage(
             max(1, round(artboard.width() * scale)),
             max(1, round(artboard.height() * scale)),
@@ -818,14 +824,16 @@ class CanvasSnapshot:
             if source.source_type is SourceType.BACKGROUND and source.background_mode == "album_art":
                 original_backgrounds.append((graphics_item, QPixmap(graphics_item._pixmap)))
                 if source.background_ambient:
+                    flow_step = round(global_seconds * AMBIENT_FLOW_HZ)
                     graphics_item._pixmap = _filtered_track_pixmap(
                         graphics_item,
                         create_cached_ambient_background(
                             track.file_path, max(1, round(source.width)),
                             max(1, round(source.height)), max(18.0, source.blur),
-                            track.cover_path,
+                            track.cover_path, phase=global_seconds,
                         ),
-                        ("ambient", round(source.width), round(source.height), *filter_key),
+                        ("ambient", round(source.width), round(source.height),
+                         flow_step, *filter_key),
                         include_blur=False,
                     )
                 else:
