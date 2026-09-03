@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from math import ceil, floor
 from pathlib import Path
 
@@ -107,13 +107,24 @@ def _effective_lyric_context(
 
 
 def _filtered_track_pixmap(
-    graphics_item: SourceItem, base: QPixmap, key: tuple, *, include_blur: bool = True,
+    graphics_item: SourceItem,
+    base: QPixmap | Callable[[], QPixmap],
+    key: tuple,
+    *,
+    include_blur: bool = True,
 ) -> QPixmap:
-    """Apply the source's brightness/contrast/blur to a track pixmap, memoised."""
+    """Apply the source's brightness/contrast/blur to a track pixmap, memoised.
+
+    ``base`` may be a callable so an expensive source pixmap (a re-scaled
+    ambient background, a decoded cover) is only built on a cache miss.
+    """
     cached = _FILTERED_TRACK_PIXMAP_CACHE.get(key)
     if cached is not None:
         return cached
-    result = graphics_item._apply_image_filters(base, include_blur=include_blur)
+    source_pixmap = base() if callable(base) else base
+    result = graphics_item._apply_image_filters(
+        source_pixmap, include_blur=include_blur,
+    )
     if len(_FILTERED_TRACK_PIXMAP_CACHE) > 96:
         _FILTERED_TRACK_PIXMAP_CACHE.clear()
     _FILTERED_TRACK_PIXMAP_CACHE[key] = result
@@ -927,7 +938,7 @@ class CanvasSnapshot:
             if source.source_type is SourceType.ALBUM_COVER and not source.content_path:
                 original_covers.append((graphics_item, QPixmap(graphics_item._pixmap)))
                 graphics_item._pixmap = _filtered_track_pixmap(
-                    graphics_item, QPixmap(track_cover), ("cover", *filter_key),
+                    graphics_item, lambda: QPixmap(track_cover), ("cover", *filter_key),
                 )
                 graphics_item.update()
             if source.source_type is SourceType.BACKGROUND and source.background_mode == "album_art":
@@ -936,7 +947,7 @@ class CanvasSnapshot:
                     flow_step = round(global_seconds * AMBIENT_FLOW_HZ)
                     graphics_item._pixmap = _filtered_track_pixmap(
                         graphics_item,
-                        create_cached_ambient_background(
+                        lambda: create_cached_ambient_background(
                             track.file_path, max(1, round(source.width)),
                             max(1, round(source.height)), max(18.0, source.blur),
                             track.cover_path, phase=global_seconds,
@@ -947,7 +958,8 @@ class CanvasSnapshot:
                     )
                 else:
                     graphics_item._pixmap = _filtered_track_pixmap(
-                        graphics_item, QPixmap(track_cover), ("bgcover", *filter_key),
+                        graphics_item, lambda: QPixmap(track_cover),
+                        ("bgcover", *filter_key),
                     )
                 previous_track = (
                     playlist_tracks[track_number - 2]
@@ -965,7 +977,7 @@ class CanvasSnapshot:
                     if source.background_ambient:
                         previous_background = _filtered_track_pixmap(
                             graphics_item,
-                            create_cached_ambient_background(
+                            lambda: create_cached_ambient_background(
                                 previous_track.file_path,
                                 max(1, round(source.width)),
                                 max(1, round(source.height)),
@@ -982,7 +994,7 @@ class CanvasSnapshot:
                     else:
                         previous_background = _filtered_track_pixmap(
                             graphics_item,
-                            QPixmap(extract_track_cover(
+                            lambda: QPixmap(extract_track_cover(
                                 previous_track.file_path,
                                 previous_track.cover_path,
                             )),

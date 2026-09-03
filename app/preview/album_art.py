@@ -235,15 +235,34 @@ def create_cached_ambient_background(audio_path: str | Path, width: int, height:
     small_w = max(2, round(width * field_scale))
     small_h = max(2, round(height * field_scale))
     phase_step = round(max(0.0, float(phase)) * AMBIENT_FLOW_HZ)
+    scaled = _cached_ambient_scaled(
+        palette, small_w, small_h, round(max(0.0, blur_radius) * 10),
+        phase_step, width, height,
+    )
+    return QPixmap.fromImage(scaled) if not scaled.isNull() else QPixmap()
+
+
+@lru_cache(maxsize=4)
+def _cached_ambient_scaled(
+    palette: _Palette, small_width: int, small_height: int,
+    blur_radius_tenths: int, phase_step: int, width: int, height: int,
+) -> QImage:
+    """Cache the full-size ambient frame.
+
+    Export renders many samples per quantised phase step (progress bar and
+    lyric timing points force near-per-frame sampling); without this the smooth
+    upscale from the small colour field to the output resolution was ~40% of
+    the whole canvas-capture cost.
+    """
     field = _cached_ambient_field(
-        palette, small_w, small_h, round(max(0.0, blur_radius) * 10), phase_step,
+        palette, small_width, small_height, blur_radius_tenths, phase_step,
     )
     if field.isNull():
-        return QPixmap()
-    return QPixmap.fromImage(field.scaled(
+        return QImage()
+    return field.scaled(
         width, height, Qt.AspectRatioMode.IgnoreAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
-    ))
+    )
 
 
 def _dominant_colors(cover: QPixmap) -> list[QColor]:
