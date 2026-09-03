@@ -6,7 +6,7 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, QSize, Signal
-from PySide6.QtGui import QDropEvent, QPixmap
+from PySide6.QtGui import QColor, QCursor, QDrag, QDropEvent, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -45,6 +45,43 @@ class _ReorderList(QListWidget):
     """
 
     order_changed = Signal(list)
+
+    def startDrag(self, supported_actions: Qt.DropAction) -> None:
+        """Drag a real preview of the grabbed row(s) instead of an empty box.
+
+        ``setItemWidget`` rows are painted by the widget, not the delegate, so
+        Qt's default drag renderer produces a blank selection-coloured
+        rectangle.  Grab the row widget instead.
+        """
+        items = self.selectedItems()
+        if not items:
+            return
+        anchor = min(items, key=self.row)
+        widget = self.itemWidget(anchor)
+        drag = QDrag(self)
+        drag.setMimeData(self.model().mimeData(
+            [self.indexFromItem(item) for item in items]
+        ))
+        if widget is not None:
+            pixmap = widget.grab()
+            if len(items) > 1:
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setBrush(QColor("#1685D1"))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(pixmap.width() - 30, 4, 24, 18, 6, 6)
+                painter.setPen(QColor("#FFFFFF"))
+                painter.drawText(
+                    pixmap.width() - 30, 4, 24, 18,
+                    Qt.AlignmentFlag.AlignCenter, f"{len(items)}",
+                )
+                painter.end()
+            drag.setPixmap(pixmap)
+            offset = self.viewport().mapFromGlobal(QCursor.pos()) - (
+                self.visualItemRect(anchor).topLeft()
+            )
+            drag.setHotSpot(offset)
+        drag.exec(supported_actions, Qt.DropAction.MoveAction)
 
     def dropEvent(self, event: QDropEvent) -> None:
         if event.source() is not self:
@@ -87,6 +124,9 @@ class _TrackRow(QWidget):
         super().__init__()
         self.setObjectName("trackOrderRow")
         self.track_id = track.id
+        # The list owns selection, double-click and drag; the row and its labels
+        # must not swallow the press or a drag started on the title never begins.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 5, 10, 5)
         layout.setSpacing(10)
@@ -123,7 +163,7 @@ class _TrackRow(QWidget):
         layout.addWidget(cover_label)
         layout.addWidget(self.meta_label, 1)
         layout.addWidget(self.duration_label)
-        self.setToolTip(
+        self.tooltip_text = (
             f"{track.title}\n{track.artist} · {track.album}\n{Path(track.file_path)}"
         )
 
@@ -284,8 +324,10 @@ class TrackOrderDialog(QDialog):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, track_id)
             item.setSizeHint(QSize(0, _COVER_PX + 12))
+            row_widget = _TrackRow(track, korean)
+            item.setToolTip(row_widget.tooltip_text)
             self.list_widget.addItem(item)
-            self.list_widget.setItemWidget(item, _TrackRow(track, korean))
+            self.list_widget.setItemWidget(item, row_widget)
         self.list_widget.blockSignals(False)
         self._renumber()
 
@@ -302,51 +344,50 @@ class TrackOrderDialog(QDialog):
             for row in range(self.list_widget.count())
         ]
 
+    def _adopt_order(self, new_order: list[str], keep_selected: set[str]) -> None:
+        """Rebuild rows for a new order and restore selection by id."""
+        self.new_order = [str(i) for i in new_order]
+        self._rebuild_rows()
+        for row, track_id in enumerate(self.new_order):
+            if track_id in keep_selected:
+                self.list_widget.item(row).setSelected(True)
+
     def _apply_new_order(self, ordered_ids: list) -> None:
         """Adopt a drag-computed order and rebuild the (widget-less) rows."""
         moving = {
-            str(self.list_widget.item(self.list_widget.row(item)).data(
-                Qt.ItemDataRole.UserRole))
+            str(item.data(Qt.ItemDataRole.UserRole))
             for item in self.list_widget.selectedItems()
         }
-        self.new_order = [str(i) for i in ordered_ids]
-        self._rebuild_rows()
-        for row, track_id in enumerate(self.new_order):
-            if track_id in moving:
-                self.list_widget.item(row).setSelected(True)
+        self._adopt_order([str(i) for i in ordered_ids], moving)
 
     def _move_selected(self, delta: object) -> None:
         order = self._current_ids()
-        selected = {
+        selected_rows = sorted(
             self.list_widget.row(item)
             for item in self.list_widget.selectedItems()
-        }
-        if not selected:
+        )
+        if not selected_rows:
             return
-        moving_ids = {order[row] for row in selected}
+        moving = [order[row] for row in selected_rows]
+        moving_set = set(moving)
+        remaining = [ident for ident in order if ident not in moving_set]
         if delta == "top":
-            block = [i for r, i in enumerate(order) if r in selected]
-            new_order = block + [i for i in order if i not in moving_ids]
+            insert_at = 0
         elif delta == "bottom":
-            block = [i for r, i in enumerate(order) if r in selected]
-            new_order = [i for i in order if i not in moving_ids] + block
+            insert_at = len(remaining)
         else:
-            new_order = order[:]
-            step = int(delta)
-            rows = sorted(selected, reverse=step > 0)
-            for row in rows:
-                neighbor = row + step
-                if 0 <= neighbor < len(new_order) and neighbor not in selected:
-                    new_order[row], new_order[neighbor] = (
-                        new_order[neighbor], new_order[row],
-                    )
-        if new_order == order:
-            return
-        self.new_order = new_order
-        self._rebuild_rows()
-        for row, track_id in enumerate(new_order):
-            if track_id in moving_ids:
-                self.list_widget.item(row).setSelected(True)
+            # The selected tracks travel together as one block, shifted by one
+            # slot relative to the tracks that stay put.
+            anchor = selected_rows[0]
+            non_selected_before = sum(
+                1 for row in range(anchor) if order[row] not in moving_set
+            )
+            insert_at = max(
+                0, min(len(remaining), non_selected_before + int(delta))
+            )
+        new_order = remaining[:insert_at] + moving + remaining[insert_at:]
+        if new_order != order:
+            self._adopt_order(new_order, moving_set)
 
     # ---- playback ----------------------------------------------------------
 
