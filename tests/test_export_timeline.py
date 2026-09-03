@@ -28,6 +28,36 @@ class ExportTimelinePlannerTests(unittest.TestCase):
             for sample in samples_60
         ))
 
+    def test_slow_progress_bar_is_capped_at_one_pixel_per_frame(self) -> None:
+        from app.preview.album_art import AMBIENT_FLOW_HZ
+
+        # A narrow bar on a long track advances well under one pixel per output
+        # frame, so a 30 FPS schedule would only add sub-pixel-identical frames.
+        track = PlaylistTrack(
+            file_path="long.mp3", title="Long", duration_seconds=120.0,
+        )
+        progress = Source(SourceType.PROGRESS_BAR, "Progress", width=200)
+
+        samples = ExportTimelinePlanner.build([track], [progress], 30)
+
+        # Floored at the ambient flow rate, not the 3600 a full 30 FPS schedule
+        # would have produced.
+        self.assertLess(len(samples), 30 * 120 // 2)
+        self.assertAlmostEqual(len(samples), round(120.0 * AMBIENT_FLOW_HZ), delta=2)
+        self.assertAlmostEqual(
+            sum(sample.duration_seconds for sample in samples), 120.0, places=9,
+        )
+
+    def test_fast_wide_progress_bar_keeps_the_full_output_rate(self) -> None:
+        track = PlaylistTrack(
+            file_path="short.mp3", title="Short", duration_seconds=4.0,
+        )
+        progress = Source(SourceType.PROGRESS_BAR, "Progress", width=1600)
+
+        samples = ExportTimelinePlanner.build([track], [progress], 30)
+
+        self.assertEqual(len(samples), 4 * 30)
+
     def test_ambient_album_background_gets_a_full_flow_rate_schedule(self) -> None:
         from app.preview.album_art import AMBIENT_FLOW_HZ
 

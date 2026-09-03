@@ -262,13 +262,29 @@ class ExportTimelinePlanner:
                 if intro < local_point < intro + stable:
                     sample_points.add(local_point)
 
-        if any(source.source_type is SourceType.PROGRESS_BAR for source in sources):
-            # Progress is continuous motion, so sampling it once per second (or
-            # at most 180 times) made a 60 FPS file contain repeated Canvas
-            # frames.  Only the Z stream containing the progress element gets
-            # this full-rate schedule; independent static streams remain
-            # capture-invariant and are still rendered once.
-            progress_steps = max(1, round(stable * animation_fps))
+        progress_bars = [
+            source for source in sources
+            if source.source_type is SourceType.PROGRESS_BAR
+        ]
+        if progress_bars and stable > 0.0:
+            # Progress is continuous motion, but the rendered fill edge can never
+            # move faster than the output pixel grid.  Sampling finer than one
+            # bar-pixel per frame only produces Canvas frames that differ by
+            # sub-pixel anti-aliasing, so they never coalesce downstream and the
+            # base stream re-rasterises the ambient background for nothing.  Cap
+            # the rate at the widest bar's pixel travel, floored at the ambient
+            # flow rate (a short clip still needs to look smooth) and ceilinged
+            # at animation_fps.  Only the Z stream containing the progress
+            # element gets this schedule; static streams stay capture-invariant.
+            widest = max(
+                (bar.width * max(1.0, bar.scale) for bar in progress_bars),
+                default=1.0,
+            )
+            pixel_rate = max(1.0, widest) / stable
+            progress_hz = max(
+                float(AMBIENT_FLOW_HZ), min(float(animation_fps), pixel_rate),
+            )
+            progress_steps = max(1, round(stable * progress_hz))
             sample_points.update(
                 intro + stable * step / progress_steps
                 for step in range(progress_steps + 1)
