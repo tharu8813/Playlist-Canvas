@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.playlist import PlaylistTrack
+from app.preview.album_art import extract_track_cover
 from app.services.project_content_service import LYRICS_EXTENSIONS
 from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
 from app.utils.i18n import Translator
@@ -300,6 +301,19 @@ class TrackRow(QWidget):
         layout.setSpacing(9)
         number_label = QLabel(f"{number:02d}")
         number_label.setObjectName("trackNumber")
+        cover_label = QLabel()
+        cover_label.setObjectName("trackRowCover")
+        cover_label.setFixedSize(34, 34)
+        cover_label.setScaledContents(True)
+        cover_pixmap = extract_track_cover(track.file_path, track.cover_path)
+        if not cover_pixmap.isNull():
+            cover_label.setPixmap(cover_pixmap.scaled(
+                34, 34, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        else:
+            cover_label.setText("♪")
+            cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title = escape(track.title)
         subtitle = f"{escape(track.artist)} · {escape(track.album)}"
         if not track.enabled:
@@ -310,6 +324,7 @@ class TrackRow(QWidget):
         duration = QLabel(track.duration_label)
         duration.setObjectName("mutedLabel")
         layout.addWidget(number_label)
+        layout.addWidget(cover_label)
         layout.addWidget(metadata, 1)
         if not track.enabled:
             excluded = QLabel("제외됨" if korean else "Excluded")
@@ -324,7 +339,7 @@ class TrackRow(QWidget):
             layout.addWidget(lyric_badge)
         layout.addWidget(duration)
         if not track.enabled:
-            for widget in (number_label, metadata, duration):
+            for widget in (number_label, cover_label, metadata, duration):
                 widget.setEnabled(False)
         self.setToolTip(
             f"{track.title}\n{track.artist} · {track.album}\n"
@@ -382,6 +397,7 @@ class PlaylistEditor(QFrame):
         self.summary = QLabel()
         self.summary.setObjectName("mutedLabel")
         self.add_button = QPushButton()
+        self.order_editor_button = QPushButton()
         self.up_button = QPushButton("↑")
         self.down_button = QPushButton("↓")
         self.duplicate_button = QPushButton()
@@ -391,6 +407,7 @@ class PlaylistEditor(QFrame):
         header.addWidget(self.summary)
         header.addStretch()
         header.addWidget(self.add_button)
+        header.addWidget(self.order_editor_button)
         header.addWidget(self.up_button)
         header.addWidget(self.down_button)
         header.addWidget(self.duplicate_button)
@@ -409,6 +426,7 @@ class PlaylistEditor(QFrame):
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.empty_label)
         self.add_button.clicked.connect(self.request_files)
+        self.order_editor_button.clicked.connect(self._open_order_editor)
         self.up_button.clicked.connect(lambda: self._move_selected(-1))
         self.down_button.clicked.connect(lambda: self._move_selected(1))
         self.duplicate_button.clicked.connect(self.duplicate_selected)
@@ -438,6 +456,12 @@ class PlaylistEditor(QFrame):
             else "Search title, artist, or album…"
         )
         self.add_button.setText("+ 음악 추가" if korean else "+ Add music")
+        self.order_editor_button.setText("순서 편집" if korean else "Reorder")
+        self.order_editor_button.setToolTip(
+            "커버·정보와 미리듣기가 있는 창에서 트랙 순서를 편집합니다."
+            if korean else
+            "Edit the track order in a window with covers, details, and preview."
+        )
         self.duplicate_button.setText("복제" if korean else "Duplicate")
         self.details_button.setText(
             "곡 정보/설정" if korean else "Track information/settings"
@@ -551,6 +575,20 @@ class PlaylistEditor(QFrame):
         if values:
             self.service.reorder(values)
 
+    def _open_order_editor(self) -> None:
+        """Open the dedicated reorder window with covers and an audio preview."""
+        tracks = list(self.service.tracks)
+        if len(tracks) < 2:
+            return
+        from app.dialogs.track_order_dialog import TrackOrderDialog
+
+        dialog = TrackOrderDialog(tracks, self.translator, self)
+        accepted = dialog.exec() == dialog.DialogCode.Accepted
+        new_order = list(dialog.new_order)
+        dialog.deleteLater()
+        if accepted:
+            self.service.reorder(new_order)
+
     def _show_context_menu(self, global_pos: QPoint) -> None:
         """Right-click actions for the current selection."""
         selected = self._selected_ids()
@@ -608,6 +646,7 @@ class PlaylistEditor(QFrame):
 
     def _update_action_state(self) -> None:
         selected = self._selected_ids()
+        self.order_editor_button.setEnabled(len(self.service.tracks) >= 2)
         self.duplicate_button.setEnabled(bool(selected))
         self.details_button.setEnabled(len(selected) == 1)
         self.remove_button.setEnabled(bool(selected))
