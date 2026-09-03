@@ -27,6 +27,9 @@ output-setup/
 /description.txt
 /playlist.csv
 
+# graphify knowledge graph (regenerate with `graphify update .`)
+/graphify-out/
+
 # Logs and temporary output
 *.log
 *.tmp
