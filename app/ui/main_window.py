@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QSystemTrayIcon,
+    QTabBar,
     QTabWidget,
     QToolBar,
     QToolButton,
@@ -1752,6 +1753,22 @@ class MainWindow(QMainWindow):
         header.addWidget(self.source_result_label)
         layout.addLayout(header)
 
+        # Category tabs. "all" shows every stacked section; a category tab shows
+        # only its own. A search spans everything and pins the bar to "all";
+        # clicking any tab during a search clears the query first.
+        self._source_tab_categories = ("all", "basic", "playback", "audio", "scene")
+        self._active_source_category = "all"
+        self._source_tab_syncing = False
+        self.source_tab_bar = QTabBar()
+        self.source_tab_bar.setObjectName("sourceCategoryTabs")
+        self.source_tab_bar.setExpanding(False)
+        self.source_tab_bar.setDrawBase(False)
+        self.source_tab_bar.setUsesScrollButtons(True)
+        for _category in self._source_tab_categories:
+            self.source_tab_bar.addTab("")
+        self.source_tab_bar.tabBarClicked.connect(self._on_source_tab_clicked)
+        layout.addWidget(self.source_tab_bar)
+
         self.source_search = QLineEdit()
         self.source_search.setObjectName("sourceSearch")
         self.source_search.setClearButtonEnabled(True)
@@ -1933,16 +1950,30 @@ class MainWindow(QMainWindow):
         )
 
     def _filter_source_cards(self, query: str) -> None:
-        """Show only palette sources matching a user-facing name or source type."""
+        """Show palette sources matching the search and the active category tab."""
         normalized = query.strip().lower()
+        if normalized and self.source_tab_bar.currentIndex() != 0:
+            # A search always spans every category; pin the bar to "all".
+            self._source_tab_syncing = True
+            self.source_tab_bar.setCurrentIndex(0)
+            self._source_tab_syncing = False
+        active_category = (
+            "all" if normalized
+            else self._source_tab_categories[self.source_tab_bar.currentIndex()]
+        )
+        self._active_source_category = active_category
         matched_count = 0
         for parent_type, group in self._source_card_groups.items():
+            in_tab = (
+                active_category == "all"
+                or self._source_type_categories.get(parent_type) == active_category
+            )
             parent_button = self._source_buttons[parent_type]
             parent_text = (
                 f"{self._source_search_terms.get(parent_type, '')} "
                 f"{parent_button.property('paletteText') or ''}"
             ).lower()
-            parent_match = not normalized or normalized in parent_text
+            parent_match = in_tab and (not normalized or normalized in parent_text)
             if parent_match:
                 matched_count += 1
             child_types = [
@@ -1956,7 +1987,9 @@ class MainWindow(QMainWindow):
                     f"{self._source_search_terms.get(child_type, '')} "
                     f"{child_button.property('paletteText') or ''}"
                 ).lower()
-                child_matches[child_type] = not normalized or normalized in searchable
+                child_matches[child_type] = in_tab and (
+                    not normalized or normalized in searchable
+                )
                 if child_matches[child_type]:
                     matched_count += 1
                 child_button.setVisible(child_matches[child_type])
@@ -1965,7 +1998,7 @@ class MainWindow(QMainWindow):
             container = self._source_variant_containers.get(parent_type)
             if container is not None:
                 expanded = self._source_variant_toggles[parent_type].isChecked()
-                container.setVisible((expanded and not normalized) or (
+                container.setVisible((in_tab and expanded and not normalized) or (
                     bool(normalized) and any(child_matches.values())
                 ))
         for category, section in self._source_category_sections.items():
@@ -1981,6 +2014,17 @@ class MainWindow(QMainWindow):
             f"{matched_count} results" if normalized else
             f"{matched_count} sources"
         )
+
+    def _on_source_tab_clicked(self, index: int) -> None:
+        """Switch category, clearing any active search first (fires on every click)."""
+        if self._source_tab_syncing or not 0 <= index < len(self._source_tab_categories):
+            return
+        if self.source_search.text():
+            self.source_search.blockSignals(True)
+            self.source_search.clear()
+            self.source_search.blockSignals(False)
+        self.source_tab_bar.setCurrentIndex(index)
+        self._filter_source_cards("")
 
     def _set_source_variants_expanded(
         self, parent_type: SourceType, expanded: bool,
@@ -2078,7 +2122,7 @@ class MainWindow(QMainWindow):
             SourceType.WATERMARK: ("Display a watermark image over the video.", "Image file · fit mode · opacity · position · size · shadow"),
             SourceType.BACKGROUND: ("Create a full-Canvas color, image, or album-art background.", "Background mode · image fit · ambient effect · brightness · contrast · blur"),
             SourceType.AUDIO_VISUALIZER: ("Show a visual effect that reacts to music frequencies.", "Style · bars · line width · sensitivity · reactivity · attack · release · smoothing"),
-            SourceType.LYRICS: ("Show lyrics or subtitles synchronized to playback.", "Subtitle style · transition · context lines · spacing · previous-line effect · timing offset"),
+            SourceType.LYRICS: ("Show lyrics or subtitles synchronized to playback.", "Text color · transition · context lines · spacing · previous-line effect · timing offset"),
             SourceType.TRACK_LIST: ("Show playlist entries around the current track.", "Track count · list style · window · metadata · spacing · highlight colors"),
             SourceType.NOW_PLAYING: ("Show current-track information as a card.", "Card style · duration · exit effect · font · alignment · colors"),
             SourceType.AUDIO_WAVEFORM: ("Show the audio waveform together with playback progress.", "Waveform style · fill color · size · opacity · animation"),
@@ -2230,6 +2274,11 @@ class MainWindow(QMainWindow):
             z_index=count,
             locked=False,
         )
+        if source_type is SourceType.LYRICS:
+            source.subtitle_context_lines = -1
+            source.subtitle_next_lines = -1
+        elif source_type is SourceType.TRACK_LIST:
+            source.track_list_count = 0
         if template_type is SourceType.LOGO:
             source.image_fit_mode = "contain"
             source.border_radius = 0.0
@@ -6639,6 +6688,15 @@ class MainWindow(QMainWindow):
         }
         for category, label in self._source_category_titles.items():
             label.setText(category_titles[category])
+        tab_titles = {
+            "all": "전체" if korean else "All",
+            "basic": "기본" if korean else "Basic",
+            "playback": "재생" if korean else "Playback",
+            "audio": "오디오" if korean else "Audio",
+            "scene": "장면" if korean else "Scene",
+        }
+        for index, category in enumerate(self._source_tab_categories):
+            self.source_tab_bar.setTabText(index, tab_titles[category])
         for source_type, button in self._source_buttons.items():
             label = self._source_type_label(source_type)
             is_variant = source_type in self._source_variant_parents
@@ -6932,6 +6990,10 @@ class MainWindow(QMainWindow):
             #leftProjectTabs::pane {{ border: 0; background: {colors['panel']}; }}
             #leftProjectTabs QTabBar::tab {{ background: {colors['button']}; color: {colors['muted']}; padding: 7px 10px; border: 1px solid {colors['border']}; }}
             #leftProjectTabs QTabBar::tab:selected {{ background: {colors['panel']}; color: {colors['text']}; border-bottom-color: {colors['panel']}; }}
+            #sourceCategoryTabs {{ qproperty-drawBase: 0; }}
+            #sourceCategoryTabs QTabBar::tab {{ background: {colors['button']}; color: {colors['muted']}; border: 1px solid {colors['border']}; border-radius: 7px; padding: 5px 10px; margin-right: 3px; }}
+            #sourceCategoryTabs QTabBar::tab:selected {{ background: #1685D1; color: #FFFFFF; border-color: #1685D1; font-weight: 700; }}
+            #sourceCategoryTabs QTabBar::tab:hover:!selected {{ background: {colors['hover']}; color: {colors['text']}; }}
             QToolBar {{ background: {colors['panel']}; border: 0; border-bottom: 1px solid {colors['border']}; spacing: 6px; padding: 7px 10px; }}
             QToolButton, QPushButton {{ background: {colors['button']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 8px; padding: 7px 10px; }}
             QToolButton[contentViewButton="true"] {{ padding: 4px 6px; border-radius: 6px; }}
@@ -6986,6 +7048,10 @@ class MainWindow(QMainWindow):
             #sourceVariantContainer {{ border-left: 2px solid {colors['border']}; }}
             QScrollArea, QListWidget, QTreeWidget, QTableWidget {{ background: {colors['panel']}; color: {colors['text']}; border: 0; }}
             #sourceInspector, #sourceInspector::viewport, #inspectorContent {{ background: {colors['panel']}; color: {colors['text']}; }}
+            #inspectorPropertyTabs::pane {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 9px; top: -1px; }}
+            #inspectorPropertyTabs QTabBar::tab {{ background: {colors['button']}; color: {colors['muted']}; border: 1px solid {colors['border']}; padding: 7px 11px; margin-right: 2px; }}
+            #inspectorPropertyTabs QTabBar::tab:selected {{ background: {colors['panel']}; color: {colors['text']}; border-bottom-color: {colors['panel']}; font-weight: 700; }}
+            #inspectorPropertyTabs QTabBar::tab:hover:!selected {{ background: {colors['hover']}; color: {colors['text']}; }}
             #inspectorEmptyState {{ color: {colors['muted']}; font-size: 14px; background: {colors['panel']}; }}
             QHeaderView::section {{ background: {colors['alternate']}; color: {colors['text']}; border: 0; border-bottom: 1px solid {colors['border']}; padding: 5px; }}
             QTreeWidget::item:selected, QListWidget::item:selected {{ background: #1685D1; color: #FFFFFF; border-radius: 5px; }}

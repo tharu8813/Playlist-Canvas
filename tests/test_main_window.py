@@ -15,8 +15,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import (QEvent, QItemSelectionModel, QMimeData, QPoint, QPointF, QRect, QRectF,
                             QSettings, QSize, Qt, QTimer, QUrl)
-from PySide6.QtGui import (QColor, QCloseEvent, QDropEvent, QImage, QMouseEvent, QPalette,
-                           QPixmap, QWheelEvent)
+from PySide6.QtGui import (QColor, QCloseEvent, QContextMenuEvent, QDropEvent, QImage,
+                           QMouseEvent, QPalette, QPixmap, QWheelEvent)
 from PySide6.QtTest import QTest
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
@@ -1170,6 +1170,44 @@ class MainWindowSafetyTests(unittest.TestCase):
         ))
         self.assertIn("17", self.window.source_result_label.text())
 
+    def test_source_palette_category_tabs_and_search_interplay(self) -> None:
+        window = self.window
+        tab_bar = window.source_tab_bar
+        self.assertEqual(
+            [tab_bar.tabText(i) for i in range(tab_bar.count())],
+            ["전체", "기본", "재생", "오디오", "장면"],
+        )
+
+        # A category tab shows only its own section.
+        tab_bar.tabBarClicked.emit(3)  # "audio"
+        self.application.processEvents()
+        self.assertEqual(window._active_source_category, "audio")
+        self.assertFalse(window._source_category_sections["audio"].isHidden())
+        for other in ("basic", "playback", "scene"):
+            self.assertTrue(window._source_category_sections[other].isHidden(), other)
+
+        # Typing a search pins the bar back to "All" and spans every section.
+        window.source_search.setText("progress")
+        self.application.processEvents()
+        self.assertEqual(tab_bar.currentIndex(), 0)
+        self.assertEqual(window._active_source_category, "all")
+        self.assertFalse(window._source_category_sections["playback"].isHidden())
+
+        # Clicking a category while searching clears the query and restores it.
+        tab_bar.tabBarClicked.emit(1)  # "basic"
+        self.application.processEvents()
+        self.assertEqual(window.source_search.text(), "")
+        self.assertEqual(window._active_source_category, "basic")
+        self.assertFalse(window._source_category_sections["basic"].isHidden())
+        self.assertTrue(window._source_category_sections["audio"].isHidden())
+
+        tab_bar.tabBarClicked.emit(0)  # back to "All"
+        self.application.processEvents()
+        self.assertTrue(all(
+            not section.isHidden()
+            for section in window._source_category_sections.values()
+        ))
+
     def test_new_lyrics_source_has_room_for_preview_context_lines(self) -> None:
         self.window._add_source(SourceType.LYRICS)
         source = self.window.store.selected
@@ -1177,6 +1215,50 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertIs(source.source_type, SourceType.LYRICS)
         self.assertGreaterEqual(source.width, 600)
         self.assertGreaterEqual(source.height, 200)
+
+    def test_new_lyrics_and_track_lists_default_to_automatic_line_counts(self) -> None:
+        self.window.translator.set_language(Language.KOREAN)
+        self.window._add_source(SourceType.LYRICS)
+        lyrics = self.window.store.sources()[-1]
+        self.assertEqual(lyrics.subtitle_context_lines, -1)
+        self.assertEqual(lyrics.subtitle_next_lines, -1)
+        self.assertEqual(self.window.inspector.subtitle_context_lines_spin.text(), "자동")
+        self.assertEqual(self.window.inspector.subtitle_next_lines_spin.text(), "자동")
+
+        self.window._add_source(SourceType.TRACK_LIST)
+        track_list = self.window.store.sources()[-1]
+        self.assertEqual(track_list.track_list_count, 0)
+        self.assertEqual(self.window.inspector.track_list_count_spin.text(), "자동")
+        self.assertGreater(
+            self.window.canvas._items[track_list.id].effective_track_list_count(),
+            2,
+        )
+
+    def test_lyrics_use_the_shared_text_color_control_without_style_presets(self) -> None:
+        self.window.translator.set_language(Language.KOREAN)
+        source = Source(
+            SourceType.LYRICS, "Editable lyrics color",
+            outline_color="#A1B2C3", outline_width=0.0,
+        )
+        self.window.store.replace([source])
+        self.window.store.select(source.id)
+        self.window.show()
+        self.application.processEvents()
+
+        inspector = self.window.inspector
+        self.assertNotIn("subtitle_style", inspector._field_widgets)
+        self.assertTrue(inspector._field_visibility["text_color"])
+        self.assertFalse(inspector._field_visibility["outline_color"])
+        self.assertEqual(inspector._form_labels["text_color"].text(), "텍스트 색상")
+        self.assertEqual(inspector.text_color_button.text(), "#A1B2C3")
+        self.assertEqual(inspector._field_categories["font_weight"], "text")
+        inspector.font_weight_combo.setCurrentIndex(
+            inspector.font_weight_combo.findData(700)
+        )
+        self.assertEqual(source.font_weight, 700)
+        special = inspector._tab_indices["special"]
+        self.assertEqual(inspector.property_tabs.tabText(special), "자막/가사")
+        self.assertTrue(inspector.property_tabs.isTabVisible(special))
 
     def test_background_defaults_unlocked_and_album_inspector_size_stays_square(self) -> None:
         welcome_background = next(
@@ -1998,7 +2080,7 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(
             inspector.gradient_check.checkState(), Qt.CheckState.PartiallyChecked,
         )
-        self.assertFalse(inspector._field_widgets["font_family"].isHidden())
+        self.assertTrue(inspector._field_visibility["font_family"])
 
         # Leaving a mixed blank line edit untouched must never overwrite values.
         inspector.text_edit.editingFinished.emit()
@@ -2025,9 +2107,9 @@ class MainWindowSafetyTests(unittest.TestCase):
         shape = Source(SourceType.SHAPE, "Shape")
         self.window.store.add(shape)
         self.window.store.select_many([first.id, shape.id], shape.id)
-        self.assertTrue(inspector._field_widgets["font_family"].isHidden())
-        self.assertTrue(inspector._field_widgets["font_size"].isHidden())
-        self.assertTrue(inspector._field_widgets["text"].isHidden())
+        self.assertFalse(inspector._field_visibility["font_family"])
+        self.assertFalse(inspector._field_visibility["font_size"])
+        self.assertFalse(inspector._field_visibility["text"])
 
     def test_token_editor_pairs_percent_and_inserts_completion_from_keyboard(self) -> None:
         editor = TokenLineEdit(self.window.translator)
@@ -2324,6 +2406,33 @@ class MainWindowSafetyTests(unittest.TestCase):
         )
         # Two sources are locked above, so the unlock-all command is offered.
         self.assertTrue(empty_actions["unlock_all_layers"].isEnabled())
+
+    def test_canvas_right_click_never_changes_source_selection(self) -> None:
+        first = Source(SourceType.TEXT, "Selected", x=80, y=90, width=220, height=100)
+        second = Source(SourceType.SHAPE, "Not selected", x=420, y=260, width=180, height=120)
+        self.window.store.replace([first, second])
+        self.window.store.select(first.id)
+        self.window.show()
+        self.application.processEvents()
+
+        canvas = self.window.canvas
+        second_item = canvas._items[second.id]
+        position = canvas.mapFromScene(second_item.sceneBoundingRect().center())
+        fake_menu = MagicMock()
+        with patch.object(canvas, "_create_context_menu", return_value=fake_menu) as create_menu:
+            QTest.mousePress(canvas.viewport(), Qt.MouseButton.RightButton, pos=position)
+            QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.RightButton, pos=position)
+            self.application.processEvents()
+
+            create_menu.reset_mock()
+            canvas.contextMenuEvent(QContextMenuEvent(
+                QContextMenuEvent.Reason.Mouse,
+                position,
+                canvas.viewport().mapToGlobal(position),
+            ))
+
+        self.assertEqual(self.window.store.selected_ids, (first.id,))
+        create_menu.assert_called_once_with(None)
 
     def test_canvas_animation_preview_is_non_blocking_and_restores_source(self) -> None:
         source = self.window.store.sources()[0]
@@ -5130,6 +5239,45 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertEqual(no_transition, fade_done)
             self.assertNotEqual(no_transition, fade_start)
 
+    def test_album_background_crossfade_is_dynamic_only_during_preview_transition(self) -> None:
+        from app.canvas.live_canvas import CanvasScene
+        from app.canvas.source_item import SourceItem
+
+        scene = CanvasScene()
+        background = Source(
+            SourceType.BACKGROUND, "BG", width=320, height=180,
+            background_mode="album_art",
+            background_track_transition=True,
+            background_track_transition_seconds=0.8,
+        )
+        scene.addItem(SourceItem(background))
+        preview = ExportPreviewDialog(
+            scene,
+            [
+                PlaylistTrack("a.wav", "A", duration_seconds=3.0),
+                PlaylistTrack("b.wav", "B", duration_seconds=3.0),
+            ],
+            self.window.translator,
+            parent=self.window,
+            preferred_backend="cpu",
+        )
+        try:
+            preview._refresh_source_partitions()
+            self.assertNotIn(
+                background.id,
+                preview._canvas_dynamic_source_ids(0, 0.2, None),
+            )
+            self.assertIn(
+                background.id,
+                preview._canvas_dynamic_source_ids(1, 0.4, None),
+            )
+            self.assertNotIn(
+                background.id,
+                preview._canvas_dynamic_source_ids(1, 1.0, None),
+            )
+        finally:
+            preview.close()
+
     def test_track_lyrics_dialog_previews_audio_with_synchronized_lyrics(self) -> None:
         saved_volumes: list[int] = []
         volume_reader = patch(
@@ -5876,37 +6024,25 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.application.processEvents()
         self.assertTrue(self.window.inspector.name_edit.hasFocus())
 
-    def test_inspector_groups_collapse_and_remember_their_state(self) -> None:
-        def _restore_group_settings() -> None:
-            settings = QSettings()
-            for key in (
-                "inspector/group_content_expanded",
-                "inspector/group_transform_expanded",
-                "inspector/group_appearance_expanded",
-            ):
-                settings.setValue(key, True)
-        self.addCleanup(_restore_group_settings)
-
-        source = Source(SourceType.TEXT, "Collapse test")
+    def test_inspector_properties_are_grouped_into_tabs(self) -> None:
+        source = Source(SourceType.IMAGE, "Tabbed properties")
         self.window.store.replace([source])
         self.window.store.select(source.id)
         self.window.show()
         self.application.processEvents()
 
-        group = self.window.inspector.appearance_group
-        self.assertTrue(group.isCheckable())
-        self.assertTrue(self.window.inspector.opacity_spin.isVisible())
-        group.setChecked(False)
+        inspector = self.window.inspector
+        expected_categories = {
+            "name": "layout", "opacity": "shape", "fill_color": "fill",
+            "blur": "filter", "animation_in": "animation", "layer": "other",
+        }
+        for field, category in expected_categories.items():
+            self.assertEqual(inspector._field_categories[field], category)
+        filter_index = inspector._tab_indices["filter"]
+        inspector.property_tabs.setCurrentIndex(inspector._tab_indices["layout"])
+        inspector.property_tabs.setCurrentIndex(filter_index)
         self.application.processEvents()
-        self.assertFalse(self.window.inspector.opacity_spin.isVisible())
-        self.assertFalse(
-            QSettings().value(
-                "inspector/group_appearance_expanded", True, type=bool,
-            )
-        )
-        group.setChecked(True)
-        self.application.processEvents()
-        self.assertTrue(self.window.inspector.opacity_spin.isVisible())
+        self.assertEqual(inspector.property_tabs.currentIndex(), filter_index)
 
     def test_format_bytes_scales_units(self) -> None:
         self.assertEqual(self.window._format_bytes(0), "0.0 B")
@@ -6021,33 +6157,33 @@ class MainWindowSafetyTests(unittest.TestCase):
         widgets = inspector._field_widgets
 
         # Gradient stops hide until "use gradient" is on.
-        self.assertTrue(widgets["gradient_start"].isHidden())
-        self.assertTrue(widgets["gradient_end"].isHidden())
+        self.assertFalse(inspector._field_visibility["gradient_start"])
+        self.assertFalse(inspector._field_visibility["gradient_end"])
         inspector.gradient_check.setChecked(True)
         self.application.processEvents()
-        self.assertFalse(widgets["gradient_start"].isHidden())
+        self.assertTrue(inspector._field_visibility["gradient_start"])
         inspector.gradient_check.setChecked(False)
         self.application.processEvents()
-        self.assertTrue(widgets["gradient_start"].isHidden())
+        self.assertFalse(inspector._field_visibility["gradient_start"])
 
         # Outline colour follows the outline width.
-        self.assertTrue(widgets["outline_color"].isHidden())
+        self.assertFalse(inspector._field_visibility["outline_color"])
         inspector.outline_spin.setValue(4.0)
         self.application.processEvents()
-        self.assertFalse(widgets["outline_color"].isHidden())
+        self.assertTrue(inspector._field_visibility["outline_color"])
 
         # Shadow sub-fields follow the shadow toggle.
-        self.assertTrue(widgets["shadow_color"].isHidden())
+        self.assertFalse(inspector._field_visibility["shadow_color"])
         inspector.shadow_check.setChecked(True)
         self.application.processEvents()
-        self.assertFalse(widgets["shadow_color"].isHidden())
+        self.assertTrue(inspector._field_visibility["shadow_color"])
 
         # Exit-animation duration hides while the style is "none".
-        self.assertTrue(widgets["animation_out_duration"].isHidden())
+        self.assertFalse(inspector._field_visibility["animation_out_duration"])
         index = inspector.animation_out_combo.findData("fade")
         inspector.animation_out_combo.setCurrentIndex(index)
         self.application.processEvents()
-        self.assertFalse(widgets["animation_out_duration"].isHidden())
+        self.assertTrue(inspector._field_visibility["animation_out_duration"])
 
     def test_delete_action_also_accepts_backspace(self) -> None:
         sequences = {

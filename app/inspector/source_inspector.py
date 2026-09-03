@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -22,6 +21,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -65,6 +65,7 @@ class SourceInspector(QScrollArea):
         self._dirty_line_fields: set[str] = set()
         self._form_labels: dict[str, QLabel] = {}
         self._field_widgets: dict[str, QWidget] = {}
+        self._field_visibility: dict[str, bool] = {}
         self.setMinimumWidth(290)
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -94,8 +95,63 @@ class SourceInspector(QScrollArea):
         layout.addWidget(self.title)
         layout.addWidget(self.subtitle)
 
-        self.content_group = QGroupBox()
-        content_form = QFormLayout(self.content_group)
+        self.property_tabs = QTabWidget()
+        self.property_tabs.setObjectName("inspectorPropertyTabs")
+        self.property_tabs.setDocumentMode(True)
+        self.property_tabs.tabBar().setExpanding(False)
+        self.property_tabs.tabBar().setUsesScrollButtons(True)
+        layout.addWidget(self.property_tabs, 1)
+
+        def property_page(name: str) -> tuple[QWidget, QFormLayout]:
+            page = QWidget()
+            page.setObjectName(f"inspector{name.title()}Page")
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(8, 12, 8, 14)
+            page_layout.setSpacing(0)
+            form = QFormLayout()
+            page_layout.addLayout(form)
+            page_layout.addStretch()
+            return page, form
+
+        self.content_group, content_form = property_page("special")
+        self.transform_group, transform = property_page("layout")
+        self.text_group, text_form = property_page("text")
+        self.appearance_group, shape_form = property_page("shape")
+        self.fill_group, fill_form = property_page("fill")
+        self.filter_group, filter_form = property_page("filter")
+        self.animation_group, animation_form = property_page("animation")
+        self.other_group, other_form = property_page("other")
+        self._category_pages = {
+            "special": self.content_group,
+            "layout": self.transform_group,
+            "text": self.text_group,
+            "shape": self.appearance_group,
+            "fill": self.fill_group,
+            "filter": self.filter_group,
+            "animation": self.animation_group,
+            "other": self.other_group,
+        }
+        self._category_forms = {
+            "special": content_form,
+            "layout": transform,
+            "text": text_form,
+            "shape": shape_form,
+            "fill": fill_form,
+            "filter": filter_form,
+            "animation": animation_form,
+            "other": other_form,
+        }
+        self._field_categories: dict[str, str] = {}
+        self._tab_indices = {
+            category: self.property_tabs.addTab(page, "")
+            for category, page in self._category_pages.items()
+        }
+        saved_tab = QSettings().value("inspector/property_tab", 0, type=int)
+        self.property_tabs.setCurrentIndex(
+            max(0, min(self.property_tabs.count() - 1, int(saved_tab)))
+        )
+        self.property_tabs.currentChanged.connect(self._remember_property_tab)
+
         self.name_edit = QLineEdit()
         self.text_edit = TokenLineEdit(translator)
         self.expand_text_button = QPushButton()
@@ -117,8 +173,8 @@ class SourceInspector(QScrollArea):
         file_layout.addWidget(self.file_path_edit, 1)
         file_layout.addWidget(self.file_button)
         file_layout.addWidget(self.clear_file_button)
-        self._add_labeled_row(content_form, "name", self.name_edit)
-        self._add_labeled_row(content_form, "text", text_row)
+        self._add_labeled_row(transform, "name", self.name_edit)
+        self._add_labeled_row(text_form, "text", text_row)
         self._add_labeled_row(content_form, "file", file_row)
         self.video_settings_button = QPushButton()
         self._add_labeled_row(content_form, "video_settings", self.video_settings_button)
@@ -182,7 +238,7 @@ class SourceInspector(QScrollArea):
         for label, value in (("Rounded", "rounded"), ("Circle", "circle"), ("Polaroid", "polaroid"), ("Glass", "glass")):
             self.album_frame_combo.addItem(label, value)
         self.track_list_count_spin = QSpinBox()
-        self.track_list_count_spin.setRange(1, 15)
+        self.track_list_count_spin.setRange(0, 15)
         self.track_list_style_combo = QComboBox()
         for label, value in (
             ("Compact", "compact"), ("Cards", "cards"), ("Queue", "queue"),
@@ -222,9 +278,6 @@ class SourceInspector(QScrollArea):
         for label, value in (("Fade", "fade"), ("Slide up", "slide_up"), ("Slide down", "slide_down"), ("Zoom", "zoom")):
             self.now_playing_exit_combo.addItem(label, value)
         self.now_playing_exit_duration_spin = self._spin(0.05, 3.0, 0.05)
-        self.subtitle_style_combo = QComboBox()
-        for label, value in (("Karaoke", "karaoke"), ("Minimal", "minimal"), ("Neon", "neon")):
-            self.subtitle_style_combo.addItem(label, value)
         self.subtitle_animation_combo = QComboBox()
         for label, value in (
             ("Glow", "glow"), ("Rise", "rise"), ("None", "none"),
@@ -232,9 +285,9 @@ class SourceInspector(QScrollArea):
             self.subtitle_animation_combo.addItem(label, value)
         self.subtitle_animation_duration_spin = self._spin(0.05, 1.5, 0.05)
         self.subtitle_context_lines_spin = QSpinBox()
-        self.subtitle_context_lines_spin.setRange(0, 6)
+        self.subtitle_context_lines_spin.setRange(-1, 6)
         self.subtitle_next_lines_spin = QSpinBox()
-        self.subtitle_next_lines_spin.setRange(0, 6)
+        self.subtitle_next_lines_spin.setRange(-1, 6)
         self.subtitle_line_spacing_spin = self._spin(0, 120, 1)
         self.subtitle_previous_opacity_spin = self._spin(0.05, 0.9, 0.05)
         self.subtitle_previous_blur_spin = self._spin(0, 8, 0.5)
@@ -293,8 +346,8 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "progress_style", self.progress_style_combo)
         self._add_labeled_row(content_form, "visualizer_style", self.visualizer_style_combo)
         self._add_labeled_row(content_form, "visualizer_bars", self.visualizer_bars_spin)
-        self._add_labeled_row(content_form, "text_alignment", self.text_alignment_combo)
-        self._add_labeled_row(content_form, "text_overflow", self.text_overflow_combo)
+        self._add_labeled_row(text_form, "text_alignment", self.text_alignment_combo)
+        self._add_labeled_row(text_form, "text_overflow", self.text_overflow_combo)
         self._add_labeled_row(content_form, "image_fit", self.image_fit_combo)
         self._add_labeled_row(content_form, "background_mode", self.background_mode_combo)
         self._add_labeled_row(content_form, "background_ambient", self.background_ambient_check)
@@ -339,7 +392,6 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "now_playing_duration", self.now_playing_duration_spin)
         self._add_labeled_row(content_form, "now_playing_exit", self.now_playing_exit_combo)
         self._add_labeled_row(content_form, "now_playing_exit_duration", self.now_playing_exit_duration_spin)
-        self._add_labeled_row(content_form, "subtitle_style", self.subtitle_style_combo)
         self._add_labeled_row(content_form, "subtitle_animation", self.subtitle_animation_combo)
         self._add_labeled_row(content_form, "subtitle_animation_duration", self.subtitle_animation_duration_spin)
         self._add_labeled_row(content_form, "subtitle_context_lines", self.subtitle_context_lines_spin)
@@ -380,10 +432,6 @@ class SourceInspector(QScrollArea):
             content_form, "particle_secondary_color", self.particle_secondary_color_button,
         )
         self._add_labeled_row(content_form, "particle_seed", self.particle_seed_spin)
-        layout.addWidget(self.content_group)
-
-        self.transform_group = QGroupBox()
-        transform = QFormLayout(self.transform_group)
         self.x_spin = self._spin(-5000, 5000, 1)
         self.y_spin = self._spin(-5000, 5000, 1)
         self.width_spin = self._spin(32, 5000, 1)
@@ -396,14 +444,18 @@ class SourceInspector(QScrollArea):
             ("scale", self.scale_spin),
         ):
             self._add_labeled_row(transform, key, widget)
-        layout.addWidget(self.transform_group)
-
-        self.appearance_group = QGroupBox()
-        appearance = QFormLayout(self.appearance_group)
         self.opacity_spin = self._spin(0, 1, 0.05)
         self.radius_spin = self._spin(0, 300, 1)
         self.outline_spin = self._spin(0, 40, 1)
         self.font_size_spin = self._spin(8, 120, 1)
+        self.font_weight_combo = QComboBox()
+        for label, value in (
+            ("Light · 300", 300), ("Regular · 400", 400),
+            ("Medium · 500", 500), ("Semi bold · 600", 600),
+            ("Bold · 700", 700), ("Extra bold · 800", 800),
+            ("Black · 900", 900),
+        ):
+            self.font_weight_combo.addItem(label, value)
         self.font_family_combo = QComboBox()
         self.font_family_combo.setEditable(True)
         self.font_family_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -417,6 +469,7 @@ class SourceInspector(QScrollArea):
         font_layout.addWidget(self.font_add_button)
         self.fill_color_button = self._color_button()
         self.outline_color_button = self._color_button()
+        self.text_color_button = self._color_button()
         self.text_stroke_color_button = self._color_button()
         self.text_stroke_width_spin = self._spin(0, 12, 0.5)
         self.gradient_check = QCheckBox()
@@ -448,37 +501,45 @@ class SourceInspector(QScrollArea):
         self.visible_check = QCheckBox()
         self.locked_check = QCheckBox()
         for key, widget in (
-            ("opacity", self.opacity_spin), ("border_radius", self.radius_spin),
-            ("outline", self.outline_spin), ("font_size", self.font_size_spin),
+            ("font_size", self.font_size_spin), ("font_weight", self.font_weight_combo),
             ("font_family", font_row),
-            ("fill_color", self.fill_color_button), ("outline_color", self.outline_color_button),
+            ("text_color", self.text_color_button),
             ("text_stroke_color", self.text_stroke_color_button),
             ("text_stroke_width", self.text_stroke_width_spin),
-            ("gradient", self.gradient_check), ("gradient_start", self.gradient_start_button),
-            ("gradient_end", self.gradient_end_button), ("blur", self.blur_spin),
-            ("brightness", self.brightness_spin), ("contrast", self.contrast_spin),
+        ):
+            self._add_labeled_row(text_form, key, widget)
+        for key, widget in (
+            ("opacity", self.opacity_spin),
             ("shadow", self.shadow_check), ("shadow_color", self.shadow_color_button),
             ("shadow_opacity", self.shadow_opacity_spin), ("shadow_blur", self.shadow_blur_spin),
             ("shadow_x", self.shadow_x_spin), ("shadow_y", self.shadow_y_spin),
+        ):
+            self._add_labeled_row(shape_form, key, widget)
+        for key, widget in (
+            ("border_radius", self.radius_spin), ("outline", self.outline_spin),
+            ("fill_color", self.fill_color_button),
+            ("outline_color", self.outline_color_button),
+            ("gradient", self.gradient_check),
+            ("gradient_start", self.gradient_start_button),
+            ("gradient_end", self.gradient_end_button),
+        ):
+            self._add_labeled_row(fill_form, key, widget)
+        for key, widget in (
+            ("blur", self.blur_spin), ("brightness", self.brightness_spin),
+            ("contrast", self.contrast_spin),
+        ):
+            self._add_labeled_row(filter_form, key, widget)
+        for key, widget in (
             ("animation_in", self.animation_in_combo),
             ("animation_in_duration", self.animation_in_duration_spin),
             ("animation_out", self.animation_out_combo),
             ("animation_out_duration", self.animation_out_duration_spin),
-            ("layer", self.z_spin),
         ):
-            self._add_labeled_row(appearance, key, widget)
-        appearance.addRow(self.visible_check)
-        appearance.addRow(self.locked_check)
-        appearance.addRow("", self.animation_preview_button)
-        layout.addWidget(self.appearance_group)
-        layout.addStretch()
-
-        for group, settings_key in (
-            (self.content_group, "inspector/group_content_expanded"),
-            (self.transform_group, "inspector/group_transform_expanded"),
-            (self.appearance_group, "inspector/group_appearance_expanded"),
-        ):
-            self._make_group_collapsible(group, settings_key)
+            self._add_labeled_row(animation_form, key, widget)
+        animation_form.addRow("", self.animation_preview_button)
+        self._add_labeled_row(other_form, "layer", self.z_spin)
+        other_form.addRow(self.visible_check)
+        other_form.addRow(self.locked_check)
 
         self._editors = [
             self.name_edit, self.text_edit, self.expand_text_button,
@@ -507,7 +568,7 @@ class SourceInspector(QScrollArea):
             self.track_list_show_dividers_check,
             self.now_playing_style_combo, self.now_playing_duration_spin,
             self.now_playing_exit_combo, self.now_playing_exit_duration_spin,
-            self.subtitle_style_combo, self.subtitle_animation_combo, self.subtitle_animation_duration_spin,
+            self.subtitle_animation_combo, self.subtitle_animation_duration_spin,
             self.subtitle_context_lines_spin, self.subtitle_next_lines_spin, self.subtitle_line_spacing_spin,
             self.subtitle_previous_opacity_spin, self.subtitle_previous_blur_spin,
             self.subtitle_timing_offset_spin,
@@ -529,8 +590,9 @@ class SourceInspector(QScrollArea):
             self.particle_seed_spin,
             self.width_spin, self.height_spin, self.rotation_spin, self.scale_spin,
             self.opacity_spin, self.radius_spin, self.outline_spin, self.font_size_spin,
+            self.font_weight_combo,
             self.font_family_combo, self.font_add_button,
-            self.fill_color_button, self.outline_color_button,
+            self.fill_color_button, self.outline_color_button, self.text_color_button,
             self.text_stroke_color_button, self.text_stroke_width_spin,
             self.gradient_check,
             self.gradient_start_button, self.gradient_end_button, self.z_spin,
@@ -573,31 +635,18 @@ class SourceInspector(QScrollArea):
         label = QLabel()
         self._form_labels[key] = label
         self._field_widgets[key] = widget
+        self._field_visibility[key] = True
+        for category, category_layout in getattr(self, "_category_forms", {}).items():
+            if layout is category_layout:
+                self._field_categories[key] = category
+                break
         layout.addRow(label, widget)
 
     @staticmethod
-    def _make_group_collapsible(group: QGroupBox, settings_key: str) -> None:
-        """Let the user fold a property section by clicking its title checkbox.
-
-        The section's form layout is moved onto a body widget so toggling the
-        group's checkable title simply shows or hides that body, and the folded
-        state is remembered across sessions.
-        """
-        body = QWidget()
-        body.setLayout(group.layout())
-        shell = QVBoxLayout(group)
-        shell.setContentsMargins(6, 2, 6, 6)
-        shell.addWidget(body)
-        group.setCheckable(True)
-        expanded = QSettings().value(settings_key, True, type=bool)
-        group.setChecked(bool(expanded))
-        body.setVisible(bool(expanded))
-
-        def _on_toggled(checked: bool) -> None:
-            body.setVisible(checked)
-            QSettings().setValue(settings_key, checked)
-
-        group.toggled.connect(_on_toggled)
+    def _remember_property_tab(index: int) -> None:
+        settings = QSettings()
+        settings.setValue("inspector/property_tab", index)
+        settings.sync()
 
     def _property_help_text(self, key: str) -> str:
         """Return localized, user-facing guidance for one Inspector property."""
@@ -630,8 +679,10 @@ class SourceInspector(QScrollArea):
             "border_radius": ("사각형 모서리를 둥글게 만드는 반경입니다. 값이 클수록 더 둥글어집니다.", "Rounds rectangular corners. Larger values produce rounder corners."),
             "outline": ("요소 가장자리에 그리는 윤곽선의 두께입니다. 0이면 표시하지 않습니다.", "Width of the outline drawn around the source. Set to 0 to hide it."),
             "font_size": ("텍스트의 기준 글꼴 크기입니다. 요소 크기와 배율은 별도로 적용됩니다.", "Base text size. Source dimensions and scale are applied separately."),
+            "font_weight": ("글자의 굵기를 가늘게부터 매우 굵게까지 선택합니다. 글꼴이 지원하지 않는 굵기는 가장 가까운 굵기로 표시될 수 있습니다.", "Selects the glyph weight from light to black. Fonts without an exact weight may use the nearest available weight."),
             "font_family": ("텍스트에 사용할 글꼴입니다. 글꼴 추가 버튼으로 TTF 또는 OTF 파일을 등록할 수 있습니다.", "Font used for text. Add Font can register a TTF or OTF file."),
             "fill_color": ("도형, 텍스트 또는 효과의 주 색상입니다. 색상 창에서 알파를 0으로 설정하면 요소 전체 투명도는 유지하면서 배경만 완전히 투명하게 만들 수 있습니다.", "Primary fill or background color. Set alpha to 0 in the color dialog to make the background fully transparent without changing overall source opacity."),
+            "text_color": ("글자에 직접 적용되는 기본 색상입니다. 색상 창에서 현재 곡의 퍼스널 컬러와 밝기·채도·색조 보정도 함께 설정할 수 있습니다.", "The primary color applied directly to the text. The color dialog also supports the current track's personal color with brightness, saturation, and hue adjustments."),
             "outline_color": ("윤곽선에 사용할 색상입니다. 윤곽선 두께가 0보다 클 때 보입니다.", "Outline color, visible when outline width is greater than zero."),
             "text_stroke_color": ("글자 자체에 두르는 테두리 색상입니다. 테두리 두께가 0보다 클 때 보입니다.", "Colour of the outline drawn around the glyphs, visible when the text outline width is greater than zero."),
             "text_stroke_width": ("글자 둘레에 그리는 테두리 두께(px)입니다. 0이면 테두리가 없습니다.", "Thickness in pixels of the outline drawn around each glyph. 0 disables it."),
@@ -783,8 +834,70 @@ class SourceInspector(QScrollArea):
             widget.setAccessibleDescription(description)
 
     def _set_field_visible(self, key: str, visible: bool) -> None:
+        self._field_visibility[key] = bool(visible)
         self._form_labels[key].setVisible(visible)
         self._field_widgets[key].setVisible(visible)
+
+    @staticmethod
+    def _uses_primary_text_color(source: Source) -> bool:
+        return source.source_type in {
+            SourceType.TEXT, SourceType.TIME, SourceType.LYRICS,
+            SourceType.NOW_PLAYING,
+        }
+
+    def _source_type_display_name(self, source_type: SourceType | None) -> str:
+        korean = self.translator.language.value == "ko"
+        names = {
+            SourceType.IMAGE: ("이미지", "Image"),
+            SourceType.VIDEO: ("비디오", "Video"),
+            SourceType.TEXT: ("텍스트", "Text"),
+            SourceType.SHAPE: ("도형", "Shape"),
+            SourceType.PROGRESS_BAR: ("진행 바", "Progress bar"),
+            SourceType.TIME: ("시간", "Time"),
+            SourceType.ALBUM_COVER: ("앨범 커버", "Album cover"),
+            SourceType.LOGO: ("로고", "Logo"),
+            SourceType.WATERMARK: ("워터마크", "Watermark"),
+            SourceType.BACKGROUND: ("배경", "Background"),
+            SourceType.AUDIO_VISUALIZER: ("오디오 비주얼라이저", "Audio visualizer"),
+            SourceType.LYRICS: ("자막/가사", "Lyrics / subtitles"),
+            SourceType.TRACK_LIST: ("트랙 목록", "Track list"),
+            SourceType.NOW_PLAYING: ("현재 재생", "Now playing"),
+            SourceType.AUDIO_WAVEFORM: ("오디오 파형", "Audio waveform"),
+            SourceType.AUDIO_LEVEL_METER: ("오디오 레벨 미터", "Audio level meter"),
+            SourceType.PARTICLE_OVERLAY: ("파티클/노이즈", "Particles / noise"),
+        }
+        if source_type is None:
+            return "요소 전용" if korean else "Source"
+        return names[source_type][0 if korean else 1]
+
+    def _refresh_property_tabs(self, sources: list[Source]) -> None:
+        """Show useful categories and name the special tab after its source."""
+        source_types = {source.source_type for source in sources}
+        special_type = next(iter(source_types)) if len(source_types) == 1 else None
+        self.property_tabs.setTabText(
+            self._tab_indices["special"],
+            self._source_type_display_name(special_type),
+        )
+        for category, page in self._category_pages.items():
+            fields = [
+                key for key, owner in self._field_categories.items()
+                if owner == category
+            ]
+            has_visible_field = any(
+                self._field_visibility.get(key, False) for key in fields
+            )
+            if category in {"animation", "other"}:
+                has_visible_field = has_visible_field or bool(sources)
+            self.property_tabs.setTabVisible(
+                self._tab_indices[category], bool(sources) and has_visible_field,
+            )
+        if self.property_tabs.currentIndex() < 0 or not self.property_tabs.isTabVisible(
+            self.property_tabs.currentIndex()
+        ):
+            for index in range(self.property_tabs.count()):
+                if self.property_tabs.isTabVisible(index):
+                    self.property_tabs.setCurrentIndex(index)
+                    break
 
     def _update_source_specific_fields(self, source: Source | None) -> None:
         source_type = source.source_type if source else None
@@ -795,12 +908,17 @@ class SourceInspector(QScrollArea):
         }
         self._set_field_visible("text", source_type in text_types)
         self._set_field_visible("font_size", source_type in text_types)
+        self._set_field_visible("font_weight", source_type in text_types)
         self._set_field_visible(
             "font_family",
             source_type in text_types,
         )
         self._set_field_visible("text_stroke_color", source_type in text_types)
         self._set_field_visible("text_stroke_width", source_type in text_types)
+        self._set_field_visible(
+            "text_color",
+            source is not None and self._uses_primary_text_color(source),
+        )
         self._set_field_visible(
             "file", source_type in self.IMAGE_BACKED_TYPES
             and source_type is not SourceType.VIDEO
@@ -857,7 +975,6 @@ class SourceInspector(QScrollArea):
         self._set_field_visible("now_playing_duration", source_type is SourceType.NOW_PLAYING)
         self._set_field_visible("now_playing_exit", source_type is SourceType.NOW_PLAYING)
         self._set_field_visible("now_playing_exit_duration", source_type is SourceType.NOW_PLAYING)
-        self._set_field_visible("subtitle_style", source_type is SourceType.LYRICS)
         self._set_field_visible("subtitle_animation", source_type is SourceType.LYRICS)
         self._set_field_visible("subtitle_animation_duration", source_type is SourceType.LYRICS)
         self._set_field_visible("subtitle_context_lines", source_type is SourceType.LYRICS)
@@ -883,9 +1000,15 @@ class SourceInspector(QScrollArea):
             "particle_glow", "particle_secondary_color", "particle_seed",
         ):
             self._set_field_visible(key, source_type is SourceType.PARTICLE_OVERLAY)
-        for key in ("blur", "brightness", "contrast", "shadow", "shadow_color", "shadow_opacity", "shadow_blur", "shadow_x", "shadow_y"):
+        for key in ("blur", "brightness", "contrast"):
             self._set_field_visible(key, source_type in self.IMAGE_BACKED_TYPES)
+        for key in (
+            "shadow", "shadow_color", "shadow_opacity", "shadow_blur",
+            "shadow_x", "shadow_y",
+        ):
+            self._set_field_visible(key, source is not None)
         self._hide_inactive_dependent_fields(source)
+        self._refresh_property_tabs([source] if source else [])
 
     def _hide_inactive_dependent_fields(self, source: Source | None) -> None:
         """Show sub-properties only while their enabling toggle or value is set.
@@ -900,7 +1023,13 @@ class SourceInspector(QScrollArea):
         toggled_both_ways = {
             "gradient_start": source.gradient.enabled,
             "gradient_end": source.gradient.enabled,
-            "outline_color": source.outline_width > 0.0,
+            # Text-like sources use outline_color as their primary glyph
+            # colour.  Keep it editable even when the separate source outline
+            # is disabled; non-text sources retain the old dependent behavior.
+            "outline_color": (
+                not self._uses_primary_text_color(source)
+                and source.outline_width > 0.0
+            ),
             "animation_in_duration": source.animation_in != "none",
             "animation_out_duration": source.animation_out != "none",
         }
@@ -916,8 +1045,8 @@ class SourceInspector(QScrollArea):
             "shadow_y": source.shadow.enabled,
             "level_meter_peak_hold": source.level_meter_show_peak,
             "level_meter_peak_decay": source.level_meter_show_peak,
-            "subtitle_previous_opacity": source.subtitle_context_lines > 0,
-            "subtitle_previous_blur": source.subtitle_context_lines > 0,
+            "subtitle_previous_opacity": source.subtitle_context_lines != 0,
+            "subtitle_previous_blur": source.subtitle_context_lines != 0,
         }
         for key, active in hidden_when_off.items():
             if not active and key in self._field_widgets:
@@ -1045,7 +1174,6 @@ class SourceInspector(QScrollArea):
         self.now_playing_duration_spin.valueChanged.connect(lambda value: self._update("now_playing_duration", value))
         self.now_playing_exit_combo.currentIndexChanged.connect(lambda _index: self._update("now_playing_exit_animation", self.now_playing_exit_combo.currentData()))
         self.now_playing_exit_duration_spin.valueChanged.connect(lambda value: self._update("now_playing_exit_duration", value))
-        self.subtitle_style_combo.currentIndexChanged.connect(lambda _index: self._update("subtitle_style", self.subtitle_style_combo.currentData()))
         self.subtitle_animation_combo.currentIndexChanged.connect(lambda _index: self._update("subtitle_animation", self.subtitle_animation_combo.currentData()))
         self.subtitle_animation_duration_spin.valueChanged.connect(lambda value: self._update("subtitle_animation_duration", value))
         self.subtitle_context_lines_spin.valueChanged.connect(lambda value: self._update("subtitle_context_lines", value))
@@ -1140,6 +1268,11 @@ class SourceInspector(QScrollArea):
         self.font_family_combo.currentTextChanged.connect(
             lambda value: self._update("font_family", value.strip() or "Segoe UI")
         )
+        self.font_weight_combo.currentIndexChanged.connect(
+            lambda _index: self._update(
+                "font_weight", self.font_weight_combo.currentData(),
+            )
+        )
         self.font_add_button.clicked.connect(self._add_font_file)
         self.z_spin.valueChanged.connect(lambda _value: self._update("z_index", self.z_spin.value()))
         self.visible_check.toggled.connect(lambda value: self._update("visible", value))
@@ -1149,6 +1282,9 @@ class SourceInspector(QScrollArea):
         )
         self.outline_color_button.clicked.connect(
             lambda: self._choose_color("outline_color", self.outline_color_button)
+        )
+        self.text_color_button.clicked.connect(
+            lambda: self._choose_color("outline_color", self.text_color_button)
         )
         self.text_stroke_color_button.clicked.connect(
             lambda: self._choose_color("text_stroke_color", self.text_stroke_color_button)
@@ -1493,8 +1629,11 @@ class SourceInspector(QScrollArea):
             "height": ("높이", "Height"), "rotation": ("회전", "Rotation"),
             "scale": ("크기", "Scale"), "opacity": ("투명도", "Opacity"),
             "border_radius": ("모서리 반경", "Border radius"), "outline": ("윤곽선", "Outline"),
-            "font_size": ("글꼴 크기", "Font size"), "font_family": ("글꼴", "Font"),
+            "font_size": ("글꼴 크기", "Font size"),
+            "font_weight": ("글자 굵기", "Font weight"),
+            "font_family": ("글꼴", "Font"),
             "fill_color": ("채우기 색", "Fill color"),
+            "text_color": ("텍스트 색상", "Text color"),
             "outline_color": ("윤곽선 색", "Outline color"),
             "text_stroke_color": ("글자 테두리 색", "Text outline color"),
             "text_stroke_width": ("글자 테두리 두께", "Text outline width"),
@@ -1538,7 +1677,6 @@ class SourceInspector(QScrollArea):
             "now_playing_duration": ("표시 시간", "Display seconds"),
             "now_playing_exit": ("사라짐 효과", "Exit effect"),
             "now_playing_exit_duration": ("사라짐 시간", "Exit duration"),
-            "subtitle_style": ("가사 스타일", "Lyrics style"),
             "subtitle_animation": ("가사 전환", "Lyrics transition"),
             "subtitle_animation_duration": ("전환 시간", "Transition duration"),
             "subtitle_context_lines": ("이전 가사 줄", "Previous lyric lines"),
@@ -1581,9 +1719,19 @@ class SourceInspector(QScrollArea):
         korean = self.translator.language.value == "ko"
         for key, label in self._form_labels.items():
             label.setText(labels[key][0 if korean else 1])
-        self.content_group.setTitle(self.translator.text("content"))
-        self.transform_group.setTitle(self.translator.text("transform"))
-        self.appearance_group.setTitle(self.translator.text("appearance"))
+        tab_labels = {
+            "layout": ("배치", "Layout"),
+            "text": ("텍스트", "Text"),
+            "shape": ("모양", "Appearance"),
+            "fill": ("채우기", "Fill"),
+            "filter": ("필터", "Filters"),
+            "animation": ("애니메이션", "Animation"),
+            "other": ("기타", "Other"),
+        }
+        for category, pair in tab_labels.items():
+            self.property_tabs.setTabText(
+                self._tab_indices[category], pair[0 if korean else 1],
+            )
         self.visible_check.setText("표시" if korean else "Visible")
         self.locked_check.setText("잠금" if korean else "Locked")
         self.file_button.setText("찾아보기" if korean else "Browse")
@@ -1597,6 +1745,15 @@ class SourceInspector(QScrollArea):
             if korean else "Edit long text in a separate window."
         )
         self.font_add_button.setText("글꼴 추가" if korean else "Add font")
+        weight_labels = (
+            ("얇게 · 300", "보통 · 400", "중간 · 500", "세미 볼드 · 600",
+             "굵게 · 700", "매우 굵게 · 800", "블랙 · 900")
+            if korean else
+            ("Light · 300", "Regular · 400", "Medium · 500", "Semi bold · 600",
+             "Bold · 700", "Extra bold · 800", "Black · 900")
+        )
+        for index, label in enumerate(weight_labels):
+            self.font_weight_combo.setItemText(index, label)
         overflow_labels = (
             ("자동 줄바꿈", "말줄임표 (…)", "영역에서 자르기")
             if korean else
@@ -1634,6 +1791,10 @@ class SourceInspector(QScrollArea):
         )
         for index, label in enumerate(marker_labels):
             self.track_list_marker_combo.setItemText(index, label)
+        automatic_label = "자동" if korean else "Auto"
+        self.track_list_count_spin.setSpecialValueText(automatic_label)
+        self.subtitle_context_lines_spin.setSpecialValueText(automatic_label)
+        self.subtitle_next_lines_spin.setSpecialValueText(automatic_label)
         subtitle_animation_labels = (
             ("글로우", "라이즈", "없음")
             if korean else
@@ -1656,6 +1817,18 @@ class SourceInspector(QScrollArea):
             "현재 곡을 기준으로 목록에 이전 곡과 다음 곡을 어떻게 배치할지 정합니다."
             if korean else "Choose how previous and upcoming tracks are arranged around the current track."
         )
+        self.track_list_count_spin.setToolTip(
+            "자동을 선택하면 요소 높이와 글자 크기에 맞춰 표시 곡 수가 바뀝니다."
+            if korean else
+            "Auto changes the visible track count to fit the source height and font size."
+        )
+        automatic_lyrics_tip = (
+            "자동을 선택하면 요소 높이, 글자 크기와 줄 간격에 맞춰 표시할 가사 수를 계산합니다."
+            if korean else
+            "Auto calculates the visible lyric context from the source height, font size, and line spacing."
+        )
+        self.subtitle_context_lines_spin.setToolTip(automatic_lyrics_tip)
+        self.subtitle_next_lines_spin.setToolTip(automatic_lyrics_tip)
         self.track_list_inactive_opacity_spin.setToolTip(
             "현재 재생 중이 아닌 곡을 흐리게 표시하는 정도입니다."
             if korean else "Controls how faint non-current tracks appear."
@@ -1745,6 +1918,7 @@ class SourceInspector(QScrollArea):
             "Supported: %title%, %artist%, %album%, %track%, %track_total%, %filename%, %current_time%, %total_time%, %track_current_time%, %track_total_time%, %video_current_time%, %video_total_time%"
         )
         self._install_property_tooltips()
+        self._refresh_property_tabs(self._selected_sources())
         self.expand_text_button.setToolTip(
             "긴 텍스트를 별도의 창에서 편집합니다."
             if korean else "Edit long text in a separate window."
@@ -1847,11 +2021,12 @@ class SourceInspector(QScrollArea):
             self._update_source_specific_fields(source)
             visible_sets.append({
                 key for key, widget in self._field_widgets.items()
-                if not widget.isHidden()
+                if self._field_visibility.get(key, False)
             })
         common = set.intersection(*visible_sets)
         for key in self._field_widgets:
             self._set_field_visible(key, key in common)
+        self._refresh_property_tabs(sources)
 
     def _fill_multi(self, sources: list[Source]) -> None:
         """Fill from the active source, then blank every non-uniform value."""
@@ -1939,7 +2114,6 @@ class SourceInspector(QScrollArea):
             "track_list_marker": self.track_list_marker_combo,
             "now_playing_style": self.now_playing_style_combo,
             "now_playing_exit_animation": self.now_playing_exit_combo,
-            "subtitle_style": self.subtitle_style_combo,
             "subtitle_animation": self.subtitle_animation_combo,
             "waveform_style": self.waveform_style_combo,
             "level_meter_mode": self.level_meter_mode_combo,
@@ -1947,6 +2121,7 @@ class SourceInspector(QScrollArea):
             "level_meter_orientation": self.level_meter_orientation_combo,
             "particle_style": self.particle_style_combo,
             "font_family": self.font_family_combo,
+            "font_weight": self.font_weight_combo,
             "animation_in": self.animation_in_combo,
             "animation_out": self.animation_out_combo,
         })
@@ -2042,6 +2217,11 @@ class SourceInspector(QScrollArea):
             "gradient.end_color": self.gradient_end_button,
             "shadow.color": self.shadow_color_button,
         })
+        # Text sources and drawable outlines share the legacy model field, but
+        # expose it in separate, correctly named UI categories.
+        bindings["text_color"] = (
+            "outline_color", self.text_color_button, "color",
+        )
         return bindings
 
     def _fill(self, source: Source) -> None:
@@ -2062,6 +2242,16 @@ class SourceInspector(QScrollArea):
             self.radius_spin.setValue(source.border_radius)
             self.outline_spin.setValue(source.outline_width)
             self.font_size_spin.setValue(source.font_size)
+            weight_index = self.font_weight_combo.findData(source.font_weight)
+            if weight_index < 0:
+                weight_index = min(
+                    range(self.font_weight_combo.count()),
+                    key=lambda index: abs(
+                        int(self.font_weight_combo.itemData(index))
+                        - int(source.font_weight)
+                    ),
+                )
+            self.font_weight_combo.setCurrentIndex(weight_index)
             if source.font_path:
                 load_application_font(source.font_path)
             if self.font_family_combo.findText(source.font_family) < 0:
@@ -2116,7 +2306,6 @@ class SourceInspector(QScrollArea):
             self.now_playing_duration_spin.setValue(source.now_playing_duration)
             self.now_playing_exit_combo.setCurrentIndex(max(0, self.now_playing_exit_combo.findData(source.now_playing_exit_animation)))
             self.now_playing_exit_duration_spin.setValue(source.now_playing_exit_duration)
-            self.subtitle_style_combo.setCurrentIndex(max(0, self.subtitle_style_combo.findData(source.subtitle_style)))
             self.subtitle_animation_combo.setCurrentIndex(max(0, self.subtitle_animation_combo.findData(source.subtitle_animation)))
             self.subtitle_animation_duration_spin.setValue(source.subtitle_animation_duration)
             self.subtitle_context_lines_spin.setValue(source.subtitle_context_lines)
@@ -2163,6 +2352,7 @@ class SourceInspector(QScrollArea):
             self._set_color_button(self.progress_track_color_button, source.progress_track_color)
             self._set_color_button(self.fill_color_button, source.fill_color)
             self._set_color_button(self.outline_color_button, source.outline_color)
+            self._set_color_button(self.text_color_button, source.outline_color)
             self._set_color_button(self.text_stroke_color_button, source.text_stroke_color)
             self.text_stroke_width_spin.setValue(source.text_stroke_width)
             self.gradient_check.setChecked(source.gradient.enabled)

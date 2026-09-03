@@ -17,6 +17,7 @@
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/license-Source--Available%20Noncommercial-blue" alt="Source-Available Noncommercial License">
     <img src="https://img.shields.io/badge/Built%20with-ChatGPT%20Codex-10A37F" alt="Built with ChatGPT Codex">
+    <img src="https://img.shields.io/badge/Built%20with-Claude%20Code-D97757" alt="Built with Claude Code">
   </p>
 </div>
 
@@ -30,9 +31,9 @@ Playlist Canvas는 정적인 이미지와 음악을 합치는 수준을 넘어, 
 
 ## 제작 방식
 
-**Playlist Canvas는 ChatGPT Codex만을 이용해 제작한 프로그램입니다.**
+**Playlist Canvas는 ChatGPT Codex와 Claude Code를 활용해 제작한 프로그램입니다.**
 
-기능 설계와 요구사항을 바탕으로 한 소스코드 작성, UI 개선, 리팩터링, 오류 분석과 수정, 자동화 테스트, Windows 배포 빌드 점검 및 GitHub 문서화 전 과정을 ChatGPT Codex와의 대화를 통해 진행했습니다.
+기능 설계와 요구사항을 바탕으로 한 소스코드 작성, UI 개선, 리팩터링, 오류 분석과 수정, 자동화 테스트, Windows 배포 빌드 점검 및 GitHub 문서화 과정에 ChatGPT Codex와 Claude Code를 활용했습니다.
 
 ## 주요 기능
 

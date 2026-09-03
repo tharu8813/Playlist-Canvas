@@ -21,7 +21,10 @@ from app.services.update_service import normalized_version
 LOGGER = logging.getLogger(__name__)
 LANGUAGE_PACK_SCHEMA = 1
 MAX_PACK_BYTES = 1024 * 1024
-MAX_TRANSLATIONS = 5000
+# The generated full-program template now contains slightly more than 5,000
+# literals.  Keep a generous but bounded ceiling so complete community packs
+# remain valid without weakening the file-size and text-length safeguards.
+MAX_TRANSLATIONS = 10_000
 MAX_TEXT_LENGTH = 20_000
 TEMPLATE_FILE_NAME = "language-pack-template.json"
 BUILT_IN_LANGUAGE_FILES = ("ko.json", "en.json")

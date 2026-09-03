@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from math import atan2, cos, degrees, pi, radians, sin
+from math import atan2, cos, degrees, radians, sin
 from pathlib import Path
 from time import monotonic
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QThreadPool, QUrl, Signal
 from PySide6.QtGui import (
     QColor, QBrush, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter,
-    QPainterPath, QPen, QPixmap,
+    QPainterPath, QPainterPathStroker, QPen, QPixmap, QTextLayout, QTextOption,
 )
 from PySide6.QtWidgets import (
     QGraphicsItem,
@@ -45,7 +45,6 @@ class SourceItem(QGraphicsObject):
 
     _handle_size = 10.0
     _middle_handle_min_span = 36.0
-    _STROKE_OFFSET_CACHE: dict[int, tuple[tuple[int, int], ...]] = {}
     _direct_gpu_pixel_formats = frozenset({
         "Format_RGBA8888", "Format_RGBX8888",
         "Format_BGRA8888", "Format_BGRX8888",
@@ -122,12 +121,15 @@ class SourceItem(QGraphicsObject):
         self._lyric_fonts: dict[str, QFont] = {}
         self._lyric_ghost_cache: dict[tuple[object, ...], QPixmap] = {}
         self._lyric_resource_key: tuple[str, int, float, int] | None = None
+        self._text_outline_path_key: tuple[object, ...] | None = None
+        self._text_outline_path = QPainterPath()
         # Preview/export assigns this transient value while a timed lyric cue
         # enters. Keeping it on the graphics item avoids serializing render state.
         self._subtitle_transition_progress = 1.0
         self._subtitle_anchor_line = -1
         self._subtitle_anchor_line_count = 1
         self._subtitle_previous_line_count = 0
+        self._subtitle_leaving_line_count = 0
         self.setFlags(
             QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemIsSelectable
@@ -962,6 +964,48 @@ class SourceItem(QGraphicsObject):
             + descender_guard,
         )
 
+    def lyric_line_capacity(self) -> int:
+        """Return the number of physical lyric rows that fit in this source."""
+        return max(
+            1,
+            min(15, int(self.source.height / self._lyric_line_height())),
+        )
+
+    def effective_track_list_count(self) -> int:
+        """Return the configured track count or a readable automatic count."""
+        configured = int(self.source.track_list_count)
+        if configured > 0:
+            return max(1, min(15, configured))
+        padding = max(0.0, min(40.0, self.source.track_list_item_padding))
+        available = max(1.0, self.source.height - padding * 2.0)
+        spacing = max(0.0, min(40.0, self.source.track_list_row_spacing))
+        regular = QFont(
+            self.source.font_family,
+            max(8, min(120, round(self.source.font_size))),
+        )
+        regular.setWeight(QFont.Weight(self.source.font_weight))
+        active = QFont(
+            self.source.font_family,
+            max(8, min(120, round(
+                self.source.font_size
+                * max(0.8, min(1.5, self.source.track_list_current_scale))
+            ))),
+        )
+        active.setWeight(QFont.Weight.Bold)
+        glyph_height = max(
+            QFontMetricsF(regular).height(), QFontMetricsF(active).height(),
+        )
+        style_padding = (
+            8.0
+            if self.source.track_list_style in {"cards", "glass", "pills"}
+            else 3.0
+        )
+        readable_row_height = max(18.0, glyph_height + style_padding)
+        count = int(
+            (available + spacing) / (readable_row_height + spacing)
+        )
+        return max(1, min(15, count))
+
     def _apply_image_filters(
         self, pixmap: QPixmap, *, include_blur: bool = True,
     ) -> QPixmap:
@@ -1040,7 +1084,7 @@ class SourceItem(QGraphicsObject):
 
         padding = max(0.0, min(40.0, source.track_list_item_padding))
         inner = rect.adjusted(padding, padding, -padding, -padding)
-        lines = (self._render_text() or source.name).splitlines()[:max(1, source.track_list_count)]
+        lines = self.track_list_display_lines()
         if not lines or inner.isEmpty():
             return
         current_row = source.track_list_current_row
@@ -1128,30 +1172,21 @@ class SourceItem(QGraphicsObject):
             self._draw_text(painter, text_rect, flags, line)
             painter.restore()
 
-    @staticmethod
-    def _stroke_offsets(radius: int) -> tuple[tuple[int, int], ...]:
-        """Return de-duplicated ring offsets that tile a disk of *radius* px.
-
-        Concentric rings give a uniform outline at any width; the earlier
-        eight-point pattern bulged at the corners and left gaps once the width
-        grew past a few pixels.
-        """
-        cached = SourceItem._STROKE_OFFSET_CACHE.get(radius)
-        if cached is not None:
-            return cached
-        step = max(1, round(radius / 4))
-        points: set[tuple[int, int]] = set()
-        ring = step
-        while ring <= radius:
-            count = max(8, round(2.0 * pi * ring / step))
-            for index in range(count):
-                angle = 2.0 * pi * index / count
-                points.add((round(ring * cos(angle)), round(ring * sin(angle))))
-            ring += step
-        points.discard((0, 0))
-        offsets = tuple(sorted(points))
-        SourceItem._STROKE_OFFSET_CACHE[radius] = offsets
-        return offsets
+    def track_list_display_lines(self) -> list[str]:
+        """Return real or editor-placeholder rows limited by effective count."""
+        text = self._render_text() or self.source.name
+        legacy_placeholder = "▶ 01. Current track\n  02. Next track"
+        if text.strip() == legacy_placeholder.strip():
+            korean = bool(getattr(self.scene(), "placeholder_labels_korean", False))
+            current = "현재 곡" if korean else "Current track"
+            upcoming = "다음 곡" if korean else "Next track"
+            track = "플레이리스트 곡" if korean else "Playlist track"
+            sample_lines = [f"▶ 01. {current}", f"  02. {upcoming}"]
+            sample_lines.extend(
+                f"  {index:02d}. {track} {index}" for index in range(3, 16)
+            )
+            text = "\n".join(sample_lines)
+        return text.splitlines()[:self.effective_track_list_count()]
 
     _SAMPLE_TEXT_TYPES = frozenset({
         SourceType.TEXT, SourceType.TIME, SourceType.TRACK_LIST,
@@ -1181,18 +1216,96 @@ class SourceItem(QGraphicsObject):
     ) -> None:
         """Draw ``text`` with the configured glyph outline behind its fill.
 
-        The stroke repeats the glyphs in the outline colour across a disk of
-        offsets before the fill pass, which keeps the surrounding ``drawText``
-        alignment, wrapping and eliding behaviour untouched.
+        A vector path stroker produces one continuous, anti-aliased contour.
+        Repainting glyphs at many integer offsets created scalloped edges,
+        especially on diagonals and rounded Hangul/Latin glyphs.
         """
         width = float(self.source.text_stroke_width)
         if width > 0.0:
-            fill_pen = painter.pen()
-            painter.setPen(QColor(self.source.text_stroke_color))
-            for offset_x, offset_y in self._stroke_offsets(max(1, round(width))):
-                painter.drawText(rect.translated(offset_x, offset_y), flags, text)
-            painter.setPen(fill_pen)
+            path = self._text_layout_path(painter, rect, flags, text)
+            if not path.isEmpty():
+                stroker = QPainterPathStroker()
+                stroker.setWidth(width * 2.0)
+                stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+                painter.fillPath(
+                    stroker.createStroke(path),
+                    QBrush(QColor(self.source.text_stroke_color)),
+                )
+                painter.restore()
         painter.drawText(rect, flags, text)
+
+    def _text_layout_path(
+        self, painter: QPainter, rect: QRectF, flags: int, text: str,
+    ) -> QPainterPath:
+        """Build a vector glyph path matching the surrounding drawText layout."""
+        if not text or rect.width() <= 0.0 or rect.height() <= 0.0:
+            return QPainterPath()
+        cache_key = (
+            painter.font().key(), text, round(rect.width(), 3),
+            round(rect.height(), 3), str(flags),
+        )
+        if cache_key == self._text_outline_path_key:
+            return QPainterPath(self._text_outline_path)
+        single_line = bool(flags & Qt.TextFlag.TextSingleLine)
+        wrap = bool(flags & Qt.TextFlag.TextWordWrap) and not single_line
+        paragraphs = [text.replace("\n", " ")] if single_line else text.split("\n")
+        horizontal = Qt.AlignmentFlag.AlignLeft
+        if flags & Qt.AlignmentFlag.AlignHCenter:
+            horizontal = Qt.AlignmentFlag.AlignHCenter
+        elif flags & Qt.AlignmentFlag.AlignRight:
+            horizontal = Qt.AlignmentFlag.AlignRight
+
+        runs: list[object] = []
+        y_cursor = 0.0
+        for paragraph in paragraphs:
+            # A space preserves the vertical advance of intentionally blank
+            # lines without contributing a visible glyph to the path.
+            layout = QTextLayout(paragraph or " ", painter.font())
+            option = QTextOption()
+            option.setAlignment(horizontal)
+            option.setWrapMode(
+                QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+                if wrap else QTextOption.WrapMode.NoWrap
+            )
+            layout.setTextOption(option)
+            layout.beginLayout()
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(rect.width())
+                line.setPosition(QPointF(0.0, y_cursor))
+                y_cursor += line.height()
+                runs.extend(line.glyphRuns())
+                if not wrap:
+                    break
+            layout.endLayout()
+
+        vertical_offset = 0.0
+        if flags & Qt.AlignmentFlag.AlignVCenter:
+            vertical_offset = max(0.0, (rect.height() - y_cursor) / 2.0)
+        elif flags & Qt.AlignmentFlag.AlignBottom:
+            vertical_offset = max(0.0, rect.height() - y_cursor)
+
+        path = QPainterPath()
+        for glyph_run in runs:
+            raw_font = glyph_run.rawFont()
+            for glyph_index, position in zip(
+                glyph_run.glyphIndexes(), glyph_run.positions(), strict=False,
+            ):
+                glyph_path = raw_font.pathForGlyph(glyph_index)
+                glyph_path.translate(
+                    rect.left() + position.x(),
+                    rect.top() + vertical_offset + position.y(),
+                )
+                path.addPath(glyph_path)
+        self._text_outline_path_key = cache_key
+        self._text_outline_path = QPainterPath(path)
+        return path
 
     def paint(
         self,
@@ -1540,7 +1653,8 @@ class SourceItem(QGraphicsObject):
             # entirely — fade it out over the transition instead of cutting it.
             leaving_previous_target = (
                 steady_previous_alpha
-                if self.source.subtitle_context_lines > 0 else 0.0
+                if current_line > 0 or self.source.subtitle_context_lines > 0
+                else 0.0
             )
             for index, line in enumerate(lines):
                 is_current = (
@@ -1554,16 +1668,28 @@ class SourceItem(QGraphicsObject):
                         enter_alpha + (1.0 - enter_alpha) * transition
                     )
                 elif not is_current:
+                    is_leaving = (
+                        transition < 1.0
+                        and self._subtitle_leaving_line_count > 0
+                        and index < self._subtitle_leaving_line_count
+                    )
                     immediate_previous = (
                         is_previous
                         and self._subtitle_previous_line_count > 0
                         and current_line - self._subtitle_previous_line_count
                         <= index < current_line
                     )
-                    # Do not demote the former current cue in a single frame.
-                    # Cross-fade its emphasis toward its resting alpha, or toward
-                    # zero when it is scrolling out of the frame.
-                    if immediate_previous and transition < 1.0:
+                    # Fade the oldest context cue to zero while it scrolls out.
+                    # The immediately previous cue separately cross-fades from
+                    # current emphasis toward its resting context opacity.
+                    if is_leaving:
+                        leaving_start_alpha = (
+                            1.0
+                            if current_line <= 0 and self.source.subtitle_context_lines == 0
+                            else steady_previous_alpha
+                        )
+                        line_alpha = leaving_start_alpha * (1.0 - transition)
+                    elif immediate_previous and transition < 1.0:
                         line_alpha = (
                             leaving_previous_target
                             + (1.0 - leaving_previous_target) * (1.0 - transition)
@@ -1583,7 +1709,11 @@ class SourceItem(QGraphicsObject):
                     )
                     if blur_radius:
                         ghost = QColor(line_color)
-                        ghost.setAlpha(max(10, line_color.alpha() // 3))
+                        ghost.setAlpha(
+                            line_color.alpha() // 3
+                            if is_leaving else
+                            max(10, line_color.alpha() // 3)
+                        )
                         ghost_pixmap = self._lyric_ghost_pixmap(
                             line, ghost, blur_radius, rect.width() - 24, line_height,
                         )

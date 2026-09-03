@@ -194,9 +194,11 @@ class AboutDialog(QDialog):
         korean = self.translator.language is Language.KOREAN
         self.setWindowTitle("프로그램 정보" if korean else "About Playlist Canvas")
         self.description_label.setText(
-            "음악 재생목록을 시각적인 영상으로 구성하고 MP4로 내보내는 데스크톱 스튜디오입니다."
+            "음악 재생목록을 시각적인 영상으로 구성하고 MP4로 내보내는 데스크톱 스튜디오입니다.\n"
+            "ChatGPT Codex와 Claude Code를 활용해 제작했습니다."
             if korean else
-            "A desktop studio for turning music playlists into visual compositions and MP4 videos."
+            "A desktop studio for turning music playlists into visual compositions and MP4 videos.\n"
+            "Created with ChatGPT Codex and Claude Code."
         )
         self.version_title.setText("애플리케이션 버전" if korean else "Application version")
         self.runtime_title.setText("Python 런타임" if korean else "Python runtime")

@@ -385,6 +385,9 @@ class ExportPreviewDialog(QDialog):
         self._source_partition_dirty = True
         self._cached_audio_dynamic_ids: frozenset[str] = frozenset()
         self._cached_always_dynamic_ids: frozenset[str] = frozenset()
+        self._cached_track_transition_backgrounds: tuple[
+            tuple[str, float], ...
+        ] = ()
         self._cached_animated_source_ids: frozenset[str] = frozenset()
         self._cached_visible_source_ids: frozenset[str] = frozenset()
         self._cached_source_items: tuple[SourceItem, ...] = ()
@@ -1011,11 +1014,9 @@ class ExportPreviewDialog(QDialog):
         phase, phase_progress, phase_duration = self._animation_state(track, elapsed)
         self._refresh_source_partitions()
         audio_dynamic_ids = self._cached_audio_dynamic_ids
-        canvas_dynamic_ids = self._cached_always_dynamic_ids
-        if phase is not None:
-            canvas_dynamic_ids = frozenset(
-                canvas_dynamic_ids | self._cached_animated_source_ids
-            )
+        canvas_dynamic_ids = self._canvas_dynamic_source_ids(
+            track_index, elapsed, phase,
+        )
         static_hidden_ids = frozenset(audio_dynamic_ids | canvas_dynamic_ids)
         ordered_canvas_required = self._canvas_dynamic_requires_z_composition(
             canvas_dynamic_ids, playlist_seconds,
@@ -1503,6 +1504,7 @@ class ExportPreviewDialog(QDialog):
         }
         audio_dynamic_ids: set[str] = set()
         always_dynamic_ids: set[str] = set()
+        transition_backgrounds: list[tuple[str, float]] = []
         animated_source_ids: set[str] = set()
         visible_source_ids: set[str] = set()
         source_items: list[SourceItem] = []
@@ -1524,6 +1526,15 @@ class ExportPreviewDialog(QDialog):
             }:
                 audio_dynamic_ids.add(source.id)
                 continue
+            if (source.source_type is SourceType.BACKGROUND
+                    and source.background_mode == "album_art"):
+                if source.background_ambient:
+                    always_dynamic_ids.add(source.id)
+                if source.background_track_transition:
+                    transition_backgrounds.append((
+                        source.id,
+                        max(0.05, source.background_track_transition_seconds),
+                    ))
             if (source.source_type in dynamic_types
                     or source.source_type is SourceType.TIME
                     or source.timeline_start > 0.0
@@ -1534,6 +1545,9 @@ class ExportPreviewDialog(QDialog):
                 animated_source_ids.add(source.id)
         self._cached_audio_dynamic_ids = frozenset(audio_dynamic_ids)
         self._cached_always_dynamic_ids = frozenset(always_dynamic_ids)
+        self._cached_track_transition_backgrounds = tuple(
+            transition_backgrounds
+        )
         self._cached_animated_source_ids = frozenset(animated_source_ids)
         self._cached_visible_source_ids = frozenset(visible_source_ids)
         self._cached_source_items = tuple(source_items)
@@ -1556,6 +1570,21 @@ class ExportPreviewDialog(QDialog):
         self._dynamic_region_plans.clear()
         self._dynamic_region_buffers.clear()
         self._source_partition_dirty = False
+
+    def _canvas_dynamic_source_ids(
+        self, track_index: int, elapsed: float, phase: str | None,
+    ) -> frozenset[str]:
+        """Return only sources whose pixels can change at this playhead time."""
+        dynamic_ids = set(self._cached_always_dynamic_ids)
+        if track_index > 0:
+            dynamic_ids.update(
+                source_id
+                for source_id, duration in self._cached_track_transition_backgrounds
+                if 0.0 <= elapsed < duration
+            )
+        if phase is not None:
+            dynamic_ids.update(self._cached_animated_source_ids)
+        return frozenset(dynamic_ids)
 
     def _active_overlay_entries(
         self, timeline_seconds: float,

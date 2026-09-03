@@ -42,6 +42,70 @@ _MAX_CAPTURE_SCALE = 8.0
 _FILTERED_TRACK_PIXMAP_CACHE: dict[tuple, QPixmap] = {}
 
 
+def _lyric_cue_line_count(cue: dict[str, object]) -> int:
+    """Count the physical display rows occupied by one lyric cue."""
+    text = LyricsService.decode_line_breaks(cue.get("text", ""))
+    return max(1, len([line for line in text.splitlines() if line.strip()]))
+
+
+def _effective_lyric_context(
+    graphics_item: SourceItem,
+    cues: Sequence[dict[str, object]],
+    cue_index: int,
+) -> tuple[int, int]:
+    """Resolve automatic previous/next cue counts against available height."""
+    source = graphics_item.source
+    previous_setting = int(source.subtitle_context_lines)
+    next_setting = int(source.subtitle_next_lines)
+    if previous_setting >= 0 and next_setting >= 0:
+        return previous_setting, next_setting
+
+    previous = min(cue_index, max(0, previous_setting))
+    following_available = max(0, len(cues) - cue_index - 1)
+    following = min(following_available, max(0, next_setting))
+    used_rows = _lyric_cue_line_count(cues[cue_index])
+    used_rows += sum(
+        _lyric_cue_line_count(cues[index])
+        for index in range(cue_index - previous, cue_index)
+    )
+    used_rows += sum(
+        _lyric_cue_line_count(cues[index])
+        for index in range(cue_index + 1, cue_index + following + 1)
+    )
+    remaining = max(0, graphics_item.lyric_line_capacity() - used_rows)
+    automatic_previous = previous_setting < 0
+    automatic_next = next_setting < 0
+    blocked: set[str] = set()
+    while remaining > 0:
+        progressed = False
+        for side in ("previous", "next"):
+            if side in blocked:
+                continue
+            if side == "previous":
+                if not automatic_previous or previous >= cue_index or previous >= 15:
+                    blocked.add(side)
+                    continue
+                candidate = cue_index - previous - 1
+            else:
+                if not automatic_next or following >= following_available or following >= 15:
+                    blocked.add(side)
+                    continue
+                candidate = cue_index + following + 1
+            row_cost = _lyric_cue_line_count(cues[candidate])
+            if row_cost > remaining:
+                blocked.add(side)
+                continue
+            if side == "previous":
+                previous += 1
+            else:
+                following += 1
+            remaining -= row_cost
+            progressed = True
+        if not progressed:
+            break
+    return previous, following
+
+
 def _filtered_track_pixmap(
     graphics_item: SourceItem, base: QPixmap, key: tuple, *, include_blur: bool = True,
 ) -> QPixmap:
@@ -576,12 +640,11 @@ class CanvasSnapshot:
         original_covers: list[tuple[SourceItem, QPixmap]] = []
         original_backgrounds: list[tuple[SourceItem, QPixmap]] = []
         original_visibility: list[tuple[SourceItem, bool]] = []
-        original_outline_colors: list[tuple[SourceItem, str]] = []
         original_subtitle_lines: list[tuple[SourceItem, int, int]] = []
         original_subtitle_offsets: list[tuple[SourceItem, float]] = []
         original_subtitle_transitions: list[tuple[SourceItem, float]] = []
         original_subtitle_anchors: list[
-            tuple[SourceItem, int, int, int]
+            tuple[SourceItem, int, int, int, int]
         ] = []
         original_track_list_rows: list[tuple[SourceItem, int]] = []
         original_personal_colors: list[
@@ -654,7 +717,6 @@ class CanvasSnapshot:
                 graphics_item.update()
             if source.source_type is SourceType.LYRICS:
                 original_text.append((graphics_item, source.text))
-                original_outline_colors.append((graphics_item, source.outline_color))
                 original_subtitle_lines.append((
                     graphics_item, source.subtitle_current_line,
                     source.subtitle_current_line_count,
@@ -667,9 +729,11 @@ class CanvasSnapshot:
                     graphics_item, graphics_item._subtitle_anchor_line,
                     graphics_item._subtitle_anchor_line_count,
                     graphics_item._subtitle_previous_line_count,
+                    graphics_item._subtitle_leaving_line_count,
                 ))
                 graphics_item._subtitle_transition_progress = 1.0
                 graphics_item._subtitle_previous_line_count = 0
+                graphics_item._subtitle_leaving_line_count = 0
                 effective_lyric_offset = (
                     track.lyrics_timing_offset_seconds
                     + source.subtitle_timing_offset
@@ -703,19 +767,25 @@ class CanvasSnapshot:
                     # its distance in the first few frames. The two styles differ
                     # in how each line is painted, not in this scroll timing.
                     eased = ease_in_out_cubic(progress)
-                context = max(0, source.subtitle_context_lines)
-                # During a transition with no context line kept on screen, show
-                # the outgoing cue for one extra slot so it can fade and scroll
-                # out instead of vanishing in a single frame.
+                if cue_index is not None:
+                    context, next_context = _effective_lyric_context(
+                        graphics_item, track.lyrics, cue_index,
+                    )
+                else:
+                    context = max(0, source.subtitle_context_lines)
+                    next_context = max(0, source.subtitle_next_lines)
+                # Keep the cue leaving the top of the visible context for one
+                # extra transition slot. Otherwise the oldest displayed row is
+                # removed in one frame when the lyric window advances.
                 extra_leading = (
                     1 if (
                         transitioning and eased < 1.0
-                        and context == 0 and cue_index and cue_index > 0
+                        and cue_index is not None and cue_index > context
                     ) else 0
                 )
                 if cue_index is not None:
                     first = max(0, cue_index - context - extra_leading)
-                    last = min(len(track.lyrics), cue_index + max(0, source.subtitle_next_lines) + 1)
+                    last = min(len(track.lyrics), cue_index + next_context + 1)
                     blocks = [
                         LyricsService.decode_line_breaks(cue.get("text", "")).strip()
                         for cue in track.lyrics[first:last]
@@ -729,6 +799,9 @@ class CanvasSnapshot:
                     anchor_line = sum(block_line_counts[:relative_index])
                     graphics_item._subtitle_anchor_line = anchor_line
                     graphics_item._subtitle_anchor_line_count = block_line_counts[relative_index]
+                    graphics_item._subtitle_leaving_line_count = (
+                        block_line_counts[0] if extra_leading else 0
+                    )
                     if active_cue_index == cue_index:
                         source.subtitle_current_line = anchor_line
                         source.subtitle_current_line_count = block_line_counts[relative_index]
@@ -741,12 +814,7 @@ class CanvasSnapshot:
                     source.subtitle_current_line_count = 1
                     graphics_item._subtitle_anchor_line = -1
                     graphics_item._subtitle_anchor_line_count = 1
-                if source.subtitle_style == "karaoke":
-                    source.outline_color = "#FFE08A"
-                elif source.subtitle_style == "minimal":
-                    source.outline_color = "#FFFFFF"
-                elif source.subtitle_style == "neon":
-                    source.outline_color = "#72E8FF"
+                    graphics_item._subtitle_leaving_line_count = 0
                 if transitioning:
                     graphics_item._subtitle_transition_progress = eased
                     # Keep the lyric card/background stable. Only its text layout
@@ -774,7 +842,7 @@ class CanvasSnapshot:
                 )
                 tracks = playlist_tracks or [track]
                 current_index = max(0, min(len(tracks) - 1, track_number - 1))
-                count = max(1, source.track_list_count)
+                count = graphics_item.effective_track_list_count()
                 if source.track_list_window == "upcoming":
                     first = current_index
                 elif source.track_list_window == "history":
@@ -1077,9 +1145,6 @@ class CanvasSnapshot:
             for graphics_item, text in original_text:
                 graphics_item.source.text = text
                 graphics_item.update()
-            for graphics_item, outline_color in original_outline_colors:
-                graphics_item.source.outline_color = outline_color
-                graphics_item.update()
             for graphics_item, current_line, line_count in original_subtitle_lines:
                 graphics_item.source.subtitle_current_line = current_line
                 graphics_item.source.subtitle_current_line_count = line_count
@@ -1092,10 +1157,12 @@ class CanvasSnapshot:
                 graphics_item.update()
             for (
                 graphics_item, anchor_line, anchor_count, previous_line_count,
+                leaving_line_count,
             ) in original_subtitle_anchors:
                 graphics_item._subtitle_anchor_line = anchor_line
                 graphics_item._subtitle_anchor_line_count = anchor_count
                 graphics_item._subtitle_previous_line_count = previous_line_count
+                graphics_item._subtitle_leaving_line_count = leaving_line_count
                 graphics_item.update()
             for graphics_item, current_row in original_track_list_rows:
                 graphics_item.source.track_list_current_row = current_row

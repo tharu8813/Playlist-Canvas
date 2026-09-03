@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter
 
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
@@ -214,19 +214,21 @@ class FunctionalRegressionTests(unittest.TestCase):
                 f"{source_type.value}: text outline did not render",
             )
 
-    def test_text_stroke_offsets_tile_a_uniform_disk(self) -> None:
-        for radius in (3, 6, 12):
-            offsets = SourceItem._stroke_offsets(radius)
-            self.assertNotIn((0, 0), offsets)
-            self.assertLessEqual(len(offsets), 90)  # bounded regardless of width
-            reach = max(dx * dx + dy * dy for dx, dy in offsets) ** 0.5
-            self.assertGreater(reach, radius - 1.5)  # covers the full radius
-            self.assertLess(reach, radius + 1.5)     # no corner bulge past it
-            # more than the eight compass points, and some genuinely off-axis
-            self.assertGreater(len(offsets), 12)
-            self.assertTrue(any(
-                dx != 0 and dy != 0 and abs(dx) != abs(dy) for dx, dy in offsets
-            ))
+    def test_text_outline_uses_a_reusable_vector_glyph_path(self) -> None:
+        source = Source(SourceType.TEXT, "Outlined", width=420, height=120)
+        item = SourceItem(source)
+        image = QImage(480, 160, QImage.Format.Format_ARGB32_Premultiplied)
+        painter = QPainter(image)
+        painter.setFont(QFont("Segoe UI", 42))
+        rect = item.content_rect()
+        flags = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextSingleLine
+        first = item._text_layout_path(painter, rect, flags, "Smooth g곡")
+        second = item._text_layout_path(painter, rect, flags, "Smooth g곡")
+        painter.end()
+
+        self.assertFalse(first.isEmpty())
+        self.assertEqual(first.boundingRect(), second.boundingRect())
+        self.assertIsNotNone(item._text_outline_path_key)
 
     def test_text_stroke_width_is_validated(self) -> None:
         payload = Source(
@@ -234,6 +236,17 @@ class FunctionalRegressionTests(unittest.TestCase):
         ).to_dict()
         with self.assertRaisesRegex(ValueError, "text stroke width"):
             Source.from_dict(payload)
+
+    def test_legacy_lyrics_style_migrates_to_the_shared_text_color(self) -> None:
+        payload = Source(
+            SourceType.LYRICS, "Legacy neon lyrics", outline_color="#123456",
+        ).to_dict()
+        payload["subtitle_style"] = "neon"
+
+        restored = Source.from_dict(payload)
+
+        self.assertEqual(restored.outline_color, "#72E8FF")
+        self.assertNotIn("subtitle_style", restored.to_dict())
 
     def test_personal_color_adjustments_blend_and_preserve_alpha(self) -> None:
         personal = QColor("#804020")
@@ -1756,6 +1769,32 @@ class FunctionalRegressionTests(unittest.TestCase):
             )
         self.assertAlmostEqual(lookup.call_args.args[1], 1.75)
 
+    def test_lyrics_preview_keeps_the_user_selected_text_color(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.LYRICS, "Custom lyrics", width=500, height=160,
+            outline_color="#34C98A",
+        )
+        scene.addItem(SourceItem(source))
+        track = PlaylistTrack(
+            "track.wav", "Track", duration_seconds=10.0,
+            lyrics=[{"start": 0.0, "end": 5.0, "text": "Line"}],
+        )
+        observed_colors: list[str] = []
+        original_capture = CanvasSnapshot.capture
+
+        def observe_capture(*arguments: object, **keywords: object):
+            observed_colors.append(source.outline_color)
+            return original_capture(*arguments, **keywords)
+
+        with patch.object(CanvasSnapshot, "capture", side_effect=observe_capture):
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=1.0,
+            )
+
+        self.assertEqual(observed_colors, ["#34C98A"])
+        self.assertEqual(source.outline_color, "#34C98A")
+
     def test_track_with_lyrics_displays_first_line_from_playback_start(self) -> None:
         cues = [
             {"start": 5.0, "end": 6.0, "text": "First line\ncontinued line"},
@@ -1907,6 +1946,51 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertIn("Incoming line", mid[2])
         # The outgoing cue is only borrowed for the fade, not kept afterwards.
         self.assertNotIn("Outgoing line", done[2])
+
+    def test_oldest_context_lyric_stays_for_fade_before_leaving(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.LYRICS, "Lyrics", width=560, height=260,
+            subtitle_context_lines=1, subtitle_next_lines=0,
+            subtitle_animation="rise", subtitle_animation_duration=0.5,
+        )
+        item = SourceItem(source)
+        scene.addItem(item)
+        track = PlaylistTrack(
+            "t.wav", "T", duration_seconds=16.0,
+            lyrics=[
+                {"start": 1.0, "end": 4.0, "text": "Old top\\nsecond row"},
+                {"start": 5.0, "end": 8.0, "text": "Former current"},
+                {"start": 9.0, "end": 13.0, "text": "New current"},
+            ],
+        )
+        seen: list[tuple[float, int, str]] = []
+
+        def observe(*_args: object, **_kwargs: object) -> QImage:
+            seen.append((
+                item._subtitle_transition_progress,
+                item._subtitle_leaving_line_count,
+                source.text,
+            ))
+            return QImage(1, 1, QImage.Format.Format_ARGB32)
+
+        with patch.object(CanvasSnapshot, "capture", side_effect=observe):
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=9.15,
+            )
+            CanvasSnapshot.capture_track(
+                scene, track, 1, 1, 0.0, elapsed_seconds=10.0,
+            )
+
+        mid, done = seen
+        self.assertLess(mid[0], 1.0)
+        self.assertEqual(mid[1], 2)
+        self.assertIn("Old top\nsecond row", mid[2])
+        self.assertIn("Former current", mid[2])
+        self.assertIn("New current", mid[2])
+        self.assertEqual(done[1], 0)
+        self.assertNotIn("Old top", done[2])
+        self.assertEqual(item._subtitle_leaving_line_count, 0)
 
     def test_lyric_context_starts_new_cue_from_previous_stable_position(self) -> None:
         scene = CanvasScene()

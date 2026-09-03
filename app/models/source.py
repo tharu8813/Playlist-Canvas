@@ -147,7 +147,6 @@ class Source:
     visualizer_smoothing: float = 0.18
     visualizer_curve: float = 0.9
     subtitle_fallback: str = "Lyrics are not available for this track."
-    subtitle_style: str = "karaoke"
     subtitle_animation: str = "glow"
     subtitle_animation_duration: float = 0.36
     subtitle_context_lines: int = 1
@@ -254,6 +253,22 @@ class Source:
             raise ValueError("Project sources must be objects.")
         source_data = data.copy()
         source_data["source_type"] = SourceType(source_data["source_type"])
+        # ``subtitle_style`` was a small preset selector that overrode the
+        # actual text colour while previewing/exporting lyrics.  Keep old
+        # projects visually stable by migrating its effective colour into the
+        # same colour property used by normal text, then discard the obsolete
+        # key before constructing the current model.
+        legacy_subtitle_style = source_data.pop("subtitle_style", None)
+        if source_data["source_type"] is SourceType.LYRICS:
+            legacy_subtitle_colors = {
+                "karaoke": "#FFE08A",
+                "minimal": "#FFFFFF",
+                "neon": "#72E8FF",
+            }
+            if legacy_subtitle_style in legacy_subtitle_colors:
+                source_data["outline_color"] = legacy_subtitle_colors[
+                    legacy_subtitle_style
+                ]
         source_data["subtitle_animation"] = _LEGACY_SUBTITLE_ANIMATIONS.get(
             source_data.get("subtitle_animation"),
             source_data.get("subtitle_animation", "glow"),
@@ -327,9 +342,11 @@ class Source:
             )
         bounded_integers = {
             "visualizer_bars": (4, 96),
-            "subtitle_context_lines": (0, 6),
-            "subtitle_next_lines": (0, 6),
-            "track_list_count": (1, 15),
+            # -1 means that lyric context is derived from source height. Track
+            # lists use 0 because zero was never a valid visible-track count.
+            "subtitle_context_lines": (-1, 6),
+            "subtitle_next_lines": (-1, 6),
+            "track_list_count": (0, 15),
             "level_meter_segments": (3, 64),
             "particle_density": (4, 500),
             "particle_seed": (0, 999_999),

@@ -1,6 +1,6 @@
 ; ============================================================================
 ; Playlist Canvas 1.2.0.1 Windows 설치 프로그램
-; ChatGPT Codex를 이용해 제작한 Playlist Canvas의 Inno Setup 스크립트입니다.
+; ChatGPT Codex와 Claude Code를 활용해 제작한 Playlist Canvas의 Inno Setup 스크립트입니다.
 ; ============================================================================
 
 #define MyAppName "Playlist Canvas"
@@ -9,7 +9,7 @@
 #define MyAppPublisher "Ji Beak min(tharu8813)"
 #define MyAppCopyright "© 2026 Ji Beak min(tharu8813). All rights reserved."
 #define MyAppDescription "음악, 가사와 비주얼 요소를 편집해 플레이리스트 영상을 만드는 Windows 데스크톱 편집기"
-#define MyAppComments "ChatGPT Codex만 이용해 제작한 프로그램입니다."
+#define MyAppComments "ChatGPT Codex와 Claude Code를 활용해 제작한 프로그램입니다."
 #define MyAppURL "https://github.com/tharu8813/Playlist-Canvas"
 #define MyAppExeName "Playlist Canvas.exe"
 ; 최초 공개 설치본부터 이 GUID를 변경하지 않아야 이후 버전이 정상 업그레이드됩니다.

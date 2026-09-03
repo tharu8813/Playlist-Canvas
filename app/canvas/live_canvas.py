@@ -648,14 +648,15 @@ class LiveCanvas(QGraphicsView):
         event.accept()
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
-        """Offer editing, alignment, grouping, and layer commands at the pointer."""
+        """Show commands without changing selection from a right-click."""
         item = self.itemAt(event.pos())
-        if not isinstance(item, SourceItem):
+        if (
+            not isinstance(item, SourceItem)
+            or item.source.id not in self.store.selected_ids
+        ):
             self._create_context_menu(None).exec(event.globalPos())
+            event.accept()
             return
-        source = item.source
-        if source.id not in self.store.selected_ids:
-            self.store.select(source.id)
         self._create_context_menu(item).exec(event.globalPos())
         event.accept()
 
@@ -820,9 +821,16 @@ class LiveCanvas(QGraphicsView):
             self.command_requested.emit(command)
 
     def mousePressEvent(self, event: object) -> None:
-        """Pan the scene with middle mouse button or Space+left mouse."""
+        """Handle navigation and reserve source selection for left-clicks."""
         button = event.button()  # type: ignore[union-attr]
         modifiers = event.modifiers()  # type: ignore[union-attr]
+        # QGraphicsView forwards right-button presses to scene items by default,
+        # which selects the item before contextMenuEvent runs.  Consume the
+        # press here so right-click only opens a menu and never changes either
+        # the primary selection or a multi-selection.
+        if button == Qt.MouseButton.RightButton:
+            event.accept()  # type: ignore[union-attr]
+            return
         if button == Qt.MouseButton.MiddleButton or (
             button == Qt.MouseButton.LeftButton and self._space_panning
         ):
