@@ -5386,11 +5386,18 @@ class MainWindowSafetyTests(unittest.TestCase):
             editor.list_widget.itemWidget(editor.list_widget.item(index))
             for index in range(editor.list_widget.count())
         ]
+        from PySide6.QtWidgets import QWidget
+
         for row in rows:
             self.assertIsInstance(row, TrackRow)
             self.assertEqual(row.findChildren(QCheckBox), [])
         self.assertFalse(rows[0].property("trackDisabled"))
         self.assertTrue(rows[1].property("trackDisabled"))
+        # An excluded row must not disable any child widget: a disabled label
+        # swallows the right-click and the include/exclude menu never opens.
+        self.assertTrue(all(
+            child.isEnabled() for child in rows[1].findChildren(QWidget)
+        ))
 
     def test_playlist_multi_select_and_context_menu_toggle_export_inclusion(
         self,

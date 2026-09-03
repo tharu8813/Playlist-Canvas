@@ -338,9 +338,9 @@ class TrackRow(QWidget):
             lyric_badge.setObjectName("mutedLabel")
             layout.addWidget(lyric_badge)
         layout.addWidget(duration)
-        if not track.enabled:
-            for widget in (number_label, cover_label, metadata, duration):
-                widget.setEnabled(False)
+        # Excluded rows are dimmed via the #trackRow[trackDisabled] stylesheet,
+        # never setEnabled(False): a disabled child label swallows the
+        # right-click so the export include/exclude menu could not be reached.
         self.setToolTip(
             f"{track.title}\n{track.artist} · {track.album}\n"
             f"{Path(track.file_path)}"

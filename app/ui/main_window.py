@@ -7063,6 +7063,7 @@ class MainWindow(QMainWindow):
             #trackRow {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 8px; }}
             #trackRow:hover {{ background: {colors['hover']}; }}
             #trackRow[trackDisabled="true"] {{ background: {colors['panel']}; border: 1px dashed {colors['border']}; }}
+            #trackRow[trackDisabled="true"] QLabel {{ color: {colors['muted']}; }}
             #trackRow[dropTarget="true"] {{ background: {colors['hover']}; border: 2px solid #1685D1; }}
             QGroupBox {{ color: {colors['text']}; font-weight: 600; border: 1px solid {colors['border']}; border-radius: 8px; margin-top: 10px; padding: 10px 7px 7px 7px; }}
             QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}
