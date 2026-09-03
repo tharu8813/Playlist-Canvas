@@ -43,6 +43,48 @@ class TrackOrderDialogTests(unittest.TestCase):
         finally:
             dialog.deleteLater()
 
+    def test_drag_drop_reorders_and_rebuilds_rows(self) -> None:
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtGui import QDropEvent
+
+        dialog = TrackOrderDialog(self.tracks, self.translator)
+        try:
+            list_widget = dialog.list_widget
+
+            class _InternalDrop(QDropEvent):
+                def source(self_inner):  # noqa: N805
+                    return list_widget
+
+            list_widget.item(0).setSelected(True)  # Alpha
+            target = list_widget.item(2)           # drop onto Charlie
+            rect = list_widget.visualItemRect(target)
+            point = QPointF(rect.center().x(), rect.bottom() - 1)
+            drop = _InternalDrop(
+                point, Qt.DropAction.MoveAction, list_widget.model().mimeData(
+                    [list_widget.indexFromItem(list_widget.item(0))]
+                ),
+                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            )
+            list_widget.dropEvent(drop)
+            self.assertEqual(self._titles(dialog), ["Bravo", "Charlie", "Alpha"])
+            # Rows keep their metadata widgets after the rebuild.
+            row = list_widget.itemWidget(list_widget.item(2))
+            self.assertIn("Alpha", row.meta_label.text())
+        finally:
+            dialog.deleteLater()
+
+    def test_now_playing_row_shows_marker_and_green_state(self) -> None:
+        dialog = TrackOrderDialog(self.tracks, self.translator)
+        try:
+            dialog._play_track(self.tracks[1].id)
+            row = dialog.list_widget.itemWidget(dialog.list_widget.item(1))
+            self.assertIn("▶", row.meta_label.text())
+            self.assertTrue(row.property("nowPlaying"))
+            other = dialog.list_widget.itemWidget(dialog.list_widget.item(0))
+            self.assertNotIn("▶", other.meta_label.text())
+        finally:
+            dialog.deleteLater()
+
     def test_save_without_changes_rejects(self) -> None:
         dialog = TrackOrderDialog(self.tracks, self.translator)
         try:

@@ -5,8 +5,8 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QUrl, QSize
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QUrl, QSize, Signal
+from PySide6.QtGui import QDropEvent, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -34,6 +34,50 @@ _COVER_PX = 46
 def _clock(milliseconds: int) -> str:
     total = max(0, milliseconds) // 1000
     return f"{total // 60:02d}:{total % 60:02d}"
+
+
+class _ReorderList(QListWidget):
+    """Internal-move list that reports the resulting id order on every drop.
+
+    ``QListWidget`` reconstructs the moved items from mime data on an internal
+    move (losing their setItemWidget rows) and never emits ``rowsMoved``, so the
+    drop order is computed here from the pointer and handed back for a rebuild.
+    """
+
+    order_changed = Signal(list)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        if event.source() is not self:
+            event.ignore()
+            return
+        order = [
+            str(self.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(self.count())
+        ]
+        selected = sorted(self.row(item) for item in self.selectedItems())
+        moving = [order[row] for row in selected if 0 <= row < len(order)]
+        if not moving:
+            event.ignore()
+            return
+        target = self.itemAt(event.position().toPoint())
+        if target is None:
+            insert_at = len(order)
+        else:
+            insert_at = self.row(target)
+            rect = self.visualItemRect(target)
+            if event.position().toPoint().y() > rect.center().y():
+                insert_at += 1
+        moving_set = set(moving)
+        insert_at -= sum(
+            1 for row, ident in enumerate(order)
+            if ident in moving_set and row < insert_at
+        )
+        remaining = [ident for ident in order if ident not in moving_set]
+        new_order = remaining[:insert_at] + moving + remaining[insert_at:]
+        event.setDropAction(Qt.DropAction.IgnoreAction)
+        event.accept()
+        if new_order != order:
+            self.order_changed.emit(new_order)
 
 
 class _TrackRow(QWidget):
@@ -65,20 +109,28 @@ class _TrackRow(QWidget):
             cover_label.setObjectName("trackOrderCoverEmpty")
             cover_label.setText("♪")
             cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        meta = QLabel(
-            f"<b>{escape(track.title)}</b>"
-            f"<br><span style='color:#8A97A6'>{escape(track.artist)}"
+        self._title = escape(track.title)
+        self._subtitle = (
+            f"<span style='color:#8A97A6'>{escape(track.artist)}"
             f" · {escape(track.album)}</span>"
         )
-        meta.setTextFormat(Qt.TextFormat.RichText)
+        self.meta_label = QLabel()
+        self.meta_label.setTextFormat(Qt.TextFormat.RichText)
+        self._render_meta(playing=False)
         self.duration_label = QLabel(track.duration_label)
         self.duration_label.setObjectName("trackOrderDuration")
         layout.addWidget(self.number_label)
         layout.addWidget(cover_label)
-        layout.addWidget(meta, 1)
+        layout.addWidget(self.meta_label, 1)
         layout.addWidget(self.duration_label)
         self.setToolTip(
             f"{track.title}\n{track.artist} · {track.album}\n{Path(track.file_path)}"
+        )
+
+    def _render_meta(self, playing: bool) -> None:
+        marker = "<span style='color:#2F9E44'>▶ </span>" if playing else ""
+        self.meta_label.setText(
+            f"<b>{marker}{self._title}</b><br>{self._subtitle}"
         )
 
     def set_position(self, number: int) -> None:
@@ -88,6 +140,7 @@ class _TrackRow(QWidget):
         self.setProperty("nowPlaying", playing)
         self.style().unpolish(self)
         self.style().polish(self)
+        self._render_meta(playing)
 
 
 class TrackOrderDialog(QDialog):
@@ -139,7 +192,7 @@ class TrackOrderDialog(QDialog):
 
         body = QHBoxLayout()
         body.setSpacing(10)
-        self.list_widget = QListWidget()
+        self.list_widget = _ReorderList()
         self.list_widget.setObjectName("trackOrderList")
         self.list_widget.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
@@ -148,9 +201,10 @@ class TrackOrderDialog(QDialog):
             QAbstractItemView.DragDropMode.InternalMove
         )
         self.list_widget.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.list_widget.setDragEnabled(True)
         self.list_widget.setUniformItemSizes(True)
         self.list_widget.setSpacing(2)
-        self.list_widget.model().rowsMoved.connect(self._on_rows_moved)
+        self.list_widget.order_changed.connect(self._apply_new_order)
         self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
         body.addWidget(self.list_widget, 1)
 
@@ -248,12 +302,18 @@ class TrackOrderDialog(QDialog):
             for row in range(self.list_widget.count())
         ]
 
-    def _on_rows_moved(self, *_args: object) -> None:
-        # QListWidget's internal move rebuilds the moved QListWidgetItems from
-        # mime data and drops their setItemWidget() rows, so recreate every row
-        # from the (correctly reordered) ids once the drop settles.
-        self.new_order = self._current_ids()
-        QTimer.singleShot(0, self._rebuild_rows)
+    def _apply_new_order(self, ordered_ids: list) -> None:
+        """Adopt a drag-computed order and rebuild the (widget-less) rows."""
+        moving = {
+            str(self.list_widget.item(self.list_widget.row(item)).data(
+                Qt.ItemDataRole.UserRole))
+            for item in self.list_widget.selectedItems()
+        }
+        self.new_order = [str(i) for i in ordered_ids]
+        self._rebuild_rows()
+        for row, track_id in enumerate(self.new_order):
+            if track_id in moving:
+                self.list_widget.item(row).setSelected(True)
 
     def _move_selected(self, delta: object) -> None:
         order = self._current_ids()
