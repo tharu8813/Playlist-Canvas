@@ -90,6 +90,7 @@ from app.services.project_media_service import ProjectMediaService
 from app.services.project_content_service import LYRICS_EXTENSIONS, ProjectContentService
 from app.services.recent_projects_service import RecentProjectsService
 from app.services.autosave_service import AutosaveService
+from app.services.autosave_worker import AutosaveWorker
 from app.services.history_service import HistoryService
 from app.services.lyrics_service import (
     LyricsError,
@@ -367,6 +368,7 @@ class MainWindow(QMainWindow):
         self._project_change_serial = 0
         self._project_save_worker: ProjectSaveWorker | None = None
         self._project_save_context: tuple[int, Path | None] | None = None
+        self._autosave_worker: AutosaveWorker | None = None
         self._project_save_succeeded: bool | None = None
         self._history_timer = QTimer(self)
         self._history_timer.setSingleShot(True)
@@ -5763,25 +5765,50 @@ class MainWindow(QMainWindow):
             self.canvas.viewport().update()
 
     def _autosave_project(self) -> None:
-        """Periodically write a recovery document without changing the active project."""
+        """Periodically write a recovery document without changing the active project.
+
+        The live models are snapshotted here on the GUI thread; the JSON encode
+        and atomic file write run on an AutosaveWorker so a large project does
+        not stutter the editor every few seconds.
+        """
         if (not self._history_ready or not self._project_dirty
-                or self._project_save_worker is not None):
+                or self._project_save_worker is not None
+                or self._autosave_worker is not None):
             return
         korean = self.translator.language is Language.KOREAN
+        try:
+            document_data = self._project_document().to_dict()
+        except (TypeError, ValueError) as error:
+            self.statusBar().showMessage(str(error), 5000)
+            return
         self.activity_progress.begin(
             "autosave", "자동 저장" if korean else "Autosaving",
             detail=(self.project_settings.title or "Untitled Project"),
         )
-        QApplication.processEvents()
-        try:
-            self.autosave.save(self._project_document(), self.current_project_path)
-            self._update_project_status()
-            message = "자동 저장됨" if self.translator.language is Language.KOREAN else "Autosaved"
-            self.statusBar().showMessage(message, 2500)
-        except ProjectError as error:
-            self.statusBar().showMessage(str(error), 5000)
-        finally:
-            self.activity_progress.finish("autosave")
+        worker = AutosaveWorker(
+            self.autosave, document_data, self.current_project_path,
+        )
+        worker.succeeded.connect(self._autosave_succeeded)
+        worker.failed.connect(self._autosave_failed)
+        worker.finished.connect(lambda: self._autosave_thread_finished(worker))
+        self._autosave_worker = worker
+        worker.start()
+
+    def _autosave_succeeded(self, _path: object) -> None:
+        self._update_project_status()
+        message = (
+            "자동 저장됨" if self.translator.language is Language.KOREAN else "Autosaved"
+        )
+        self.statusBar().showMessage(message, 2500)
+
+    def _autosave_failed(self, message: str) -> None:
+        self.statusBar().showMessage(message, 5000)
+
+    def _autosave_thread_finished(self, worker: AutosaveWorker) -> None:
+        self.activity_progress.finish("autosave")
+        if self._autosave_worker is worker:
+            self._autosave_worker = None
+        worker.deleteLater()
 
     def _offer_recovery(self) -> bool:
         """Offer recovery of the most recently autosaved workspace on startup."""
@@ -6802,6 +6829,13 @@ class MainWindow(QMainWindow):
                 return
         if self._workspace_settings_timer.isActive():
             self._workspace_settings_timer.stop()
+        self._autosave_timer.stop()
+        self._autosave_debounce_timer.stop()
+        # Let a running recovery write finish before _clear_recovery(), otherwise
+        # its atomic replace re-creates the file we just deleted and the next
+        # launch offers a stale recovery after a clean exit.
+        if self._autosave_worker is not None and self._autosave_worker.isRunning():
+            self._autosave_worker.wait(3000)
         self._save_workspace_layout()
         QSettings().sync()
         self._clear_recovery()

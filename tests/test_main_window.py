@@ -414,6 +414,37 @@ class MainWindowSafetyTests(unittest.TestCase):
             clear_snapshot.assert_called_once_with(snapshot)
             recovery_question.assert_not_called()
 
+    def test_autosave_writes_recovery_on_a_background_worker(self) -> None:
+        from app.services.autosave_service import AutosaveService
+
+        original = self.window.autosave
+        with TemporaryDirectory(prefix="pvs-autosave-worker-") as directory:
+            self.window.autosave = AutosaveService(Path(directory))
+            try:
+                self.window.store.add(Source(SourceType.TEXT, "AUTOSAVE_MARKER"))
+                self.window._history_ready = True
+                self.window._project_dirty = True
+                self.window._autosave_project()
+                worker = self.window._autosave_worker
+                self.assertIsNotNone(worker)
+                self.assertIn("autosave", self.window.activity_progress.active_keys)
+                self.assertTrue(worker.wait(5000))
+                self.application.processEvents()
+                self.assertIsNone(self.window._autosave_worker)
+                self.assertNotIn(
+                    "autosave", self.window.activity_progress.active_keys
+                )
+                recovery = self.window.autosave.latest_recovery()
+                self.assertIsNotNone(recovery)
+                self.assertIn(
+                    "AUTOSAVE_MARKER",
+                    [source.name for source in recovery.document.sources],
+                )
+            finally:
+                if self.window._autosave_worker is not None:
+                    self.window._autosave_worker.wait(5000)
+                self.window.autosave = original
+
     def test_close_cancel_keeps_unsaved_window_and_workspace_open(self) -> None:
         marker = Source(SourceType.TEXT, "CLOSE_CANCEL_MARKER")
         self.window.store.add(marker)

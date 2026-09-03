@@ -32,14 +32,37 @@ class AutosaveService:
         self.directory = directory.resolve() / "recoveries"
 
     def save(self, document: ProjectDocument, project_path: Path | None) -> RecoverySnapshot:
-        """Atomically store a snapshot without changing the user's project file."""
-        target = self._path_for(project_path)
+        """Atomically store a snapshot without changing the user's project file.
+
+        ``document.to_dict()`` reads the live models, so this call must stay on
+        the thread that owns them; :meth:`write_document_data` does the rest and
+        is safe to hand to a worker.
+        """
         saved_at = datetime.now(UTC)
+        target = self.write_document_data(
+            document.to_dict(), project_path, saved_at,
+        )
+        return RecoverySnapshot(target, document, project_path, saved_at)
+
+    def write_document_data(
+        self,
+        document_data: dict[str, object],
+        project_path: Path | None,
+        saved_at: datetime | None = None,
+    ) -> Path:
+        """Atomically write a recovery snapshot from an already-serialized dict.
+
+        ``document_data`` is plain ``ProjectDocument.to_dict()`` output, fully
+        detached from the Qt models, so the JSON encoding and disk write here can
+        run on a background thread while the user keeps editing.
+        """
+        saved_at = saved_at or datetime.now(UTC)
+        target = self._path_for(project_path)
         payload = {
             "schema_version": self.schema_version,
             "saved_at": saved_at.isoformat(),
             "project_path": str(project_path.resolve()) if project_path else None,
-            "document": document.to_dict(),
+            "document": document_data,
         }
         temporary_path: Path | None = None
         try:
@@ -52,7 +75,7 @@ class AutosaveService:
                 json.dump(payload, temporary, ensure_ascii=False, indent=2)
                 temporary.flush()
             temporary_path.replace(target)
-            return RecoverySnapshot(target, document, project_path, saved_at)
+            return target
         except (OSError, TypeError, ValueError) as error:
             raise ProjectError(f"Could not save recovery snapshot: {error}") from error
         finally:
