@@ -160,6 +160,8 @@ class SourceInspector(QScrollArea):
                              ("Current album cover", "album_art")):
             self.background_mode_combo.addItem(label, value)
         self.background_ambient_check = QCheckBox()
+        self.background_track_transition_check = QCheckBox()
+        self.background_track_transition_seconds_spin = self._spin(0.2, 3.0, 0.1)
         self.progress_value_spin = self._spin(0, 1, 0.01)
         self.progress_track_color_button = self._color_button()
         self.progress_mode_combo = QComboBox()
@@ -296,6 +298,14 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "image_fit", self.image_fit_combo)
         self._add_labeled_row(content_form, "background_mode", self.background_mode_combo)
         self._add_labeled_row(content_form, "background_ambient", self.background_ambient_check)
+        self._add_labeled_row(
+            content_form, "background_track_transition",
+            self.background_track_transition_check,
+        )
+        self._add_labeled_row(
+            content_form, "background_track_transition_seconds",
+            self.background_track_transition_seconds_spin,
+        )
         self._add_labeled_row(content_form, "progress_value", self.progress_value_spin)
         self._add_labeled_row(content_form, "progress_track_color", self.progress_track_color_button)
         self._add_labeled_row(content_form, "progress_mode", self.progress_mode_combo)
@@ -479,6 +489,8 @@ class SourceInspector(QScrollArea):
             self.image_fit_combo, self.progress_value_spin,
             self.progress_mode_combo,
             self.background_mode_combo, self.background_ambient_check,
+            self.background_track_transition_check,
+            self.background_track_transition_seconds_spin,
             self.progress_track_color_button, self.visualizer_line_width_spin,
             self.visualizer_sensitivity_spin, self.visualizer_reactivity_spin,
             self.visualizer_noise_gate_spin, self.visualizer_min_level_spin,
@@ -601,6 +613,8 @@ class SourceInspector(QScrollArea):
             "image_fit": ("원본 비율을 유지하며 채우기, 전체 이미지 맞추기 또는 영역에 늘이기 중 하나를 선택합니다.", "Chooses cover, contain, or stretch behavior for the image inside its source box."),
             "background_mode": ("단색·그라데이션, 지정 이미지 또는 현재 앨범 커버를 배경으로 사용합니다.", "Uses a color/gradient, selected image, or current album artwork as the background."),
             "background_ambient": ("앨범 커버를 확대하고 흐리게 처리해 캔버스를 채우는 앰비언트 배경을 만듭니다.", "Expands and blurs album artwork to create an ambient full-Canvas background."),
+            "background_track_transition": ("곡이 바뀔 때 이전 곡 배경에서 새 곡 배경으로 부드럽게 크로스페이드합니다. 편집 화면에는 나타나지 않고 미리보기와 내보내기에서만 적용됩니다.", "Cross-fades from the previous track's background to the new one at each track change. It appears only in preview and export, not on the editing canvas."),
+            "background_track_transition_seconds": ("배경 크로스페이드가 진행되는 시간(초)입니다.", "How long the background cross-fade lasts, in seconds."),
             "progress_value": ("편집 화면에서 확인할 진행 비율입니다. 실제 미리보기와 내보내기에서는 재생 시간으로 자동 계산됩니다.", "Preview progress used while editing. Playback and export calculate it automatically from time."),
             "progress_track_color": ("아직 재생되지 않은 진행 바 뒷부분의 색상입니다.", "Color of the unplayed track behind the filled progress portion."),
             "progress_mode": ("현재 곡의 진행 시간 또는 전체 영상의 진행 시간을 기준으로 채웁니다.", "Fills according to either current-track time or complete-video time."),
@@ -812,9 +826,18 @@ class SourceInspector(QScrollArea):
         )
         self._set_field_visible("image_fit", source_type in self.IMAGE_BACKED_TYPES)
         self._set_field_visible("background_mode", is_background)
-        self._set_field_visible(
-            "background_ambient", is_background and source is not None
+        album_art_background = (
+            is_background and source is not None
             and source.background_mode == "album_art"
+        )
+        self._set_field_visible("background_ambient", album_art_background)
+        self._set_field_visible(
+            "background_track_transition", album_art_background,
+        )
+        self._set_field_visible(
+            "background_track_transition_seconds",
+            album_art_background and source is not None
+            and source.background_track_transition,
         )
         self._set_field_visible("progress_value", source_type is SourceType.PROGRESS_BAR)
         self._set_field_visible("progress_track_color", source_type is SourceType.PROGRESS_BAR)
@@ -952,6 +975,15 @@ class SourceInspector(QScrollArea):
         self.image_fit_combo.currentIndexChanged.connect(lambda _index: self._update("image_fit_mode", self.image_fit_combo.currentData()))
         self.background_mode_combo.currentIndexChanged.connect(self._update_background_mode)
         self.background_ambient_check.toggled.connect(lambda value: self._update("background_ambient", value))
+        self.background_track_transition_check.toggled.connect(
+            self._update_background_track_transition
+        )
+        self.background_track_transition_seconds_spin.valueChanged.connect(
+            lambda _value: self._update(
+                "background_track_transition_seconds",
+                self.background_track_transition_seconds_spin.value(),
+            )
+        )
         self.progress_value_spin.valueChanged.connect(lambda _value: self._update("progress_value", self.progress_value_spin.value()))
         self.progress_mode_combo.currentIndexChanged.connect(
             lambda _index: self._update("progress_mode", self.progress_mode_combo.currentData())
@@ -1140,6 +1172,7 @@ class SourceInspector(QScrollArea):
 
         direct_checks = (
             ("background_ambient", self.background_ambient_check),
+            ("background_track_transition", self.background_track_transition_check),
             ("track_list_show_number", self.track_list_show_number_check),
             ("track_list_show_artist", self.track_list_show_artist_check),
             ("track_list_show_album", self.track_list_show_album_check),
@@ -1212,6 +1245,13 @@ class SourceInspector(QScrollArea):
         if self._updating:
             return
         self._update("background_mode", self.background_mode_combo.currentData())
+        self._update_common_visibility(self._selected_sources())
+
+    def _update_background_track_transition(self, enabled: bool) -> None:
+        """Toggle the cross-fade and show or hide its length field."""
+        if self._updating:
+            return
+        self._update("background_track_transition", enabled)
         self._update_common_visibility(self._selected_sources())
 
     def _add_font_file(self) -> None:
@@ -1475,6 +1515,8 @@ class SourceInspector(QScrollArea):
             "visualizer_reactivity": ("반응 속도", "Response speed"),
             "background_mode": ("배경 모드", "Background mode"),
             "background_ambient": ("앨범 커버 앰비언트 블러", "Album art ambient blur"),
+            "background_track_transition": ("곡 전환 시 배경 크로스페이드", "Cross-fade background on track change"),
+            "background_track_transition_seconds": ("전환 길이(초)", "Transition length (s)"),
             "progress_mode": ("진행 기준", "Progress timing"),
             "album_frame": ("앨범 커버 프레임", "Album cover frame"),
             "track_list_count": ("표시 곡 개수", "Visible tracks"),
@@ -1916,6 +1958,8 @@ class SourceInspector(QScrollArea):
             "font_size": self.font_size_spin, "z_index": self.z_spin,
             "visualizer_bars": self.visualizer_bars_spin,
             "progress_value": self.progress_value_spin,
+            "background_track_transition_seconds":
+                self.background_track_transition_seconds_spin,
             "visualizer_line_width": self.visualizer_line_width_spin,
             "visualizer_sensitivity": self.visualizer_sensitivity_spin,
             "visualizer_reactivity": self.visualizer_reactivity_spin,
@@ -1971,6 +2015,7 @@ class SourceInspector(QScrollArea):
         })
         add("check", {
             "background_ambient": self.background_ambient_check,
+            "background_track_transition": self.background_track_transition_check,
             "track_list_show_number": self.track_list_show_number_check,
             "track_list_show_artist": self.track_list_show_artist_check,
             "track_list_show_album": self.track_list_show_album_check,
@@ -2033,6 +2078,12 @@ class SourceInspector(QScrollArea):
             self.image_fit_combo.setCurrentIndex(max(0, self.image_fit_combo.findData(source.image_fit_mode)))
             self.background_mode_combo.setCurrentIndex(max(0, self.background_mode_combo.findData(source.background_mode)))
             self.background_ambient_check.setChecked(source.background_ambient)
+            self.background_track_transition_check.setChecked(
+                source.background_track_transition
+            )
+            self.background_track_transition_seconds_spin.setValue(
+                source.background_track_transition_seconds
+            )
             self.progress_value_spin.setValue(source.progress_value)
             self.progress_mode_combo.setCurrentIndex(max(0, self.progress_mode_combo.findData(source.progress_mode)))
             self.visualizer_line_width_spin.setValue(source.visualizer_line_width)

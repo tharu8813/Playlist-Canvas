@@ -123,6 +123,11 @@ class Source:
     image_fit_mode: str = "cover"
     background_mode: str = "color"
     background_ambient: bool = False
+    # When on, an album-art background cross-fades from the previous track's
+    # artwork to the new one over background_track_transition_seconds at each
+    # track change instead of switching in a single frame.
+    background_track_transition: bool = False
+    background_track_transition_seconds: float = 0.7
     brightness: float = 0.0
     contrast: float = 0.0
     progress_value: float = 0.62

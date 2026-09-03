@@ -154,7 +154,7 @@ class ExportTimelinePlanner:
 
             stable = max(0.0, track.duration_seconds - intro - outro)
             sample_points = ExportTimelinePlanner._stable_sample_points(
-                track, start, intro, stable, sources, animation_fps,
+                track, start, intro, stable, sources, animation_fps, number,
             )
             ordered_points = sorted(sample_points)
             for point, next_point in zip(ordered_points, ordered_points[1:]):
@@ -250,6 +250,7 @@ class ExportTimelinePlanner:
         stable: float,
         sources: Sequence[Source],
         animation_fps: int,
+        track_number: int = 1,
     ) -> set[float]:
         sample_points = {intro, intro + stable}
         for source in sources:
@@ -289,6 +290,25 @@ class ExportTimelinePlanner:
                 intro + stable * step / flow_steps
                 for step in range(flow_steps + 1)
             )
+
+        if track_number >= 2:
+            fade_seconds = max(
+                (source.background_track_transition_seconds for source in sources
+                 if source.source_type is SourceType.BACKGROUND
+                 and source.background_mode == "album_art"
+                 and source.background_track_transition),
+                default=0.0,
+            )
+            # The album-art background cross-fades from the previous track over
+            # this window at track start.  Points before ``intro`` are already
+            # dense from the in-animation schedule; cover the remainder here.
+            fade_end = min(fade_seconds, intro + stable)
+            if fade_end > intro:
+                fade_steps = max(1, round((fade_end - intro) * animation_fps))
+                sample_points.update(
+                    intro + (fade_end - intro) * step / fade_steps
+                    for step in range(fade_steps + 1)
+                )
 
         has_time_text = any(
             source.source_type is SourceType.TIME

@@ -56,6 +56,28 @@ def _filtered_track_pixmap(
     return result
 
 
+def _crossfade_pixmaps(
+    previous: QPixmap, current: QPixmap, progress: float,
+) -> QPixmap:
+    """Return ``previous`` dissolving into ``current`` at ``progress`` in [0, 1]."""
+    if previous.isNull() or current.isNull() or progress >= 1.0:
+        return current
+    if previous.size() != current.size():
+        previous = previous.scaled(
+            current.size(), Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    merged = QPixmap(current.size())
+    merged.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(merged)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    painter.drawPixmap(0, 0, previous)
+    painter.setOpacity(max(0.0, min(1.0, progress)))
+    painter.drawPixmap(0, 0, current)
+    painter.end()
+    return merged
+
+
 class CanvasSnapshot:
     """Captures only the export artboard, without editor handles or workspace chrome."""
 
@@ -858,6 +880,49 @@ class CanvasSnapshot:
                 else:
                     graphics_item._pixmap = _filtered_track_pixmap(
                         graphics_item, QPixmap(track_cover), ("bgcover", *filter_key),
+                    )
+                previous_track = (
+                    playlist_tracks[track_number - 2]
+                    if (source.background_track_transition
+                        and playlist_tracks is not None
+                        and 2 <= track_number <= len(playlist_tracks))
+                    else None
+                )
+                fade_seconds = max(0.05, source.background_track_transition_seconds)
+                if previous_track is not None and 0.0 <= elapsed_seconds < fade_seconds:
+                    blend = ease_in_out_cubic(
+                        max(0.0, min(1.0, elapsed_seconds / fade_seconds))
+                    )
+                    filters = (source.brightness, source.contrast, source.blur)
+                    if source.background_ambient:
+                        previous_background = _filtered_track_pixmap(
+                            graphics_item,
+                            create_cached_ambient_background(
+                                previous_track.file_path,
+                                max(1, round(source.width)),
+                                max(1, round(source.height)),
+                                max(18.0, source.blur),
+                                previous_track.cover_path, phase=global_seconds,
+                            ),
+                            ("ambient-prev", round(source.width),
+                             round(source.height),
+                             round(global_seconds * AMBIENT_FLOW_HZ),
+                             previous_track.file_path,
+                             previous_track.cover_path, *filters),
+                            include_blur=False,
+                        )
+                    else:
+                        previous_background = _filtered_track_pixmap(
+                            graphics_item,
+                            QPixmap(extract_track_cover(
+                                previous_track.file_path,
+                                previous_track.cover_path,
+                            )),
+                            ("bgcover-prev", previous_track.file_path,
+                             previous_track.cover_path, *filters),
+                        )
+                    graphics_item._pixmap = _crossfade_pixmaps(
+                        previous_background, graphics_item._pixmap, blend,
                     )
                 graphics_item.update()
             if source.personal_color_enabled and personal_color.isValid():

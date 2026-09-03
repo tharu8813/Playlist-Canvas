@@ -5080,6 +5080,56 @@ class MainWindowSafetyTests(unittest.TestCase):
             )
             self.assertNotEqual(captured_start, captured_later)
 
+    def test_album_background_cross_fades_between_tracks(self) -> None:
+        from app.canvas.live_canvas import CanvasScene
+        from app.canvas.source_item import SourceItem
+        from app.preview.canvas_snapshot import CanvasSnapshot
+
+        with TemporaryDirectory(prefix="playlist-bg-fade-") as directory:
+            first_cover = Path(directory) / "first.png"
+            second_cover = Path(directory) / "second.png"
+            green = QImage(64, 64, QImage.Format.Format_ARGB32)
+            green.fill(QColor("#12B886"))
+            red = QImage(64, 64, QImage.Format.Format_ARGB32)
+            red.fill(QColor("#E03131"))
+            self.assertTrue(green.save(str(first_cover)))
+            self.assertTrue(red.save(str(second_cover)))
+
+            scene = CanvasScene()
+            background = Source(
+                SourceType.BACKGROUND, "BG", width=320, height=180, z_index=-20,
+                background_mode="album_art", background_ambient=False,
+                background_track_transition=True,
+                background_track_transition_seconds=1.0,
+            )
+            scene.addItem(SourceItem(background))
+            tracks = [
+                PlaylistTrack("a.wav", "A", duration_seconds=30.0,
+                              cover_path=str(first_cover)),
+                PlaylistTrack("b.wav", "B", duration_seconds=30.0,
+                              cover_path=str(second_cover)),
+            ]
+
+            def capture(track_number, elapsed):
+                return CanvasSnapshot.capture_track(
+                    scene, tracks[track_number - 1], track_number, 2, 0.0,
+                    elapsed_seconds=elapsed, playlist_tracks=tracks,
+                )
+
+            fade_start = capture(2, 0.0)     # blend ~ previous track's artwork
+            fade_mid = capture(2, 0.5)       # a blend of both covers
+            fade_done = capture(2, 1.5)      # past the window: only track B
+
+            self.assertNotEqual(fade_start, fade_mid)
+            self.assertNotEqual(fade_mid, fade_done)
+            # The first track has no previous cover, so it never cross-fades.
+            self.assertEqual(capture(1, 0.0), capture(1, 5.0))
+
+            background.background_track_transition = False
+            no_transition = capture(2, 0.0)
+            self.assertEqual(no_transition, fade_done)
+            self.assertNotEqual(no_transition, fade_start)
+
     def test_track_lyrics_dialog_previews_audio_with_synchronized_lyrics(self) -> None:
         saved_volumes: list[int] = []
         volume_reader = patch(

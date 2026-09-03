@@ -8,6 +8,7 @@ from dataclasses import replace
 from PySide6.QtCore import QRectF
 from PySide6.QtGui import QImage
 
+from app.animation.curves import ease_in_out_cubic
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.models.playlist import PlaylistTrack
@@ -255,6 +256,28 @@ class ExportCanvasCapturer:
                     background_state = (
                         *background_state,
                         round(global_seconds * AMBIENT_FLOW_HZ),
+                    )
+                previous_track = (
+                    self.tracks[sample.track_number - 2]
+                    if (source.background_track_transition
+                        and 2 <= sample.track_number <= len(self.tracks))
+                    else None
+                )
+                fade_seconds = max(
+                    0.05, source.background_track_transition_seconds,
+                )
+                if (previous_track is not None
+                        and 0.0 <= sample.elapsed_seconds < fade_seconds):
+                    # Mid cross-fade the pixels depend on the blend fraction and
+                    # the previous track's artwork, so those must enter the key.
+                    background_state = (
+                        *background_state,
+                        "fade",
+                        ease_in_out_cubic(max(0.0, min(
+                            1.0, sample.elapsed_seconds / fade_seconds,
+                        ))),
+                        previous_track.file_path,
+                        previous_track.cover_path,
                     )
             else:
                 background_state = source.background_mode

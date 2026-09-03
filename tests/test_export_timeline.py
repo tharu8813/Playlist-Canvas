@@ -53,6 +53,35 @@ class ExportTimelinePlannerTests(unittest.TestCase):
         elapsed = [round(sample.elapsed_seconds, 4) for sample in flowing]
         self.assertEqual(len(set(elapsed)), len(elapsed))
 
+    def test_album_background_transition_densifies_later_track_openings(self) -> None:
+        first = PlaylistTrack(
+            file_path="first.mp3", title="First", duration_seconds=3.0,
+        )
+        second = PlaylistTrack(
+            file_path="second.mp3", title="Second", duration_seconds=3.0,
+        )
+        bg = Source(
+            SourceType.BACKGROUND, "Cover", background_mode="album_art",
+            background_track_transition=True,
+            background_track_transition_seconds=0.8,
+        )
+
+        with_transition = ExportTimelinePlanner.build([first, second], [bg], 30)
+        bg.background_track_transition = False
+        without = ExportTimelinePlanner.build([first, second], [bg], 30)
+
+        self.assertGreater(len(with_transition), len(without))
+        fade_frames = [
+            sample for sample in with_transition
+            if sample.track_number == 2 and sample.elapsed_seconds < 0.8 + 1e-6
+        ]
+        self.assertGreaterEqual(len(fade_frames), round(0.8 * 30) - 1)
+        # The first track has no previous artwork, so it is never densified.
+        self.assertEqual(
+            len([s for s in with_transition if s.track_number == 1]),
+            len([s for s in without if s.track_number == 1]),
+        )
+
     def test_ambient_album_background_flows_through_track_gaps(self) -> None:
         from app.preview.album_art import AMBIENT_FLOW_HZ
 
