@@ -360,20 +360,27 @@ class ContentLibraryPanel(QWidget):
             detail = f"{type_label} · {extension}" if extension else type_label
             if not available:
                 detail += " · " + ("파일 없음" if korean else "Missing file")
-            if in_project:
-                detail += f" · {added_label}"
+            # The "Added" marker reads best pinned to the left of each line and
+            # tinted, rather than trailing a long detail string.
+            name_line = f"✓ {content.name}" if in_project else content.name
             if self._view_mode == "compact":
-                item_text = f"{content.name}  ·  {detail}"
+                item_text = (
+                    f"{name_line}  ·  {added_label}  ·  {detail}" if in_project
+                    else f"{name_line}  ·  {detail}"
+                )
                 item_height = 32
             elif self._view_mode == "grid":
-                item_text = f"✓ {content.name}" if in_project else content.name
+                item_text = name_line
                 item_height = 104
             else:
-                item_text = f"{content.name}\n{detail}"
+                detail_line = f"{added_label} · {detail}" if in_project else detail
+                item_text = f"{name_line}\n{detail_line}"
                 item_height = 54
             item = QListWidgetItem(item_text)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
             item.setData(Qt.ItemDataRole.UserRole + 3, in_project)
+            if in_project:
+                item.setForeground(QColor("#2F9E44"))
             item.setIcon(self._content_item_icon(path, content.media_type, available))
             item.setSizeHint(
                 QSize(108, item_height) if self._view_mode == "grid"
