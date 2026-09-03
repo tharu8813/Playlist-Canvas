@@ -37,6 +37,7 @@ class RenderWorker(QThread):
     succeeded = Signal(object)
     failed = Signal(str)
     cancelled = Signal()
+    storage_path_changed = Signal(str, object)
 
     def __init__(self, renderer: FFmpegRenderer,
                  image: QImage | list[QImage] | list[RenderFrame] | PreparedVideoInput,
@@ -82,6 +83,7 @@ class RenderWorker(QThread):
                 progress_callback=self.progress.emit, cancel_event=self._cancel_event,
                 visualizers=self.visualizers, static_layers=self.static_layers,
                 video_clips=self.video_clips, metadata=self.metadata,
+                storage_path_callback=self.storage_path_changed.emit,
             )
         except RenderCancelledError:
             self.cancelled.emit()

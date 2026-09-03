@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QTimer, QUrl, Signal
@@ -102,10 +103,18 @@ class ContentLibraryPanel(QWidget):
     def __init__(
         self, service: ProjectContentService, translator: Translator,
         parent: QWidget | None = None,
+        *, used_keys_provider: Callable[[], set[str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.service = service
         self.translator = translator
+        self._used_keys_provider = used_keys_provider
+        # The "Added" marker depends on the playlist and Canvas, which change
+        # far more often than the library itself; coalesce those refreshes.
+        self._used_refresh_timer = QTimer(self)
+        self._used_refresh_timer.setSingleShot(True)
+        self._used_refresh_timer.setInterval(160)
+        self._used_refresh_timer.timeout.connect(self.refresh)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 12, 10, 10)
         layout.setSpacing(8)
@@ -196,6 +205,10 @@ class ContentLibraryPanel(QWidget):
         self._apply_view_mode()
         self.retranslate()
         self.refresh()
+
+    def schedule_used_refresh(self) -> None:
+        """Re-evaluate the 'Added' markers after a playlist or Canvas change."""
+        self._used_refresh_timer.start()
 
     @property
     def view_mode(self) -> str:
@@ -328,25 +341,39 @@ class ContentLibraryPanel(QWidget):
             content for content in items
             if self._filter == "all" or content.media_type == self._filter
         ]
+        try:
+            used_keys = (
+                self._used_keys_provider() if self._used_keys_provider else set()
+            )
+        except Exception:  # a stale project reference must not break the list
+            used_keys = set()
+        added_label = "추가됨" if korean else "Added"
+        used_count = 0
         for content in visible_items:
             path = Path(content.path)
             available = path.is_file()
+            in_project = self.service._key(content.path) in used_keys
+            if in_project:
+                used_count += 1
             type_label = labels.get(content.media_type, content.media_type)
             extension = path.suffix.removeprefix(".").upper()
             detail = f"{type_label} · {extension}" if extension else type_label
             if not available:
                 detail += " · " + ("파일 없음" if korean else "Missing file")
+            if in_project:
+                detail += f" · {added_label}"
             if self._view_mode == "compact":
                 item_text = f"{content.name}  ·  {detail}"
                 item_height = 32
             elif self._view_mode == "grid":
-                item_text = content.name
+                item_text = f"✓ {content.name}" if in_project else content.name
                 item_height = 104
             else:
                 item_text = f"{content.name}\n{detail}"
                 item_height = 54
             item = QListWidgetItem(item_text)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
+            item.setData(Qt.ItemDataRole.UserRole + 3, in_project)
             item.setIcon(self._content_item_icon(path, content.media_type, available))
             item.setSizeHint(
                 QSize(108, item_height) if self._view_mode == "grid"
@@ -360,6 +387,8 @@ class ContentLibraryPanel(QWidget):
             )
             if not korean and not available:
                 accessible_type += "; missing file"
+            if in_project:
+                accessible_type += f"; {added_label}"
             item.setData(
                 Qt.ItemDataRole.AccessibleTextRole,
                 f"{content.name}; {accessible_type}",
@@ -370,11 +399,21 @@ class ContentLibraryPanel(QWidget):
                     ("\n파일을 찾을 수 없습니다." if korean else "\nFile not found.")
                     if not available else ""
                 )
+                + (
+                    ("\n이미 이 프로젝트에 추가되어 있습니다." if korean
+                     else "\nAlready used in this project.")
+                    if in_project else ""
+                )
             )
             self.list.addItem(item)
             if content.id == selected_id:
                 self.list.setCurrentItem(item)
-        self.filter_count_label.setText(f"{len(visible_items)} / {len(items)}")
+        count_text = f"{len(visible_items)} / {len(items)}"
+        if used_count:
+            count_text += (
+                f" · {added_label} {used_count}"
+            )
+        self.filter_count_label.setText(count_text)
         self._update_buttons()
 
     def _select_content_id(self, content_id: str) -> None:

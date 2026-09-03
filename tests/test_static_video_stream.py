@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -121,6 +122,41 @@ class StaticVideoStreamEncoderTests(unittest.TestCase):
         self.assertIsNotNone(process)
         assert process is not None
         self.assertTrue(process.terminated)
+
+    def test_cancel_stops_expanding_one_coalesced_state_immediately(self) -> None:
+        """A cancel mid-expansion must not keep feeding FFmpeg thousands of frames."""
+        cancel_event = threading.Event()
+
+        class _TripStdin(_FakeStdin):
+            def write(self, value: object) -> int:
+                if len(self.data) // max(1, len(bytes(value))) >= 6:
+                    cancel_event.set()
+                return super().write(value)
+
+        def create_process(command: list[str], **_kwargs: object) -> _FakeProcess:
+            process = _FakeProcess(command)
+            process.stdin = _TripStdin()
+            return process
+
+        image = QImage(2, 2, QImage.Format.Format_RGB32)
+        with TemporaryDirectory(prefix="static-stream-cancel-expand-") as raw, patch(
+            "app.renderer.static_video_stream.subprocess.Popen",
+            side_effect=create_process,
+        ):
+            encoder = StaticVideoStreamEncoder(
+                Path("ffmpeg.exe"), Path(raw) / "stream.mkv", 30,
+                producer_cancel_event=cancel_event,
+            )
+            encoder.submit(image, 60.0)  # 1800 output frames without a cancel
+            deadline = time.monotonic() + 3.0
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.1)
+            written = encoder.frame_count
+            encoder.cancel()
+
+        self.assertTrue(cancel_event.is_set())
+        self.assertLess(written, 30)  # nowhere near the 1800-frame expansion
 
     def test_variable_durations_stream_as_lossless_cfr_with_bounded_queue(self) -> None:
         processes: list[_FakeProcess] = []

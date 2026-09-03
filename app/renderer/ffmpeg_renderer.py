@@ -256,7 +256,9 @@ class FFmpegRenderer:
                visualizers: list[VisualizerOverlay] | None = None,
                static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer] | None = None,
                video_clips: list[VideoClipOverlay] | None = None,
-               metadata: "ExportMetadata | None" = None) -> RenderResult:
+               metadata: "ExportMetadata | None" = None,
+               storage_path_callback: Callable[[str, Path | None], None] | None = None,
+               ) -> RenderResult:
         """Create a static Canvas video whose audio is the ordered enabled playlist."""
         cancel_event = cancel_event or threading.Event()
         if cancel_event.is_set():
@@ -379,6 +381,8 @@ class FFmpegRenderer:
         target.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix="playlist-video-") as temporary_directory:
             temporary = Path(temporary_directory)
+            if storage_path_callback:
+                storage_path_callback("render", temporary)
             metadata_path = self._write_export_ffmetadata(
                 temporary, active_tracks, metadata or ExportMetadata(), target,
             )
@@ -623,6 +627,8 @@ class FFmpegRenderer:
                     "destination. Check the destination folder and try again."
                 ) from error
             temporary_video = Path(output_staging_name)
+            if storage_path_callback:
+                storage_path_callback("output", temporary_video)
             video_arguments = [
                 # Let FFmpeg use all available CPU workers for PNG decoding,
                 # filtering and software encoding. Hardware encoders ignore this

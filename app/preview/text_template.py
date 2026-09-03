@@ -58,35 +58,39 @@ def expand_track_template(template: str, track: PlaylistTrack, track_number: int
     )
 
 
-def build_sample_track(korean: bool = False) -> PlaylistTrack:
-    """Return placeholder track metadata for the editor's sample-data preview.
+_PLACEHOLDER_LABELS = {
+    "en": {
+        "title": "Title", "artist": "Artist", "album": "Album",
+        "track": "Track #", "track_total": "Track count", "filename": "File name",
+        "current_time": "Elapsed", "total_time": "Duration",
+        "track_current_time": "Elapsed", "track_total_time": "Duration",
+        "video_current_time": "Video elapsed", "video_total_time": "Video duration",
+    },
+    "ko": {
+        "title": "제목", "artist": "아티스트", "album": "앨범",
+        "track": "트랙 번호", "track_total": "전체 곡 수", "filename": "파일명",
+        "current_time": "현재 시간", "total_time": "전체 시간",
+        "track_current_time": "현재 시간", "track_total_time": "전체 시간",
+        "video_current_time": "영상 현재 시간", "video_total_time": "영상 전체 시간",
+    },
+}
 
-    The editing canvas normally shows raw tokens such as ``%title%``.  When the
-    sample-data preview is on, tokens are expanded against this obviously fake
-    track so the layout reads the way it will once a real song is loaded.
+
+def expand_placeholder_labels(template: str, korean: bool = False) -> str:
+    """Show known ``%token%`` names as parenthesised labels on the editing canvas.
+
+    Surrounding literal text is preserved: ``%title%The Album`` becomes
+    ``(제목)The Album``.  Unknown tokens are left as-is.  The real values are
+    substituted only in preview and export, against the actual playlist track.
     """
-    if korean:
-        return PlaylistTrack(
-            "sample-track.mp3", "샘플 곡 제목", "샘플 아티스트", "샘플 앨범",
-            duration_seconds=214.0,
-        )
-    return PlaylistTrack(
-        "sample-track.mp3", "Sample Track Title", "Sample Artist", "Sample Album",
-        duration_seconds=214.0,
-    )
-
-
-SAMPLE_TRACK_NUMBER = 3
-SAMPLE_TRACK_TOTAL = 12
-SAMPLE_TRACK_ELAPSED_SECONDS = 42.0
-SAMPLE_PLAYLIST_DURATION_SECONDS = 1_680.0
-
-
-def expand_sample_template(template: str, track: PlaylistTrack) -> str:
-    """Expand a text template against sample-track metadata for the editor."""
-    return expand_track_template(
-        template, track, SAMPLE_TRACK_NUMBER, SAMPLE_TRACK_TOTAL, 0.0,
-        SAMPLE_TRACK_ELAPSED_SECONDS, SAMPLE_PLAYLIST_DURATION_SECONDS,
+    labels = _PLACEHOLDER_LABELS["ko" if korean else "en"]
+    return re.sub(
+        r"%([a-z_]+)%",
+        lambda match: (
+            f"({labels[match.group(1).lower()]})"
+            if match.group(1).lower() in labels else match.group(0)
+        ),
+        template,
     )
 
 

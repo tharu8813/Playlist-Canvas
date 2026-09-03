@@ -22,9 +22,8 @@ def render_preset_thumbnail(
     height = max(1, int(height))
     scene = CanvasScene()
     scene.show_grid = False
-    # Fill %title%-style tokens with sample metadata so the thumbnail reads the
-    # way the layout will once a real track is loaded.
-    scene.sample_data_mode = True
+    # Text tokens (%title% …) render as their ``(Title)`` placeholders here,
+    # the same way they appear on the editing canvas.
     items: list[SourceItem] = []
     for source in sources:
         item = SourceItem(Source.from_dict(source.to_dict()))

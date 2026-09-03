@@ -91,7 +91,11 @@ from app.services.project_content_service import LYRICS_EXTENSIONS, ProjectConte
 from app.services.recent_projects_service import RecentProjectsService
 from app.services.autosave_service import AutosaveService
 from app.services.history_service import HistoryService
-from app.services.lyrics_service import LyricsError, LyricsService
+from app.services.lyrics_service import (
+    LyricsError,
+    LyricsService,
+    find_sidecar_lyrics,
+)
 from app.services.theme_service import Theme, ThemeService
 from app.services.source_store import SourceStore
 from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
@@ -100,6 +104,10 @@ from app.services.app_settings_service import (
     AppSettings,
     AppSettingsService,
     VIDEO_ENCODERS,
+)
+from app.services.export_storage_service import (
+    ExportStorageMonitor,
+    estimate_export_storage,
 )
 from app.services.video_encoder_service import (
     AUTO_VIDEO_ENCODER,
@@ -394,6 +402,7 @@ class MainWindow(QMainWindow):
         self._export_png_pipeline: PngFrameStagingPipeline | None = None
         self._last_export_frame_metrics: ExportFrameStagingMetrics | None = None
         self._export_dialog: ExportProgressDialog | None = None
+        self._export_storage_monitor: ExportStorageMonitor | None = None
         self._export_ui_lock_state: tuple[bool, bool, bool, bool, bool] | None = None
         self._export_preparation_cancel: threading.Event | None = None
         self._close_after_export_cancel = False
@@ -440,8 +449,9 @@ class MainWindow(QMainWindow):
         self._build_zoom_controls()
         self._apply_style()
         self._add_welcome_sources()
-        if QSettings().value("interface/sample_data_preview", False, type=bool):
-            self.sample_data_action.setChecked(True)
+        self.canvas.scene_model.set_placeholder_language(
+            self.translator.language is Language.KOREAN
+        )
         self.translator.language_changed.connect(self.retranslate)
         self.translator.language_changed.connect(
             lambda: self.activity_progress.set_korean(
@@ -540,11 +550,6 @@ class MainWindow(QMainWindow):
         self.grid_action.setChecked(True)
         self.grid_action.toggled.connect(self._toggle_grid)
         toolbar.addAction(self.grid_action)
-        self.sample_data_action = QAction(self)
-        self.sample_data_action.setCheckable(True)
-        self.sample_data_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
-        self.sample_data_action.toggled.connect(self._toggle_sample_data)
-        toolbar.addAction(self.sample_data_action)
         # Kept as a non-toolbar action for legacy translated text; snapping is now
         # temporarily disabled with Alt instead of a persistent toolbar toggle.
         self.snap_action = QAction(self)
@@ -1345,7 +1350,6 @@ class MainWindow(QMainWindow):
         self.view_menu = menu_bar.addMenu("")
         self.view_menu.addAction(self.fit_action)
         self.view_menu.addAction(self.grid_action)
-        self.view_menu.addAction(self.sample_data_action)
         self.view_menu.addSeparator()
         self.view_menu.addAction(self.panels_action)
         self.view_menu.addAction(self.inspector_panel_action)
@@ -1489,9 +1493,19 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(0)
         self.source_sidebar = self._make_source_sidebar()
         self.content_library_panel = ContentLibraryPanel(
-            self.project_content_service, self.translator
+            self.project_content_service, self.translator,
+            used_keys_provider=lambda: self.project_content_service.referenced_keys(
+                self._project_document()
+            ),
         )
         self.content_library_panel.add_requested.connect(self._add_library_content)
+        _refresh_content_markers = self.content_library_panel.schedule_used_refresh
+        self.playlist_service.playlist_changed.connect(_refresh_content_markers)
+        for _store_signal in (
+            self.store.source_added, self.store.source_removed,
+            self.store.source_changed, self.store.sources_replaced,
+        ):
+            _store_signal.connect(_refresh_content_markers)
         self.left_tabs = QTabWidget()
         self.left_tabs.setObjectName("leftProjectTabs")
         self.left_tabs.addTab(self.source_sidebar, "")
@@ -2244,7 +2258,14 @@ class MainWindow(QMainWindow):
         track = next((entry for entry in self.playlist_service.tracks if entry.id == track_id), None)
         if track is None:
             return
-        dialog = TrackDetailsDialog(track, self.translator, self)
+        content_lyrics = [
+            (Path(content.path).name, content.path)
+            for content in self.project_content_service.items
+            if content.media_type == "lyrics"
+        ]
+        dialog = TrackDetailsDialog(
+            track, self.translator, self, content_lyrics=content_lyrics,
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.playlist_service.update_track(
                 track_id,
@@ -2267,15 +2288,16 @@ class MainWindow(QMainWindow):
             "Audio files (*.mp3 *.wav *.flac *.aac *.m4a *.ogg)",
         )
         if paths:
-            _added, accepted_paths = self._import_audio_files(paths)
+            _added, accepted_paths, lyric_notes = self._import_audio_files(paths)
             self.project_content_service.add_paths(accepted_paths)
+            self._notify_sidecar_lyrics(lyric_notes)
 
     def _import_audio_files(
         self, paths: list[str] | list[Path],
-    ) -> tuple[int, list[Path]]:
+    ) -> tuple[int, list[Path], list[str]]:
         """Inspect audio tags, request missing project metadata, and add tracks."""
         if not paths:
-            return 0, []
+            return 0, [], []
         korean = self.translator.language is Language.KOREAN
         self.activity_progress.begin(
             "content_add", "콘텐츠 추가" if korean else "Adding content",
@@ -2286,7 +2308,7 @@ class MainWindow(QMainWindow):
         try:
             candidates = self.playlist_service.inspect_files(paths)
             if not candidates:
-                return 0, []
+                return 0, [], []
             tracks = [candidate.track for candidate in candidates]
             if any(candidate.missing_fields for candidate in candidates):
                 self.activity_progress.update(
@@ -2297,18 +2319,103 @@ class MainWindow(QMainWindow):
                 )
                 dialog = AudioMetadataDialog(candidates, self.translator, self)
                 if dialog.exec() != QDialog.DialogCode.Accepted:
-                    return 0, []
+                    return 0, [], []
                 tracks = dialog.selected_tracks
             self.activity_progress.update(
                 "content_add", 0.8,
                 "프로젝트 콘텐츠에 등록하는 중" if korean
                 else "Registering project content",
             )
+            lyric_notes = self._attach_sidecar_lyrics(tracks)
             added = self.playlist_service.add_tracks(tracks)
             accepted_paths = [Path(track.file_path) for track in tracks]
-            return added, accepted_paths
+            return added, accepted_paths, lyric_notes
         finally:
             self.activity_progress.finish("content_add")
+
+    def _attach_sidecar_lyrics(self, tracks: list) -> list[str]:
+        """Attach a same-name lyric file, or prompt for a similar one, per settings.
+
+        Returns a short "track ← file" note for every attachment so the caller
+        can surface a status-bar notification.
+        """
+        mode = self.settings_service.current.lyrics_auto_attach_mode
+        if mode == "never":
+            return []
+        korean = self.translator.language is Language.KOREAN
+        notes: list[str] = []
+        for track in tracks:
+            if track.lyrics or track.lyrics_path:
+                continue
+            exact, similar = find_sidecar_lyrics(track.file_path)
+            sidecar = None
+            if exact:
+                sidecar = exact[0]
+                if mode == "ask" and not self._confirm_sidecar_lyrics(
+                    track.title, sidecar, korean,
+                ):
+                    sidecar = None
+            elif similar and self._confirm_sidecar_lyrics(
+                track.title, similar[0], korean,
+            ):
+                sidecar = similar[0]
+            if sidecar is None:
+                continue
+            try:
+                cues = LyricsService.load(sidecar.path)
+            except LyricsError:
+                continue
+            if not cues:
+                continue
+            track.lyrics = cues
+            track.lyrics_path = str(sidecar.path.resolve())
+            notes.append(f"'{track.title}' ← {sidecar.path.name}")
+        return notes
+
+    def _confirm_sidecar_lyrics(
+        self, track_title: str, sidecar: object, korean: bool,
+    ) -> bool:
+        """Ask before attaching a lyric file that was matched by name."""
+        exact = bool(getattr(sidecar, "exact", False))
+        name = Path(getattr(sidecar, "path", "")).name
+        if korean:
+            title = "가사·자막 파일 발견"
+            relation = "이름이 같은" if exact else "이름이 비슷한"
+            body = (
+                f"'{track_title}' 곡과 {relation} 자막 파일이 있습니다:\n{name}\n\n"
+                "가사로 함께 추가할까요?"
+            )
+        else:
+            title = "Lyric file found"
+            relation = "the same name as" if exact else "a similar name to"
+            body = (
+                f"A subtitle file with {relation} '{track_title}' was found:\n"
+                f"{name}\n\nAttach it as lyrics?"
+            )
+        return QMessageBox.question(
+            self, title, body,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        ) == QMessageBox.StandardButton.Yes
+
+    def _notify_sidecar_lyrics(self, notes: list[str]) -> None:
+        """Show a transient status-bar note for auto-attached lyric files."""
+        if not notes:
+            return
+        korean = self.translator.language is Language.KOREAN
+        if len(notes) == 1:
+            message = (
+                f"가사·자막 파일을 자동으로 연결했습니다 · {notes[0]}"
+                if korean else
+                f"Attached a lyric file automatically · {notes[0]}"
+            )
+        else:
+            message = (
+                f"가사·자막 파일 {len(notes)}개를 자동으로 연결했습니다"
+                if korean else
+                f"Attached {len(notes)} lyric files automatically"
+            )
+        self.statusBar().showMessage(message, 7000)
 
     def _add_library_content(self, path: str, media_type: str) -> None:
         """Turn a reusable library entry into the appropriate project object."""
@@ -2323,7 +2430,8 @@ class MainWindow(QMainWindow):
         if media_type == "image":
             self._add_dropped_images([content_path], None)
         elif media_type == "audio":
-            self._import_audio_files([content_path])
+            _added, _paths, lyric_notes = self._import_audio_files([content_path])
+            self._notify_sidecar_lyrics(lyric_notes)
         elif media_type == "video":
             self._add_dropped_videos([content_path], None)
         elif media_type == "font":
@@ -2523,7 +2631,9 @@ class MainWindow(QMainWindow):
         audio_paths = [path for path in paths if path.suffix.lower() in AUDIO_EXTENSIONS]
         image_count = self._add_dropped_images(image_paths, position)
         video_count = self._add_dropped_videos(video_paths, position)
-        audio_count, accepted_audio_paths = self._import_audio_files(audio_paths)
+        audio_count, accepted_audio_paths, lyric_notes = self._import_audio_files(
+            audio_paths
+        )
         self.project_content_service.add_paths([*image_paths, *video_paths, *accepted_audio_paths])
         if image_count or video_count or audio_count:
             korean = self.translator.language is Language.KOREAN
@@ -2531,7 +2641,13 @@ class MainWindow(QMainWindow):
                 f"이미지 {image_count}개, 영상 {video_count}개, 음악 {audio_count}개를 추가했습니다."
                 if korean else f"Added {image_count} image(s), {video_count} video source(s), and {audio_count} music file(s)."
             )
-            self.statusBar().showMessage(message, 6000)
+            if lyric_notes:
+                message += (
+                    f" 가사·자막 {len(lyric_notes)}개 연결됨."
+                    if korean else
+                    f" Attached {len(lyric_notes)} lyric file(s)."
+                )
+            self.statusBar().showMessage(message, 7000)
             return
         korean = self.translator.language is Language.KOREAN
         self.statusBar().showMessage(
@@ -2753,6 +2869,7 @@ class MainWindow(QMainWindow):
 
     def _clear_export_frame_staging(self) -> None:
         """Release disk-backed captured frames after every export completion path."""
+        self._stop_export_storage_monitor()
         self._cancel_export_png_pipeline()
         if self._export_frame_metrics is not None:
             summary = self._export_frame_metrics.snapshot()
@@ -2989,6 +3106,52 @@ class MainWindow(QMainWindow):
                 return f"{value:.1f} {unit}"
             value /= 1024.0
         return f"{value:.1f} TB"
+
+    def _start_export_storage_monitor(self, output_path: str | Path) -> None:
+        """Track export-owned files without walking large folders on the UI thread."""
+        self._stop_export_storage_monitor()
+        monitor = ExportStorageMonitor(output_path, self)
+        if self._export_frame_staging is not None:
+            monitor.set_path("frames", self._export_frame_staging.name)
+        monitor.snapshot_ready.connect(self._handle_export_storage_snapshot)
+        self._export_storage_monitor = monitor
+        monitor.start()
+        dialog = self._export_dialog
+        if dialog is not None:
+            dialog.cancel_requested.connect(self._freeze_export_storage_monitor)
+
+    def _freeze_export_storage_monitor(self) -> None:
+        """Stop live storage sampling the instant a cancel is confirmed.
+
+        Cancellation stops the encoders quickly, but a still-polling monitor kept
+        showing the last few numbers and made the export look like it was still
+        writing. Halt sampling immediately; cleanup still runs in _stop_...().
+        """
+        monitor = self._export_storage_monitor
+        if monitor is not None:
+            monitor.stop()
+
+    def _handle_export_storage_path(
+        self, kind: str, path: str | Path | None,
+    ) -> None:
+        monitor = self._export_storage_monitor
+        if monitor is not None:
+            monitor.set_path(kind, path)
+
+    def _handle_export_storage_snapshot(self, snapshot: object) -> None:
+        dialog = self._export_dialog
+        if dialog is not None:
+            dialog.update_storage_snapshot(snapshot)
+
+    def _stop_export_storage_monitor(self) -> None:
+        monitor = self._export_storage_monitor
+        self._export_storage_monitor = None
+        if monitor is None:
+            return
+        monitor.stop()
+        if not monitor.wait(3000):
+            LOGGER.warning("Export storage monitor did not stop within three seconds.")
+        monitor.deleteLater()
 
     def _prepare_export_staging_space(
         self, render_settings: RenderSettings, duration_seconds: float,
@@ -3268,6 +3431,7 @@ class MainWindow(QMainWindow):
                 round(self.canvas.scene_model.artboard_rect.width()),
                 round(self.canvas.scene_model.artboard_rect.height()),
             ),
+            estimated_layer_count=min(3, max(1, len(self.store.sources()))),
         )
         if export_options.exec() != export_options.DialogCode.Accepted:
             return
@@ -3348,6 +3512,13 @@ class MainWindow(QMainWindow):
             len(active_tracks), self._playlist_duration(active_tracks),
             settings_summary, output,
         )
+        initial_storage_estimate = estimate_export_storage(
+            render_settings.output_width, render_settings.output_height,
+            render_settings.fps, self._playlist_duration(active_tracks),
+            selected_app_settings.crf, selected_app_settings.audio_bitrate,
+            min(3, max(1, len(self.store.sources()))),
+        )
+        self._export_dialog.set_storage_estimate(initial_storage_estimate)
         self._export_dialog.set_busy(
             "Preparing visual frames",
             "캔버스와 애니메이션 프레임을 준비하고 있습니다."
@@ -3411,6 +3582,14 @@ class MainWindow(QMainWindow):
                 plan.use_streamed_visuals, korean,
             ):
                 raise RenderCancelledError("Export cancelled at the disk-space check.")
+            actual_storage_estimate = estimate_export_storage(
+                render_settings.output_width, render_settings.output_height,
+                render_settings.fps, playlist_duration,
+                selected_app_settings.crf, selected_app_settings.audio_bitrate,
+                max(1, len(plan.z_bands)),
+            )
+            self._export_dialog.set_storage_estimate(actual_storage_estimate)
+            self._start_export_storage_monitor(output)
             stream_root = (
                 Path(self._export_frame_staging.name)
                 if plan.use_streamed_visuals and self._export_frame_staging is not None
@@ -3534,6 +3713,11 @@ class MainWindow(QMainWindow):
                 export_dialog, stage, fraction, message,
             )
         )
+        storage_path_signal = getattr(
+            self._render_worker, "storage_path_changed", None,
+        )
+        if storage_path_signal is not None:
+            storage_path_signal.connect(self._handle_export_storage_path)
         self._render_worker.succeeded.connect(self._export_succeeded)
         self._render_worker.failed.connect(self._export_failed)
         self._render_worker.cancelled.connect(self._export_cancelled)
@@ -4326,12 +4510,9 @@ class MainWindow(QMainWindow):
             return
         if current_version == release_version:
             if manual:
-                QMessageBox.information(
-                    self,
-                    "업데이트 확인" if korean else "Check for updates",
-                    f"현재 최신 버전({__version__})을 사용하고 있습니다."
-                    if korean else f"Playlist Canvas {__version__} is up to date.",
-                )
+                UpdateAvailableDialog(
+                    release, __version__, korean, False, self, up_to_date=True,
+                ).exec()
             return
 
         settings = QSettings()
@@ -6233,18 +6414,6 @@ class MainWindow(QMainWindow):
         self.canvas.scene_model.update()
         self._schedule_history()
 
-    def _toggle_sample_data(self, enabled: bool) -> None:
-        """Preview text tokens against sample-track data on the editing canvas."""
-        korean = self.translator.language is Language.KOREAN
-        self.canvas.scene_model.set_sample_data_mode(enabled, korean)
-        QSettings().setValue("interface/sample_data_preview", enabled)
-        self.statusBar().showMessage(
-            ("샘플 데이터 미리보기: 켜짐" if enabled else "샘플 데이터 미리보기: 꺼짐")
-            if korean else
-            ("Sample-data preview: on" if enabled else "Sample-data preview: off"),
-            2500,
-        )
-
     def retranslate(self) -> None:
         """Refresh all user-interface strings for the active language."""
         text = self.translator.text
@@ -6307,18 +6476,7 @@ class MainWindow(QMainWindow):
         )
         self.fit_action.setText(text("fit_canvas"))
         self.grid_action.setText(text("grid"))
-        self.sample_data_action.setText(
-            "샘플 데이터 미리보기" if korean else "Preview with sample data"
-        )
-        sample_data_help = (
-            "편집 캔버스에서 %title% 같은 토큰을 샘플 곡 정보로 바꿔 보여줍니다. (Ctrl+Shift+P)"
-            if korean else
-            "Show %title%-style tokens filled with sample track info on the editing canvas. (Ctrl+Shift+P)"
-        )
-        self.sample_data_action.setToolTip(sample_data_help)
-        self.sample_data_action.setStatusTip(sample_data_help)
-        if self.sample_data_action.isChecked():
-            self.canvas.scene_model.set_sample_data_mode(True, korean)
+        self.canvas.scene_model.set_placeholder_language(korean)
         self.delete_action.setText(text("delete"))
         self.export_action.setText(text("export"))
         self.preview_action.setText("미리보기" if self.translator.language is Language.KOREAN else "Preview")
@@ -6800,6 +6958,7 @@ class MainWindow(QMainWindow):
             #playlistList[dropActive="true"] {{ border: 1px solid #1685D1; border-radius: 8px; }}
             #trackRow {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 8px; }}
             #trackRow:hover {{ background: {colors['hover']}; }}
+            #trackRow[trackDisabled="true"] {{ background: {colors['panel']}; border: 1px dashed {colors['border']}; }}
             #trackRow[dropTarget="true"] {{ background: {colors['hover']}; border: 2px solid #1685D1; }}
             QGroupBox {{ color: {colors['text']}; font-weight: 600; border: 1px solid {colors['border']}; border-radius: 8px; margin-top: 10px; padding: 10px 7px 7px 7px; }}
             QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}

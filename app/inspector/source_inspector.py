@@ -225,10 +225,7 @@ class SourceInspector(QScrollArea):
             self.subtitle_style_combo.addItem(label, value)
         self.subtitle_animation_combo = QComboBox()
         for label, value in (
-            ("Soft focus", "apple_music"), ("Smooth slide", "spotify"),
-            ("Blur reveal", "blur_reveal"), ("Fade", "fade"),
-            ("Scroll up", "scroll_up"), ("Scroll down", "scroll_down"),
-            ("Pop", "pop"), ("None", "none"),
+            ("Glow", "glow"), ("Rise", "rise"), ("None", "none"),
         ):
             self.subtitle_animation_combo.addItem(label, value)
         self.subtitle_animation_duration_spin = self._spin(0.05, 1.5, 0.05)
@@ -1596,18 +1593,18 @@ class SourceInspector(QScrollArea):
         for index, label in enumerate(marker_labels):
             self.track_list_marker_combo.setItemText(index, label)
         subtitle_animation_labels = (
-            ("소프트 포커스", "스무스 슬라이드",
-             "블러 리빌", "페이드", "위로 스크롤", "아래로 스크롤", "팝", "없음")
+            ("글로우", "라이즈", "없음")
             if korean else
-            ("Soft focus", "Smooth slide",
-             "Blur reveal", "Fade", "Scroll up", "Scroll down", "Pop", "None")
+            ("Glow", "Rise", "None")
         )
         for index, label in enumerate(subtitle_animation_labels):
             self.subtitle_animation_combo.setItemText(index, label)
         self.subtitle_animation_combo.setToolTip(
-            "소프트 포커스는 부드러운 초점·상승 전환, 스무스 슬라이드는 짧고 선명한 이동 전환입니다."
+            "글로우: 흐릿하게 시작해 제자리에서 또렷해지는 부드러운 전환. "
+            "라이즈: 흐림·확대 없이 아래에서 위로 빠르게 미끄러져 올라오는 선명한 전환."
             if korean else
-            "Soft focus uses a gentle focused lift; Smooth slide uses a shorter, crisper motion."
+            "Glow: a soft transition that starts blurred and sharpens in place. "
+            "Rise: a crisp upward slide from below, with no blur or scale."
         )
         self.font_add_button.setToolTip(
             "TTF 또는 OTF 글꼴 파일을 이 프로젝트의 텍스트에 추가합니다."

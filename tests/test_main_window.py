@@ -47,6 +47,10 @@ from app.dialogs.text_editor_dialog import TextEditorDialog
 from app.dialogs.video_source_dialog import VideoSourceDialog
 from app.dialogs.export_progress_dialog import ExportEtaEstimator, ExportProgressDialog
 from app.dialogs.export_complete_dialog import ExportCompleteDialog
+from app.services.export_storage_service import (
+    ExportStorageSnapshot,
+    estimate_export_storage,
+)
 from app.dialogs.export_preview_dialog import (
     GPU_TEXTURE_SURFACE_AVAILABLE, ExportPreviewDialog, OverlayFrameWorker,
     VideoDurationProbeWorker,
@@ -340,6 +344,55 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertIn(__version__, warning.call_args.args[2])
         dialog.assert_not_called()
 
+    def test_manual_check_on_latest_shows_current_version_release_notes(self) -> None:
+        release = ReleaseInfo(
+            version=__version__,
+            tag_name=__version__,
+            name=f"Playlist Canvas {__version__}",
+            body="## 이번 버전\n\n- 변경 사항 A\n",
+            published_at="2026-09-04T00:00:00Z",
+            html_url=(
+                "https://github.com/tharu8813/Playlist-Canvas/releases/tag/"
+                + __version__
+            ),
+        )
+        self.window._update_check_manual = True
+        with patch(
+            "app.ui.main_window.UpdateAvailableDialog"
+        ) as dialog:
+            self.window._update_release_found(release)
+        dialog.assert_called_once()
+        self.assertTrue(dialog.call_args.kwargs.get("up_to_date"))
+
+    def test_up_to_date_release_dialog_shows_rendered_notes_without_update_button(
+        self,
+    ) -> None:
+        from app.dialogs.update_dialogs import UpdateAvailableDialog
+
+        release = ReleaseInfo(
+            version=__version__, tag_name=__version__,
+            name=f"Playlist Canvas {__version__}",
+            body="> [!NOTE]\n> 임시 공간이 필요합니다.\n\n## 변경\n\n- 항목 하나\n",
+            published_at="2026-09-04T00:00:00Z",
+            html_url=(
+                "https://github.com/tharu8813/Playlist-Canvas/releases/tag/"
+                + __version__
+            ),
+        )
+        dialog = UpdateAvailableDialog(
+            release, __version__, True, False, self.window, up_to_date=True,
+        )
+        try:
+            self.assertNotIn(
+                dialog.update_button,
+                dialog.buttons.buttons(),
+            )
+            html = dialog.notes.toHtml()
+            self.assertNotIn("[!NOTE]", html)
+            self.assertIn("항목 하나", html)
+        finally:
+            dialog.close()
+
     def test_stale_recovery_is_removed_instead_of_replacing_newer_project(self) -> None:
         with TemporaryDirectory(prefix="pvs-stale-recovery-") as raw_directory:
             project_path = Path(raw_directory) / "newer.pvsproj"
@@ -535,14 +588,14 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.window.inspector.subtitle_animation_combo.itemData(index)
             for index in range(self.window.inspector.subtitle_animation_combo.count())
         }
-        self.assertTrue({"apple_music", "spotify", "blur_reveal"}.issubset(values))
-        self.assertEqual(Source(SourceType.LYRICS, "Lyrics").subtitle_animation, "apple_music")
+        self.assertEqual(values, {"glow", "rise", "none"})
+        self.assertEqual(Source(SourceType.LYRICS, "Lyrics").subtitle_animation, "glow")
         labels = [
             self.window.inspector.subtitle_animation_combo.itemText(index)
             for index in range(self.window.inspector.subtitle_animation_combo.count())
         ]
-        self.assertIn("소프트 포커스", labels)
-        self.assertIn("스무스 슬라이드", labels)
+        self.assertIn("글로우", labels)
+        self.assertIn("라이즈", labels)
         self.assertFalse(any("Apple" in label or "Spotify" in label for label in labels))
 
     def test_menu_bar_is_grouped_and_fully_localized(self) -> None:
@@ -812,19 +865,116 @@ class MainWindowSafetyTests(unittest.TestCase):
         ):
             metadata_dialog = dialog_type.return_value
             metadata_dialog.exec.return_value = QDialog.DialogCode.Rejected
-            added, accepted = self.window._import_audio_files([track.file_path])
+            added, accepted, _notes = self.window._import_audio_files(
+                [track.file_path]
+            )
             self.assertEqual((added, accepted), (0, []))
             self.assertEqual(len(self.window.playlist_service.tracks), original_count)
 
             metadata_dialog.exec.return_value = QDialog.DialogCode.Accepted
             metadata_dialog.selected_tracks = [edited]
-            added, accepted = self.window._import_audio_files([track.file_path])
+            added, accepted, _notes = self.window._import_audio_files(
+                [track.file_path]
+            )
 
         self.assertEqual(added, 1)
         self.assertEqual(accepted, [Path(track.file_path)])
         imported = self.window.playlist_service.tracks[-1]
         self.assertEqual(imported.artist, "Edited artist")
         self.assertEqual(imported.album, "Edited album")
+
+    def _import_with_sidecar(
+        self, folder_names: dict[str, str], mode: str, audio_name: str,
+    ):
+        """Import one audio file from a temp folder and return its playlist track."""
+        restore = self.window.settings_service.current
+        self.addCleanup(self.window.settings_service.save, restore)
+        self.window.settings_service.save(replace(
+            restore, lyrics_auto_attach_mode=mode,
+        ))
+        with TemporaryDirectory(prefix="pc-import-sidecar-") as raw:
+            folder = Path(raw)
+            for name, content in folder_names.items():
+                (folder / name).write_text(content, encoding="utf-8")
+            audio = folder / audio_name
+            audio.write_bytes(b"ID3 stub")
+            track = PlaylistTrack(str(audio.resolve()), Path(audio_name).stem)
+            with patch.object(
+                self.window.playlist_service, "inspect_files",
+                return_value=[AudioImportCandidate(track)],
+            ):
+                added, _accepted, notes = self.window._import_audio_files(
+                    [str(audio)]
+                )
+        self.assertEqual(added, 1)
+        return self.window.playlist_service.tracks[-1], notes
+
+    _LRC = "[00:01.00]First line\n[00:04.00]Second line\n"
+
+    def test_same_name_lyric_file_is_attached_automatically_when_always(self) -> None:
+        imported, notes = self._import_with_sidecar(
+            {"Nightfall.lrc": self._LRC}, "always", "Nightfall.mp3",
+        )
+        self.assertTrue(imported.lyrics)
+        self.assertEqual(Path(imported.lyrics_path).name, "Nightfall.lrc")
+        self.assertEqual(len(notes), 1)
+
+    def test_never_mode_skips_even_an_exact_lyric_match(self) -> None:
+        imported, notes = self._import_with_sidecar(
+            {"Nightfall.lrc": self._LRC}, "never", "Nightfall.mp3",
+        )
+        self.assertFalse(imported.lyrics)
+        self.assertEqual(imported.lyrics_path, "")
+        self.assertEqual(notes, [])
+
+    def test_ask_mode_prompts_before_attaching_an_exact_match(self) -> None:
+        with patch.object(
+            QMessageBox, "question",
+            return_value=QMessageBox.StandardButton.No,
+        ) as question:
+            imported, notes = self._import_with_sidecar(
+                {"Nightfall.lrc": self._LRC}, "ask", "Nightfall.mp3",
+            )
+        question.assert_called_once()
+        self.assertFalse(imported.lyrics)
+        self.assertEqual(notes, [])
+
+    def test_similar_name_lyric_always_prompts_even_in_always_mode(self) -> None:
+        with patch.object(
+            QMessageBox, "question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ) as question:
+            imported, notes = self._import_with_sidecar(
+                {"Golden Hour.lrc": self._LRC}, "always", "01 - Golden Hour.mp3",
+            )
+        question.assert_called_once()
+        self.assertTrue(imported.lyrics)
+        self.assertEqual(Path(imported.lyrics_path).name, "Golden Hour.lrc")
+        self.assertEqual(len(notes), 1)
+
+    def test_settings_dialog_round_trips_the_lyrics_auto_attach_mode(self) -> None:
+        dialog = SettingsDialog(
+            replace(
+                self.window.settings_service.current,
+                lyrics_auto_attach_mode="ask",
+            ),
+            self.window.translator.language,
+            self.window.theme_service.preference,
+            self.window.translator,
+            self.window,
+        )
+        try:
+            self.assertEqual(
+                dialog.lyrics_auto_attach_combo.currentData(), "ask",
+            )
+            dialog.lyrics_auto_attach_combo.setCurrentIndex(
+                dialog.lyrics_auto_attach_combo.findData("never")
+            )
+            self.assertEqual(
+                dialog.app_settings.lyrics_auto_attach_mode, "never",
+            )
+        finally:
+            dialog.close()
 
     def test_app_theme_and_language_do_not_dirty_or_follow_project_metadata(self) -> None:
         original_language = self.window.translator.language
@@ -1180,6 +1330,82 @@ class MainWindowSafetyTests(unittest.TestCase):
         updated = self.window.playlist_service.tracks[0]
         self.assertEqual(updated.lyrics[0]["text"], "Incoming lyric")
         self.assertTrue(updated.lyrics_path.endswith("incoming.lrc"))
+
+    def test_playlist_accepts_external_drops_for_project_content_dnd(self) -> None:
+        from PySide6.QtGui import QDragEnterEvent
+
+        track = PlaylistTrack("song.wav", "Row", duration_seconds=10.0)
+        self.window.playlist_service.add_tracks([track])
+        self.application.processEvents()
+        playlist_list = self.window.playlist_editor.list_widget
+
+        # InternalMove silently rejects external drops before dropEvent runs,
+        # which is why lyrics dragged from Project Content never attached.
+        self.assertEqual(
+            playlist_list.dragDropMode(),
+            QAbstractItemView.DragDropMode.DragDrop,
+        )
+
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QDragMoveEvent
+
+        with TemporaryDirectory(prefix="pl-ext-drop-") as directory:
+            lyrics_path = Path(directory) / "song.lrc"
+            lyrics_path.write_text("[00:01.00]hi\n", encoding="utf-8")
+            item = playlist_list.item(0)
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(str(lyrics_path))])
+            row_center = playlist_list.visualItemRect(item).center()
+
+            def make(kind, pos):
+                return kind(
+                    pos, Qt.DropAction.CopyAction, mime,
+                    Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                )
+
+            # The drag border is crossed over the spacing gap, not a row.  The
+            # ENTER must still be accepted or Qt stops delivering move events
+            # and the cursor stays forbidden even after reaching the row.
+            enter = make(QDragEnterEvent, QPoint(2, 1))
+            playlist_list.dragEnterEvent(enter)
+            self.assertTrue(enter.isAccepted())
+
+            off_row = make(QDragMoveEvent, QPoint(2, 1))
+            playlist_list.dragMoveEvent(off_row)
+            self.assertFalse(off_row.isAccepted())
+
+            on_row = make(QDragMoveEvent, row_center)
+            playlist_list.dragMoveEvent(on_row)
+            self.assertTrue(on_row.isAccepted())
+
+    def test_playlist_drag_reorder_moves_rows_without_duplicating(self) -> None:
+        from PySide6.QtGui import QDropEvent
+
+        self.window.playlist_service.add_tracks([
+            PlaylistTrack("a.wav", "Alpha", duration_seconds=10.0),
+            PlaylistTrack("b.wav", "Bravo", duration_seconds=10.0),
+            PlaylistTrack("c.wav", "Charlie", duration_seconds=10.0),
+        ])
+        self.application.processEvents()
+        playlist_list = self.window.playlist_editor.list_widget
+        service = self.window.playlist_service
+
+        # Drag "Alpha" (row 0) onto the lower half of "Charlie" (row 2).
+        playlist_list.item(0).setSelected(True)
+        target = playlist_list.item(2)
+        rect = playlist_list.visualItemRect(target)
+        drop_point = QPointF(rect.center().x(), rect.bottom() - 1)
+        mime = QMimeData()
+        drop = QDropEvent(
+            drop_point, Qt.DropAction.MoveAction, mime,
+            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        )
+        playlist_list._reorder_from_drop(drop)
+        self.application.processEvents()
+
+        titles = [track.title for track in service.tracks]
+        self.assertEqual(titles, ["Bravo", "Charlie", "Alpha"])
+        self.assertEqual(len(titles), 3)  # moved, not copied
 
     def test_existing_lyrics_are_replaced_only_after_comparison_choice(self) -> None:
         track = PlaylistTrack(
@@ -2120,24 +2346,24 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertTrue(item.isSelected())
         self.assertEqual(self.window.store.selected.id, source.id)
 
-    def test_sample_data_preview_expands_text_tokens_on_canvas(self) -> None:
+    def test_text_tokens_render_as_labelled_placeholders_on_canvas(self) -> None:
         self.window._add_source(SourceType.TEXT)
         source = self.window.store.selected
-        self.window.store.update(source.id, text="%title% - %artist%")
         item = self.window.canvas._items[source.id]
 
-        self.assertEqual(item._render_text(), "%title% - %artist%")
+        # Main-window tests run in Korean; surrounding literal text is preserved.
+        self.window.store.update(source.id, text="%title%이것은 제목입니다")
+        self.assertEqual(item._render_text(), "(제목)이것은 제목입니다")
 
-        self.window.sample_data_action.setChecked(True)
-        rendered = item._render_text()
-        self.assertNotIn("%title%", rendered)
-        self.assertNotIn("%artist%", rendered)
-        self.assertNotEqual(rendered, "%title% - %artist%")
-        self.assertTrue(self.window.canvas.scene_model.sample_data_mode)
+        self.window.store.update(source.id, text="%title% - %artist%")
+        self.assertEqual(item._render_text(), "(제목) - (아티스트)")
 
-        self.window.sample_data_action.setChecked(False)
-        self.assertEqual(item._render_text(), "%title% - %artist%")
-        self.assertFalse(self.window.canvas.scene_model.sample_data_mode)
+        # Unknown tokens are left untouched.
+        self.window.store.update(source.id, text="%title% %mystery%")
+        self.assertEqual(item._render_text(), "(제목) %mystery%")
+
+        # There is no longer a sample-data toggle.
+        self.assertFalse(hasattr(self.window, "sample_data_action"))
 
     def test_distribute_spacing_evens_gaps_and_keeps_outermost(self) -> None:
         ids: list[str] = []
@@ -3597,6 +3823,9 @@ class MainWindowSafetyTests(unittest.TestCase):
                 (settings.crf, settings.preset, settings.audio_bitrate),
                 ExportSettingsDialog.QUALITY_PROFILES["balanced"],
             )
+            self.assertIn("예상 결과 영상", dialog.storage_estimate_label.text())
+            self.assertIn("작업 중 최대 필요 공간", dialog.storage_estimate_label.text())
+            self.assertGreater(dialog.storage_disk_bar.maximum(), 0)
         finally:
             dialog.close()
 
@@ -4653,6 +4882,42 @@ class MainWindowSafetyTests(unittest.TestCase):
             finally:
                 dialog.close()
 
+    def test_track_details_can_attach_lyrics_from_project_content(self) -> None:
+        with TemporaryDirectory(prefix="pvs-track-content-lyrics-") as raw:
+            lrc = Path(raw) / "my song.lrc"
+            lrc.write_text("[00:02.00]From content\n", encoding="utf-8")
+            self.window.project_content_service.add_paths([lrc])
+            track = PlaylistTrack("my song.wav", "My Song", duration_seconds=30.0)
+            self.window.playlist_service.replace([track])
+
+            # The window feeds the dialog the project's lyrics content.
+            captured: list[TrackDetailsDialog] = []
+            original = TrackDetailsDialog
+
+            with patch(
+                "app.ui.main_window.TrackDetailsDialog",
+                side_effect=lambda *a, **k: captured.append(original(*a, **k)) or captured[-1],
+            ), patch.object(original, "exec", return_value=QDialog.DialogCode.Rejected):
+                self.window._show_track_details(track.id)
+
+            dialog = captured[0]
+            try:
+                self.assertEqual(dialog._content_lyrics, [("my song.lrc", str(lrc))])
+                self.assertFalse(dialog.content_lyrics_button.isHidden())
+                self.assertTrue(dialog._apply_lyrics_from_path(str(lrc)))
+                self.assertEqual(dialog.selected_lyrics[0]["text"], "From content")
+                self.assertTrue(dialog.selected_lyrics_path.endswith("my song.lrc"))
+            finally:
+                dialog.close()
+
+            # An empty library hides the button.
+            self.window.project_content_service.replace([])
+            empty_dialog = TrackDetailsDialog(track, self.window.translator, self.window)
+            try:
+                self.assertTrue(empty_dialog.content_lyrics_button.isHidden())
+            finally:
+                empty_dialog.close()
+
     def test_video_settings_explain_scope_without_discarding_other_mode_media(self) -> None:
         source = Source(
             SourceType.VIDEO, "Video",
@@ -4877,6 +5142,53 @@ class MainWindowSafetyTests(unittest.TestCase):
             signal.disconnect(requested.append)
             signal.connect(self.window._show_track_details)
         self.assertEqual(requested, [track.id])
+
+    def test_playlist_rows_have_no_checkbox_and_show_excluded_state(self) -> None:
+        from PySide6.QtWidgets import QCheckBox
+
+        from app.widgets.playlist_editor import TrackRow
+
+        on = PlaylistTrack("a.wav", "Kept", duration_seconds=10.0)
+        off = PlaylistTrack("b.wav", "Dropped", duration_seconds=10.0, enabled=False)
+        self.window.playlist_service.replace([on, off])
+        self.application.processEvents()
+        editor = self.window.playlist_editor
+        rows = [
+            editor.list_widget.itemWidget(editor.list_widget.item(index))
+            for index in range(editor.list_widget.count())
+        ]
+        for row in rows:
+            self.assertIsInstance(row, TrackRow)
+            self.assertEqual(row.findChildren(QCheckBox), [])
+        self.assertFalse(rows[0].property("trackDisabled"))
+        self.assertTrue(rows[1].property("trackDisabled"))
+
+    def test_playlist_multi_select_and_context_menu_toggle_export_inclusion(
+        self,
+    ) -> None:
+        tracks = [
+            PlaylistTrack(f"{i}.wav", f"Track {i}", duration_seconds=10.0)
+            for i in range(3)
+        ]
+        self.window.playlist_service.replace(tracks)
+        self.application.processEvents()
+        editor = self.window.playlist_editor
+        for index in (0, 2):
+            editor.list_widget.item(index).setSelected(True)
+        self.assertEqual(len(editor._selected_ids()), 2)
+
+        editor._toggle_selected()
+        self.application.processEvents()
+        by_id = {t.id: t for t in self.window.playlist_service.tracks}
+        self.assertFalse(by_id[tracks[0].id].enabled)
+        self.assertFalse(by_id[tracks[2].id].enabled)
+        self.assertTrue(by_id[tracks[1].id].enabled)
+
+        editor._toggle_selected()
+        self.application.processEvents()
+        self.assertTrue(
+            all(t.enabled for t in self.window.playlist_service.tracks)
+        )
 
     def test_snap_setting_round_trip(self) -> None:
         self.window.canvas.scene_model.snap_enabled = False
@@ -5719,6 +6031,42 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(
             [action.data() for action in empty_menu.actions()], ["import"],
         )
+
+    def test_project_content_marks_items_already_used_in_the_project(self) -> None:
+        panel = self.window.content_library_panel
+        with TemporaryDirectory(prefix="pvs-content-added-") as raw_directory:
+            song = Path(raw_directory) / "track one.mp3"
+            song.write_bytes(b"audio placeholder")
+            cover = Path(raw_directory) / "art.png"
+            cover.write_bytes(b"image placeholder")
+            self.window.project_content_service.add_paths([song, cover])
+
+            def row_for(name: str):
+                for index in range(panel.list.count()):
+                    item = panel.list.item(index)
+                    if name in item.text():
+                        return item
+                raise AssertionError(f"no content row for {name}")
+
+            self.assertFalse(row_for("track one").data(Qt.ItemDataRole.UserRole + 3))
+            self.assertNotIn("추가됨", row_for("art").text())
+
+            self.window.playlist_service.add_tracks(
+                [PlaylistTrack(str(song.resolve()), "Track One")]
+            )
+            panel._used_refresh_timer.stop()
+            panel.refresh()
+            self.assertTrue(row_for("track one").data(Qt.ItemDataRole.UserRole + 3))
+            self.assertIn("추가됨", row_for("track one").text())
+            self.assertNotIn("추가됨", row_for("art").text())
+
+            source = Source(
+                SourceType.IMAGE, "Art", content_path=str(cover.resolve()),
+            )
+            self.window.store.add(source)
+            panel._used_refresh_timer.stop()
+            panel.refresh()
+            self.assertIn("추가됨", row_for("art").text())
 
     def test_project_content_switches_between_list_grid_and_compact_views(self) -> None:
         panel = self.window.content_library_panel
@@ -6724,6 +7072,84 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertIn("AAC 320k", settings_text)
             self.assertIn("playlist.mp4", settings_text)
             self.assertIn("오디오 결합 중", dialog.detail_label.text())
+        finally:
+            dialog.complete(False)
+
+    def test_export_progress_shows_live_storage_breakdown_and_disk_space(self) -> None:
+        dialog = ExportProgressDialog(self.window)
+        dialog.set_korean(True)
+        try:
+            estimate = estimate_export_storage(
+                1920, 1080, 30, 60.0, 18, "192k", 2,
+            )
+            dialog.set_storage_estimate(estimate)
+            dialog.update_storage_snapshot(ExportStorageSnapshot(
+                categories={
+                    "visuals": 3 * 1024**3,
+                    "audio": 256 * 1024**2,
+                    "effects": 128 * 1024**2,
+                    "processing": 16 * 1024**2,
+                },
+                temporary_total=4 * 1024**3,
+                output_in_progress=640 * 1024**2,
+                disk_total=1024 * 1024**3,
+                disk_free=901 * 1024**3,
+            ))
+
+            self.assertEqual(dialog.storage_rows["visuals"][1].text(), "3.0 GB")
+            self.assertEqual(dialog.storage_rows["output"][1].text(), "640.0 MB")
+            self.assertEqual(dialog.storage_total_value.text(), "4.0 GB")
+            self.assertIn("901.0 GB", dialog.storage_disk_label.text())
+            self.assertIn("1.0 TB", dialog.storage_disk_label.text())
+            self.assertIn("예상 결과 영상", dialog.storage_widget.toolTip())
+        finally:
+            dialog.complete(False)
+
+    def test_export_progress_storage_panel_can_be_toggled_off_and_on(self) -> None:
+        dialog = ExportProgressDialog(self.window)
+        dialog.set_korean(True)
+        try:
+            self.assertTrue(dialog.storage_button.isChecked())
+            self.assertFalse(dialog.storage_widget.isHidden())
+
+            dialog.storage_button.setChecked(False)
+            self.assertTrue(dialog.storage_widget.isHidden())
+            self.assertTrue(dialog.storage_heading.isHidden())
+            self.assertIn("보기", dialog.storage_button.text())
+
+            dialog.storage_button.setChecked(True)
+            self.assertFalse(dialog.storage_widget.isHidden())
+            self.assertIn("숨기기", dialog.storage_button.text())
+        finally:
+            dialog.complete(False)
+
+    def test_export_progress_dialog_grows_for_wrapped_content_instead_of_compressing(
+        self,
+    ) -> None:
+        from PySide6.QtWidgets import QLayout
+
+        dialog = ExportProgressDialog(self.window)
+        dialog.resize(700, 620)
+        try:
+            self.assertEqual(
+                dialog.layout().sizeConstraint(),
+                QLayout.SizeConstraint.SetMinimumSize,
+            )
+            dialog.set_export_details(2, 120.0, "single line summary", "C:/out.mp4")
+            dialog.layout().activate()
+            short_hint = dialog.sizeHint().height()
+
+            tall_summary = "\n".join(
+                f"detail row {index} with a meaningful amount of text"
+                for index in range(6)
+            )
+            dialog.set_export_details(2, 120.0, tall_summary, "C:/out.mp4")
+            dialog.layout().activate()
+            tall_hint = dialog.sizeHint().height()
+
+            # More content must make the dialog want to be taller, not squeeze
+            # the cards above the label.
+            self.assertGreater(tall_hint, short_hint)
         finally:
             dialog.complete(False)
 

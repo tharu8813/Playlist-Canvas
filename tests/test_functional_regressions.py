@@ -1769,7 +1769,7 @@ class FunctionalRegressionTests(unittest.TestCase):
         scene = CanvasScene()
         source = Source(
             SourceType.LYRICS, "Lyrics", text="Configured placeholder",
-            subtitle_fallback="No lyrics", subtitle_animation="fade",
+            subtitle_fallback="No lyrics", subtitle_animation="glow",
         )
         item = SourceItem(source)
         scene.addItem(item)
@@ -1811,7 +1811,7 @@ class FunctionalRegressionTests(unittest.TestCase):
         scene = CanvasScene()
         source = Source(
             SourceType.LYRICS, "Lyrics", width=560, height=220,
-            subtitle_animation="apple_music", subtitle_animation_duration=0.4,
+            subtitle_animation="glow", subtitle_animation_duration=0.4,
         )
         item = SourceItem(source)
         scene.addItem(item)
@@ -1836,7 +1836,7 @@ class FunctionalRegressionTests(unittest.TestCase):
             CanvasSnapshot.capture_track(
                 scene, track, 1, 1, 0.0, elapsed_seconds=5.1,
             )
-            source.subtitle_animation = "spotify"
+            source.subtitle_animation = "rise"
             CanvasSnapshot.capture_track(
                 scene, track, 1, 1, 0.0, elapsed_seconds=5.1,
             )
@@ -1857,13 +1857,64 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(item._subtitle_transition_progress, 1.0)
         self.assertEqual(item._subtitle_anchor_line, -1)
 
+    def test_legacy_subtitle_animation_names_migrate_to_glow_or_rise(self) -> None:
+        base = Source(SourceType.LYRICS, "Lyrics").to_dict()
+        for legacy, expected in (
+            ("apple_music", "glow"), ("blur_reveal", "glow"), ("fade", "glow"),
+            ("spotify", "rise"), ("scroll_up", "rise"), ("pop", "rise"),
+            ("glow", "glow"), ("none", "none"), ("bogus", "glow"),
+        ):
+            restored = Source.from_dict({**base, "subtitle_animation": legacy})
+            self.assertEqual(restored.subtitle_animation, expected, legacy)
+
+    def test_outgoing_lyric_fades_out_instead_of_cutting_with_no_context(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.LYRICS, "Lyrics", width=560, height=220,
+            subtitle_context_lines=0, subtitle_next_lines=0,
+            subtitle_animation="glow", subtitle_animation_duration=0.5,
+        )
+        item = SourceItem(source)
+        scene.addItem(item)
+        track = PlaylistTrack(
+            "t.wav", "T", duration_seconds=12.0,
+            lyrics=[
+                {"start": 1.0, "end": 4.0, "text": "Outgoing line"},
+                {"start": 5.0, "end": 9.0, "text": "Incoming line"},
+            ],
+        )
+        seen: list[tuple[float, int, str]] = []
+        original_capture = CanvasSnapshot.capture
+
+        def observe(*args: object, **kwargs: object):
+            seen.append((
+                item._subtitle_transition_progress,
+                item._subtitle_previous_line_count,
+                source.text,
+            ))
+            return original_capture(*args, **kwargs)
+
+        with patch.object(CanvasSnapshot, "capture", side_effect=observe):
+            # Mid-transition into the second cue.
+            CanvasSnapshot.capture_track(scene, track, 1, 1, 0.0, elapsed_seconds=5.15)
+            # Then well after it completes.
+            CanvasSnapshot.capture_track(scene, track, 1, 1, 0.0, elapsed_seconds=6.5)
+
+        mid, done = seen
+        self.assertLess(mid[0], 1.0)
+        self.assertGreater(mid[1], 0)
+        self.assertIn("Outgoing line", mid[2])
+        self.assertIn("Incoming line", mid[2])
+        # The outgoing cue is only borrowed for the fade, not kept afterwards.
+        self.assertNotIn("Outgoing line", done[2])
+
     def test_lyric_context_starts_new_cue_from_previous_stable_position(self) -> None:
         scene = CanvasScene()
         source = Source(
             SourceType.LYRICS, "Lyrics", width=560, height=220,
             font_size=30, subtitle_line_spacing=10,
             subtitle_context_lines=1, subtitle_next_lines=1,
-            subtitle_animation="apple_music", subtitle_animation_duration=0.4,
+            subtitle_animation="glow", subtitle_animation_duration=0.4,
         )
         item = SourceItem(source)
         scene.addItem(item)

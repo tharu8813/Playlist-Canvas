@@ -35,6 +35,7 @@ from app.services.app_settings_service import (
     VIDEO_ENCODERS,
     AUDIO_BITRATES,
     EXPORT_NOTIFICATION_MODES,
+    LYRICS_AUTO_ATTACH_MODES,
     AppSettings,
 )
 from app.services.theme_service import Theme
@@ -255,6 +256,25 @@ class SettingsDialog(QDialog):
             self._update_preview_backend_restart_hint
         )
 
+        self.lyrics_auto_attach_combo = QComboBox()
+        for mode in LYRICS_AUTO_ATTACH_MODES:
+            self.lyrics_auto_attach_combo.addItem("", mode)
+        self.lyrics_auto_attach_combo.setCurrentIndex(max(
+            0, self.lyrics_auto_attach_combo.findData(
+                settings.lyrics_auto_attach_mode
+            ),
+        ))
+        self.lyrics_auto_attach_combo.setMinimumWidth(260)
+        self.lyrics_auto_attach_hint = QLabel()
+        self.lyrics_auto_attach_hint.setObjectName("mutedLabel")
+        self.lyrics_auto_attach_hint.setWordWrap(True)
+        lyrics_auto_attach_panel = QWidget()
+        lyrics_auto_attach_layout = QVBoxLayout(lyrics_auto_attach_panel)
+        lyrics_auto_attach_layout.setContentsMargins(0, 0, 0, 0)
+        lyrics_auto_attach_layout.setSpacing(4)
+        lyrics_auto_attach_layout.addWidget(self.lyrics_auto_attach_combo)
+        lyrics_auto_attach_layout.addWidget(self.lyrics_auto_attach_hint)
+
         self.export_notifications_check = QCheckBox()
         self.export_notifications_check.setChecked(
             settings.export_notifications_enabled
@@ -426,6 +446,12 @@ class SettingsDialog(QDialog):
         app_form.addRow(self.smooth_scroll_label, self.smooth_scroll_check)
         app_form.addRow(self.smooth_scroll_speed_label, smooth_scroll_speed_row)
         app_form.addRow(self.preview_backend_label, preview_backend_panel)
+        content_group = QGroupBox()
+        content_form = QFormLayout(content_group)
+        self.lyrics_auto_attach_label = QLabel()
+        content_form.addRow(
+            self.lyrics_auto_attach_label, lyrics_auto_attach_panel,
+        )
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("settingsTabs")
@@ -434,6 +460,7 @@ class SettingsDialog(QDialog):
         general_layout = QVBoxLayout(self.general_page)
         general_layout.setContentsMargins(14, 16, 14, 14)
         general_layout.addWidget(app_group)
+        general_layout.addWidget(content_group)
         general_layout.addStretch()
         self.export_page = QWidget()
         export_layout = QVBoxLayout(self.export_page)
@@ -466,6 +493,7 @@ class SettingsDialog(QDialog):
         self.render_group = render_group
         self.notification_group = notification_group
         self.app_group = app_group
+        self.content_group = content_group
         self.retranslate()
         self._update_smooth_scroll_ui()
         self._update_work_mode_hint()
@@ -630,6 +658,9 @@ class SettingsDialog(QDialog):
             export_notify_encode=self.export_notify_encode_check.isChecked(),
             export_notify_complete=self.export_notify_complete_check.isChecked(),
             export_notify_failures=self.export_notify_failures_check.isChecked(),
+            lyrics_auto_attach_mode=str(
+                self.lyrics_auto_attach_combo.currentData() or "always"
+            ),
         )
 
     @property
@@ -949,6 +980,29 @@ class SettingsDialog(QDialog):
             "내보내기 알림" if korean else "Export notifications"
         )
         self.app_group.setTitle("앱" if korean else "Application")
+        self.content_group.setTitle("콘텐츠 추가" if korean else "Adding content")
+        self.lyrics_auto_attach_label.setText(
+            "가사·자막 파일 자동 연결" if korean else "Auto-attach lyric files"
+        )
+        self.lyrics_auto_attach_combo.setItemText(
+            0, "항상 함께 추가 (권장)" if korean else "Always attach (Recommended)",
+        )
+        self.lyrics_auto_attach_combo.setItemText(
+            1, "물어보기" if korean else "Ask each time",
+        )
+        self.lyrics_auto_attach_combo.setItemText(
+            2, "추가하지 않음" if korean else "Never attach",
+        )
+        self.lyrics_auto_attach_hint.setText(
+            "노래를 추가할 때 같은 폴더에 파일 이름이 같은 .lrc/.srt/.vtt 파일이 있으면 "
+            "가사·자막으로 함께 연결합니다. '추가하지 않음'이 아니면, 이름이 비슷한 파일이 "
+            "있을 때는 설정과 관계없이 항상 추가 여부를 물어봅니다."
+            if korean else
+            "When you add a song, a .lrc/.srt/.vtt file with the same name in the "
+            "same folder is attached as lyrics. Unless set to Never, a similarly "
+            "named file always prompts before it is attached, regardless of this "
+            "setting."
+        )
         self.ffmpeg_path_label.setText("FFmpeg 경로" if korean else "FFmpeg path")
         self.ffmpeg_version_label.setText("설치 버전" if korean else "Version to install")
         self.output_label.setText("기본 출력 폴더" if korean else "Default output folder")

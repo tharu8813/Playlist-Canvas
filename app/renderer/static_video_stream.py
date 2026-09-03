@@ -294,7 +294,17 @@ class StaticVideoStreamEncoder:
         target_count = max(1, floor(self._duration_seconds * self.fps + 0.5))
         repeat_count = max(0, target_count - self._frame_count)
         pixels = prepared.constBits()
+        pipeline = self._pipeline
+        cancel_event = self.producer_cancel_event
         for _index in range(repeat_count):
+            # A single coalesced Canvas state can expand to tens of thousands of
+            # output frames. Without this check a cancel during that expansion
+            # kept feeding FFmpeg — the intermediate file and disk use kept
+            # growing for seconds after the user pressed Cancel.
+            if (cancel_event is not None and cancel_event.is_set()) or (
+                pipeline is not None and pipeline.cancel_event.is_set()
+            ):
+                return
             process.stdin.write(pixels)
             # Publish progress incrementally.  A coalesced still can represent
             # tens of thousands of output frames, and updating only after the

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -42,11 +43,15 @@ class TrackDetailsDialog(QDialog):
 
     def __init__(
         self, track: PlaylistTrack, translator: Translator,
-        parent: QWidget | None = None,
+        parent: QWidget | None = None, *,
+        content_lyrics: list[tuple[str, str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.track = track
         self.translator = translator
+        # (display name, resolved path) for every lyrics/subtitle file already
+        # in the project content library.
+        self._content_lyrics = list(content_lyrics or [])
         self.selected_lyrics_path = track.lyrics_path
         self.selected_lyrics = [cue.copy() for cue in track.lyrics]
         self.selected_timing_offset = float(track.lyrics_timing_offset_seconds)
@@ -153,10 +158,13 @@ class TrackDetailsDialog(QDialog):
         self.lyrics_path.setObjectName("mutedLabel")
         self.lyrics_path.setWordWrap(True)
         self.load_button = QPushButton()
+        self.content_lyrics_button = QPushButton()
+        self.content_lyrics_button.setVisible(bool(self._content_lyrics))
         self.edit_lrc_button = QPushButton()
         self.export_lrc_button = QPushButton()
         self.clear_button = QPushButton()
         path_row.addWidget(self.lyrics_path, 1)
+        path_row.addWidget(self.content_lyrics_button)
         path_row.addWidget(self.load_button)
         path_row.addWidget(self.clear_button)
         lyrics_layout.addLayout(path_row)
@@ -355,6 +363,7 @@ class TrackDetailsDialog(QDialog):
         root.addWidget(self.buttons)
 
         self.load_button.clicked.connect(self._load_lyrics)
+        self.content_lyrics_button.clicked.connect(self._show_content_lyrics_menu)
         self.edit_lrc_button.clicked.connect(self._edit_in_lrc_generator)
         self.export_lrc_button.clicked.connect(self._export_current_lyrics_as_lrc)
         self.clear_button.clicked.connect(self._clear_lyrics)
@@ -456,16 +465,37 @@ class TrackDetailsDialog(QDialog):
             self.selected_lyrics_path,
             "Lyrics / subtitles (*.lrc *.srt *.vtt)",
         )
-        if not path:
+        if path:
+            self._apply_lyrics_from_path(path)
+
+    def _show_content_lyrics_menu(self) -> None:
+        """Pick a lyrics/subtitle file already imported into project content."""
+        if not self._content_lyrics:
             return
+        menu = QMenu(self)
+        for name, path in self._content_lyrics:
+            action = menu.addAction(name)
+            action.setToolTip(path)
+            action.triggered.connect(
+                lambda _checked=False, target=path: self._apply_lyrics_from_path(target)
+            )
+        menu.exec(
+            self.content_lyrics_button.mapToGlobal(
+                self.content_lyrics_button.rect().bottomLeft()
+            )
+        )
+
+    def _apply_lyrics_from_path(self, path: str) -> bool:
+        """Load cues from ``path`` into the pending selection, or report an error."""
         try:
             cues = LyricsService.load(path)
         except LyricsError as error:
             self.preview.setPlainText(str(error))
-            return
+            return False
         self.selected_lyrics_path = str(Path(path).resolve())
         self.selected_lyrics = [cue.copy() for cue in cues]
         self._refresh_preview()
+        return True
 
     def _clear_lyrics(self) -> None:
         self.selected_lyrics_path = ""
@@ -837,6 +867,14 @@ class TrackDetailsDialog(QDialog):
         self.lyrics_group.setTitle("가사 / 자막" if korean else "Lyrics / subtitles")
         self.playback_group.setTitle("노래와 가사 미리보기" if korean else "Audio and lyrics preview")
         self.load_button.setText("파일 불러오기…" if korean else "Load file…")
+        self.content_lyrics_button.setText(
+            "프로젝트 콘텐츠…" if korean else "From project content…"
+        )
+        self.content_lyrics_button.setToolTip(
+            "프로젝트 콘텐츠에 추가한 가사·자막 파일을 이 곡에 연결합니다."
+            if korean else
+            "Attach a lyrics/subtitle file already in Project Content to this track."
+        )
         self.edit_lrc_button.setText(
             "LRC 생성기로 편집…" if korean else "Edit in LRC Generator…"
         )

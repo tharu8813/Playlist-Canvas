@@ -126,7 +126,7 @@ class ExportTimelinePlannerTests(unittest.TestCase):
             Source(
                 SourceType.LYRICS,
                 "Lyrics",
-                subtitle_animation="fade",
+                subtitle_animation="glow",
                 subtitle_animation_duration=0.5,
             ),
             Source(

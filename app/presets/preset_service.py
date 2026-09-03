@@ -271,7 +271,7 @@ def _lyrics(x: float, y: float, width: float, height: float, color: str, z: int,
         SourceType.LYRICS, "Lyrics", x=x, y=y, width=width, height=height,
         fill_color=TRANSPARENT, outline_color=color, text="Lyrics are not available for this track.",
         font_size=23, font_weight=600, text_alignment="center", subtitle_style=style,
-        subtitle_animation="scroll_up", subtitle_animation_duration=0.28,
+        subtitle_animation="rise", subtitle_animation_duration=0.28,
         subtitle_context_lines=1, subtitle_next_lines=1, subtitle_previous_opacity=0.34,
         subtitle_previous_blur=1.5, z_index=z,
     )

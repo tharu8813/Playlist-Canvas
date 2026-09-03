@@ -61,6 +61,18 @@ class ProjectContentService(QObject):
             self.changed.emit()
 
     def synchronize(self, document: ProjectDocument) -> None:
+        self.add_paths(self._document_paths(document))
+
+    def referenced_keys(self, document: ProjectDocument) -> set[str]:
+        """Return the dedup keys of every media path the project currently uses.
+
+        Used by the Project Content panel to mark items already placed on the
+        Canvas, cover art, or the playlist as "Added".
+        """
+        return {self._key(path) for path in self._document_paths(document)}
+
+    @staticmethod
+    def _document_paths(document: ProjectDocument) -> list[str]:
         paths: list[str] = []
         for source in document.sources:
             paths.extend(path for path in (source.content_path, source.font_path) if path)
@@ -72,7 +84,7 @@ class ProjectContentService(QObject):
                 ) if path
             )
             paths.extend(path for path in track.video_paths if path)
-        self.add_paths(paths)
+        return paths
 
     @staticmethod
     def classify(path: Path) -> str | None:

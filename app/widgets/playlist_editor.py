@@ -5,19 +5,20 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QKeyEvent, QMouseEvent,
+    QContextMenuEvent, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent,
+    QDropEvent, QKeyEvent, QMouseEvent,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -36,15 +37,20 @@ class PlaylistList(QListWidget):
     lyrics_dropped = Signal(str, str)
     track_double_clicked = Signal(str)
     order_changed = Signal()
+    reorder_requested = Signal(list)
     remove_requested = Signal()
     toggle_requested = Signal()
     details_requested = Signal(str)
+    context_menu_requested = Signal(QPoint)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("playlistList")
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        # DragDrop (not InternalMove) so external audio/lyrics drops from
+        # Project Content or the file system reach dropEvent(); the handlers
+        # below branch on ``event.source() is self`` for internal reordering.
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setAcceptDrops(True)
         self.setDragEnabled(True)
@@ -136,7 +142,22 @@ class PlaylistList(QListWidget):
             self._clear_drop_feedback()
             super().dragEnterEvent(event)
             return
-        self._update_external_drag(event)
+        # Accept the *enter* for any audio/lyrics payload, even when the pointer
+        # is not over a row yet.  Rejecting here makes Qt stop delivering
+        # dragMoveEvent, so a lyric drag that crosses the list border over the
+        # spacing gap would stay forbidden even after reaching a track row.
+        # dragMoveEvent() below does the real per-row targeting.
+        paths = self._local_paths(event)
+        if any(
+            Path(path).suffix.lower() in LYRICS_EXTENSIONS
+            or Path(path).suffix.lower() in AUDIO_EXTENSIONS
+            for path in paths
+        ):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            self._clear_drop_feedback()
+            event.ignore()
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
         """Highlight the exact lyric target while the drag cursor moves."""
@@ -151,11 +172,50 @@ class PlaylistList(QListWidget):
         self._clear_drop_feedback()
         super().dragLeaveEvent(event)
 
+    def _reorder_from_drop(self, event: QDropEvent) -> None:
+        """Move the selected rows to the drop point ourselves.
+
+        In ``DragDrop`` mode ``QListWidget`` only performs an internal move when
+        the negotiated drop action is exactly ``MoveAction``; a drag started
+        from the list often arrives as ``CopyAction`` and the rows get
+        duplicated instead of reordered.  Computing the target order here and
+        handing it to the service keeps reordering deterministic.
+        """
+        order = [
+            str(self.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(self.count())
+        ]
+        # Keep the dragged block in its visual order, not selection order.
+        selected_rows = sorted(self.row(item) for item in self.selectedItems())
+        moving = [order[row] for row in selected_rows if 0 <= row < len(order)]
+        if not moving:
+            event.ignore()
+            return
+        target = self.itemAt(event.position().toPoint())
+        if target is None:
+            insert_at = len(order)
+        else:
+            insert_at = self.row(target)
+            rect = self.visualItemRect(target)
+            if event.position().toPoint().y() > rect.center().y():
+                insert_at += 1
+        moving_set = set(moving)
+        insert_at -= sum(1 for row, ident in enumerate(order)
+                         if ident in moving_set and row < insert_at)
+        remaining = [ident for ident in order if ident not in moving_set]
+        new_order = remaining[:insert_at] + moving + remaining[insert_at:]
+        if new_order == order:
+            event.ignore()
+            return
+        event.setDropAction(Qt.DropAction.IgnoreAction)
+        event.accept()
+        self.reorder_requested.emit(new_order)
+
     def dropEvent(self, event: QDropEvent) -> None:
         """Import audio or attach lyrics only to the highlighted track row."""
         if event.source() is self:
             self._clear_drop_feedback()
-            super().dropEvent(event)
+            self._reorder_from_drop(event)
             return
 
         paths = self._local_paths(event)
@@ -192,6 +252,16 @@ class PlaylistList(QListWidget):
             return
         event.ignore()
 
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        """Right-click acts on the whole current selection, like a file list."""
+        item = self.itemAt(self.viewport().mapFromGlobal(event.globalPos()))
+        if item is not None and not item.isSelected():
+            self.setCurrentItem(item)
+            self.clearSelection()
+            item.setSelected(True)
+        self.context_menu_requested.emit(event.globalPos())
+        event.accept()
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Expose common playlist editing actions without fragile global shortcuts."""
         if event.key() == Qt.Key.Key_Delete:
@@ -212,63 +282,72 @@ class PlaylistList(QListWidget):
 
 
 class TrackRow(QWidget):
-    """Compact visual row for a playlist track."""
+    """Compact, display-only visual row for a playlist track.
 
-    toggled = Signal(str, bool)
-    clicked = Signal(str, object)
-    activated = Signal(str)
+    Selection, double-click and drag reordering are all handled natively by
+    the parent ``PlaylistList`` (an ExtendedSelection QListWidget), so this
+    widget stays transparent to mouse input and never fights that logic.
+    """
 
     def __init__(self, number: int, track: PlaylistTrack, korean: bool = False,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("trackRow")
         self.track_id = track.id
+        self.setProperty("trackDisabled", not track.enabled)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(9)
-        self.enabled_box = QCheckBox()
-        self.enabled_box.setChecked(track.enabled)
-        self.enabled_box.toggled.connect(lambda checked: self.toggled.emit(track.id, checked))
         number_label = QLabel(f"{number:02d}")
         number_label.setObjectName("trackNumber")
-        metadata = QLabel(
-            f"<b>{escape(track.title)}</b><br>"
-            f"<span>{escape(track.artist)} · {escape(track.album)}</span>"
-        )
+        title = escape(track.title)
+        subtitle = f"{escape(track.artist)} · {escape(track.album)}"
+        if not track.enabled:
+            title = f'<span style="text-decoration:line-through">{title}</span>'
+        metadata = QLabel(f"<b>{title}</b><br><span>{subtitle}</span>")
         metadata.setObjectName("trackMetadata")
         metadata.setTextFormat(Qt.TextFormat.RichText)
         duration = QLabel(track.duration_label)
         duration.setObjectName("mutedLabel")
-        layout.addWidget(self.enabled_box)
         layout.addWidget(number_label)
         layout.addWidget(metadata, 1)
+        if not track.enabled:
+            excluded = QLabel("제외됨" if korean else "Excluded")
+            excluded.setObjectName("mutedLabel")
+            layout.addWidget(excluded)
         if track.lyrics or track.lyrics_path:
             offset = track.lyrics_timing_offset_seconds
             lyric_badge = QLabel(
                 f"가사 {offset:+.2f}s" if korean else f"Lyrics {offset:+.2f}s"
             )
             lyric_badge.setObjectName("mutedLabel")
-            lyric_badge.setToolTip(
-                "더블클릭하거나 곡 정보/설정에서 메타데이터·커버·가사를 편집합니다."
-                if korean else
-                "Double-click or use Track/Lyrics Settings to adjust timing."
-            )
-            lyric_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             layout.addWidget(lyric_badge)
         layout.addWidget(duration)
-        for label in (number_label, metadata, duration):
-            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        if not track.enabled:
+            for widget in (number_label, metadata, duration):
+                widget.setEnabled(False)
         self.setToolTip(
-            f"{track.title}\n{track.artist} · {track.album}\n{Path(track.file_path)}"
+            f"{track.title}\n{track.artist} · {track.album}\n"
+            f"{Path(track.file_path)}"
+            + ("" if track.enabled else
+               ("\n\n내보내기에서 제외됨 (우클릭 → 포함)" if korean
+                else "\n\nExcluded from export (right-click to include)"))
         )
 
+    # Let the parent list own selection, double-click and drag: forward the
+    # button events to it instead of running a second, conflicting handler
+    # (the old custom handler double-toggled Ctrl+click and broke multi-select).
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        self.clicked.emit(self.track_id, event.modifiers())
-        super().mousePressEvent(event)
+        event.ignore()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        event.ignore()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        event.ignore()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        self.activated.emit(self.track_id)
-        event.accept()
+        event.ignore()
 
 
 class PlaylistEditor(QFrame):
@@ -338,9 +417,11 @@ class PlaylistEditor(QFrame):
         self.list_widget.files_dropped.connect(self.files_dropped)
         self.list_widget.lyrics_dropped.connect(self.lyrics_dropped)
         self.list_widget.order_changed.connect(self._sync_order)
+        self.list_widget.reorder_requested.connect(self._apply_drop_order)
         self.list_widget.remove_requested.connect(self.remove_selected)
         self.list_widget.toggle_requested.connect(self._toggle_selected)
         self.list_widget.details_requested.connect(self.track_double_clicked)
+        self.list_widget.context_menu_requested.connect(self._show_context_menu)
         self.list_widget.itemSelectionChanged.connect(self._update_action_state)
         self.list_widget.itemDoubleClicked.connect(lambda item: self.track_double_clicked.emit(item.data(Qt.ItemDataRole.UserRole)))
         service.playlist_changed.connect(self.refresh)
@@ -403,9 +484,6 @@ class PlaylistEditor(QFrame):
                 row = TrackRow(number, track, self.translator.language.value == "ko")
                 item.setSizeHint(row.sizeHint())
                 self.list_widget.addItem(item)
-                row.toggled.connect(self._queue_enabled_change)
-                row.clicked.connect(self._select_track_row)
-                row.activated.connect(self.track_double_clicked)
                 self.list_widget.setItemWidget(item, row)
                 if track.id in selected_ids:
                     item.setSelected(True)
@@ -428,10 +506,12 @@ class PlaylistEditor(QFrame):
                 ("음악 파일을 추가하거나 이 영역으로 끌어오세요." if korean
                  else "Add music files or drop them in this area.")
             )
+            # A search filter breaks safe reordering, but external audio/lyrics
+            # drops onto a specific track must still work.
             self.list_widget.setDragEnabled(not bool(query))
             self.list_widget.setDragDropMode(
                 QAbstractItemView.DragDropMode.DropOnly if query else
-                QAbstractItemView.DragDropMode.InternalMove
+                QAbstractItemView.DragDropMode.DragDrop
             )
             QTimer.singleShot(
                 0, lambda value=scroll_position: self.list_widget.verticalScrollBar().setValue(value)
@@ -465,32 +545,48 @@ class PlaylistEditor(QFrame):
             self._pending_order_ids = []
             self.service.reorder(values)
 
-    def _queue_enabled_change(self, track_id: str, enabled: bool) -> None:
-        """Avoid rebuilding and deleting a checkbox during its own signal."""
-        QTimer.singleShot(0, lambda: self.service.set_enabled(track_id, enabled))
+    def _apply_drop_order(self, ordered_ids: list) -> None:
+        """Commit a drag-and-drop reorder computed by the list widget."""
+        values = [str(identifier) for identifier in ordered_ids if identifier]
+        if values:
+            self.service.reorder(values)
 
-    def _select_track_row(self, track_id: str, modifiers: object) -> None:
-        target = next(
-            (self.list_widget.item(row) for row in range(self.list_widget.count())
-             if self.list_widget.item(row).data(Qt.ItemDataRole.UserRole) == track_id),
-            None,
-        )
-        if target is None:
+    def _show_context_menu(self, global_pos: QPoint) -> None:
+        """Right-click actions for the current selection."""
+        selected = self._selected_ids()
+        if not selected:
             return
-        keyboard_modifiers = Qt.KeyboardModifier(modifiers)
-        if keyboard_modifiers & Qt.KeyboardModifier.ShiftModifier:
-            anchor = max(0, self.list_widget.currentRow())
-            target_row = self.list_widget.row(target)
-            self.list_widget.clearSelection()
-            for row in range(min(anchor, target_row), max(anchor, target_row) + 1):
-                self.list_widget.item(row).setSelected(True)
-        elif keyboard_modifiers & Qt.KeyboardModifier.ControlModifier:
-            target.setSelected(not target.isSelected())
-        else:
-            self.list_widget.clearSelection()
-            target.setSelected(True)
-        self.list_widget.setCurrentItem(target)
-        self.list_widget.setFocus(Qt.FocusReason.MouseFocusReason)
+        korean = self.translator.language.value == "ko"
+        tracks = [track for track in self.service.tracks if track.id in selected]
+        menu = QMenu(self)
+        if len(selected) == 1:
+            details = menu.addAction("곡 정보/설정" if korean else "Track information/settings")
+            details.triggered.connect(lambda: self.track_double_clicked.emit(selected[0]))
+            up = menu.addAction("위로 이동" if korean else "Move up")
+            up.triggered.connect(lambda: self._move_selected(-1))
+            down = menu.addAction("아래로 이동" if korean else "Move down")
+            down.triggered.connect(lambda: self._move_selected(1))
+        duplicate = menu.addAction(
+            f"복제 ({len(selected)})" if korean and len(selected) > 1
+            else ("복제" if korean else "Duplicate")
+        )
+        duplicate.triggered.connect(self.duplicate_selected)
+        menu.addSeparator()
+        any_disabled = any(not track.enabled for track in tracks)
+        include_label = (
+            ("내보내기에 포함" if korean else "Include in export")
+            if any_disabled else
+            ("내보내기에서 제외" if korean else "Exclude from export")
+        )
+        toggle = menu.addAction(include_label)
+        toggle.triggered.connect(self._toggle_selected)
+        menu.addSeparator()
+        remove = menu.addAction(
+            f"삭제 ({len(selected)})" if korean and len(selected) > 1
+            else ("삭제" if korean else "Remove")
+        )
+        remove.triggered.connect(self.remove_selected)
+        menu.exec(global_pos)
 
     def _move_selected(self, direction: int) -> None:
         selected = self._selected_ids()

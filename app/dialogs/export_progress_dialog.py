@@ -14,8 +14,10 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -24,6 +26,12 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+)
+
+from app.services.export_storage_service import (
+    ExportStorageEstimate,
+    ExportStorageSnapshot,
+    format_bytes,
 )
 
 
@@ -151,7 +159,10 @@ class ExportProgressDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setModal(False)
-        self.setMinimumSize(680, 470)
+        # Grow the window to fit its content instead of letting QVBoxLayout
+        # crush word-wrapped labels and cards when a status line wraps to more
+        # rows or a collapsible section is shown.
+        self.resize(700, 620)
         self._started_at = monotonic()
         self._eta_estimator = ExportEtaEstimator(self._started_at)
         self._cancelling = False
@@ -169,6 +180,10 @@ class ExportProgressDialog(QDialog):
         self._export_output_path = ""
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
+        # Never shrink below what the current content needs; a wrapped status
+        # line or an expanded section enlarges the dialog rather than
+        # compressing the cards above it.
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         self.steps_heading = QLabel("Export steps")
         self.steps_heading.setObjectName("panelTitle")
         self.steps_widget = QFrame()
@@ -212,8 +227,59 @@ class ExportProgressDialog(QDialog):
         self.detail_label = QLabel("Preparing temporary files")
         self.detail_label.setObjectName("mutedLabel")
         self.detail_label.setWordWrap(True)
+        # Reserve two lines so a status message that wraps mid-export does not
+        # reflow the whole dialog on every progress tick.
+        self.detail_label.setMinimumHeight(
+            round(self.detail_label.fontMetrics().lineSpacing() * 2.2)
+        )
+        self.detail_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
         self.time_label = QLabel("Elapsed 00:00 · Calculating remaining time")
         self.time_label.setObjectName("mutedLabel")
+        self.storage_heading = QLabel("Storage use")
+        self.storage_heading.setObjectName("panelTitle")
+        self.storage_widget = QFrame()
+        self.storage_widget.setObjectName("settingsStatusCard")
+        self.storage_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed,
+        )
+        storage_layout = QGridLayout(self.storage_widget)
+        storage_layout.setContentsMargins(14, 10, 14, 10)
+        storage_layout.setHorizontalSpacing(14)
+        storage_layout.setVerticalSpacing(4)
+        self.storage_rows: dict[str, tuple[QLabel, QLabel]] = {}
+        for row, key in enumerate(("visuals", "audio", "effects", "processing", "output")):
+            name_label = QLabel()
+            name_label.setObjectName("mutedLabel")
+            value_label = QLabel("0 B")
+            value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.storage_rows[key] = (name_label, value_label)
+            storage_layout.addWidget(name_label, row, 0)
+            storage_layout.addWidget(value_label, row, 1)
+        self.storage_total_label = QLabel()
+        self.storage_total_label.setObjectName("panelTitle")
+        self.storage_total_value = QLabel("0 B")
+        self.storage_total_value.setObjectName("panelTitle")
+        self.storage_total_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        storage_layout.addWidget(self.storage_total_label, 5, 0)
+        storage_layout.addWidget(self.storage_total_value, 5, 1)
+        self.storage_estimate_hint = QLabel()
+        self.storage_estimate_hint.setObjectName("mutedLabel")
+        self.storage_estimate_hint.setWordWrap(True)
+        self.storage_disk_label = QLabel()
+        self.storage_disk_label.setObjectName("mutedLabel")
+        self.storage_disk_bar = QProgressBar()
+        self.storage_disk_bar.setRange(0, 1000)
+        self.storage_disk_bar.setTextVisible(False)
+        self.storage_disk_bar.setFixedHeight(8)
+        storage_layout.addWidget(self.storage_estimate_hint, 6, 0, 1, 2)
+        storage_layout.addWidget(self.storage_disk_label, 7, 0, 1, 2)
+        storage_layout.addWidget(self.storage_disk_bar, 8, 0, 1, 2)
+        storage_layout.setColumnStretch(0, 1)
+        self._storage_estimate: ExportStorageEstimate | None = None
         self.log_heading = QLabel("Activity")
         self.log_heading.setObjectName("panelTitle")
         self.log_output = QTextEdit()
@@ -224,6 +290,13 @@ class ExportProgressDialog(QDialog):
         self.log_output.document().setMaximumBlockCount(200)
         self.log_heading.hide()
         self.log_output.hide()
+        self.storage_button = QPushButton("Hide storage use")
+        self.storage_button.setCheckable(True)
+        self.storage_button.setChecked(True)
+        self.storage_button.setToolTip(
+            "Show or hide the live storage-use breakdown."
+        )
+        self.storage_button.toggled.connect(self._set_storage_visible)
         self.details_button = QPushButton("Show technical details")
         self.details_button.setCheckable(True)
         self.details_button.setToolTip(
@@ -248,6 +321,9 @@ class ExportProgressDialog(QDialog):
         layout.addLayout(progress_row)
         layout.addWidget(self.detail_label)
         layout.addWidget(self.time_label)
+        layout.addWidget(self.storage_button, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.storage_heading)
+        layout.addWidget(self.storage_widget)
         layout.addWidget(self.details_button, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self.log_heading)
         layout.addWidget(self.log_output, 1)
@@ -279,6 +355,13 @@ class ExportProgressDialog(QDialog):
             self.steps_heading.setText("내보내기 단계")
             self.export_settings_heading.setText("내보내기 설정")
             self.log_heading.setText("작업 내역")
+            self.storage_button.setText(
+                "저장 공간 사용량 숨기기" if self.storage_button.isChecked()
+                else "저장 공간 사용량 보기"
+            )
+            self.storage_button.setToolTip(
+                "실시간 저장 공간 사용량 표시를 켜거나 끕니다."
+            )
             self.details_button.setText(
                 "기술 정보 숨기기" if self.details_button.isChecked()
                 else "기술 정보 보기"
@@ -300,6 +383,13 @@ class ExportProgressDialog(QDialog):
             self.steps_heading.setText("Export steps")
             self.export_settings_heading.setText("Export settings")
             self.log_heading.setText("Activity")
+            self.storage_button.setText(
+                "Hide storage use" if self.storage_button.isChecked()
+                else "Show storage use"
+            )
+            self.storage_button.setToolTip(
+                "Show or hide the live storage-use breakdown."
+            )
             self.details_button.setText(
                 "Hide technical details" if self.details_button.isChecked()
                 else "Show technical details"
@@ -311,7 +401,89 @@ class ExportProgressDialog(QDialog):
             self.cancel_button.setText("Cancel")
             self.stage_label.setText("Preparing export")
             self.time_label.setText("Elapsed 00:00 · Calculating remaining time")
+        self._refresh_storage_labels()
         self._refresh_steps("Preparing visual frames")
+
+    def set_storage_estimate(self, estimate: ExportStorageEstimate) -> None:
+        """Show the expected peak and result range until live files take over."""
+        self._storage_estimate = estimate
+        self._refresh_storage_labels()
+
+    def update_storage_snapshot(self, snapshot: ExportStorageSnapshot) -> None:
+        """Apply one background disk-accounting sample without scanning in UI."""
+        values = dict(snapshot.categories)
+        values["output"] = snapshot.output_in_progress
+        for key, (_name, value) in self.storage_rows.items():
+            value.setText(format_bytes(values.get(key, 0)))
+        self.storage_total_value.setText(format_bytes(snapshot.temporary_total))
+        if snapshot.disk_total > 0:
+            used = 1.0 - snapshot.disk_free / snapshot.disk_total
+            self.storage_disk_bar.setValue(round(max(0.0, min(1.0, used)) * 1000))
+            self.storage_disk_label.setText(
+                f"컴퓨터 남은 저장 공간: {format_bytes(snapshot.disk_free)} / {format_bytes(snapshot.disk_total)}"
+                if self._korean else
+                f"Computer storage free: {format_bytes(snapshot.disk_free)} / {format_bytes(snapshot.disk_total)}"
+            )
+        else:
+            self.storage_disk_bar.setValue(0)
+
+    def _refresh_storage_labels(self) -> None:
+        names = (
+            {
+                "visuals": "화면·프레임 파일",
+                "audio": "오디오 작업 파일",
+                "effects": "음악 반응 효과 파일",
+                "processing": "기타 작업 파일",
+                "output": "생성 중인 결과 영상",
+            }
+            if self._korean else
+            {
+                "visuals": "Visual/frame files",
+                "audio": "Audio working files",
+                "effects": "Music-reactive effect files",
+                "processing": "Other working files",
+                "output": "Result video in progress",
+            }
+        )
+        self.storage_heading.setText(
+            "저장 공간 사용량" if self._korean else "Storage use"
+        )
+        for key, (name, _value) in self.storage_rows.items():
+            name.setText(names[key])
+        self.storage_total_label.setText(
+            "내보내기 작업 중 사용된 파일 합계"
+            if self._korean else "Total files used by this export"
+        )
+        if self._storage_estimate is not None:
+            estimate = self._storage_estimate
+            self.storage_estimate_hint.setText(
+                (
+                    f"예상 최대 약 {format_bytes(estimate.peak_temporary)}"
+                    f" · 결과 영상 약 {format_bytes(estimate.result_low)}"
+                    f" ~ {format_bytes(estimate.result_high)}"
+                )
+                if self._korean else
+                (
+                    f"Estimated peak ~{format_bytes(estimate.peak_temporary)}"
+                    f" · result ~{format_bytes(estimate.result_low)}"
+                    f"–{format_bytes(estimate.result_high)}"
+                )
+            )
+            self.storage_widget.setToolTip(
+                (
+                    f"예상 최대 작업 공간 약 {format_bytes(estimate.peak_temporary)}\n"
+                    f"예상 결과 영상 {format_bytes(estimate.result_low)}"
+                    f" ~ {format_bytes(estimate.result_high)}\n"
+                    "실제 값은 파일이 생성·삭제되면서 달라집니다."
+                )
+                if self._korean else
+                (
+                    f"Estimated peak working space ~{format_bytes(estimate.peak_temporary)}\n"
+                    f"Estimated result {format_bytes(estimate.result_low)}"
+                    f"–{format_bytes(estimate.result_high)}\n"
+                    "Live values change as working files are created and removed."
+                )
+            )
 
     def set_cancel_confirmation(self, title: str, message: str) -> None:
         """Customize confirmation text when the dialog tracks a non-export task."""
@@ -389,6 +561,22 @@ class ExportProgressDialog(QDialog):
             self._last_log = display_message
         remaining = self._eta_estimator.update(stage, fraction, now)
         self._update_time_label(remaining, elapsed)
+
+    def _set_storage_visible(self, visible: bool) -> None:
+        """Let the user collapse the storage-use card when they don't need it."""
+        self.storage_heading.setVisible(visible)
+        self.storage_widget.setVisible(visible)
+        if self.layout() is not None:
+            self.layout().invalidate()
+            self.layout().activate()
+        if self._korean:
+            self.storage_button.setText(
+                "저장 공간 사용량 숨기기" if visible else "저장 공간 사용량 보기"
+            )
+        else:
+            self.storage_button.setText(
+                "Hide storage use" if visible else "Show storage use"
+            )
 
     def _set_details_visible(self, visible: bool) -> None:
         """Keep implementation terminology optional for ordinary users."""

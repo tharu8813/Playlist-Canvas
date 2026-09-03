@@ -40,6 +40,7 @@ ENCODING_PRESETS = (
 AUDIO_BITRATES = ("128k", "192k", "256k", "320k")
 PREVIEW_BACKENDS = ("gpu_layers", "cpu")
 EXPORT_NOTIFICATION_MODES = ("always", "unfocused")
+LYRICS_AUTO_ATTACH_MODES = ("always", "ask", "never")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +67,11 @@ class AppSettings:
     export_notify_encode: bool = True
     export_notify_complete: bool = True
     export_notify_failures: bool = True
+    # How a same-name or similar-name lyric file next to an imported song is
+    # handled: "always" attaches exact matches automatically, "ask" confirms
+    # first, "never" disables the feature. Similar-name matches always prompt
+    # unless the mode is "never".
+    lyrics_auto_attach_mode: str = "always"
     # Per-export dimensions derived from the active project ratio. They are not
     # persisted as app-wide defaults because every project can have a different ratio.
     render_width: int = 0
@@ -156,6 +162,11 @@ class AppSettingsService(QObject):
             export_notify_encode=bool(settings.export_notify_encode),
             export_notify_complete=bool(settings.export_notify_complete),
             export_notify_failures=bool(settings.export_notify_failures),
+            lyrics_auto_attach_mode=(
+                settings.lyrics_auto_attach_mode
+                if settings.lyrics_auto_attach_mode in LYRICS_AUTO_ATTACH_MODES
+                else "always"
+            ),
         )
         self._settings.beginGroup("export")
         self._settings.setValue("ffmpeg_path", normalized.ffmpeg_path)
@@ -175,6 +186,11 @@ class AppSettingsService(QObject):
             "smooth_scroll_duration_ms", normalized.smooth_scroll_duration_ms
         )
         self._settings.setValue("preview_backend", normalized.preview_backend)
+        self._settings.endGroup()
+        self._settings.beginGroup("content_import")
+        self._settings.setValue(
+            "lyrics_auto_attach_mode", normalized.lyrics_auto_attach_mode
+        )
         self._settings.endGroup()
         self._settings.beginGroup("export_notifications")
         self._settings.setValue("enabled", normalized.export_notifications_enabled)
@@ -227,6 +243,16 @@ class AppSettingsService(QObject):
         self._settings.endGroup()
         if values.preview_backend not in PREVIEW_BACKENDS:
             values = replace(values, preview_backend="gpu_layers")
+        self._settings.beginGroup("content_import")
+        values = replace(
+            values,
+            lyrics_auto_attach_mode=str(
+                self._settings.value("lyrics_auto_attach_mode", "always")
+            ),
+        )
+        self._settings.endGroup()
+        if values.lyrics_auto_attach_mode not in LYRICS_AUTO_ATTACH_MODES:
+            values = replace(values, lyrics_auto_attach_mode="always")
         self._settings.beginGroup("export_notifications")
         values = replace(
             values,

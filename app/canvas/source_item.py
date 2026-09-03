@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 
 from app.models.source import Source, SourceType
-from app.preview.text_template import expand_sample_template
+from app.preview.text_template import expand_placeholder_labels
 from app.utils.font_loader import load_application_font
 from app.utils.image_loader import load_pixmap
 from app.utils.level_meter_painter import paint_level_meter
@@ -1159,21 +1159,22 @@ class SourceItem(QGraphicsObject):
     })
 
     def _render_text(self) -> str:
-        """Return the text to paint, expanding tokens under the sample preview."""
+        """Return the text to paint, showing known tokens as ``(label)`` on canvas.
+
+        Preview and export set ``source.text`` to the resolved value before
+        painting, so any ``%token%`` reaching here belongs to the live editing
+        canvas and is displayed as a readable placeholder instead.
+        """
         text = self.source.text
-        scene = self.scene()
-        if (scene is None or not getattr(scene, "sample_data_mode", False)
-                or self.source.source_type not in self._SAMPLE_TEXT_TYPES):
+        if self.source.source_type not in self._SAMPLE_TEXT_TYPES:
             return text
-        track = getattr(scene, "sample_track", None)
-        if track is None:
-            return text
-        if self.source.source_type is SourceType.LYRICS:
-            return str(getattr(scene, "sample_lyric", "") or text)
         template = text
         if self.source.source_type is SourceType.TIME and "%" not in text:
             template = "%track_current_time%"
-        return expand_sample_template(template, track)
+        if "%" not in template:
+            return text
+        korean = bool(getattr(self.scene(), "placeholder_labels_korean", False))
+        return expand_placeholder_labels(template, korean)
 
     def _draw_text(
         self, painter: QPainter, rect: QRectF, flags: int, text: str,
@@ -1522,6 +1523,25 @@ class SourceItem(QGraphicsObject):
                 )
             transition = max(0.0, min(1.0, self._subtitle_transition_progress))
             transition_style = self.source.subtitle_animation
+            is_animated = transition_style in {"glow", "rise"}
+            # Two deliberately different entrances.
+            #  * glow: the line materialises in place — alpha 0, a small lift,
+            #    a subtle upscale, and a soft blur that sharpens.
+            #  * rise: no blur, no scale; a crisp, longer upward slide with a
+            #    quicker partial fade.
+            if transition_style == "rise":
+                enter_alpha, enter_offset, enter_scale, enter_blur = 0.28, 22.0, 1.0, 0.0
+            else:  # glow (also the migrated default for older styles)
+                enter_alpha, enter_offset, enter_scale, enter_blur = 0.0, 4.0, 0.955, 7.0
+            steady_previous_alpha = max(
+                0.05, min(0.9, self.source.subtitle_previous_opacity),
+            )
+            # When no previous line is kept on screen, the outgoing cue leaves
+            # entirely — fade it out over the transition instead of cutting it.
+            leaving_previous_target = (
+                steady_previous_alpha
+                if self.source.subtitle_context_lines > 0 else 0.0
+            )
             for index, line in enumerate(lines):
                 is_current = (
                     has_current_line
@@ -1529,26 +1549,11 @@ class SourceItem(QGraphicsObject):
                 )
                 is_previous = has_current_line and index < current_line
                 line_color = QColor(self.source.outline_color)
-                animated_styles = {
-                    "fade", "scroll_up", "slide_up", "scroll_down", "pop",
-                    "apple_music", "spotify", "blur_reveal",
-                }
-                if is_current and transition_style in animated_styles:
-                    start_alpha = {
-                        "fade": 0.0,
-                        "scroll_up": 0.58,
-                        "slide_up": 0.58,
-                        "scroll_down": 0.58,
-                        "pop": 0.48,
-                        "apple_music": 0.52,
-                        "spotify": 0.70,
-                        "blur_reveal": 0.38,
-                    }.get(transition_style, 1.0)
-                    line_color.setAlphaF(start_alpha + (1.0 - start_alpha) * transition)
-                elif not is_current:
-                    previous_alpha = max(
-                        0.05, min(0.9, self.source.subtitle_previous_opacity),
+                if is_current and is_animated:
+                    line_color.setAlphaF(
+                        enter_alpha + (1.0 - enter_alpha) * transition
                     )
+                elif not is_current:
                     immediate_previous = (
                         is_previous
                         and self._subtitle_previous_line_count > 0
@@ -1556,14 +1561,15 @@ class SourceItem(QGraphicsObject):
                         <= index < current_line
                     )
                     # Do not demote the former current cue in a single frame.
-                    # Cross-fade its emphasis while the complete lyric stack
-                    # glides toward the new anchored position.
-                    line_alpha = previous_alpha
+                    # Cross-fade its emphasis toward its resting alpha, or toward
+                    # zero when it is scrolling out of the frame.
                     if immediate_previous and transition < 1.0:
                         line_alpha = (
-                            previous_alpha
-                            + (1.0 - previous_alpha) * (1.0 - transition)
+                            leaving_previous_target
+                            + (1.0 - leaving_previous_target) * (1.0 - transition)
                         )
+                    else:
+                        line_alpha = steady_previous_alpha
                     line_color.setAlphaF(line_alpha)
                     blur_radius = (
                         max(
@@ -1587,24 +1593,9 @@ class SourceItem(QGraphicsObject):
                 lyric_font = QFont(self._lyric_fonts["current" if is_current else "regular"])
                 current_y = y
                 line_transform_saved = False
-                if is_current and transition_style in animated_styles:
-                    reveal_offset = {
-                        "scroll_up": 10.0,
-                        "slide_up": 10.0,
-                        "scroll_down": -10.0,
-                        "pop": 5.0,
-                        "apple_music": 6.0,
-                        "spotify": 3.0,
-                        "blur_reveal": 4.0,
-                    }.get(transition_style, 0.0) * (1.0 - transition)
-                    current_y += reveal_offset
-                    start_scale = {
-                        "pop": 0.94,
-                        "apple_music": 0.985,
-                        "spotify": 0.995,
-                        "blur_reveal": 0.99,
-                    }.get(transition_style, 1.0)
-                    line_scale = start_scale + (1.0 - start_scale) * transition
+                if is_current and is_animated:
+                    current_y += enter_offset * (1.0 - transition)
+                    line_scale = enter_scale + (1.0 - enter_scale) * transition
                     if line_scale < 0.9999:
                         line_center = QPointF(
                             rect.center().x(), current_y + line_height / 2.0,
@@ -1614,11 +1605,7 @@ class SourceItem(QGraphicsObject):
                         painter.scale(line_scale, line_scale)
                         painter.translate(-line_center)
                         line_transform_saved = True
-                    reveal_blur = {
-                        "apple_music": 2.0,
-                        "spotify": 0.0,
-                        "blur_reveal": 4.5,
-                    }.get(transition_style, 0.0) * (1.0 - transition)
+                    reveal_blur = enter_blur * (1.0 - transition)
                     if reveal_blur >= 0.75:
                         ghost = QColor(line_color)
                         ghost.setAlpha(max(8, round(line_color.alpha() * 0.18)))

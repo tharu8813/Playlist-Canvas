@@ -43,6 +43,22 @@ class Shadow:
     opacity: float = 0.35
 
 
+SUBTITLE_ANIMATIONS = ("glow", "rise", "none")
+
+# Projects saved before the lyric transitions were reduced to two distinct
+# styles used these identifiers. Map each onto its closest survivor.
+_LEGACY_SUBTITLE_ANIMATIONS = {
+    "apple_music": "glow",
+    "blur_reveal": "glow",
+    "fade": "glow",
+    "spotify": "rise",
+    "scroll_up": "rise",
+    "scroll_down": "rise",
+    "slide_up": "rise",
+    "pop": "rise",
+}
+
+
 @dataclass(slots=True)
 class Gradient:
     """Simple two-stop linear gradient definition."""
@@ -127,7 +143,7 @@ class Source:
     visualizer_curve: float = 0.9
     subtitle_fallback: str = "Lyrics are not available for this track."
     subtitle_style: str = "karaoke"
-    subtitle_animation: str = "apple_music"
+    subtitle_animation: str = "glow"
     subtitle_animation_duration: float = 0.36
     subtitle_context_lines: int = 1
     subtitle_next_lines: int = 1
@@ -233,6 +249,12 @@ class Source:
             raise ValueError("Project sources must be objects.")
         source_data = data.copy()
         source_data["source_type"] = SourceType(source_data["source_type"])
+        source_data["subtitle_animation"] = _LEGACY_SUBTITLE_ANIMATIONS.get(
+            source_data.get("subtitle_animation"),
+            source_data.get("subtitle_animation", "glow"),
+        )
+        if source_data["subtitle_animation"] not in SUBTITLE_ANIMATIONS:
+            source_data["subtitle_animation"] = "glow"
         legacy_animation_duration = source_data.get("animation_duration", 0.45)
         source_data.setdefault("animation_in_duration", legacy_animation_duration)
         source_data.setdefault("animation_out_duration", legacy_animation_duration)

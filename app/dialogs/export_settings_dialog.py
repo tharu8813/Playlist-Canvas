@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -16,9 +17,11 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QSizePolicy,
     QSpinBox,
     QVBoxLayout,
@@ -34,6 +37,7 @@ from app.services.app_settings_service import (
 )
 from app.utils.i18n import Language, Translator
 from app.services.video_encoder_service import AUTO_VIDEO_ENCODER
+from app.services.export_storage_service import estimate_export_storage, format_bytes
 
 
 class ExportSettingsDialog(QDialog):
@@ -49,11 +53,13 @@ class ExportSettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, track_count: int, duration_seconds: float,
                  translator: Translator, default_output_path: str | Path,
                  parent: QWidget | None = None,
-                 canvas_size: tuple[int, int] | None = None) -> None:
+                 canvas_size: tuple[int, int] | None = None,
+                 estimated_layer_count: int = 1) -> None:
         super().__init__(parent)
         self.translator = translator
         self._base_settings = settings
         self.canvas_size = canvas_size
+        self.estimated_layer_count = max(1, int(estimated_layer_count))
         self._applying_quality_profile = False
         self.setMinimumWidth(760)
         self.setSizeGripEnabled(True)
@@ -65,6 +71,15 @@ class ExportSettingsDialog(QDialog):
         self.workload_label = QLabel()
         self.workload_label.setObjectName("mutedLabel")
         self.workload_label.setWordWrap(True)
+        self.storage_estimate_label = QLabel()
+        self.storage_estimate_label.setObjectName("infoCallout")
+        self.storage_estimate_label.setWordWrap(True)
+        self.storage_disk_label = QLabel()
+        self.storage_disk_label.setObjectName("mutedLabel")
+        self.storage_disk_bar = QProgressBar()
+        self.storage_disk_bar.setRange(0, 1000)
+        self.storage_disk_bar.setTextVisible(False)
+        self.storage_disk_bar.setFixedHeight(8)
         self.resolution_combo = QComboBox()
         self._populate_resolutions(settings)
         self.fps_combo = QComboBox()
@@ -139,7 +154,17 @@ class ExportSettingsDialog(QDialog):
         output_layout = QHBoxLayout(output_group)
         output_layout.addWidget(self.output_path_edit, 1)
         output_layout.addWidget(self.output_browse_button)
+        storage_group = QGroupBox()
+        storage_layout = QVBoxLayout(storage_group)
+        storage_layout.setSpacing(6)
+        storage_layout.addWidget(self.storage_estimate_label)
+        storage_layout.addWidget(self.storage_disk_label)
+        storage_layout.addWidget(self.storage_disk_bar)
         layout = QVBoxLayout(self)
+        # Keep the dialog at least as tall as its content so showing the
+        # advanced section or a multi-line estimate grows the window instead
+        # of compressing the group boxes above it.
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.addWidget(self.summary_label)
         layout.addWidget(output_group)
         main_columns = QHBoxLayout()
@@ -150,6 +175,7 @@ class ExportSettingsDialog(QDialog):
             quality_group, 1, Qt.AlignmentFlag.AlignTop,
         )
         layout.addLayout(main_columns)
+        layout.addWidget(storage_group)
         layout.addWidget(advanced_group)
         footer = QHBoxLayout()
         footer.addWidget(self.save_default_check)
@@ -161,7 +187,7 @@ class ExportSettingsDialog(QDialog):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum,
         )
         for section in (
-            output_group, render_group, quality_group, advanced_group,
+            output_group, render_group, quality_group, storage_group, advanced_group,
         ):
             section.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum,
@@ -170,6 +196,7 @@ class ExportSettingsDialog(QDialog):
         self.render_group = render_group
         self.advanced_group = advanced_group
         self.output_group = output_group
+        self.storage_group = storage_group
         self.track_count = track_count
         self.duration_seconds = duration_seconds
         initial_profile = self._matching_quality_profile(
@@ -193,6 +220,7 @@ class ExportSettingsDialog(QDialog):
             self._update_workload_hint
         )
         self.fps_combo.currentIndexChanged.connect(self._update_workload_hint)
+        self.output_path_edit.textChanged.connect(self._update_storage_estimate)
         self.setTabOrder(self.output_path_edit, self.output_browse_button)
         self.setTabOrder(self.output_browse_button, self.resolution_combo)
         self.setTabOrder(self.resolution_combo, self.fps_combo)
@@ -361,6 +389,58 @@ class ExportSettingsDialog(QDialog):
             if korean else
             f"Estimated workload: {level} · {width} × {height}, {fps} FPS\n{detail}"
         )
+        self._update_storage_estimate()
+
+    def _update_storage_estimate(self, _value: object = None) -> None:
+        """Refresh the size range and destination-drive headroom."""
+        data = self.resolution_combo.currentData()
+        if not isinstance(data, tuple) or len(data) < 2:
+            return
+        try:
+            fps = int(self.fps_combo.currentText())
+        except ValueError:
+            fps = 30
+        estimate = estimate_export_storage(
+            int(data[0]), int(data[1]), fps, self.duration_seconds,
+            self.crf_spin.value(), self.audio_bitrate_combo.currentText(),
+            self.estimated_layer_count,
+        )
+        korean = self.translator.language is Language.KOREAN
+        self.storage_estimate_label.setText(
+            (
+                f"화면·프레임 준비: 약 {format_bytes(estimate.visual_files)}\n"
+                f"오디오·부가 작업: 약 {format_bytes(estimate.processing_files)}\n"
+                f"예상 결과 영상: 약 {format_bytes(estimate.result_low)}"
+                f" ~ {format_bytes(estimate.result_high)}\n"
+                f"작업 중 최대 필요 공간: 약 {format_bytes(estimate.peak_temporary)}"
+            )
+            if korean else
+            (
+                f"Visual/frame preparation: ~{format_bytes(estimate.visual_files)}\n"
+                f"Audio/additional processing: ~{format_bytes(estimate.processing_files)}\n"
+                f"Estimated result: ~{format_bytes(estimate.result_low)}"
+                f"–{format_bytes(estimate.result_high)}\n"
+                f"Estimated peak working space: ~{format_bytes(estimate.peak_temporary)}"
+            )
+        )
+        raw_path = self.output_path_edit.text().strip()
+        parent = Path(raw_path).expanduser().parent if raw_path else Path.cwd()
+        try:
+            usage = shutil.disk_usage(parent)
+        except OSError:
+            self.storage_disk_label.setText(
+                "출력 드라이브의 남은 공간을 확인할 수 없습니다."
+                if korean else "Output drive space is unavailable."
+            )
+            self.storage_disk_bar.setValue(0)
+            return
+        used_fraction = 1.0 - usage.free / max(1, usage.total)
+        self.storage_disk_bar.setValue(round(used_fraction * 1000))
+        self.storage_disk_label.setText(
+            f"출력 드라이브 여유 공간: {format_bytes(usage.free)} / {format_bytes(usage.total)}"
+            if korean else
+            f"Output drive free: {format_bytes(usage.free)} / {format_bytes(usage.total)}"
+        )
 
     @property
     def app_settings(self) -> AppSettings:
@@ -510,6 +590,9 @@ class ExportSettingsDialog(QDialog):
         self.render_group.setTitle("기본 영상 설정" if korean else "Basic video settings")
         self.advanced_group.setTitle("고급 인코딩 설정" if korean else "Advanced encoding settings")
         self.output_group.setTitle("출력 파일" if korean else "Output file")
+        self.storage_group.setTitle(
+            "예상 저장 공간" if korean else "Estimated storage"
+        )
         self.quality_mode_label.setText("용도" if korean else "Purpose")
         self.advanced_check.setText(
             "고급 설정 직접 조정" if korean else "Adjust advanced settings"

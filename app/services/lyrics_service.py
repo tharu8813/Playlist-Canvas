@@ -2,12 +2,76 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 import re
 from pathlib import Path
+
+LYRICS_EXTENSIONS = (".lrc", ".srt", ".vtt")
+_SIMILAR_RATIO = 0.72
 
 
 class LyricsError(ValueError):
     """Raised when a lyric file cannot be read as LRC or SRT."""
+
+
+@dataclass(frozen=True, slots=True)
+class LyricsSidecar:
+    """A lyric file discovered next to an audio file during import."""
+
+    path: Path
+    exact: bool
+
+
+def _normalized_stem(stem: str) -> str:
+    """Reduce a file stem so track-number prefixes and copy suffixes don't matter."""
+    text = stem.casefold()
+    text = re.sub(r"^\s*\d{1,3}\s*[-_.)\]]*\s*", "", text)  # "01 - ", "12."
+    text = re.sub(r"\s*[(\[][^)\]]*[)\]]\s*$", "", text)  # " (1)", " [live]"
+    text = re.sub(r"\s*-\s*copy\s*$", "", text)
+    return re.sub(r"[^0-9a-z가-힣]+", "", text)
+
+
+def find_sidecar_lyrics(
+    audio_path: str | Path,
+) -> tuple[list[LyricsSidecar], list[LyricsSidecar]]:
+    """Return (exact-stem matches, similar-stem matches) beside an audio file.
+
+    Exact matches share the file stem (case-insensitively); ``.lrc`` is listed
+    first. Similar matches survive normalization of track numbers and copy
+    markers, or score above a fuzzy-ratio threshold, and never include an
+    exact match.
+    """
+    audio = Path(audio_path)
+    folder = audio.parent
+    try:
+        entries = sorted(folder.iterdir())
+    except OSError:
+        return [], []
+    exact_stem = audio.stem.casefold()
+    target = _normalized_stem(audio.stem)
+    exact: list[LyricsSidecar] = []
+    scored_similar: list[tuple[float, LyricsSidecar]] = []
+    for entry in entries:
+        if entry.suffix.lower() not in LYRICS_EXTENSIONS or not entry.is_file():
+            continue
+        if entry.stem.casefold() == exact_stem:
+            exact.append(LyricsSidecar(entry, True))
+            continue
+        candidate = _normalized_stem(entry.stem)
+        if not candidate or not target:
+            continue
+        if candidate == target:
+            scored_similar.append((1.0, LyricsSidecar(entry, False)))
+            continue
+        ratio = SequenceMatcher(None, target, candidate).ratio()
+        if ratio >= _SIMILAR_RATIO:
+            scored_similar.append((ratio, LyricsSidecar(entry, False)))
+    exact.sort(
+        key=lambda sidecar: LYRICS_EXTENSIONS.index(sidecar.path.suffix.lower())
+    )
+    scored_similar.sort(key=lambda item: item[0], reverse=True)
+    return exact, [sidecar for _ratio, sidecar in scored_similar]
 
 
 class LyricsService:

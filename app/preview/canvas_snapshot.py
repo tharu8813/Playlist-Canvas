@@ -661,8 +661,38 @@ class CanvasSnapshot:
                 lyric = LyricsService.decode_line_breaks(
                     lyric_cue.get("text", "") if lyric_cue else ""
                 )
+                transitioning = (
+                    cue_index is not None
+                    and active_cue_index == cue_index
+                    and lyric_cue is not None
+                    and source.subtitle_animation != "none"
+                )
+                eased = 1.0
+                if transitioning:
+                    cue_start = (
+                        float(lyric_cue.get("start", lyric_elapsed))
+                        - effective_lyric_offset
+                    )
+                    progress = max(0.0, min(1.0, (
+                        (elapsed_seconds - cue_start)
+                        / max(0.05, source.subtitle_animation_duration)
+                    )))
+                    # A symmetric ease keeps the lyric stack from jumping most of
+                    # its distance in the first few frames. The two styles differ
+                    # in how each line is painted, not in this scroll timing.
+                    eased = ease_in_out_cubic(progress)
+                context = max(0, source.subtitle_context_lines)
+                # During a transition with no context line kept on screen, show
+                # the outgoing cue for one extra slot so it can fade and scroll
+                # out instead of vanishing in a single frame.
+                extra_leading = (
+                    1 if (
+                        transitioning and eased < 1.0
+                        and context == 0 and cue_index and cue_index > 0
+                    ) else 0
+                )
                 if cue_index is not None:
-                    first = max(0, cue_index - max(0, source.subtitle_context_lines))
+                    first = max(0, cue_index - context - extra_leading)
                     last = min(len(track.lyrics), cue_index + max(0, source.subtitle_next_lines) + 1)
                     blocks = [
                         LyricsService.decode_line_breaks(cue.get("text", "")).strip()
@@ -695,25 +725,14 @@ class CanvasSnapshot:
                     source.outline_color = "#FFFFFF"
                 elif source.subtitle_style == "neon":
                     source.outline_color = "#72E8FF"
-                if (active_cue_index == cue_index and lyric_cue
-                        and source.subtitle_animation != "none"):
-                    cue_start = (
-                        float(lyric_cue.get("start", lyric_elapsed))
-                        - effective_lyric_offset
-                    )
-                    progress = max(0.0, min(
-                        1.0, (elapsed_seconds - cue_start) / max(0.05, source.subtitle_animation_duration)
-                    ))
-                    # A symmetric ease prevents the lyric stack from jumping
-                    # most of its distance during the first few frames.
-                    eased = ease_in_out_cubic(progress)
+                if transitioning:
                     graphics_item._subtitle_transition_progress = eased
                     # Keep the lyric card/background stable. Only its text layout
                     # moves, so context lines no longer pulse and fade each time a
                     # cue changes. A full previous-cue height compensates for the
                     # new anchored layout and produces a continuous upward scroll.
                     previous_line_count = 0
-                    if cue_index > 0 and source.subtitle_context_lines > 0:
+                    if cue_index and cue_index > 0 and (context > 0 or extra_leading):
                         previous_text = LyricsService.decode_line_breaks(
                             track.lyrics[cue_index - 1].get("text", "")
                         )

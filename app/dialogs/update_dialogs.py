@@ -20,10 +20,15 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.update_service import ReleaseInfo
+from app.utils.release_notes_html import render_release_notes_html
 
 
 class UpdateAvailableDialog(QDialog):
-    """Show the complete release description before the user chooses to update."""
+    """Show the complete release description before the user chooses to update.
+
+    With ``up_to_date`` the same view doubles as a "what changed in this
+    version" screen for the manual update check when no newer release exists.
+    """
 
     def __init__(
         self,
@@ -32,45 +37,73 @@ class UpdateAvailableDialog(QDialog):
         korean: bool,
         automatic: bool,
         parent: QWidget | None = None,
+        *,
+        up_to_date: bool = False,
     ) -> None:
         super().__init__(parent)
         self.release = release
+        self.up_to_date = up_to_date
         self.setWindowTitle("Playlist Canvas 업데이트" if korean else "Playlist Canvas update")
         self.setMinimumSize(620, 460)
         self.resize(680, 520)
 
-        title = QLabel(
-            f"새 버전 {release.version}을 사용할 수 있습니다."
-            if korean else f"Playlist Canvas {release.version} is available."
-        )
+        if up_to_date:
+            title = QLabel(
+                f"이미 최신 버전({current_version})을 사용하고 있습니다."
+                if korean else
+                f"Playlist Canvas {current_version} is already up to date."
+            )
+        else:
+            title = QLabel(
+                f"새 버전 {release.version}을 사용할 수 있습니다."
+                if korean else f"Playlist Canvas {release.version} is available."
+            )
         title.setObjectName("panelTitle")
+        title.setWordWrap(True)
         versions = QLabel(
-            f"현재 버전 {current_version}  →  최신 버전 {release.version}"
-            if korean else f"Current {current_version}  →  Latest {release.version}"
+            (
+                f"현재 버전 {current_version}"
+                if korean else f"Current version {current_version}"
+            )
+            if up_to_date else
+            (
+                f"현재 버전 {current_version}  →  최신 버전 {release.version}"
+                if korean else f"Current {current_version}  →  Latest {release.version}"
+            )
         )
         versions.setObjectName("mutedLabel")
-        heading = QLabel("최신 릴리즈 내용" if korean else "Latest release notes")
+        heading = QLabel(
+            (
+                "이번 버전의 변경 사항" if korean else "What changed in this version"
+            )
+            if up_to_date else
+            ("최신 릴리즈 내용" if korean else "Latest release notes")
+        )
         heading.setObjectName("panelTitle")
         self.notes = QTextBrowser()
         self.notes.setOpenExternalLinks(True)
-        self.notes.setMarkdown(release.body or (
-            "릴리즈 설명이 없습니다." if korean else "No release notes were provided."
-        ))
+        dark = self.notes.palette().base().color().lightness() < 128
+        self.notes.setHtml(render_release_notes_html(release.body, korean, dark))
 
         self.buttons = QDialogButtonBox()
         self.update_button = QPushButton(
             "다운로드 및 업데이트" if korean else "Download and update"
         )
         self.update_button.setObjectName("primaryButton")
-        self.update_button.setEnabled(release.can_install)
+        self.update_button.setEnabled(release.can_install and not up_to_date)
         self.update_button.clicked.connect(self.accept)
         dismiss_text = (
             "이 버전은 다시 알리지 않기" if korean else "Do not remind me about this version"
-        ) if automatic else ("닫기" if korean else "Close")
+        ) if automatic and not up_to_date else ("닫기" if korean else "Close")
         self.dismiss_button = QPushButton(dismiss_text)
         self.dismiss_button.clicked.connect(self.reject)
         self.buttons.addButton(self.dismiss_button, QDialogButtonBox.ButtonRole.RejectRole)
-        self.buttons.addButton(self.update_button, QDialogButtonBox.ButtonRole.AcceptRole)
+        if not up_to_date:
+            self.buttons.addButton(
+                self.update_button, QDialogButtonBox.ButtonRole.AcceptRole,
+            )
+        else:
+            self.update_button.hide()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
@@ -80,7 +113,7 @@ class UpdateAvailableDialog(QDialog):
         layout.addSpacing(4)
         layout.addWidget(heading)
         layout.addWidget(self.notes, 1)
-        if not release.can_install:
+        if not release.can_install and not up_to_date:
             warning = QLabel(
                 "이 릴리즈에는 SHA-256으로 검증 가능한 Playlist Canvas Setup 파일이 없습니다."
                 if korean else
