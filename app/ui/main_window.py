@@ -7052,6 +7052,10 @@ class MainWindow(QMainWindow):
             #inspectorPropertyTabs QTabBar::tab {{ background: {colors['button']}; color: {colors['muted']}; border: 1px solid {colors['border']}; padding: 7px 11px; margin-right: 2px; }}
             #inspectorPropertyTabs QTabBar::tab:selected {{ background: {colors['panel']}; color: {colors['text']}; border-bottom-color: {colors['panel']}; font-weight: 700; }}
             #inspectorPropertyTabs QTabBar::tab:hover:!selected {{ background: {colors['hover']}; color: {colors['text']}; }}
+            #inspectorSectionHeader {{ background: {colors['button']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 7px; padding: 6px 10px; text-align: left; font-weight: 700; font-size: 11px; }}
+            #inspectorSectionHeader:hover {{ background: {colors['hover']}; }}
+            #inspectorSectionHeader:checked {{ border-bottom-left-radius: 0; border-bottom-right-radius: 0; }}
+            #inspectorSectionBody {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-top: 0; border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }}
             #inspectorEmptyState {{ color: {colors['muted']}; font-size: 14px; background: {colors['panel']}; }}
             QHeaderView::section {{ background: {colors['alternate']}; color: {colors['text']}; border: 0; border-bottom: 1px solid {colors['border']}; padding: 5px; }}
             QTreeWidget::item:selected, QListWidget::item:selected {{ background: #1685D1; color: #FFFFFF; border-radius: 5px; }}

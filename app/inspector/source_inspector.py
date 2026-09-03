@@ -36,6 +36,52 @@ from app.utils.i18n import Translator
 from app.widgets.token_text_editor import TokenLineEdit
 
 
+class _CollapsibleGroup(QWidget):
+    """A titled, collapsible sub-section that holds a small form of fields.
+
+    Used to break a crowded property tab (a visualizer or track list can expose
+    a dozen-plus fields) into a few labelled, foldable groups.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("inspectorSection")
+        self.field_keys: list[str] = []
+        self._title = ""
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 8, 0, 0)
+        outer.setSpacing(0)
+        self.header = QPushButton()
+        self.header.setObjectName("inspectorSectionHeader")
+        self.header.setCheckable(True)
+        self.header.setChecked(True)
+        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header.toggled.connect(self._on_toggled)
+        outer.addWidget(self.header)
+        self._body = QWidget()
+        self._body.setObjectName("inspectorSectionBody")
+        self.form = QFormLayout(self._body)
+        self.form.setContentsMargins(9, 8, 2, 2)
+        self.form.setSpacing(7)
+        outer.addWidget(self._body)
+
+    def set_title(self, title: str) -> None:
+        self._title = title
+        self._sync_header()
+
+    def add_field(self, label: QLabel, widget: QWidget) -> None:
+        self.form.addRow(label, widget)
+
+    def _on_toggled(self, expanded: bool) -> None:
+        self._body.setVisible(expanded)
+        self._sync_header()
+
+    def _sync_header(self) -> None:
+        self.header.setText(
+            f"{'▾' if self.header.isChecked() else '▸'}  {self._title}"
+        )
+
+
 class SourceInspector(QScrollArea):
     """Editable property panel with guarded, two-way SourceStore binding."""
 
@@ -142,6 +188,8 @@ class SourceInspector(QScrollArea):
             "other": other_form,
         }
         self._field_categories: dict[str, str] = {}
+        self._field_sections: dict[str, tuple[str, str]] = {}
+        self._sections: dict[tuple[str, str], _CollapsibleGroup] = {}
         self._tab_indices = {
             category: self.property_tabs.addTab(page, "")
             for category, page in self._category_pages.items()
@@ -344,8 +392,8 @@ class SourceInspector(QScrollArea):
         self.particle_seed_spin.setRange(0, 999_999)
         self._add_labeled_row(content_form, "shape", self.shape_kind_combo)
         self._add_labeled_row(content_form, "progress_style", self.progress_style_combo)
-        self._add_labeled_row(content_form, "visualizer_style", self.visualizer_style_combo)
-        self._add_labeled_row(content_form, "visualizer_bars", self.visualizer_bars_spin)
+        self._add_labeled_row(content_form, "visualizer_style", self.visualizer_style_combo, section="vz_display")
+        self._add_labeled_row(content_form, "visualizer_bars", self.visualizer_bars_spin, section="vz_display")
         self._add_labeled_row(text_form, "text_alignment", self.text_alignment_combo)
         self._add_labeled_row(text_form, "text_overflow", self.text_overflow_combo)
         self._add_labeled_row(content_form, "image_fit", self.image_fit_combo)
@@ -362,76 +410,77 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "progress_value", self.progress_value_spin)
         self._add_labeled_row(content_form, "progress_track_color", self.progress_track_color_button)
         self._add_labeled_row(content_form, "progress_mode", self.progress_mode_combo)
-        self._add_labeled_row(content_form, "visualizer_line_width", self.visualizer_line_width_spin)
-        self._add_labeled_row(content_form, "visualizer_sensitivity", self.visualizer_sensitivity_spin)
-        self._add_labeled_row(content_form, "visualizer_reactivity", self.visualizer_reactivity_spin)
-        self._add_labeled_row(content_form, "visualizer_noise_gate", self.visualizer_noise_gate_spin)
-        self._add_labeled_row(content_form, "visualizer_min_level", self.visualizer_min_level_spin)
-        self._add_labeled_row(content_form, "visualizer_max_level", self.visualizer_max_level_spin)
-        self._add_labeled_row(content_form, "visualizer_attack", self.visualizer_attack_spin)
-        self._add_labeled_row(content_form, "visualizer_release", self.visualizer_release_spin)
-        self._add_labeled_row(content_form, "visualizer_smoothing", self.visualizer_smoothing_spin)
-        self._add_labeled_row(content_form, "visualizer_curve", self.visualizer_curve_spin)
+        self._add_labeled_row(content_form, "visualizer_line_width", self.visualizer_line_width_spin, section="vz_display")
+        self._add_labeled_row(content_form, "visualizer_sensitivity", self.visualizer_sensitivity_spin, section="vz_response")
+        self._add_labeled_row(content_form, "visualizer_reactivity", self.visualizer_reactivity_spin, section="vz_response")
+        self._add_labeled_row(content_form, "visualizer_attack", self.visualizer_attack_spin, section="vz_response")
+        self._add_labeled_row(content_form, "visualizer_release", self.visualizer_release_spin, section="vz_response")
+        self._add_labeled_row(content_form, "visualizer_smoothing", self.visualizer_smoothing_spin, section="vz_response")
+        self._add_labeled_row(content_form, "visualizer_curve", self.visualizer_curve_spin, section="vz_response")
+        self._add_labeled_row(content_form, "visualizer_noise_gate", self.visualizer_noise_gate_spin, section="vz_range")
+        self._add_labeled_row(content_form, "visualizer_min_level", self.visualizer_min_level_spin, section="vz_range")
+        self._add_labeled_row(content_form, "visualizer_max_level", self.visualizer_max_level_spin, section="vz_range")
         self._add_labeled_row(content_form, "album_frame", self.album_frame_combo)
-        self._add_labeled_row(content_form, "track_list_count", self.track_list_count_spin)
-        self._add_labeled_row(content_form, "track_list_style", self.track_list_style_combo)
-        self._add_labeled_row(content_form, "track_list_window", self.track_list_window_combo)
-        self._add_labeled_row(content_form, "track_list_show_number", self.track_list_show_number_check)
-        self._add_labeled_row(content_form, "track_list_show_artist", self.track_list_show_artist_check)
-        self._add_labeled_row(content_form, "track_list_show_album", self.track_list_show_album_check)
-        self._add_labeled_row(content_form, "track_list_marker", self.track_list_marker_combo)
-        self._add_labeled_row(content_form, "track_list_row_spacing", self.track_list_row_spacing_spin)
-        self._add_labeled_row(content_form, "track_list_item_padding", self.track_list_item_padding_spin)
-        self._add_labeled_row(content_form, "track_list_current_color", self.track_list_current_color_button)
-        self._add_labeled_row(content_form, "track_list_inactive_color", self.track_list_inactive_color_button)
-        self._add_labeled_row(content_form, "track_list_current_background", self.track_list_current_background_button)
-        self._add_labeled_row(content_form, "track_list_inactive_opacity", self.track_list_inactive_opacity_spin)
-        self._add_labeled_row(content_form, "track_list_current_scale", self.track_list_current_scale_spin)
-        self._add_labeled_row(content_form, "track_list_show_dividers", self.track_list_show_dividers_check)
+        self._add_labeled_row(content_form, "track_list_count", self.track_list_count_spin, section="tl_layout")
+        self._add_labeled_row(content_form, "track_list_style", self.track_list_style_combo, section="tl_layout")
+        self._add_labeled_row(content_form, "track_list_window", self.track_list_window_combo, section="tl_layout")
+        self._add_labeled_row(content_form, "track_list_marker", self.track_list_marker_combo, section="tl_layout")
+        self._add_labeled_row(content_form, "track_list_show_number", self.track_list_show_number_check, section="tl_content")
+        self._add_labeled_row(content_form, "track_list_show_artist", self.track_list_show_artist_check, section="tl_content")
+        self._add_labeled_row(content_form, "track_list_show_album", self.track_list_show_album_check, section="tl_content")
+        self._add_labeled_row(content_form, "track_list_show_dividers", self.track_list_show_dividers_check, section="tl_content")
+        self._add_labeled_row(content_form, "track_list_row_spacing", self.track_list_row_spacing_spin, section="tl_spacing")
+        self._add_labeled_row(content_form, "track_list_item_padding", self.track_list_item_padding_spin, section="tl_spacing")
+        self._add_labeled_row(content_form, "track_list_current_scale", self.track_list_current_scale_spin, section="tl_spacing")
+        self._add_labeled_row(content_form, "track_list_inactive_opacity", self.track_list_inactive_opacity_spin, section="tl_spacing")
+        self._add_labeled_row(content_form, "track_list_current_color", self.track_list_current_color_button, section="tl_colors")
+        self._add_labeled_row(content_form, "track_list_inactive_color", self.track_list_inactive_color_button, section="tl_colors")
+        self._add_labeled_row(content_form, "track_list_current_background", self.track_list_current_background_button, section="tl_colors")
         self._add_labeled_row(content_form, "now_playing_style", self.now_playing_style_combo)
         self._add_labeled_row(content_form, "now_playing_duration", self.now_playing_duration_spin)
-        self._add_labeled_row(content_form, "now_playing_exit", self.now_playing_exit_combo)
-        self._add_labeled_row(content_form, "now_playing_exit_duration", self.now_playing_exit_duration_spin)
-        self._add_labeled_row(content_form, "subtitle_animation", self.subtitle_animation_combo)
-        self._add_labeled_row(content_form, "subtitle_animation_duration", self.subtitle_animation_duration_spin)
-        self._add_labeled_row(content_form, "subtitle_context_lines", self.subtitle_context_lines_spin)
-        self._add_labeled_row(content_form, "subtitle_next_lines", self.subtitle_next_lines_spin)
-        self._add_labeled_row(content_form, "subtitle_line_spacing", self.subtitle_line_spacing_spin)
-        self._add_labeled_row(content_form, "subtitle_previous_opacity", self.subtitle_previous_opacity_spin)
-        self._add_labeled_row(content_form, "subtitle_previous_blur", self.subtitle_previous_blur_spin)
+        self._add_labeled_row(content_form, "now_playing_exit", self.now_playing_exit_combo, section="np_exit")
+        self._add_labeled_row(content_form, "now_playing_exit_duration", self.now_playing_exit_duration_spin, section="np_exit")
+        self._add_labeled_row(content_form, "subtitle_animation", self.subtitle_animation_combo, section="sub_transition")
+        self._add_labeled_row(content_form, "subtitle_animation_duration", self.subtitle_animation_duration_spin, section="sub_transition")
+        self._add_labeled_row(content_form, "subtitle_context_lines", self.subtitle_context_lines_spin, section="sub_layout")
+        self._add_labeled_row(content_form, "subtitle_next_lines", self.subtitle_next_lines_spin, section="sub_layout")
+        self._add_labeled_row(content_form, "subtitle_line_spacing", self.subtitle_line_spacing_spin, section="sub_layout")
+        self._add_labeled_row(content_form, "subtitle_previous_opacity", self.subtitle_previous_opacity_spin, section="sub_prev")
+        self._add_labeled_row(content_form, "subtitle_previous_blur", self.subtitle_previous_blur_spin, section="sub_prev")
         self._add_labeled_row(content_form, "subtitle_timing_offset", self.subtitle_timing_offset_spin)
         self._add_labeled_row(content_form, "waveform_style", self.waveform_style_combo)
-        self._add_labeled_row(content_form, "level_meter_mode", self.level_meter_mode_combo)
-        self._add_labeled_row(content_form, "level_meter_style", self.level_meter_style_combo)
-        self._add_labeled_row(content_form, "level_meter_orientation", self.level_meter_orientation_combo)
-        self._add_labeled_row(content_form, "level_meter_sensitivity", self.level_meter_sensitivity_spin)
-        self._add_labeled_row(content_form, "level_meter_attack", self.level_meter_attack_spin)
-        self._add_labeled_row(content_form, "level_meter_release", self.level_meter_release_spin)
-        self._add_labeled_row(content_form, "level_meter_min_level", self.level_meter_min_level_spin)
-        self._add_labeled_row(content_form, "level_meter_max_level", self.level_meter_max_level_spin)
-        self._add_labeled_row(content_form, "level_meter_segments", self.level_meter_segments_spin)
-        self._add_labeled_row(content_form, "level_meter_gap", self.level_meter_gap_spin)
-        self._add_labeled_row(content_form, "level_meter_show_peak", self.level_meter_show_peak_check)
-        self._add_labeled_row(content_form, "level_meter_peak_hold", self.level_meter_peak_hold_spin)
-        self._add_labeled_row(content_form, "level_meter_peak_decay", self.level_meter_peak_decay_spin)
-        self._add_labeled_row(content_form, "level_meter_track_color", self.level_meter_track_color_button)
-        self._add_labeled_row(content_form, "level_meter_low_color", self.level_meter_low_color_button)
-        self._add_labeled_row(content_form, "level_meter_mid_color", self.level_meter_mid_color_button)
-        self._add_labeled_row(content_form, "level_meter_high_color", self.level_meter_high_color_button)
-        self._add_labeled_row(content_form, "particle_style", self.particle_style_combo)
-        self._add_labeled_row(content_form, "particle_density", self.particle_density_spin)
-        self._add_labeled_row(content_form, "particle_speed", self.particle_speed_spin)
-        self._add_labeled_row(content_form, "particle_min_size", self.particle_min_size_spin)
-        self._add_labeled_row(content_form, "particle_max_size", self.particle_max_size_spin)
-        self._add_labeled_row(content_form, "particle_opacity", self.particle_opacity_spin)
-        self._add_labeled_row(content_form, "particle_direction", self.particle_direction_spin)
-        self._add_labeled_row(content_form, "particle_drift", self.particle_drift_spin)
-        self._add_labeled_row(content_form, "particle_twinkle", self.particle_twinkle_spin)
-        self._add_labeled_row(content_form, "particle_glow", self.particle_glow_spin)
+        self._add_labeled_row(content_form, "level_meter_mode", self.level_meter_mode_combo, section="lm_display")
+        self._add_labeled_row(content_form, "level_meter_style", self.level_meter_style_combo, section="lm_display")
+        self._add_labeled_row(content_form, "level_meter_orientation", self.level_meter_orientation_combo, section="lm_display")
+        self._add_labeled_row(content_form, "level_meter_segments", self.level_meter_segments_spin, section="lm_display")
+        self._add_labeled_row(content_form, "level_meter_gap", self.level_meter_gap_spin, section="lm_display")
+        self._add_labeled_row(content_form, "level_meter_sensitivity", self.level_meter_sensitivity_spin, section="lm_response")
+        self._add_labeled_row(content_form, "level_meter_attack", self.level_meter_attack_spin, section="lm_response")
+        self._add_labeled_row(content_form, "level_meter_release", self.level_meter_release_spin, section="lm_response")
+        self._add_labeled_row(content_form, "level_meter_min_level", self.level_meter_min_level_spin, section="lm_range")
+        self._add_labeled_row(content_form, "level_meter_max_level", self.level_meter_max_level_spin, section="lm_range")
+        self._add_labeled_row(content_form, "level_meter_show_peak", self.level_meter_show_peak_check, section="lm_peak")
+        self._add_labeled_row(content_form, "level_meter_peak_hold", self.level_meter_peak_hold_spin, section="lm_peak")
+        self._add_labeled_row(content_form, "level_meter_peak_decay", self.level_meter_peak_decay_spin, section="lm_peak")
+        self._add_labeled_row(content_form, "level_meter_track_color", self.level_meter_track_color_button, section="lm_colors")
+        self._add_labeled_row(content_form, "level_meter_low_color", self.level_meter_low_color_button, section="lm_colors")
+        self._add_labeled_row(content_form, "level_meter_mid_color", self.level_meter_mid_color_button, section="lm_colors")
+        self._add_labeled_row(content_form, "level_meter_high_color", self.level_meter_high_color_button, section="lm_colors")
+        self._add_labeled_row(content_form, "particle_style", self.particle_style_combo, section="pt_display")
+        self._add_labeled_row(content_form, "particle_density", self.particle_density_spin, section="pt_display")
+        self._add_labeled_row(content_form, "particle_opacity", self.particle_opacity_spin, section="pt_display")
+        self._add_labeled_row(content_form, "particle_glow", self.particle_glow_spin, section="pt_display")
+        self._add_labeled_row(content_form, "particle_speed", self.particle_speed_spin, section="pt_motion")
+        self._add_labeled_row(content_form, "particle_direction", self.particle_direction_spin, section="pt_motion")
+        self._add_labeled_row(content_form, "particle_drift", self.particle_drift_spin, section="pt_motion")
+        self._add_labeled_row(content_form, "particle_twinkle", self.particle_twinkle_spin, section="pt_motion")
+        self._add_labeled_row(content_form, "particle_min_size", self.particle_min_size_spin, section="pt_shape")
+        self._add_labeled_row(content_form, "particle_max_size", self.particle_max_size_spin, section="pt_shape")
         self._add_labeled_row(
             content_form, "particle_secondary_color", self.particle_secondary_color_button,
+            section="pt_shape",
         )
-        self._add_labeled_row(content_form, "particle_seed", self.particle_seed_spin)
+        self._add_labeled_row(content_form, "particle_seed", self.particle_seed_spin, section="pt_shape")
         self.x_spin = self._spin(-5000, 5000, 1)
         self.y_spin = self._spin(-5000, 5000, 1)
         self.width_spin = self._spin(32, 5000, 1)
@@ -613,6 +662,8 @@ class SourceInspector(QScrollArea):
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             )
             form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+            form.setHorizontalSpacing(10)
+            form.setVerticalSpacing(7)
         for widget in self._field_widgets.values():
             widget.setMinimumWidth(0)
             if widget.sizePolicy().horizontalPolicy() in {
@@ -631,16 +682,39 @@ class SourceInspector(QScrollArea):
         translator.language_changed.connect(self.retranslate)
         self.retranslate()
 
-    def _add_labeled_row(self, layout: QFormLayout, key: str, widget: QWidget) -> None:
+    def _add_labeled_row(
+        self, layout: QFormLayout, key: str, widget: QWidget,
+        section: str | None = None,
+    ) -> None:
         label = QLabel()
         self._form_labels[key] = label
         self._field_widgets[key] = widget
         self._field_visibility[key] = True
-        for category, category_layout in getattr(self, "_category_forms", {}).items():
+        category = None
+        for cat, category_layout in getattr(self, "_category_forms", {}).items():
             if layout is category_layout:
-                self._field_categories[key] = category
+                category = cat
+                self._field_categories[key] = cat
                 break
-        layout.addRow(label, widget)
+        if section and category:
+            group = self._sections.get((category, section))
+            if group is None:
+                group = _CollapsibleGroup()
+                self._sections[(category, section)] = group
+                layout.addRow(group)
+            group.field_keys.append(key)
+            self._field_sections[key] = (category, section)
+            group.add_field(label, widget)
+        else:
+            layout.addRow(label, widget)
+
+    def _refresh_sections(self) -> None:
+        """Fold away sub-sections whose fields are all hidden for this source."""
+        for group in self._sections.values():
+            group.setVisible(any(
+                self._field_visibility.get(key, False)
+                for key in group.field_keys
+            ))
 
     @staticmethod
     def _remember_property_tab(index: int) -> None:
@@ -872,6 +946,7 @@ class SourceInspector(QScrollArea):
 
     def _refresh_property_tabs(self, sources: list[Source]) -> None:
         """Show useful categories and name the special tab after its source."""
+        self._refresh_sections()
         source_types = {source.source_type for source in sources}
         special_type = next(iter(source_types)) if len(source_types) == 1 else None
         self.property_tabs.setTabText(
@@ -1732,6 +1807,30 @@ class SourceInspector(QScrollArea):
             self.property_tabs.setTabText(
                 self._tab_indices[category], pair[0 if korean else 1],
             )
+        section_titles = {
+            "vz_display": ("표시", "Display"),
+            "vz_response": ("반응", "Response"),
+            "vz_range": ("레벨 범위", "Level range"),
+            "tl_layout": ("레이아웃", "Layout"),
+            "tl_content": ("표시 항목", "Shown details"),
+            "tl_spacing": ("간격 · 크기", "Spacing & size"),
+            "tl_colors": ("색상", "Colors"),
+            "lm_display": ("표시", "Display"),
+            "lm_response": ("반응", "Response"),
+            "lm_range": ("레벨 범위", "Level range"),
+            "lm_peak": ("피크 표시", "Peak"),
+            "lm_colors": ("색상", "Colors"),
+            "pt_display": ("표시", "Display"),
+            "pt_motion": ("움직임", "Motion"),
+            "pt_shape": ("모양", "Shape"),
+            "sub_transition": ("전환", "Transition"),
+            "sub_layout": ("줄 배치", "Line layout"),
+            "sub_prev": ("이전 줄", "Previous lines"),
+            "np_exit": ("종료 효과", "Exit"),
+        }
+        for (_category, section), group in self._sections.items():
+            pair = section_titles.get(section, (section, section))
+            group.set_title(pair[0 if korean else 1])
         self.visible_check.setText("표시" if korean else "Visible")
         self.locked_check.setText("잠금" if korean else "Locked")
         self.file_button.setText("찾아보기" if korean else "Browse")

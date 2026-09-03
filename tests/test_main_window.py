@@ -6044,6 +6044,38 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.application.processEvents()
         self.assertEqual(inspector.property_tabs.currentIndex(), filter_index)
 
+    def test_inspector_special_tab_sub_sections_follow_the_source_type(self) -> None:
+        inspector = self.window.inspector
+
+        # Every sectioned field is registered with its group and category.
+        self.assertEqual(inspector._field_sections["visualizer_attack"],
+                         ("special", "vz_response"))
+        self.assertEqual(inspector._field_categories["visualizer_attack"], "special")
+
+        groups = inspector._sections
+        visualizer = Source(SourceType.AUDIO_VISUALIZER, "VZ")
+        self.window.store.replace([visualizer])
+        self.window.store.select(visualizer.id)
+        self.application.processEvents()
+        self.assertFalse(groups[("special", "vz_response")].isHidden())
+        self.assertTrue(groups[("special", "tl_layout")].isHidden())
+
+        # A group with no fields for the current source folds away entirely.
+        shape = Source(SourceType.SHAPE, "Shape")
+        self.window.store.replace([shape])
+        self.window.store.select(shape.id)
+        self.application.processEvents()
+        self.assertTrue(groups[("special", "vz_response")].isHidden())
+
+        # Collapsing a section hides its body but keeps the header.
+        self.window.store.replace([visualizer])
+        self.window.store.select(visualizer.id)
+        self.application.processEvents()
+        response = groups[("special", "vz_response")]
+        response.header.setChecked(False)
+        self.assertTrue(response._body.isHidden())
+        self.assertFalse(response.header.isHidden())
+
     def test_format_bytes_scales_units(self) -> None:
         self.assertEqual(self.window._format_bytes(0), "0.0 B")
         self.assertEqual(self.window._format_bytes(2048), "2.0 KB")
