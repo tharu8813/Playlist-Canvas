@@ -3177,14 +3177,22 @@ class ExportPreviewDialog(QDialog):
 
     @staticmethod
     def _finish_or_detach_worker(worker: QThread) -> None:
-        """Prevent Qt from destroying a rare slow worker during dialog teardown."""
-        if worker.wait(5000):
-            return
-        LOGGER.warning("Preview worker did not stop within five seconds; detaching safely")
+        """Detach a still-running worker instead of blocking the UI thread on it.
+
+        The caller already requested cancellation, but that is not always
+        enough to stop ``run()`` promptly: ``VideoDurationProbeWorker`` calls
+        FFprobe through a blocking ``subprocess.run(..., timeout=15)`` with no
+        way to interrupt it early, so a synchronous ``wait()`` here could
+        freeze the whole window for up to 15 seconds every time Preview closed
+        while a probe was in flight. Reparenting to the application keeps Qt
+        from deleting a QThread while it is still running; the worker's own
+        ``finished`` signal cleans it up once it actually exits, decoupled
+        from the dialog's lifetime.
+        """
         application = QApplication.instance()
         if application is not None:
             worker.setParent(application)
-            worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(worker.deleteLater)
 
     def retranslate(self) -> None:
         korean = self.translator.language is Language.KOREAN

@@ -3366,6 +3366,38 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertNotEqual(probe_threads[0], ui_thread)
         worker.deleteLater()
 
+    def test_stop_preview_detaches_a_slow_worker_without_blocking_the_ui_thread(
+        self,
+    ) -> None:
+        """FFprobe can block a worker's run() for seconds with no way to
+        interrupt it early; leaving Preview must never wait that out on the
+        UI thread (see the freeze this fixed)."""
+        import time
+
+        release = threading.Event()
+
+        def slow_probe(_path: Path) -> float:
+            release.wait(timeout=3.0)
+            return 3.5
+
+        worker = VideoDurationProbeWorker("clip.mp4")
+        try:
+            with patch.object(PlaylistService, "_probe_duration", side_effect=slow_probe):
+                worker.start()
+                time.sleep(0.05)
+                self.assertTrue(worker.isRunning(), "worker did not even start")
+                started = time.perf_counter()
+                ExportPreviewDialog._finish_or_detach_worker(worker)
+                elapsed = time.perf_counter() - started
+                self.assertTrue(worker.isRunning())
+                self.assertLess(
+                    elapsed, 0.5,
+                    "detaching a still-running worker must not block the caller",
+                )
+        finally:
+            release.set()
+            worker.wait(3000)
+
     def test_preview_proxy_replaces_decoder_path_but_preserves_export_source(self) -> None:
         with TemporaryDirectory(prefix="preview-proxy-routing-") as raw_directory:
             directory = Path(raw_directory)
