@@ -4,8 +4,8 @@
 ; ============================================================================
 
 #define MyAppName "Playlist Canvas"
-#define MyAppVersion "1.2.0.2"
-#define MyAppFileVersion "1.2.0.2"
+#define MyAppVersion "1.2.0.3"
+#define MyAppFileVersion "1.2.0.3"
 #define MyAppPublisher "Ji Beak min(tharu8813)"
 #define MyAppCopyright "© 2026 Ji Beak min(tharu8813). All rights reserved."
 #define MyAppDescription "음악, 가사와 비주얼 요소를 편집해 플레이리스트 영상을 만드는 Windows 데스크톱 편집기"

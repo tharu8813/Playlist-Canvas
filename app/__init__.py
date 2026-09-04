@@ -1,5 +1,5 @@
 """Playlist Canvas application package."""
 
-__version__ = "1.2.0.2"
+__version__ = "1.2.0.3"
 PRODUCT_NAME = "Playlist Canvas"
 LEGACY_PRODUCT_NAME = "Playlist Video Studio"

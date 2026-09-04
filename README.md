@@ -11,7 +11,7 @@
   <p>음악, 가사, 비주얼 요소를 하나의 캔버스에서 편집해 플레이리스트 영상을 만드는 Windows 데스크톱 편집기</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-1.2.0.2-1685D1" alt="Version 1.2.0.2">
+    <img src="https://img.shields.io/badge/version-1.2.0.3-1685D1" alt="Version 1.2.0.3">
     <img src="https://img.shields.io/badge/platform-Windows%2064--bit-0078D4" alt="Windows 64-bit">
     <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python 3.12">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
@@ -54,7 +54,7 @@ Playlist Canvas는 정적인 이미지와 음악을 합치는 수준을 넘어, 
 
 ## 사용자 설치
 
-1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.2.0.2-setup.exe`를 받습니다.
+1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.2.0.3-setup.exe`를 받습니다.
 2. Setup 파일을 실행하고 설치 언어를 선택합니다.
 3. 설치 위치와 바탕 화면 바로가기 생성 여부를 선택한 뒤 **설치**를 누릅니다.
 4. 설치가 완료되면 **Playlist Canvas 실행**을 선택하거나 시작 메뉴의 바로가기를 실행합니다. 설치 후에는 파일 탐색기의 `.pvsproj` 프로젝트를 더블클릭해 프로그램과 프로젝트를 바로 열 수도 있습니다.
@@ -160,7 +160,7 @@ python -m PyInstaller --noconfirm --clean playlist_canvas.spec
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 ```
 
-완성된 `output-setup\Playlist Canvas-1.2.0.2-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
+완성된 `output-setup\Playlist Canvas-1.2.0.3-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
 
 ## 프로젝트 구조
 
