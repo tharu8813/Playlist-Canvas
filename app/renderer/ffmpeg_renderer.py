@@ -391,7 +391,14 @@ class FFmpegRenderer:
                 visual_sequence = [
                     (prepared_path, prepared_video.duration_seconds),
                 ]
-                base_input_arguments = ["-i", str(prepared_path)]
+                base_input_arguments = [
+                    # Offload the lossless intermediate's decode to any working
+                    # GPU decoder; FFmpeg falls back to software when the RGB /
+                    # 4:4:4 stream has no hardware path, and downloads frames to
+                    # system memory automatically before the software filters.
+                    "-hwaccel", "auto",
+                    "-i", str(prepared_path),
+                ]
             else:
                 frame_paths: list[Path] = []
                 for index, frame in enumerate(frames):
@@ -1362,21 +1369,29 @@ class FFmpegRenderer:
 
     @staticmethod
     def _filter_worker_count(settings: RenderSettings) -> int:
-        """Use modest filter parallelism without multiplying 4K frame memory."""
+        """Parallelise the filter graph up to a resolution-bounded cap.
+
+        Each in-flight worker can retain a few full-resolution RGBA frames, so
+        the ceiling drops as the frame grows: ~8 at <=1080p60, 4 at <=1440p60,
+        3 at 4K and above.  STABLE stays single-worker for the lowest possible
+        peak memory; AUTO leaves half the cores for the encoder and the OS while
+        MAX_SPEED uses every core it is allowed.
+        """
+        if settings.work_mode == WORK_MODE_STABLE:
+            return 1
         pixels_per_second = (
             settings.output_width * settings.output_height * settings.fps
         )
-        if settings.work_mode == WORK_MODE_STABLE:
-            return 1
+        if pixels_per_second <= 1920 * 1080 * 60:
+            ceiling = 8
+        elif pixels_per_second <= 2560 * 1440 * 60:
+            ceiling = 4
+        else:
+            ceiling = 3
+        cpu = os.cpu_count() or 4
         if settings.work_mode == WORK_MODE_MAX_SPEED:
-            if pixels_per_second <= 1920 * 1080 * 60:
-                return 4
-            if pixels_per_second <= 2560 * 1440 * 60:
-                return 2
-            return 1
-        # Two filter workers improve the common 720p/1080p path. Higher-rate 4K
-        # work remains single-worker to avoid retaining several large RGBA frames.
-        return 2 if pixels_per_second <= 1920 * 1080 * 60 else 1
+            return max(2, min(ceiling, cpu))
+        return max(2, min(ceiling, cpu // 2))
 
     @staticmethod
     def _audio_worker_count(settings: RenderSettings, track_count: int) -> int:

@@ -88,8 +88,18 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertTrue(CanvasSnapshot.source_is_capture_invariant(
             Source(SourceType.TEXT, "Static title", text="Playlist"), duration,
         ))
+        # ``track_total`` and unknown tokens resolve to the same string for the
+        # whole playlist, so a count caption stays capture-invariant.
+        self.assertTrue(CanvasSnapshot.source_is_capture_invariant(
+            Source(SourceType.TEXT, "Count", text="%track_total% songs"), duration,
+        ))
+        self.assertTrue(CanvasSnapshot.source_is_capture_invariant(
+            Source(SourceType.TEXT, "Unknown token", text="%mixtape%"), duration,
+        ))
         for source in (
             Source(SourceType.TEXT, "Token", text="%title%"),
+            Source(SourceType.TEXT, "Count and title", text="%track_total% · %artist%"),
+            Source(SourceType.TEXT, "Clock", text="%video_current_time%"),
             Source(SourceType.LYRICS, "Lyrics"),
             Source(SourceType.PROGRESS_BAR, "Progress"),
             Source(SourceType.BACKGROUND, "Cover", background_mode="album_art"),
@@ -707,18 +717,17 @@ class FunctionalRegressionTests(unittest.TestCase):
         )
 
     def test_export_filter_parallelism_is_bounded_for_high_resolution(self) -> None:
-        self.assertEqual(
-            FFmpegRenderer._filter_worker_count(RenderSettings(
+        with patch("app.renderer.ffmpeg_renderer.os.cpu_count", return_value=12):
+            hd = FFmpegRenderer._filter_worker_count(RenderSettings(
                 fps=60, output_width=1920, output_height=1080,
-            )),
-            2,
-        )
-        self.assertEqual(
-            FFmpegRenderer._filter_worker_count(RenderSettings(
+            ))
+            uhd = FFmpegRenderer._filter_worker_count(RenderSettings(
                 fps=60, output_width=3840, output_height=2160,
-            )),
-            1,
-        )
+            ))
+        # A larger frame keeps fewer workers in flight, never more.
+        self.assertLessEqual(uhd, hd)
+        self.assertEqual(hd, 6)
+        self.assertEqual(uhd, 3)
 
     def test_export_work_modes_change_bounded_worker_counts(self) -> None:
         with patch("app.renderer.ffmpeg_renderer.os.cpu_count", return_value=12):
@@ -731,16 +740,19 @@ class FunctionalRegressionTests(unittest.TestCase):
             self.assertEqual(FFmpegRenderer._audio_worker_count(
                 RenderSettings(work_mode=WORK_MODE_MAX_SPEED), 10,
             ), 6)
-        self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
-            work_mode=WORK_MODE_STABLE,
-        )), 1)
-        self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
-            work_mode=WORK_MODE_MAX_SPEED,
-        )), 4)
-        self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
-            work_mode=WORK_MODE_MAX_SPEED,
-            output_width=3840, output_height=2160, fps=60,
-        )), 1)
+            self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
+                work_mode=WORK_MODE_STABLE,
+            )), 1)
+            self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
+                work_mode=WORK_MODE_MAX_SPEED,
+            )), 8)
+            self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
+                work_mode=WORK_MODE_AUTO,
+            )), 6)
+            self.assertEqual(FFmpegRenderer._filter_worker_count(RenderSettings(
+                work_mode=WORK_MODE_MAX_SPEED,
+                output_width=3840, output_height=2160, fps=60,
+            )), 3)
 
     def test_cropped_static_stream_is_composited_at_original_coordinates(self) -> None:
         graph = FFmpegRenderer._layered_filter_graph(

@@ -27,8 +27,19 @@ from app.preview.album_art import (
     extract_track_cover,
     extract_track_personal_color,
 )
-from app.preview.text_template import expand_track_template
+from app.preview.text_template import (
+    TEXT_TEMPLATE_TOKEN_NAMES,
+    expand_track_template,
+)
 from app.services.lyrics_service import LyricsService
+
+# Text template tokens whose resolved value changes during an export: every
+# token the renderer substitutes except ``track_total``, which is constant for
+# the whole playlist.  Unknown ``%tokens%`` are preserved verbatim, so they are
+# constant too and do not appear here.
+_VOLATILE_TEXT_TOKENS: frozenset[str] = frozenset(TEXT_TEMPLATE_TOKEN_NAMES) - {
+    "track_total",
+}
 
 # Editor preview never asks for more than the artboard resolution, but export
 # renders the vector scene at the target output resolution so text and shapes
@@ -452,7 +463,13 @@ class CanvasSnapshot:
         ):
             return False
         if source.source_type is SourceType.TEXT:
-            return "%" not in source.text
+            # Identical for the whole playlist only when every substituted token
+            # is playlist-constant.  ``track_total`` and unknown tokens qualify;
+            # title/artist/album/track/filename follow the current track and the
+            # time tokens follow the clock.
+            return not any(
+                f"%{token}%" in source.text for token in _VOLATILE_TEXT_TOKENS
+            )
         if source.source_type is SourceType.ALBUM_COVER:
             return bool(source.content_path)
         if source.source_type is SourceType.BACKGROUND:
