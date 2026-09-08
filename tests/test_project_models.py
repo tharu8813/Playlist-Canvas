@@ -9,6 +9,15 @@ from app.models.source import Source, SourceType
 
 
 class ProjectModelValidationTests(unittest.TestCase):
+    def test_project_collections_require_arrays(self) -> None:
+        for field in ("sources", "groups", "playlist", "content_library"):
+            for value in ({}, "", None):
+                with self.subTest(field=field, value=value):
+                    payload = ProjectDocument().to_dict()
+                    payload[field] = value
+                    with self.assertRaises(ValueError):
+                        ProjectDocument.from_dict(payload)
+
     def test_valid_document_round_trip(self) -> None:
         document = ProjectDocument(
             sources=[Source(SourceType.TEXT, "Title", text="%title%")],

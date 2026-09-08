@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import json
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from PySide6.QtGui import QColor, QImage
 
@@ -12,11 +13,31 @@ from app import __version__
 from app.models.playlist import PlaylistTrack
 from app.models.project import ProjectDocument, ProjectSettings
 from app.models.source import Source, SourceType
-from app.services.project_service import ProjectService
+from app.services.project_service import ProjectError, ProjectService
 from app.services.project_media_service import ProjectMediaService
 
 
 class ProjectServiceTests(unittest.TestCase):
+    def test_relative_media_prefers_project_folder_over_working_directory(self) -> None:
+        with TemporaryDirectory(prefix="pvs-relative-") as directory:
+            project_directory = Path(directory)
+            media = project_directory / "track.wav"
+            media.write_bytes(b"project audio")
+            with patch.object(Path, "is_file", return_value=True):
+                resolved = ProjectMediaService._resolve_existing_path(
+                    "track.wav", project_directory,
+                )
+            self.assertEqual(resolved, media.resolve())
+
+    def test_inspect_invalid_settings_reports_project_error(self) -> None:
+        with TemporaryDirectory(prefix="pvs-inspect-") as directory:
+            path = Path(directory) / "invalid.json"
+            for settings in (None, [], "invalid", 42):
+                with self.subTest(settings=settings):
+                    path.write_text(json.dumps({"settings": settings}), encoding="utf-8")
+                    with self.assertRaises(ProjectError):
+                        ProjectService.inspect(path)
+
     def test_missing_custom_track_cover_can_be_relinked_or_cleared(self) -> None:
         with TemporaryDirectory(prefix="pvs-cover-relink-") as raw_directory:
             directory = Path(raw_directory)

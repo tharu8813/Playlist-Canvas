@@ -19,13 +19,12 @@ from PySide6.QtCore import (QByteArray, QEvent, QEventLoop, QMimeData, QProcess,
                             QStandardPaths, Qt, QTimer)
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QCloseEvent, QDragEnterEvent,
                            QDropEvent, QFontDatabase, QIcon, QImage, QImageReader,
-                           QImageWriter, QKeySequence, QPainter, QPalette, QPen, QPixmap)
+                           QImageWriter, QKeySequence, QPainter, QPen, QPixmap)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFrame,
     QFileDialog,
-    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -86,6 +85,10 @@ from app.layers.layer_panel import LayerPanel
 from app.models.source import Source, SourceType
 from app.models.project import CanvasSettings, ProjectDocument, ProjectSettings
 from app.services.project_service import ProjectError, ProjectService
+from app.services.project_persistence_service import (
+    default_project_path,
+    is_legacy_project_path,
+)
 from app.services.project_save_worker import ProjectSaveWorker
 from app.services.project_media_service import ProjectMediaService
 from app.services.project_content_service import LYRICS_EXTENSIONS, ProjectContentService
@@ -111,6 +114,7 @@ from app.services.export_storage_service import (
     ExportStorageMonitor,
     estimate_export_storage,
 )
+from app.services.export_controller import ExportController
 from app.services.video_encoder_service import (
     AUTO_VIDEO_ENCODER,
     CPU_H264_ENCODER,
@@ -314,6 +318,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        from app.ui.design_system import apply_studio_style
+        apply_studio_style(QApplication.instance())
         self.store = SourceStore(self)
         self.playlist_service = PlaylistService(self)
         self.project_content_service = ProjectContentService(self)
@@ -390,9 +396,9 @@ class MainWindow(QMainWindow):
         # preferences or participate in project dirty/history state.
         self._project_theme_metadata = self.current_theme
         self._project_language_metadata = self.translator.language.value
-        self._sidebar_open_width = 260
-        self._inspector_open_width = 300
-        self._bottom_open_height = 270
+        self._sidebar_open_width = 272
+        self._inspector_open_width = 316
+        self._bottom_open_height = 240
         self._sidebar_transition = False
         self._panel_transition_serial = {"left": 0, "right": 0, "bottom": 0}
         self._render_worker: RenderWorker | None = None
@@ -576,24 +582,6 @@ class MainWindow(QMainWindow):
         self.language_button = QToolButton()
         self.language_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.language_button.setMenu(language_menu)
-        theme_menu = QMenu(self)
-        self.theme_menu = theme_menu
-        theme_group = QActionGroup(self)
-        theme_group.setExclusive(True)
-        self.theme_actions: dict[Theme, QAction] = {}
-        for theme in Theme:
-            action = QAction(self)
-            action.setCheckable(True)
-            action.setChecked(theme is self.theme_service.preference)
-            action.triggered.connect(
-                lambda checked=False, value=theme: self.theme_service.set_preference(value)
-            )
-            theme_group.addAction(action)
-            theme_menu.addAction(action)
-            self.theme_actions[theme] = action
-        self.theme_button = QToolButton()
-        self.theme_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.theme_button.setMenu(theme_menu)
         self.panels_action = QAction(self)
         self.panels_action.setCheckable(True)
         self.panels_action.setChecked(True)
@@ -624,7 +612,6 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.panels_action)
         toolbar.addAction(self.settings_action)
         toolbar.addWidget(self.language_button)
-        toolbar.addWidget(self.theme_button)
         toolbar.addSeparator()
         self.playlist_files_action = QAction(self)
         self.playlist_files_action.setIcon(
@@ -647,6 +634,7 @@ class MainWindow(QMainWindow):
         self.export_button = toolbar.widgetForAction(self.export_action)
         if self.export_button is not None:
             self.export_button.setObjectName("exportButton")
+            self.export_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         # File/edit/view controls live in the menu bar.  Keep only the primary
         # everyday controls in the toolbar so the top area stays balanced.
         toolbar.clear()
@@ -671,6 +659,15 @@ class MainWindow(QMainWindow):
         self.export_button = toolbar.widgetForAction(self.export_action)
         if self.export_button is not None:
             self.export_button.setObjectName("exportButton")
+            self.export_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        # Compact secondary actions leave Export visible on laptops.
+        for action in (
+            self.new_action, self.open_action, self.undo_action, self.redo_action,
+            self.center_horizontal_action, self.center_vertical_action,
+        ):
+            button = toolbar.widgetForAction(action)
+            if button is not None:
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.store.selection_set_changed.connect(
             lambda _selected_ids, _active: self._update_alignment_toolbar_actions()
         )
@@ -1377,9 +1374,7 @@ class MainWindow(QMainWindow):
         self.tools_menu.addAction(self.settings_action)
         self.tools_menu.addSeparator()
         self.language_menu.setTitle("언어")
-        self.theme_menu.setTitle("테마")
         self.tools_menu.addMenu(self.language_menu)
-        self.tools_menu.addMenu(self.theme_menu)
         self.help_menu = menu_bar.addMenu("")
         self.help_action = QAction(self)
         self.help_action.setShortcut(QKeySequence("F1"))
@@ -1524,7 +1519,7 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
         )
         center_layout = QVBoxLayout(center)
-        center_layout.setContentsMargins(10, 10, 10, 8)
+        center_layout.setContentsMargins(16, 16, 16, 12)
         self.canvas = LiveCanvas(self.store, self.translator)
         self.canvas.files_dropped.connect(self._handle_dropped_files)
         self.canvas.source_template_dropped.connect(self._handle_source_template_drop)
@@ -1740,7 +1735,7 @@ class MainWindow(QMainWindow):
         panel = QFrame()
         panel.setObjectName("sidePanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 16, 14, 14)
+        layout.setContentsMargins(12, 14, 12, 12)
         layout.setSpacing(8)
         self.sidebar_title = QLabel()
         self.sidebar_title.setObjectName("panelTitle")
@@ -2203,14 +2198,15 @@ class MainWindow(QMainWindow):
         progress_y = max(title_y + 140.0, height - max(80.0, height * 0.1944))
         progress_y = min(progress_y, height - 24.0)
         self.store.add(Source(SourceType.BACKGROUND, "Background", width=width, height=height,
-                              fill_color="#263042", locked=False, z_index=-10, text=""))
+                                fill_color="#202A29", locked=False, z_index=-10, text=""))
         self.store.add(Source(SourceType.TEXT, "Playlist title", x=margin_x, y=title_y,
                               width=title_width,
-                              height=100, fill_color="#7C3AED", border_radius=16,
-                              text="Late Night Playlist", z_index=1))
+                                height=100, fill_color="#00000000", border_radius=0,
+                                font_size=42, text_alignment="left",
+                                text="Late Night Playlist", z_index=1))
         self.store.add(Source(SourceType.PROGRESS_BAR, "Progress", x=margin_x,
                               y=progress_y, width=progress_width,
-                              height=14, fill_color="#27D17F", border_radius=7, z_index=2))
+                                height=6, fill_color="#79C7B4", border_radius=0, z_index=2))
 
     def _add_source(self, source_type: SourceType, position: object | None = None) -> None:
         """Add a base source or one of its property-only palette templates."""
@@ -3345,6 +3341,15 @@ class MainWindow(QMainWindow):
                 if korean else "Select at least one music track to export.",
             )
             return None
+        width, height = selected_app_settings.resolution
+        selected_app_settings = replace(
+            selected_app_settings,
+            # Workload is selected from the actual export cost so the user
+            # does not need to tune a machine-specific setting before export.
+            work_mode=ExportController.choose_work_mode(
+                width, height, selected_app_settings.fps,
+            ),
+        )
         render_settings = selected_app_settings.render_settings()
         try:
             renderer.preflight_export(active_tracks, output, render_settings)
@@ -3521,6 +3526,23 @@ class MainWindow(QMainWindow):
                 ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+        font_warnings = self._export_font_warnings(korean)
+        if font_warnings:
+            listed = "\n".join(font_warnings[:5])
+            if QMessageBox.question(
+                self,
+                "대체 폰트 확인" if korean else "Check fallback fonts",
+                (
+                    "다음 텍스트 요소의 폰트를 내보내기 환경에서 찾지 못할 수 있습니다:\n\n"
+                    f"{listed}\n\n계속 내보낼까요?"
+                    if korean else
+                    "These text elements may use a fallback font during export:\n\n"
+                    f"{listed}\n\nContinue export?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             ) != QMessageBox.StandardButton.Yes:
                 return
         work_mode_name = {
@@ -4200,6 +4222,27 @@ class MainWindow(QMainWindow):
                     f"about {shown[0]}×{shown[1]} ({scale_up:.1f}x upscale)"
                 )
             )
+        return warnings
+
+    def _export_font_warnings(self, korean: bool) -> list[str]:
+        """Detect custom fonts that are missing or no longer loadable."""
+        installed = set(QFontDatabase.families())
+        warnings: list[str] = []
+        for source in self.store.sources():
+            if not source.visible or not source.font_family:
+                continue
+            if source.font_path and not Path(source.font_path).is_file():
+                warnings.append(
+                    f"· {source.name or 'Text'}: {source.font_family} (font file missing)"
+                    if not korean else
+                    f"· {source.name or '텍스트'}: {source.font_family} (폰트 파일 없음)"
+                )
+            elif source.font_family not in installed:
+                warnings.append(
+                    f"· {source.name or 'Text'}: {source.font_family} (not installed)"
+                    if not korean else
+                    f"· {source.name or '텍스트'}: {source.font_family} (설치되지 않음)"
+                )
         return warnings
 
     def _export_visualizers(
@@ -5205,7 +5248,9 @@ class MainWindow(QMainWindow):
 
     def _show_export_complete_dialog(self, result: RenderResult) -> None:
         """Offer useful next actions only after the editor has been unlocked."""
-        dialog = ExportCompleteDialog(result.output_path, self.translator, self)
+        dialog = ExportCompleteDialog(
+            result.output_path, self.translator, self, validation=result.validation,
+        )
         dialog.exec()
         export_again = dialog.export_again_requested
         self._active_export_output_path = None
@@ -5494,9 +5539,6 @@ class MainWindow(QMainWindow):
     def _on_theme_changed(self, preference: str, effective: str) -> None:
         """Apply a selected theme and softly transition the refreshed workspace."""
         self.current_theme = preference
-        selected = Theme(preference)
-        if selected in self.theme_actions:
-            self.theme_actions[selected].setChecked(True)
         self._apply_style()
         if self._inline_preview is not None:
             self._inline_preview.refresh_theme()
@@ -5951,11 +5993,7 @@ class MainWindow(QMainWindow):
             return False
         target = None if force_choose else self.current_project_path
         if target is None:
-            safe_title = "".join(
-                character if character.isalnum() or character in " _-" else "_"
-                for character in self.project_settings.title
-            ).strip() or "playlist"
-            default = str(Path.cwd() / f"{safe_title}.pvsproj")
+            default = str(default_project_path(self.project_settings.title))
             selected, _ = QFileDialog.getSaveFileName(
                 self,
                 "프로젝트 저장" if self.translator.language is Language.KOREAN else "Save project",
@@ -6020,8 +6058,8 @@ class MainWindow(QMainWindow):
         try:
             self.current_project_path = Path(saved_path)
             self._legacy_project_path = (
-                self.current_project_path
-                if self.current_project_path.suffix.lower() == ".json" else None
+                self.current_project_path if is_legacy_project_path(self.current_project_path)
+                else None
             )
             self.upgrade_project_action.setEnabled(self._legacy_project_path is not None)
             self.recent_projects.add(self.current_project_path)
@@ -6175,8 +6213,8 @@ class MainWindow(QMainWindow):
                 self._history_restoring = False
             self.current_project_path = path.resolve()
             self._legacy_project_path = (
-                self.current_project_path
-                if self.current_project_path.suffix.lower() == ".json" else None
+                self.current_project_path if is_legacy_project_path(self.current_project_path)
+                else None
             )
             self.upgrade_project_action.setEnabled(self._legacy_project_path is not None)
             self.recent_projects.add(self.current_project_path)
@@ -6622,10 +6660,6 @@ class MainWindow(QMainWindow):
             action.setToolTip(f"{description} {settings}")
             action.setStatusTip(description)
         self.language_menu.setTitle(text("language"))
-        self.theme_menu.setTitle("테마" if korean else "Theme")
-        self.theme_actions[Theme.LIGHT].setText("라이트" if korean else "Light")
-        self.theme_actions[Theme.DARK].setText("다크" if korean else "Dark")
-        self.theme_actions[Theme.AUTO].setText("자동" if korean else "Auto")
         self.panels_action.setText(
             "왼쪽 패널 표시" if korean else "Show left panel"
         )
@@ -6910,220 +6944,12 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _apply_style(self) -> None:
-        dark = self.theme_service.effective_theme is Theme.DARK
-        colors = {
-            "window": "#14181F" if dark else "#F4F7FB",
-            "panel": "#1C222C" if dark else "#FFFFFF",
-            "field": "#131820" if dark else "#F7F9FC",
-            "button": "#293241" if dark else "#EEF2F7",
-            "hover": "#354258" if dark else "#E0EAF5",
-            "text": "#E7EDF5" if dark else "#18212D",
-            "muted": "#9BA9BA" if dark else "#64748B",
-            "border": "#303947" if dark else "#D7E0EA",
-            "disabled": "#202733" if dark else "#E6EBF1",
-            "alternate": "#202733" if dark else "#F0F4F8",
-            "shadow": "#000000" if dark else "#7C8A9A",
-        }
-        application = QApplication.instance()
-        effective_name = "dark" if dark else "light"
-        palette_changed = (
-            application is not None
-            and application.property("playlistCanvasEffectiveTheme") != effective_name
-        )
-        if application is not None and palette_changed:
-            palette = QPalette()
-            palette.setColor(QPalette.ColorRole.Window, QColor(colors["window"]))
-            palette.setColor(QPalette.ColorRole.WindowText, QColor(colors["text"]))
-            palette.setColor(QPalette.ColorRole.Base, QColor(colors["field"]))
-            palette.setColor(QPalette.ColorRole.AlternateBase, QColor(colors["alternate"]))
-            palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(colors["panel"]))
-            palette.setColor(QPalette.ColorRole.ToolTipText, QColor(colors["text"]))
-            palette.setColor(QPalette.ColorRole.Text, QColor(colors["text"]))
-            palette.setColor(QPalette.ColorRole.Button, QColor(colors["button"]))
-            palette.setColor(QPalette.ColorRole.ButtonText, QColor(colors["text"]))
-            palette.setColor(QPalette.ColorRole.BrightText, QColor("#FFFFFF"))
-            palette.setColor(QPalette.ColorRole.Highlight, QColor("#1685D1"))
-            palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
-            palette.setColor(QPalette.ColorRole.Link, QColor("#1685D1"))
-            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(colors["muted"]))
-            palette.setColor(
-                QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,
-                QColor(colors["muted"]),
-            )
-            palette.setColor(
-                QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText,
-                QColor(colors["muted"]),
-            )
-            palette.setColor(
-                QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText,
-                QColor(colors["muted"]),
-            )
-            application.setPalette(palette)
-            application.setProperty("playlistCanvasEffectiveTheme", effective_name)
-
-        bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
-
-        spin_up_path = (bundle_root / "assets" / "icons" / "spin_up.svg").as_posix()
-        spin_down_path = (bundle_root / "assets" / "icons" / "spin_down.svg").as_posix()
-        
-        style_sheet = (
-            f"""
-            QMainWindow {{ background: {colors['window']}; color: {colors['text']}; }}
-            QDialog, QMessageBox {{ background: {colors['window']}; color: {colors['text']}; }}
-            QMenuBar {{ background: {colors['panel']}; color: {colors['text']}; border-bottom: 1px solid {colors['border']}; }}
-            QMenuBar::item:selected {{ background: {colors['hover']}; border-radius: 5px; }}
-            QMenu {{ background: {colors['panel']}; color: {colors['text']}; border: 1px solid {colors['border']}; padding: 5px; }}
-            QMenu::item {{ padding: 7px 30px 7px 24px; border-radius: 5px; }}
-            QMenu::item:selected {{ background: #1685D1; color: #FFFFFF; }}
-            QMenu::item:disabled {{ color: {colors['muted']}; }}
-            QMenu::separator {{ height: 1px; background: {colors['border']}; margin: 4px 8px; }}
-            QStatusBar {{ background: {colors['panel']}; color: {colors['muted']}; border-top: 1px solid {colors['border']}; }}
-            QLabel#activityProgressLabel {{ color: {colors['text']}; font-weight: 600; }}
-            QProgressBar#activityProgressBar {{ background: {colors['field']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 7px; text-align: center; font-size: 10px; }}
-            QProgressBar#activityProgressBar::chunk {{ background: #1685D1; border-radius: 6px; }}
-            QDialog#startupDialog {{ background: {colors['window']}; color: {colors['text']}; }}
-            QDialog#startupDialog QFrame#card {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 12px; }}
-            #startupTitle {{ color: {colors['text']}; }}
-            #recentProjectList {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 8px; padding: 5px; }}
-            #recentProjectList::item {{ padding: 5px; margin: 2px; border-radius: 6px; }}
-            #recentProjectThumbnail, #thumbnailPreview {{ background: {colors['alternate']}; color: {colors['muted']}; border: 1px solid {colors['border']}; border-radius: 7px; font-weight: 700; }}
-            #leftProjectTabs::pane {{ border: 0; background: {colors['panel']}; }}
-            #leftProjectTabs QTabBar::tab {{ background: {colors['button']}; color: {colors['muted']}; padding: 7px 10px; border: 1px solid {colors['border']}; }}
-            #leftProjectTabs QTabBar::tab:selected {{ background: {colors['panel']}; color: {colors['text']}; border-bottom-color: {colors['panel']}; }}
-            #sourceCategoryTabs {{ qproperty-drawBase: 0; }}
-            #sourceCategoryTabs QTabBar::tab {{ background: {colors['button']}; color: {colors['muted']}; border: 1px solid {colors['border']}; border-radius: 7px; padding: 5px 10px; margin-right: 3px; }}
-            #sourceCategoryTabs QTabBar::tab:selected {{ background: #1685D1; color: #FFFFFF; border-color: #1685D1; font-weight: 700; }}
-            #sourceCategoryTabs QTabBar::tab:hover:!selected {{ background: {colors['hover']}; color: {colors['text']}; }}
-            QToolBar {{ background: {colors['panel']}; border: 0; border-bottom: 1px solid {colors['border']}; spacing: 6px; padding: 7px 10px; }}
-            QToolButton, QPushButton {{ background: {colors['button']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 8px; padding: 7px 10px; }}
-            QToolButton[contentViewButton="true"] {{ padding: 4px 6px; border-radius: 6px; }}
-            QToolButton:hover, QPushButton:hover {{ background: {colors['hover']}; border-color: #55B8FF; }}
-            QToolTip {{ background: {colors['panel']}; color: {colors['text']}; border: 1px solid #55B8FF; border-radius: 7px; padding: 8px; }}
-            QToolButton:checked {{ background: #1685D1; color: #FFFFFF; }}
-            QToolButton:disabled {{ color: {colors['muted']}; background: {colors['disabled']}; }}
-            QPushButton:disabled {{ color: {colors['muted']}; background: {colors['disabled']}; border-color: {colors['border']}; }}
-            QToolButton#exportButton {{ background: #1685D1; color: #FFFFFF; border-color: #1685D1; font-weight: 700; padding-left: 14px; padding-right: 14px; }}
-            QToolButton#exportButton:hover {{ background: #0D72B8; border-color: #0D72B8; }}
-            QToolButton#exportButton:disabled {{ background: {colors['disabled']}; border-color: {colors['border']}; color: {colors['muted']}; }}
-            #dialogTitle {{ color: {colors['text']}; font-size: 21px; font-weight: 750; padding: 0; }}
-            #settingsStatusCard {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 10px; }}
-            #aboutHeader, #aboutDetailsCard {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 11px; }}
-            #aboutProductName {{ color: {colors['text']}; font-size: 22px; font-weight: 750; padding: 0; }}
-            #aboutVersion {{ color: #1685D1; font-size: 13px; font-weight: 700; padding: 0; }}
-            QPushButton#primaryButton {{ background: #1685D1; color: #FFFFFF; border-color: #1685D1; font-weight: 700; }}
-            QPushButton#primaryButton:hover {{ background: #0D72B8; border-color: #0D72B8; }}
-            #settingsTabs::pane {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 9px; top: -1px; }}
-            #settingsTabs QTabBar::tab {{ background: {colors['button']}; color: {colors['muted']}; border: 1px solid {colors['border']}; padding: 9px 22px; margin-right: 3px; }}
-            #settingsTabs QTabBar::tab:selected {{ background: {colors['panel']}; color: {colors['text']}; border-bottom-color: {colors['panel']}; font-weight: 700; }}
-            #projectStatusChip {{ color: {colors['muted']}; background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 8px; padding: 6px 10px; margin-right: 6px; font-size: 12px; }}
-            #sidePanel, #layerPanel {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 10px; }}
-            #playlistStrip, #timelineStrip {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 10px; }}
-            #bottomWorkspaceTabs::pane {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 10px; top: -1px; }}
-            #bottomWorkspaceTabs QTabBar::tab {{ background: {colors['button']}; color: {colors['muted']}; border: 1px solid {colors['border']}; padding: 8px 20px; margin-right: 3px; }}
-            #bottomWorkspaceTabs QTabBar::tab:selected {{ background: {colors['panel']}; color: {colors['text']}; border-bottom-color: {colors['panel']}; font-weight: 700; }}
-            #timelineStrip {{ border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0; }}
-            #timelineTabs::pane {{ border: 1px solid {colors['border']}; border-radius: 8px; top: -1px; background: {colors['field']}; }}
-            #timelineTabs QTabBar::tab {{ background: transparent; color: {colors['muted']}; border: 0; padding: 7px 16px; margin-right: 4px; }}
-            #timelineTabs QTabBar::tab:selected {{ color: {colors['text']}; border-bottom: 2px solid #1685D1; font-weight: 700; }}
-            #timelineTrackTable, #timelineSourceTable {{ background: {colors['field']}; border: 0; alternate-background-color: {colors['alternate']}; selection-background-color: #1685D1; }}
-            #timelineTrackTable::item, #timelineSourceTable::item {{ padding: 5px 8px; border: 0; }}
-            #timelineTrackTable::item:selected, #timelineSourceTable::item:selected {{ background: #1685D1; color: #FFFFFF; }}
-            #timelineMoveButton {{ min-width: 28px; max-width: 28px; min-height: 28px; padding: 0; font-size: 15px; font-weight: 700; }}
-            #panelTitle {{ color: {colors['text']}; font-size: 15px; font-weight: 700; }}
-            #mutedLabel {{ color: {colors['muted']}; font-size: 12px; }}
-            #sourceSearch {{ padding-left: 7px; min-height: 28px; border-radius: 8px; }}
-            #sourceResultCount {{ color: {colors['muted']}; background: {colors['alternate']}; border: 1px solid {colors['border']}; border-radius: 9px; padding: 2px 7px; font-size: 10px; font-weight: 650; }}
-            #sourceCategoryTitle {{ color: {colors['muted']}; font-size: 10px; font-weight: 750; padding: 5px 3px 2px 3px; }}
-            #sourceTemplateGroup {{ background: transparent; border: 0; }}
-            QPushButton#sourceTemplateButton {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 10px; padding: 0; text-align: left; }}
-            QPushButton#sourceTemplateButton:hover {{ background: {colors['hover']}; border-color: #55B8FF; }}
-            QPushButton#sourceTemplateButton:pressed {{ background: #1685D1; border-color: #1685D1; }}
-            QPushButton#sourceTemplateButton:pressed QLabel {{ color: #FFFFFF; }}
-            QPushButton#sourceTemplateButton[variant="true"] {{ background: {colors['alternate']}; border-radius: 8px; }}
-            #sourceTemplateTitle {{ color: {colors['text']}; font-size: 12px; font-weight: 700; padding: 0; background: transparent; }}
-            #sourceTemplateDescription {{ color: {colors['muted']}; font-size: 10px; padding: 0; background: transparent; }}
-            #sourceTemplateIcon {{ background: {colors['alternate']}; border: 1px solid {colors['border']}; border-radius: 7px; padding: 2px; }}
-            QPushButton#sourceTemplateButton:hover #sourceTemplateIcon {{ border-color: #55B8FF; }}
-            #sourceVariantToggle {{ min-width: 28px; max-width: 28px; min-height: 42px; padding: 0; border-radius: 8px; font-size: 14px; }}
-            #sourceVariantContainer {{ border-left: 2px solid {colors['border']}; }}
-            QScrollArea, QListWidget, QTreeWidget, QTableWidget {{ background: {colors['panel']}; color: {colors['text']}; border: 0; }}
-            #sourceInspector, #sourceInspector::viewport, #inspectorContent {{ background: {colors['panel']}; color: {colors['text']}; }}
-            #inspectorPropertyTabs::pane {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 9px; top: -1px; }}
-            #inspectorPropertyTabs QTabBar::tab {{ background: {colors['button']}; color: {colors['muted']}; border: 1px solid {colors['border']}; padding: 7px 11px; margin-right: 2px; }}
-            #inspectorPropertyTabs QTabBar::tab:selected {{ background: {colors['panel']}; color: {colors['text']}; border-bottom-color: {colors['panel']}; font-weight: 700; }}
-            #inspectorPropertyTabs QTabBar::tab:hover:!selected {{ background: {colors['hover']}; color: {colors['text']}; }}
-            #inspectorSectionHeader {{ background: {colors['button']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 7px; padding: 6px 10px; text-align: left; font-weight: 700; font-size: 11px; }}
-            #inspectorSectionHeader:hover {{ background: {colors['hover']}; }}
-            #inspectorSectionHeader:checked {{ border-bottom-left-radius: 0; border-bottom-right-radius: 0; }}
-            #inspectorSectionBody {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-top: 0; border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }}
-            #inspectorEmptyState {{ color: {colors['muted']}; font-size: 14px; background: {colors['panel']}; }}
-            QHeaderView::section {{ background: {colors['alternate']}; color: {colors['text']}; border: 0; border-bottom: 1px solid {colors['border']}; padding: 5px; }}
-            QTreeWidget::item:selected, QListWidget::item:selected {{ background: #1685D1; color: #FFFFFF; border-radius: 5px; }}
-            #playlistList[dropActive="true"] {{ border: 1px solid #1685D1; border-radius: 8px; }}
-            #trackRow {{ background: {colors['field']}; border: 1px solid {colors['border']}; border-radius: 8px; }}
-            #trackRow:hover {{ background: {colors['hover']}; }}
-            #trackRow[trackDisabled="true"] {{ background: {colors['panel']}; border: 1px dashed {colors['border']}; }}
-            #trackRow[trackDisabled="true"] QLabel {{ color: {colors['muted']}; }}
-            #trackRow[dropTarget="true"] {{ background: {colors['hover']}; border: 2px solid #1685D1; }}
-            QGroupBox {{ color: {colors['text']}; font-weight: 600; border: 1px solid {colors['border']}; border-radius: 8px; margin-top: 10px; padding: 10px 7px 7px 7px; }}
-            QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}
-            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{ background: {colors['field']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 6px; padding: 5px; min-height: 18px; selection-background-color: #1685D1; selection-color: #FFFFFF; }}
-            QLineEdit:focus, QComboBox:focus {{ border: 2px solid #1685D1; padding: 4px; }}
-            QSpinBox, QDoubleSpinBox {{ background: {colors['field']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 6px; padding: 0px 28px 0px 5px; min-height: 30px; max-height: 30px; selection-background-color: #1685D1; selection-color: #FFFFFF; }}
-            QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid #1685D1; }}
-            QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; width: 24px; height: 15px; margin: 0px; background: {colors['button']}; border-left: 1px solid {colors['border']}; border-bottom: 1px solid {colors['border']}; border-top-right-radius: 5px; }}
-            QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; width: 24px; height: 15px; margin: 0px; background: {colors['button']}; border-left: 1px solid {colors['border']}; border-bottom-right-radius: 5px; }}
-            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url("{spin_up_path}"); width: 9px; height: 6px; }}
-            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url("{spin_down_path}"); width: 9px; height: 6px; }}
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{ background: {colors['hover']}; }}
-            QSpinBox::up-button:pressed, QSpinBox::down-button:pressed, QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed {{ background: #1685D1; }}
-            QCheckBox, QLabel {{ color: {colors['text']}; padding: 3px; }}
-            QCheckBox:disabled, QLabel:disabled {{ color: {colors['muted']}; }}
-            QComboBox QAbstractItemView {{ background: {colors['panel']}; color: {colors['text']}; border: 1px solid {colors['border']}; selection-background-color: #1685D1; selection-color: #FFFFFF; outline: 0; }}
-            QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px; }}
-            QScrollBar::handle:vertical {{ background: {colors['border']}; min-height: 28px; border-radius: 5px; }}
-            QScrollBar::handle:vertical:hover {{ background: {colors['muted']}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-            QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 3px; }}
-            QScrollBar::handle:horizontal {{ background: {colors['border']}; min-width: 28px; border-radius: 5px; }}
-            QScrollBar::handle:horizontal:hover {{ background: {colors['muted']}; }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
-            QSplitter::handle {{ background: {colors['border']}; width: 2px; height: 5px; }}
-            QSplitter::handle:hover {{ background: #1685D1; }}
-            """
-        )
-        self.setStyleSheet("")
-        if application is not None:
-            style_changed = application.styleSheet() != style_sheet
-            if style_changed:
-                application.setStyleSheet(style_sheet)
-        else:
-            style_changed = True
-            self.setStyleSheet(style_sheet)
+        """Apply the shared studio skin without restyling every open window."""
+        from app.ui.design_system import apply_studio_style
+        apply_studio_style(QApplication.instance())
         for panel in (self.source_sidebar, self.layer_panel, self.playlist_editor):
-            effect = QGraphicsDropShadowEffect(panel)
-            effect.setBlurRadius(18)
-            effect.setOffset(0, 4)
-            shadow_color = QColor(colors["shadow"])
-            shadow_color.setAlpha(85)
-            effect.setColor(shadow_color)
-            panel.setGraphicsEffect(effect)
-        if dark:
-            self.canvas.set_theme_colors(
-                QColor("#171B22"), QColor("#202733"), QColor(255, 255, 255, 18),
-                QColor("#5F6B7A"),
-            )
-        else:
-            self.canvas.set_theme_colors(
-                QColor("#E6EBF1"), QColor("#FFFFFF"), QColor(72, 91, 112, 30),
-                QColor("#9AA9BA"),
-            )
-        if application is not None and (palette_changed or style_changed):
-            for widget in application.topLevelWidgets():
-                widget.setPalette(application.palette())
-                refresh_theme = getattr(widget, "refresh_theme", None)
-                if callable(refresh_theme):
-                    refresh_theme()
-                widget.style().unpolish(widget)
-                widget.style().polish(widget)
-                widget.update()
+            panel.setGraphicsEffect(None)
+        self.canvas.set_theme_colors(
+            QColor("#17191B"), QColor("#202326"), QColor(255, 255, 255, 10),
+            QColor("#646A70"),
+        )

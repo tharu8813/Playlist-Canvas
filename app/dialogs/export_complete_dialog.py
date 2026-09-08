@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.utils.i18n import Language, Translator
+from app.services.export_validation_service import ExportValidationResult
 
 
 class ExportCompleteDialog(QDialog):
@@ -29,6 +30,7 @@ class ExportCompleteDialog(QDialog):
         output_path: str | Path,
         translator: Translator,
         parent: QWidget | None = None,
+        validation: ExportValidationResult | None = None,
     ) -> None:
         super().__init__(parent)
         self.output_path = Path(output_path).expanduser().resolve()
@@ -68,6 +70,11 @@ class ExportCompleteDialog(QDialog):
         card_layout.addWidget(file_name)
         card_layout.addWidget(path_label)
         card_layout.addWidget(size_label)
+        if validation is not None:
+            validation_label = QLabel(self._validation_text(validation, korean))
+            validation_label.setObjectName("mutedLabel" if validation.passed else "warningLabel")
+            validation_label.setWordWrap(True)
+            card_layout.addWidget(validation_label)
 
         self.play_button = QPushButton(
             "영상 재생하기" if korean else "Play video"
@@ -124,6 +131,17 @@ class ExportCompleteDialog(QDialog):
                 return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
             value /= 1024.0
         return f"{size} B"
+
+    @staticmethod
+    def _validation_text(validation: ExportValidationResult, korean: bool) -> str:
+        if not validation.available:
+            return ("출력 품질 확인을 건너뛰었습니다: " + validation.error
+                    if korean else "Output quality check unavailable: " + validation.error)
+        prefix = "출력 확인 · " if korean else "Output verified · "
+        text = prefix + validation.summary
+        if validation.warnings:
+            text += ("\n확인 필요: " if korean else "\nCheck: ") + "; ".join(validation.warnings)
+        return text
 
     def _play_video(self) -> None:
         if self.output_path.is_file() and QDesktopServices.openUrl(

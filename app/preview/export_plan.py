@@ -45,9 +45,14 @@ def canvas_render_scale(scene: object, render_settings: RenderSettings) -> float
     at the final pixel grid instead of being upscaled by FFmpeg afterwards.
     """
     artboard_width = float(scene.artboard_rect.width())
-    if artboard_width <= 0.0:
+    artboard_height = float(scene.artboard_rect.height())
+    if artboard_width <= 0.0 or artboard_height <= 0.0:
         return 1.0
-    return max(1.0, round(render_settings.output_width) / artboard_width)
+    return max(
+        1.0,
+        round(render_settings.output_width) / artboard_width,
+        round(render_settings.output_height) / artboard_height,
+    )
 
 
 def build_export_plan(

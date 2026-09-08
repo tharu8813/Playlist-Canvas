@@ -112,6 +112,8 @@ class ProjectService:
                 with target.open("r", encoding="utf-8") as file:
                     data = json.load(file)
             settings = data.get("settings", {}) if isinstance(data, dict) else {}
+            if not isinstance(settings, dict):
+                raise ValueError("Project settings must be an object.")
             return ProjectSummary(
                 title=str(settings.get("title") or target.stem.removesuffix(".project")),
                 description=str(settings.get("description", "")),

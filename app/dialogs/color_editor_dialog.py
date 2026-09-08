@@ -106,7 +106,7 @@ class ColorEditorDialog(QDialog):
         root.setSpacing(14)
         heading = QLabel(title)
         heading.setObjectName("dialogTitle")
-        heading.setStyleSheet("font-size: 19px; font-weight: 750;")
+        heading.setStyleSheet("font-size: 21px; font-weight: 600;")
         root.addWidget(heading)
         description = QLabel(
             "색상을 직접 조절하거나 현재 곡의 앨범 커버 색상과 연결할 수 있습니다."

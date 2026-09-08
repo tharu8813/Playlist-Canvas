@@ -125,9 +125,13 @@ class AutosaveService:
     def _load(path: Path) -> RecoverySnapshot:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("Recovery root must be an object")
             if data.get("schema_version") != AutosaveService.schema_version:
                 raise ValueError("Unsupported recovery schema")
             saved_at = datetime.fromisoformat(data["saved_at"])
+            if saved_at.tzinfo is None:
+                saved_at = saved_at.replace(tzinfo=UTC)
             project_value = data.get("project_path")
             project_path = Path(project_value) if project_value else None
             return RecoverySnapshot(

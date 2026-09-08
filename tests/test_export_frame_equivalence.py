@@ -740,6 +740,17 @@ class ExportFrameEquivalenceTests(unittest.TestCase):
             (staged[0].image.width(), staged[0].image.height()), (320, 180),
         )
 
+    def test_small_canvas_capture_does_not_apply_a_low_resolution_cap(self) -> None:
+        scene = CanvasScene()
+        scene.set_artboard_size(64, 64)
+        scene.addItem(SourceItem(Source(
+            SourceType.TEXT, "Tiny canvas", text="4K title", width=64, height=64,
+        )))
+
+        captured = CanvasSnapshot.capture(scene, output_scale=9.0)
+
+        self.assertEqual((captured.width(), captured.height()), (576, 576))
+
     def test_animated_source_remains_on_pixel_identical_legacy_path(self) -> None:
         """Animation samples must never be collapsed by the safe-frame cache."""
         scene = CanvasScene()

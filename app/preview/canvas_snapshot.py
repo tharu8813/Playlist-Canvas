@@ -43,8 +43,10 @@ _VOLATILE_TEXT_TOKENS: frozenset[str] = frozenset(TEXT_TEMPLATE_TOKEN_NAMES) - {
 
 # Editor preview never asks for more than the artboard resolution, but export
 # renders the vector scene at the target output resolution so text and shapes
-# stay crisp instead of being bicubic-upscaled by FFmpeg afterwards.
-_MAX_CAPTURE_SCALE = 8.0
+# stay crisp instead of being bicubic-upscaled by FFmpeg afterwards. Custom
+# projects may be as small as 64 px while export can reach 4K, which needs a
+# 60x raster scale; the cap leaves a small margin for the supported outputs.
+_MAX_CAPTURE_SCALE = 64.0
 
 
 # Track-driven album covers and ambient backgrounds are re-injected on every

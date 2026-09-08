@@ -102,6 +102,29 @@ class ExportPlanTests(unittest.TestCase):
         # Never downscale the authored canvas; FFmpeg still handles that case.
         self.assertEqual(hd.canvas_render_scale, 1.0)
 
+    def test_canvas_render_scale_keeps_small_and_tall_projects_crisp(self) -> None:
+        source = Source(SourceType.TEXT, "Title", text="Playlist")
+        scene = self._scene(source)
+        scene.set_artboard_size(64, 64)
+        with patch.object(CanvasSnapshot, "z_bands", return_value=[(None, None)]):
+            four_k = self._plan(
+                scene, [source], _RendererStub(),
+                render_settings=RenderSettings(
+                    output_width=3840, output_height=2160,
+                ),
+            )
+        self.assertEqual(four_k.canvas_render_scale, 60.0)
+
+        scene.set_artboard_size(1280, 720)
+        with patch.object(CanvasSnapshot, "z_bands", return_value=[(None, None)]):
+            tall = self._plan(
+                scene, [source], _RendererStub(),
+                render_settings=RenderSettings(
+                    output_width=1920, output_height=2160,
+                ),
+            )
+        self.assertEqual(tall.canvas_render_scale, 3.0)
+
     def test_empty_timeline_raises_render_error(self) -> None:
         source = Source(SourceType.TEXT, "Title", text="Playlist")
         scene = self._scene(source)

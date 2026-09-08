@@ -15,7 +15,7 @@ from weakref import WeakSet
 import numpy as np
 
 from PySide6.QtCore import QElapsedTimer, QRect, QRectF, QSize, QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QResizeEvent, QShortcut
+from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QResizeEvent, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QStackedLayout,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -53,6 +54,7 @@ from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.services.source_store import SourceStore
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.services.playlist_service import PlaylistService
+from app.preview.album_art import extract_track_cover
 from app.video.timeline import resolve_video_position, source_video_paths
 from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
 from app.video.decoder_backpressure import VideoDecoderBackpressure
@@ -131,7 +133,7 @@ class PlaylistTimeline(QSlider):
             label_x = max(1, min(self.width() - 25, x + 3))
             if active:
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor("#1685D1"))
+                painter.setBrush(QColor("#79C7B4"))
                 painter.drawRoundedRect(QRect(label_x, 1, 24, 18), 8, 8)
                 painter.setPen(QColor("#FFFFFF"))
             else:
@@ -482,7 +484,7 @@ class ExportPreviewDialog(QDialog):
         # user's preference, so the next launch can retry after a driver update.
         self.gpu_preview_enabled = False
         self.preview_label = CpuPreviewSurface()
-        self.preview_label.setStyleSheet("background: #111820; border-radius: 8px;")
+        self.preview_label.setStyleSheet("background: #121416; border-radius: 4px;")
         self.preview_label.frame_presented.connect(self._record_presented_frame)
         self.preview_stack_host = QWidget()
         self.preview_stack = QStackedLayout(self.preview_stack_host)
@@ -610,6 +612,7 @@ class ExportPreviewDialog(QDialog):
         self.track_list = QListWidget()
         self.track_list.setObjectName("previewTrackList")
         self.track_list.setUniformItemSizes(True)
+        self.track_list.setIconSize(QSize(38, 38))
         self.track_list.setSpacing(2)
         self.track_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
@@ -793,6 +796,10 @@ class ExportPreviewDialog(QDialog):
         )
         for widget in transport_widgets:
             transport_layout.removeWidget(widget)
+        # The original two-row grid stretches column 5 for the shortcut hint.
+        # Clear those stretches before reusing the columns for the one-line strip.
+        for column in range(transport_layout.columnCount()):
+            transport_layout.setColumnStretch(column, 0)
         transport_layout.addWidget(self.volume_label, 0, 0)
         transport_layout.addWidget(self.volume_slider, 0, 1)
         transport_layout.addWidget(self.volume_value_label, 0, 2)
@@ -815,57 +822,9 @@ class ExportPreviewDialog(QDialog):
         return page
 
     def _apply_embedded_preview_style(self, page: QWidget) -> None:
-        """Match the embedded preview to MainWindow's Canvas workspace language."""
-        dark = self.palette().color(self.backgroundRole()).lightness() < 128
-        window = "#14181F" if dark else "#F4F7FB"
-        panel = "#1C222C" if dark else "#FFFFFF"
-        field = "#131820" if dark else "#F7F9FC"
-        button = "#293241" if dark else "#EEF2F7"
-        hover = "#354258" if dark else "#E0EAF5"
-        border = "#303947" if dark else "#D7E0EA"
-        text = "#E7EDF5" if dark else "#18212D"
-        muted = "#9BA9BA" if dark else "#64748B"
-        style = f"""
-            #embeddedCanvasPreview {{ background: {window}; border: 0; }}
-            #embeddedPreviewTitle {{ color: {text}; font-size: 13px; font-weight: 700; padding: 4px 2px; }}
-            #previewStage {{ background: #0B1017; border: 1px solid {border}; border-radius: 4px; }}
-            #previewPerformanceBar {{ background: {panel}; border: 1px solid {border}; border-radius: 7px; }}
-            #previewPerformanceTitle {{ color: {muted}; font-size: 11px; font-weight: 700; padding-right: 3px; }}
-            #previewStatusChip, #previewPerformanceMetric {{ background: {field}; color: {muted}; border: 1px solid {border}; border-radius: 5px; padding: 3px 7px; font-size: 11px; }}
-            #previewErrorBanner[severity="error"] {{ background: #4A1820; border: 1px solid #D95768; border-radius: 6px; }}
-            #previewErrorBanner[severity="warning"] {{ background: #493416; border: 1px solid #D79A34; border-radius: 6px; }}
-            #previewErrorIcon {{ background: #D95768; color: #FFFFFF; border-radius: 11px; font-weight: 900; }}
-            #previewErrorBanner[severity="warning"] #previewErrorIcon {{ background: #D79A34; }}
-            #previewErrorTitle {{ color: #FFFFFF; font-weight: 700; }}
-            #previewErrorMessage {{ color: #F1DDE1; }}
-            #previewErrorButton, #previewErrorDismissButton {{ background: transparent; color: #FFFFFF; border: 1px solid rgba(255,255,255,70); border-radius: 5px; padding: 3px 7px; }}
-            #previewErrorButton:hover, #previewErrorDismissButton:hover {{ background: rgba(255,255,255,28); }}
-            #previewTrackPanel {{ background: {panel}; border: 1px solid {border}; border-radius: 6px; }}
-            #previewTrackListTitle {{ color: {text}; font-size: 12px; font-weight: 700; }}
-            QListWidget#previewTrackList {{ background: {field}; color: {text}; border: 0; border-radius: 5px; padding: 4px; outline: 0; }}
-            QListWidget#previewTrackList::item {{ padding: 8px 7px; border: 1px solid transparent; border-radius: 5px; }}
-            QListWidget#previewTrackList::item:hover {{ background: {hover}; border-color: {border}; }}
-            QListWidget#previewTrackList::item:selected {{ background: #164A70; color: #FFFFFF; border-color: #1685D1; }}
-            #embeddedPreviewControls {{ background: {panel}; border: 1px solid {border}; border-radius: 8px; }}
-            #embeddedNowPlaying, #embeddedTimeline, #embeddedTransport {{ background: transparent; border: 0; border-radius: 0; }}
-            #embeddedNowPlaying {{ border-bottom: 1px solid {border}; }}
-            #embeddedTimeline {{ border-bottom: 1px solid {border}; }}
-            #previewTrackTitle {{ color: {text}; font-size: 14px; font-weight: 700; padding: 0; }}
-            #previewTrackBadge {{ background: #1685D1; color: #FFFFFF; border-radius: 9px; font-size: 12px; font-weight: 800; }}
-            #previewTimeLabel, #previewValueLabel {{ color: {text}; font-size: 12px; font-weight: 600; }}
-            #previewPlayButton {{ background: #1685D1; color: #FFFFFF; border: 1px solid #1685D1; border-radius: 7px; min-width: 86px; min-height: 24px; font-weight: 700; padding: 5px 10px; }}
-            #previewPlayButton:hover {{ background: #0D72B8; }}
-            #previewPlayButton:checked {{ background: #C2415B; border-color: #C2415B; }}
-            #previewTransportButton, #embeddedPreviewCloseButton {{ background: {button}; color: {text}; border: 1px solid {border}; border-radius: 7px; min-width: 38px; min-height: 24px; padding: 5px 8px; }}
-            #previewTransportButton:hover, #embeddedPreviewCloseButton:hover {{ background: {hover}; border-color: #55B8FF; }}
-            #embeddedPreviewCloseButton {{ margin-left: 5px; }}
-            #previewTimeline::groove:horizontal {{ background: {field}; border: 0; border-radius: 3px; height: 6px; }}
-            #previewTimeline::sub-page:horizontal {{ background: #1685D1; border-radius: 3px; }}
-            #previewTimeline::handle:horizontal {{ background: #FFFFFF; border: 2px solid #1685D1; width: 14px; margin: -5px 0; border-radius: 7px; }}
-            QLabel {{ color: {text}; }}
-        """
-        self.setStyleSheet(style)
-        page.setStyleSheet(style)
+        """Embedded playback uses the same chrome as the rest of the editor."""
+        self.setStyleSheet("")
+        page.setStyleSheet("")
 
     def _build_track_schedule(
         self,
@@ -928,6 +887,12 @@ class ExportPreviewDialog(QDialog):
             item = QListWidgetItem(
                 f"{index + 1:02d}  {title}\n     {detail} · {format_timestamp(track.duration_seconds)}"
             )
+            cover = extract_track_cover(track.file_path, track.cover_path)
+            if not cover.isNull():
+                item.setIcon(QIcon(cover))
+            else:
+                item.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+            item.setSizeHint(QSize(0, 54))
             item.setData(Qt.ItemDataRole.UserRole, index)
             item.setData(
                 Qt.ItemDataRole.UserRole + 1,
@@ -3118,54 +3083,8 @@ class ExportPreviewDialog(QDialog):
         self._video_proxy_worker = None
 
     def _apply_preview_style(self) -> None:
-        """Apply a compact card hierarchy that remains readable in both themes."""
-        dark = self.palette().color(self.backgroundRole()).lightness() < 128
-        panel = "#1C222C" if dark else "#FFFFFF"
-        field = "#121820" if dark else "#F4F7FB"
-        border = "#303947" if dark else "#D7E0EA"
-        text = "#EAF1F8" if dark else "#18212D"
-        muted = "#9AAABD" if dark else "#64748B"
-        hover = "#293649" if dark else "#E7EEF6"
-        self.setStyleSheet(
-            f"""
-            #previewDialogTitle {{ color: {text}; font-size: 20px; font-weight: 700; padding: 0; }}
-            #previewStage {{ background: #0B1017; border: 1px solid {border}; border-radius: 12px; }}
-            #previewPerformanceBar {{ background: {panel}; border: 1px solid {border}; border-radius: 9px; }}
-            #previewPerformanceTitle {{ color: {muted}; font-size: 11px; font-weight: 700; padding-right: 3px; }}
-            #previewPerformanceMetric {{ background: {field}; color: {muted}; border: 1px solid {border}; border-radius: 6px; padding: 5px 8px; font-size: 11px; }}
-            #previewErrorBanner[severity="error"] {{ background: #4A1820; border: 1px solid #D95768; border-radius: 8px; }}
-            #previewErrorBanner[severity="warning"] {{ background: #493416; border: 1px solid #D79A34; border-radius: 8px; }}
-            #previewErrorIcon {{ background: #D95768; color: #FFFFFF; border-radius: 11px; font-weight: 900; }}
-            #previewErrorBanner[severity="warning"] #previewErrorIcon {{ background: #D79A34; }}
-            #previewErrorTitle {{ color: #FFFFFF; font-weight: 700; }}
-            #previewErrorMessage {{ color: #F1DDE1; }}
-            #previewErrorButton, #previewErrorDismissButton {{ background: transparent; color: #FFFFFF; border: 1px solid rgba(255,255,255,70); border-radius: 5px; padding: 4px 8px; }}
-            #previewErrorButton:hover, #previewErrorDismissButton:hover {{ background: rgba(255,255,255,28); }}
-            #previewTrackPanel {{ background: {panel}; border: 1px solid {border}; border-radius: 9px; }}
-            #previewTrackListTitle {{ color: {text}; font-size: 13px; font-weight: 700; }}
-            QListWidget#previewTrackList {{ background: {field}; color: {text}; border: 0; border-radius: 7px; padding: 4px; outline: 0; }}
-            QListWidget#previewTrackList::item {{ padding: 9px 8px; border: 1px solid transparent; border-radius: 6px; }}
-            QListWidget#previewTrackList::item:hover {{ background: {hover}; border-color: {border}; }}
-            QListWidget#previewTrackList::item:selected {{ background: #164A70; color: #FFFFFF; border-color: #1685D1; }}
-            #previewInfoCard, #previewControlCard {{ background: {panel}; border: 1px solid {border}; border-radius: 10px; }}
-            #previewTrackTitle {{ color: {text}; font-size: 16px; font-weight: 700; padding: 0; }}
-            #previewTrackBadge {{ background: #1685D1; color: #FFFFFF; border-radius: 12px; font-size: 15px; font-weight: 800; }}
-            #previewStatusChip {{ background: {field}; color: {muted}; border: 1px solid {border}; border-radius: 8px; padding: 6px 10px; }}
-            #previewInfoCard QLabel#mutedLabel {{ color: {muted}; }}
-            #previewTimeLabel, #previewValueLabel {{ color: {text}; font-weight: 600; }}
-            #previewPlayButton {{ background: #1685D1; color: #FFFFFF; border: 1px solid #1685D1; border-radius: 9px; min-width: 104px; min-height: 24px; font-weight: 700; }}
-            #previewPlayButton:hover {{ background: #0D72B8; border-color: #0D72B8; }}
-            #previewPlayButton:checked {{ background: #C2415B; border-color: #C2415B; }}
-            #previewTransportButton {{ background: {field}; color: {text}; border: 1px solid {border}; border-radius: 8px; min-width: 42px; min-height: 24px; }}
-            #previewTransportButton:hover {{ background: {hover}; border-color: #55B8FF; }}
-            #previewTimeline::groove:horizontal {{ background: {field}; border: 1px solid {border}; border-radius: 4px; height: 8px; }}
-            #previewTimeline::sub-page:horizontal {{ background: #1685D1; border-radius: 4px; }}
-            #previewTimeline::handle:horizontal {{ background: #FFFFFF; border: 2px solid #1685D1; width: 16px; margin: -5px 0; border-radius: 8px; }}
-            QSlider::groove:horizontal {{ background: {field}; border-radius: 3px; height: 6px; }}
-            QSlider::sub-page:horizontal {{ background: #1685D1; border-radius: 3px; }}
-            QSlider::handle:horizontal {{ background: #1685D1; width: 14px; margin: -4px 0; border-radius: 7px; }}
-            """
-        )
+        """Use the application's shared playback styling."""
+        self.setStyleSheet("")
 
     def refresh_theme(self) -> None:
         """Rebuild dialog-local cards when the application theme changes."""

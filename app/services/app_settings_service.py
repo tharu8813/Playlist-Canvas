@@ -13,6 +13,7 @@ from app.renderer.ffmpeg_renderer import (
     WORK_MODES,
 )
 from app.services.video_encoder_service import AUTO_VIDEO_ENCODER, VideoEncoderAdvisor
+from app.services.export_validation_service import EXPORT_FPS_OPTIONS
 
 
 RESOLUTIONS: dict[str, tuple[int, int]] = {
@@ -127,7 +128,7 @@ class AppSettingsService(QObject):
             output_directory=settings.output_directory.strip(),
             resolution_name=(settings.resolution_name if settings.resolution_name in RESOLUTIONS
                              else "1920 × 1080 (Full HD)"),
-            fps=settings.fps if settings.fps in {24, 25, 30, 50, 60} else 30,
+            fps=settings.fps if settings.fps in EXPORT_FPS_OPTIONS else 30,
             video_codec=(
                 settings.video_codec if settings.video_codec in VIDEO_CODECS
                 else AUTO_VIDEO_ENCODER
@@ -228,6 +229,8 @@ class AppSettingsService(QObject):
             audio_bitrate=str(self._settings.value("audio_bitrate", "192k")),
             work_mode=str(self._settings.value("work_mode", WORK_MODE_AUTO)),
         )
+        if values.fps not in EXPORT_FPS_OPTIONS:
+            values = replace(values, fps=30)
         self._settings.endGroup()
         self._settings.beginGroup("interface")
         values = replace(

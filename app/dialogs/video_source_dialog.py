@@ -303,13 +303,5 @@ class VideoSourceDialog(QDialog):
         self.accept()
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            #videoDialogTitle { font-size: 16px; font-weight: 700; }
-            #videoScopeSummary { background: rgba(22, 133, 209, 0.12); border: 1px solid rgba(22, 133, 209, 0.35); border-radius: 7px; padding: 8px 10px; }
-            #videoTrackScopePanel { background: rgba(127, 140, 160, 0.10); border: 1px solid rgba(127, 140, 160, 0.28); border-radius: 7px; }
-            #videoPanelTitle { font-weight: 700; }
-            QGroupBox { font-weight: 700; margin-top: 8px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 9px; padding: 0 4px; }
-            """
-        )
+        """Video controls inherit the shared studio skin."""
+        self.setStyleSheet("")

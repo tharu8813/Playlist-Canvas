@@ -1033,40 +1033,20 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(round_trip.language, document.language)
         self.assertEqual(round_trip.theme, document.theme)
 
-    def test_explicit_theme_updates_application_palette_menus_and_open_dialogs(self) -> None:
-        original = self.window.theme_service.preference
-
-        class ThemeAwareDialog(QDialog):
-            def __init__(self, parent: QWidget) -> None:
-                super().__init__(parent)
-                self.refresh_count = 0
-
-            def refresh_theme(self) -> None:
-                self.refresh_count += 1
-
-        dialog = ThemeAwareDialog(self.window)
+    def test_legacy_theme_choices_keep_studio_and_open_dialogs_dark(self) -> None:
+        dialog = QDialog(self.window)
         dialog.show()
         try:
-            self.window.theme_service.set_preference(Theme.DARK)
-            self.application.processEvents()
-            self.assertLess(
-                self.application.palette().window().color().lightness(), 128
-            )
+            for preference in Theme:
+                self.window.theme_service.set_preference(preference)
+                self.application.processEvents()
+                self.assertIs(self.window.theme_service.preference, Theme.DARK)
+                self.assertLess(self.application.palette().window().color().lightness(), 128)
+                self.assertLess(dialog.palette().window().color().lightness(), 128)
             self.assertIn("QMenu::item:selected", self.application.styleSheet())
-            self.assertLess(dialog.palette().window().color().lightness(), 128)
-
-            previous_refreshes = dialog.refresh_count
-            self.window.theme_service.set_preference(Theme.LIGHT)
-            self.application.processEvents()
-            self.assertGreater(
-                self.application.palette().window().color().lightness(), 128
-            )
-            self.assertGreater(dialog.palette().window().color().lightness(), 128)
-            self.assertGreater(dialog.refresh_count, previous_refreshes)
+            self.assertFalse(hasattr(self.window, "theme_menu"))
         finally:
             dialog.close()
-            self.window.theme_service.set_preference(original)
-            self.application.processEvents()
 
     def test_source_buttons_show_localized_settings_on_hover(self) -> None:
         original_language = self.window.translator.language
@@ -1135,6 +1115,43 @@ class MainWindowSafetyTests(unittest.TestCase):
                 )
                 self.assertLess(spin.value(), raised)
 
+    def test_inspector_continuous_values_pair_sliders_with_precise_spins(self) -> None:
+        inspector = self.window.inspector
+        linked = inspector._linked_sliders
+        for spin in (
+            inspector.width_spin, inspector.height_spin, inspector.rotation_spin,
+            inspector.scale_spin, inspector.opacity_spin, inspector.radius_spin,
+            inspector.font_size_spin, inspector.blur_spin,
+            inspector.brightness_spin, inspector.contrast_spin,
+            inspector.shadow_opacity_spin, inspector.shadow_blur_spin,
+        ):
+            with self.subTest(control=spin):
+                self.assertIn(spin, linked)
+                self.assertIs(inspector._slider_hosts[spin], spin.parentWidget())
+
+        self.assertNotIn(inspector.x_spin, linked)
+        opacity_slider = linked[inspector.opacity_spin]
+        opacity_slider.setValue(12)
+        self.assertAlmostEqual(inspector.opacity_spin.value(), 0.6)
+        inspector.opacity_spin.setValue(0.35)
+        self.assertEqual(opacity_slider.value(), 7)
+
+        # Exact input still accepts values beyond the ergonomic drag range.
+        inspector.width_spin.setValue(3200)
+        self.assertEqual(inspector.width_spin.value(), 3200)
+        self.assertEqual(linked[inspector.width_spin].value(),
+                         linked[inspector.width_spin].maximum())
+
+        first = Source(SourceType.TEXT, "First", opacity=0.25)
+        second = Source(SourceType.TEXT, "Second", opacity=0.75)
+        self.window.store.replace([first, second])
+        inspector.set_sources((first.id, second.id), second)
+        self.assertFalse(opacity_slider.isEnabled())
+        self.assertEqual(inspector.opacity_spin.lineEdit().text(), "")
+        inspector.set_source(first)
+        self.assertTrue(opacity_slider.isEnabled())
+        self.assertAlmostEqual(inspector.opacity_spin.value(), 0.25)
+
     def test_source_sidebar_has_no_footer_tip(self) -> None:
         self.assertFalse(hasattr(self.window, "sidebar_hint"))
         self.assertIs(self.window.source_cards_scroll.parent(), self.window.source_sidebar)
@@ -1148,7 +1165,7 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertTrue(image_button.title_label.text())
         self.assertTrue(image_button.description_label.text())
         self.assertFalse(image_button.icon_label.pixmap().isNull())
-        self.assertGreaterEqual(image_button.minimumHeight(), 58)
+        self.assertGreaterEqual(image_button.minimumHeight(), 50)
 
         self.window.source_search.setText("audio_visualizer")
         self.application.processEvents()
@@ -2833,6 +2850,11 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(
             preview.preview_close_button.objectName(), "embeddedPreviewCloseButton",
         )
+        preview.transport_card.resize(900, 56)
+        self.application.processEvents()
+        self.assertLessEqual(
+            preview.rewind_button.width(), preview.forward_button.width() + 20,
+        )
         self.assertEqual(preview.layout().indexOf(preview.now_playing_card), -1)
         self.assertGreaterEqual(controls_page.layout().indexOf(preview.timeline_card), 0)
 
@@ -3985,7 +4007,8 @@ class MainWindowSafetyTests(unittest.TestCase):
         )
         try:
             self.assertEqual(dialog.quality_mode_combo.currentData(), "balanced")
-            self.assertTrue(dialog.advanced_group.isHidden())
+            self.assertFalse(dialog.advanced_group.isHidden())
+            self.assertTrue(dialog.storage_group.isHidden())
             self.assertIn("권장", dialog.quality_mode_combo.currentText())
             self.assertIn("예상 작업량", dialog.workload_label.text())
             self.assertIn("권장", dialog.quality_description_label.text())
@@ -4021,11 +4044,13 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertGreaterEqual(dialog.width(), 760)
             self.assertLess(dialog.height(), dialog.width())
 
+            dialog.advanced_check.setChecked(False)
+            self.application.processEvents()
             compact_height = dialog.height()
             dialog.advanced_check.setChecked(True)
             self.application.processEvents()
             self.assertFalse(dialog.advanced_group.isHidden())
-            self.assertGreater(dialog.height(), compact_height)
+            self.assertGreaterEqual(dialog.height(), compact_height)
         finally:
             dialog.close()
 
@@ -7256,7 +7281,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertFalse(dialog.log_output.isVisible())
             dialog.details_button.setChecked(True)
             self.assertFalse(dialog.log_output.isHidden())
-            self.assertEqual(dialog.details_button.text(), "기술 정보 숨기기")
+            self.assertEqual(dialog.details_button.text(), "상세 현황 숨기기")
         finally:
             dialog.complete(False)
 

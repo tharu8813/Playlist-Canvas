@@ -67,7 +67,7 @@ class _ReorderList(QListWidget):
             if len(items) > 1:
                 painter = QPainter(pixmap)
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                painter.setBrush(QColor("#1685D1"))
+                painter.setBrush(QColor("#79C7B4"))
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawRoundedRect(pixmap.width() - 30, 4, 24, 18, 6, 6)
                 painter.setPen(QColor("#FFFFFF"))
@@ -307,10 +307,6 @@ class TrackOrderDialog(QDialog):
         self.cancel_button.clicked.connect(self.reject)
         root.addWidget(self.buttons)
 
-        self.setStyleSheet(
-            "#trackOrderRow[nowPlaying=\"true\"] { background: rgba(47,158,68,0.22);"
-            " border: 1px solid #2F9E44; border-radius: 6px; }"
-        )
         self._rebuild_rows()
 
     # ---- row management -------------------------------------------------

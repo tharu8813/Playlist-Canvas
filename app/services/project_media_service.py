@@ -205,7 +205,7 @@ class ProjectMediaService:
         candidate = Path(raw_path).expanduser()
         alternatives = [candidate]
         if not candidate.is_absolute():
-            alternatives.append(project_directory / candidate)
+            alternatives.insert(0, project_directory / candidate)
         alternatives.append(project_directory / candidate.name)
         for alternative in alternatives:
             if alternative.is_file():

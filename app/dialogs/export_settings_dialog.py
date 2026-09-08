@@ -38,6 +38,7 @@ from app.services.app_settings_service import (
 from app.utils.i18n import Language, Translator
 from app.services.video_encoder_service import AUTO_VIDEO_ENCODER
 from app.services.export_storage_service import estimate_export_storage, format_bytes
+from app.services.export_validation_service import EXPORT_FPS_OPTIONS
 
 
 class ExportSettingsDialog(QDialog):
@@ -83,7 +84,7 @@ class ExportSettingsDialog(QDialog):
         self.resolution_combo = QComboBox()
         self._populate_resolutions(settings)
         self.fps_combo = QComboBox()
-        self.fps_combo.addItems(["24", "25", "30", "50", "60"])
+        self.fps_combo.addItems([str(value) for value in EXPORT_FPS_OPTIONS])
         self.fps_combo.setCurrentText(str(settings.fps))
         self.codec_combo = QComboBox()
         for label, codec in VIDEO_ENCODERS.items():
@@ -99,6 +100,10 @@ class ExportSettingsDialog(QDialog):
         self.audio_bitrate_combo.addItems(AUDIO_BITRATES)
         self.audio_bitrate_combo.setCurrentText(settings.audio_bitrate)
         self.advanced_check = QCheckBox()
+        self.storage_button = QPushButton()
+        self.storage_button.setCheckable(True)
+        self.storage_button.setChecked(False)
+        self.storage_button.toggled.connect(self._set_storage_visible)
         self.output_path_edit = QLineEdit(str(default_output_path))
         self.output_path_edit.setMinimumWidth(330)
         self.output_browse_button = QPushButton()
@@ -175,8 +180,12 @@ class ExportSettingsDialog(QDialog):
             quality_group, 1, Qt.AlignmentFlag.AlignTop,
         )
         layout.addLayout(main_columns)
-        layout.addWidget(storage_group)
+        # Keep the quality profile card visible: it is the beginner-facing
+        # entry point and the advanced controls remain available below it.
+        # Both controls already share the same settings update path.
         layout.addWidget(advanced_group)
+        layout.addWidget(self.storage_button)
+        layout.addWidget(storage_group)
         footer = QHBoxLayout()
         footer.addWidget(self.save_default_check)
         footer.addStretch(1)
@@ -204,8 +213,8 @@ class ExportSettingsDialog(QDialog):
             settings.video_codec,
         )
         self._populate_quality_modes(initial_profile)
-        self.advanced_group.setVisible(initial_profile == "custom")
-        self.advanced_check.setChecked(initial_profile == "custom")
+        self.advanced_group.setVisible(True)
+        self.advanced_check.setChecked(True)
         self.quality_mode_combo.currentIndexChanged.connect(
             self._quality_mode_changed
         )
@@ -237,6 +246,7 @@ class ExportSettingsDialog(QDialog):
             self.button_box.button(QDialogButtonBox.StandardButton.Ok),
         )
         self.retranslate()
+        self._set_storage_visible(False)
         preferred_width = min(960, max(820, self.sizeHint().width()))
         self.resize(preferred_width, self.sizeHint().height())
 
@@ -442,6 +452,14 @@ class ExportSettingsDialog(QDialog):
             f"Output drive free: {format_bytes(usage.free)} / {format_bytes(usage.total)}"
         )
 
+    def _set_storage_visible(self, visible: bool) -> None:
+        self.storage_group.setVisible(visible)
+        self.storage_button.setText(
+            ("예상 저장공간 숨기기" if visible else "예상 저장공간 보기")
+            if self.translator.language is Language.KOREAN else
+            ("Hide storage estimate" if visible else "Show storage estimate")
+        )
+
     @property
     def app_settings(self) -> AppSettings:
         """Return this export's settings while retaining app-wide path defaults."""
@@ -586,7 +604,6 @@ class ExportSettingsDialog(QDialog):
         self.setWindowTitle("내보내기 설정" if korean else "Export settings")
         selected_profile = str(self.quality_mode_combo.currentData() or "balanced")
         self._populate_quality_modes(selected_profile)
-        self.quality_group.setTitle("간편 품질 설정" if korean else "Simple quality settings")
         self.render_group.setTitle("기본 영상 설정" if korean else "Basic video settings")
         self.advanced_group.setTitle("고급 인코딩 설정" if korean else "Advanced encoding settings")
         self.output_group.setTitle("출력 파일" if korean else "Output file")
@@ -594,8 +611,11 @@ class ExportSettingsDialog(QDialog):
             "예상 저장 공간" if korean else "Estimated storage"
         )
         self.quality_mode_label.setText("용도" if korean else "Purpose")
-        self.advanced_check.setText(
-            "고급 설정 직접 조정" if korean else "Adjust advanced settings"
+        self.storage_button.setText(
+            ("예상 저장공간 숨기기" if self.storage_button.isChecked()
+             else "예상 저장공간 보기") if korean else
+            ("Hide storage estimate" if self.storage_button.isChecked()
+             else "Show storage estimate")
         )
         self.output_browse_button.setText("찾아보기" if korean else "Browse")
         self.resolution_label.setText("해상도" if korean else "Resolution")

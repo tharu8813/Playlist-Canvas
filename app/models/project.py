@@ -110,6 +110,10 @@ class ProjectDocument:
         playlist = data.get("playlist", [])
         canvas = data.get("canvas", {})
         content_library = data.get("content_library", [])
+        if not all(isinstance(entries, list) for entries in (
+            sources, groups, playlist, content_library,
+        )):
+            raise ValueError("Project collections must be arrays.")
         if not all(isinstance(entry, dict) for entry in sources):
             raise ValueError("Project sources must be objects.")
         if not all(isinstance(entry, dict) for entry in groups):

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSizePolicy,
     QSpinBox,
     QTabWidget,
@@ -111,6 +112,9 @@ class SourceInspector(QScrollArea):
         self._dirty_line_fields: set[str] = set()
         self._form_labels: dict[str, QLabel] = {}
         self._field_widgets: dict[str, QWidget] = {}
+        self._field_hosts: dict[str, QWidget] = {}
+        self._slider_hosts: dict[QWidget, QWidget] = {}
+        self._linked_sliders: dict[QWidget, QSlider] = {}
         self._field_visibility: dict[str, bool] = {}
         self.setMinimumWidth(290)
         self.setWidgetResizable(True)
@@ -487,6 +491,10 @@ class SourceInspector(QScrollArea):
         self.height_spin = self._spin(24, 5000, 1)
         self.rotation_spin = self._spin(-360, 360, 1)
         self.scale_spin = self._spin(0.1, 10, 0.05)
+        self._slider_spin_editor(self.width_spin, slider_maximum=1920)
+        self._slider_spin_editor(self.height_spin, slider_maximum=1080)
+        self._slider_spin_editor(self.rotation_spin)
+        self._slider_spin_editor(self.scale_spin, slider_maximum=3.0)
         for key, widget in (
             ("x", self.x_spin), ("y", self.y_spin), ("width", self.width_spin),
             ("height", self.height_spin), ("rotation", self.rotation_spin),
@@ -497,6 +505,9 @@ class SourceInspector(QScrollArea):
         self.radius_spin = self._spin(0, 300, 1)
         self.outline_spin = self._spin(0, 40, 1)
         self.font_size_spin = self._spin(8, 120, 1)
+        self._slider_spin_editor(self.opacity_spin)
+        self._slider_spin_editor(self.radius_spin, slider_maximum=100)
+        self._slider_spin_editor(self.font_size_spin)
         self.font_weight_combo = QComboBox()
         for label, value in (
             ("Light · 300", 300), ("Regular · 400", 400),
@@ -527,12 +538,17 @@ class SourceInspector(QScrollArea):
         self.blur_spin = self._spin(0, 40, 1)
         self.brightness_spin = self._spin(-100, 100, 1)
         self.contrast_spin = self._spin(-100, 100, 1)
+        self._slider_spin_editor(self.blur_spin)
+        self._slider_spin_editor(self.brightness_spin)
+        self._slider_spin_editor(self.contrast_spin)
         self.shadow_check = QCheckBox()
         self.shadow_color_button = self._color_button()
         self.shadow_opacity_spin = self._spin(0, 1, 0.05)
         self.shadow_blur_spin = self._spin(0, 50, 1)
         self.shadow_x_spin = self._spin(-100, 100, 1)
         self.shadow_y_spin = self._spin(-100, 100, 1)
+        self._slider_spin_editor(self.shadow_opacity_spin)
+        self._slider_spin_editor(self.shadow_blur_spin)
         self.animation_in_combo = QComboBox()
         self.animation_out_combo = QComboBox()
         for combo in (self.animation_in_combo, self.animation_out_combo):
@@ -653,6 +669,7 @@ class SourceInspector(QScrollArea):
             self.animation_preview_button,
             self.visible_check, self.locked_check,
         ]
+        self._editors.extend(self._linked_sliders.values())
         for form in self._content.findChildren(QFormLayout):
             form.setFieldGrowthPolicy(
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
@@ -666,6 +683,8 @@ class SourceInspector(QScrollArea):
             form.setVerticalSpacing(7)
         for widget in self._field_widgets.values():
             widget.setMinimumWidth(0)
+            if widget in self._slider_hosts:
+                continue
             if widget.sizePolicy().horizontalPolicy() in {
                 QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum,
             }:
@@ -689,6 +708,8 @@ class SourceInspector(QScrollArea):
         label = QLabel()
         self._form_labels[key] = label
         self._field_widgets[key] = widget
+        host = self._slider_hosts.get(widget, widget)
+        self._field_hosts[key] = host
         self._field_visibility[key] = True
         category = None
         for cat, category_layout in getattr(self, "_category_forms", {}).items():
@@ -704,9 +725,9 @@ class SourceInspector(QScrollArea):
                 layout.addRow(group)
             group.field_keys.append(key)
             self._field_sections[key] = (category, section)
-            group.add_field(label, widget)
+            group.add_field(label, host)
         else:
-            layout.addRow(label, widget)
+            layout.addRow(label, host)
 
     def _refresh_sections(self) -> None:
         """Fold away sub-sections whose fields are all hidden for this source."""
@@ -888,6 +909,15 @@ class SourceInspector(QScrollArea):
             widget.setToolTip(tooltip)
             widget.setToolTipDuration(15_000)
             widget.setAccessibleDescription(description)
+            host = self._field_hosts[key]
+            host.setToolTip(tooltip)
+            host.setToolTipDuration(15_000)
+            slider = self._linked_sliders.get(widget)
+            if slider is not None:
+                slider.setAccessibleName(label.text())
+                slider.setAccessibleDescription(description)
+                slider.setToolTip(tooltip)
+                slider.setToolTipDuration(15_000)
             for child in widget.findChildren(QWidget):
                 child.setToolTip(tooltip)
                 child.setToolTipDuration(15_000)
@@ -910,7 +940,7 @@ class SourceInspector(QScrollArea):
     def _set_field_visible(self, key: str, visible: bool) -> None:
         self._field_visibility[key] = bool(visible)
         self._form_labels[key].setVisible(visible)
-        self._field_widgets[key].setVisible(visible)
+        self._field_hosts[key].setVisible(visible)
 
     @staticmethod
     def _uses_primary_text_color(source: Source) -> bool:
@@ -1135,6 +1165,44 @@ class SourceInspector(QScrollArea):
         spin.setDecimals(2)
         spin.setKeyboardTracking(False)
         return spin
+
+    def _slider_spin_editor(
+        self, spin: QDoubleSpinBox, *, slider_minimum: float | None = None,
+        slider_maximum: float | None = None,
+    ) -> QWidget:
+        """Pair a drag-friendly slider with the existing precise number editor."""
+        minimum = spin.minimum() if slider_minimum is None else slider_minimum
+        maximum = spin.maximum() if slider_maximum is None else slider_maximum
+        step = spin.singleStep()
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setObjectName("inspectorValueSlider")
+        slider.setRange(0, max(1, round((maximum - minimum) / step)))
+        slider.setMinimumWidth(72)
+        slider.setAccessibleName("Property slider")
+        spin.setMaximumWidth(82)
+
+        def update_spin(position: int) -> None:
+            spin.setValue(minimum + position * step)
+
+        def update_slider(value: float) -> None:
+            position = round((min(maximum, max(minimum, value)) - minimum) / step)
+            previous = slider.blockSignals(True)
+            slider.setValue(position)
+            slider.blockSignals(previous)
+
+        slider.valueChanged.connect(update_spin)
+        spin.valueChanged.connect(update_slider)
+        update_slider(spin.value())
+        host = QWidget()
+        host.setObjectName("inspectorSliderSpinEditor")
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(slider, 1)
+        row.addWidget(spin)
+        self._slider_hosts[spin] = host
+        self._linked_sliders[spin] = slider
+        return host
 
     @staticmethod
     def _color_button() -> QPushButton:
@@ -2157,6 +2225,9 @@ class SourceInspector(QScrollArea):
             for _field, (_path, widget, kind) in self._multi_value_bindings().items():
                 if kind == "check" and isinstance(widget, QCheckBox):
                     widget.setTristate(False)
+                slider = self._linked_sliders.get(widget)
+                if slider is not None:
+                    slider.setEnabled(widget.isEnabled())
             self.text_edit.setPlaceholderText("%title% · %artist% · %album%")
         finally:
             self._updating = previous
@@ -2168,12 +2239,14 @@ class SourceInspector(QScrollArea):
             value = getattr(value, part)
         return value
 
-    @staticmethod
-    def _set_mixed_widget(widget: QWidget, kind: str) -> None:
+    def _set_mixed_widget(self, widget: QWidget, kind: str) -> None:
         if kind == "line" and isinstance(widget, QLineEdit):
             widget.clear()
         elif kind == "spin" and isinstance(widget, (QSpinBox, QDoubleSpinBox)):
             widget.lineEdit().clear()
+            slider = self._linked_sliders.get(widget)
+            if slider is not None:
+                slider.setEnabled(False)
         elif kind == "combo" and isinstance(widget, QComboBox):
             widget.setCurrentIndex(-1)
             if widget.isEditable() and widget.lineEdit() is not None:

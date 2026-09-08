@@ -55,6 +55,7 @@ from app.renderer.ffmpeg_renderer import (
     WORK_MODE_MAX_SPEED,
     WORK_MODE_STABLE,
 )
+from app.services.export_validation_service import EXPORT_FPS_OPTIONS
 
 
 class SettingsDialog(QDialog):
@@ -138,7 +139,7 @@ class SettingsDialog(QDialog):
         self.resolution_combo.addItems(RESOLUTIONS)
         self.resolution_combo.setCurrentText(settings.resolution_name)
         self.fps_combo = QComboBox()
-        self.fps_combo.addItems(["24", "25", "30", "50", "60"])
+        self.fps_combo.addItems([str(value) for value in EXPORT_FPS_OPTIONS])
         self.fps_combo.setCurrentText(str(settings.fps))
         self.codec_combo = QComboBox()
         for label, encoder in VIDEO_ENCODERS.items():
@@ -180,13 +181,12 @@ class SettingsDialog(QDialog):
         self.render_hint_label = QLabel()
         self.render_hint_label.setObjectName("mutedLabel")
         self.render_hint_label.setWordWrap(True)
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItem("", Theme.LIGHT)
-        self.theme_combo.addItem("", Theme.DARK)
-        self.theme_combo.addItem("", Theme.AUTO)
-        self.theme_combo.setCurrentIndex(self.theme_combo.findData(theme))
+
         self.language_combo = QComboBox()
         self._populate_language_combo(language.value)
+        self.appearance_hint = QLabel()
+        self.appearance_hint.setObjectName("mutedLabel")
+        self.appearance_hint.setWordWrap(True)
         self.language_pack_status = QLabel()
         self.language_pack_status.setObjectName("mutedLabel")
         self.language_pack_status.setWordWrap(True)
@@ -434,14 +434,13 @@ class SettingsDialog(QDialog):
         render_form.addRow("", self.render_hint_label)
         app_group = QGroupBox()
         app_form = QFormLayout(app_group)
-        self.theme_label = QLabel()
         self.language_label = QLabel()
         self.language_pack_label = QLabel()
         self.smooth_scroll_label = QLabel()
         self.smooth_scroll_speed_label = QLabel()
         self.preview_backend_label = QLabel()
-        app_form.addRow(self.theme_label, self.theme_combo)
         app_form.addRow(self.language_label, self.language_combo)
+        app_form.addRow("", self.appearance_hint)
         app_form.addRow(self.language_pack_label, language_pack_panel)
         app_form.addRow(self.smooth_scroll_label, self.smooth_scroll_check)
         app_form.addRow(self.smooth_scroll_speed_label, smooth_scroll_speed_row)
@@ -666,7 +665,7 @@ class SettingsDialog(QDialog):
     @property
     def selected_theme(self) -> Theme:
         """Return the selected theme preference."""
-        return Theme(self.theme_combo.currentData())
+        return Theme.DARK
 
     @property
     def selected_language(self) -> Language | str:
@@ -1030,8 +1029,12 @@ class SettingsDialog(QDialog):
         self.work_mode_combo.setItemText(
             2, "최대 속도" if korean else "Maximum speed",
         )
-        self.theme_label.setText("테마" if korean else "Theme")
         self.language_label.setText("언어" if korean else "Language")
+        self.appearance_hint.setText(
+            "Playlist Canvas는 일관된 편집 환경을 위해 다크 스튜디오 테마만 제공합니다."
+            if korean else
+            "Playlist Canvas uses one dark studio theme so the editing workspace stays consistent."
+        )
         self.language_pack_label.setText("외부 언어팩" if korean else "External language packs")
         self.language_pack_import_button.setText("가져오기" if korean else "Import")
         self.language_pack_remove_button.setText("제거" if korean else "Remove")
@@ -1166,9 +1169,6 @@ class SettingsDialog(QDialog):
             "Slower presets generally produce smaller files but take longer to encode."
         )
         self.output_browse_button.setText("찾아보기" if korean else "Browse")
-        self.theme_combo.setItemText(0, "라이트" if korean else "Light")
-        self.theme_combo.setItemText(1, "다크" if korean else "Dark")
-        self.theme_combo.setItemText(2, "자동" if korean else "Auto")
         self._update_smooth_scroll_ui()
         self._update_work_mode_hint()
         self.button_box.button(QDialogButtonBox.StandardButton.Save).setText(

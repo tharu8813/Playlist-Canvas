@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import json
 
 from app.models.project import ProjectDocument
 from app.models.playlist import PlaylistTrack
@@ -19,6 +20,29 @@ def _document() -> ProjectDocument:
 
 
 class AutosaveServiceTests(unittest.TestCase):
+    def test_malformed_recovery_does_not_hide_valid_snapshots(self) -> None:
+        with TemporaryDirectory(prefix="pvs-autosave-") as directory:
+            service = AutosaveService(Path(directory))
+            valid = service.save(_document(), None)
+            for payload in ([], None, "invalid"):
+                with self.subTest(payload=payload):
+                    (service.directory / "broken.recovery.json").write_text(
+                        json.dumps(payload), encoding="utf-8",
+                    )
+                    self.assertEqual([s.path for s in service.recoveries()], [valid.path])
+
+    def test_naive_recovery_timestamp_does_not_break_sorting(self) -> None:
+        with TemporaryDirectory(prefix="pvs-autosave-") as directory:
+            service = AutosaveService(Path(directory))
+            service.save(_document(), None)
+            service.write_document_data(
+                _document().to_dict(), Path(directory) / "older.json",
+                datetime(2020, 1, 1),
+            )
+            snapshots = service.recoveries()
+            self.assertEqual(len(snapshots), 2)
+            self.assertEqual(snapshots[-1].saved_at, datetime(2020, 1, 1, tzinfo=UTC))
+
     def test_save_round_trips_through_recoveries(self) -> None:
         with TemporaryDirectory(prefix="pvs-autosave-") as directory:
             service = AutosaveService(Path(directory))

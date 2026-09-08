@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpacerItem,
-    QTextEdit,
+    QListWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -149,6 +149,29 @@ class ExportEtaEstimator:
         return max(0.0, remaining)
 
 
+class ExportDetailsList(QListWidget):
+    """Readable status history presented as UI rows instead of a console."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("exportDetailsList")
+        self.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setMaximumHeight(190)
+        self.setAlternatingRowColors(True)
+
+    def add_detail(self, text: str) -> None:
+        if not text or (self.count() and self.item(self.count() - 1).text() == text):
+            return
+        self.addItem(text)
+        while self.count() > 80:
+            self.takeItem(0)
+        self.scrollToBottom()
+
+    def toPlainText(self) -> str:
+        return "\n".join(self.item(index).text() for index in range(self.count()))
+
+
 class ExportProgressDialog(QDialog):
     """Display a comprehensible in-flight FFmpeg export and allow safe cancellation."""
 
@@ -222,6 +245,7 @@ class ExportProgressDialog(QDialog):
         self.stage_label.setObjectName("panelTitle")
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(6)
         self.percent_label = QLabel("0%")
         self.percent_label.setObjectName("panelTitle")
         self.detail_label = QLabel("Preparing temporary files")
@@ -282,12 +306,7 @@ class ExportProgressDialog(QDialog):
         self._storage_estimate: ExportStorageEstimate | None = None
         self.log_heading = QLabel("Activity")
         self.log_heading.setObjectName("panelTitle")
-        self.log_output = QTextEdit()
-        self.log_output.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
-        )
-        self.log_output.setReadOnly(True)
-        self.log_output.document().setMaximumBlockCount(200)
+        self.log_output = ExportDetailsList()
         self.log_heading.hide()
         self.log_output.hide()
         self.storage_button = QPushButton("Hide storage use")
@@ -297,10 +316,10 @@ class ExportProgressDialog(QDialog):
             "Show or hide the live storage-use breakdown."
         )
         self.storage_button.toggled.connect(self._set_storage_visible)
-        self.details_button = QPushButton("Show technical details")
+        self.details_button = QPushButton("Show detailed status")
         self.details_button.setCheckable(True)
         self.details_button.setToolTip(
-            "Show detailed processing messages for troubleshooting."
+            "Show the detailed export status history."
         )
         self.details_button.toggled.connect(self._set_details_visible)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
@@ -354,7 +373,7 @@ class ExportProgressDialog(QDialog):
             self.setWindowTitle("내보내기 진행 상황")
             self.steps_heading.setText("내보내기 단계")
             self.export_settings_heading.setText("내보내기 설정")
-            self.log_heading.setText("작업 내역")
+            self.log_heading.setText("상세 현황")
             self.storage_button.setText(
                 "저장 공간 사용량 숨기기" if self.storage_button.isChecked()
                 else "저장 공간 사용량 보기"
@@ -363,11 +382,11 @@ class ExportProgressDialog(QDialog):
                 "실시간 저장 공간 사용량 표시를 켜거나 끕니다."
             )
             self.details_button.setText(
-                "기술 정보 숨기기" if self.details_button.isChecked()
-                else "기술 정보 보기"
+                "상세 현황 숨기기" if self.details_button.isChecked()
+                else "상세 현황 보기"
             )
             self.details_button.setToolTip(
-                "문제 해결에 필요한 상세 처리 내용을 표시합니다."
+                "내보내기 단계별 상세 현황을 표시합니다."
             )
             self.minimize_button.setText("최소화")
             self.cancel_button.setText("취소")
@@ -382,7 +401,7 @@ class ExportProgressDialog(QDialog):
             self.setWindowTitle("Export progress")
             self.steps_heading.setText("Export steps")
             self.export_settings_heading.setText("Export settings")
-            self.log_heading.setText("Activity")
+            self.log_heading.setText("Detailed status")
             self.storage_button.setText(
                 "Hide storage use" if self.storage_button.isChecked()
                 else "Show storage use"
@@ -391,11 +410,11 @@ class ExportProgressDialog(QDialog):
                 "Show or hide the live storage-use breakdown."
             )
             self.details_button.setText(
-                "Hide technical details" if self.details_button.isChecked()
-                else "Show technical details"
+                "Hide detailed status" if self.details_button.isChecked()
+                else "Show detailed status"
             )
             self.details_button.setToolTip(
-                "Show detailed processing messages for troubleshooting."
+                "Show the detailed export status history."
             )
             self.minimize_button.setText("Minimize")
             self.cancel_button.setText("Cancel")
@@ -540,7 +559,7 @@ class ExportProgressDialog(QDialog):
             self._eta_estimator.remaining(now), now - self._started_at,
         )
         if display_message and display_message != self._last_log:
-            self.log_output.append(display_message)
+            self.log_output.add_detail(display_message)
             self._last_log = display_message
 
     def update_progress(self, stage: str, fraction: float, message: str) -> None:
@@ -557,7 +576,7 @@ class ExportProgressDialog(QDialog):
         self.percent_label.setText(f"{percent}%")
         self.detail_label.setText(display_message)
         if display_message and display_message != self._last_log:
-            self.log_output.append(display_message)
+            self.log_output.add_detail(display_message)
             self._last_log = display_message
         remaining = self._eta_estimator.update(stage, fraction, now)
         self._update_time_label(remaining, elapsed)
@@ -579,7 +598,7 @@ class ExportProgressDialog(QDialog):
             )
 
     def _set_details_visible(self, visible: bool) -> None:
-        """Keep implementation terminology optional for ordinary users."""
+        """Toggle the structured status history without exposing console output."""
         self.log_heading.setVisible(visible)
         self.log_output.setVisible(visible)
         self.content_spacer.changeSize(
@@ -595,11 +614,11 @@ class ExportProgressDialog(QDialog):
             self.layout().activate()
         if self._korean:
             self.details_button.setText(
-                "기술 정보 숨기기" if visible else "기술 정보 보기"
+                "상세 현황 숨기기" if visible else "상세 현황 보기"
             )
         else:
             self.details_button.setText(
-                "Hide technical details" if visible else "Show technical details"
+                "Hide detailed status" if visible else "Show detailed status"
             )
 
     def _refresh_steps(self, stage: str) -> None:
@@ -619,7 +638,7 @@ class ExportProgressDialog(QDialog):
                 symbol, color, state = "✓", "#35A56F", "completed"
                 status = "완료" if self._korean else "completed"
             elif index == active_index:
-                symbol, color, state = "●", "#1685D1", "active"
+                symbol, color, state = "●", "#79C7B4", "active"
                 status = "진행 중" if self._korean else "in progress"
             else:
                 symbol, color, state = "○", "#8793A1", "pending"
@@ -684,7 +703,7 @@ class ExportProgressDialog(QDialog):
             "현재 프레임 준비 또는 FFmpeg 작업을 안전하게 중단하는 중" if self._korean
             else "Safely stopping the current frame preparation or FFmpeg operation"
         )
-        self.log_output.append("취소를 요청했습니다" if self._korean else "Cancellation requested")
+        self.log_output.add_detail("취소를 요청했습니다" if self._korean else "Cancellation requested")
         self.cancel_requested.emit()
         return True
 

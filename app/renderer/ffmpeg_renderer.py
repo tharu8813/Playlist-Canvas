@@ -21,6 +21,8 @@ from PySide6.QtGui import QImage, QImageReader
 from app.models.playlist import PlaylistTrack
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
 from app.utils.subprocess_utils import hidden_process_kwargs
+from app.services.export_validation_service import ExportValidationResult
+from app.services.export_controller import ExportController
 
 
 LOGGER = logging.getLogger(__name__)
@@ -67,6 +69,7 @@ class RenderResult:
 
     output_path: Path
     track_count: int
+    validation: ExportValidationResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -777,7 +780,15 @@ class FFmpegRenderer:
                         temporary_video,
                     )
         self._report(progress_callback, "Complete", 1.0, "Export completed")
-        return RenderResult(target, len(active_tracks))
+        validation = ExportController.validate_output(
+            target,
+            width=selected_settings.output_width,
+            height=selected_settings.output_height,
+            fps=selected_settings.fps,
+            duration_seconds=total_duration,
+            ffmpeg_executable=self.executable,
+        )
+        return RenderResult(target, len(active_tracks), validation)
 
     @staticmethod
     def _visual_sequence(tracks: list[PlaylistTrack], frame_paths: list[Path]) -> list[tuple[Path, float]]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +14,7 @@ from PySide6.QtCore import QThread, Signal
 
 MIB = 1024 * 1024
 GIB = 1024 * MIB
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +174,7 @@ class ExportStorageMonitor(QThread):
                         else:
                             categories["processing"] += size
             except OSError:
-                pass
+                LOGGER.debug("Could not scan export render files", exc_info=True)
         output_size = self._file_size(output_staging)
         try:
             usage = shutil.disk_usage(self._output_path.parent)
@@ -197,7 +199,7 @@ class ExportStorageMonitor(QThread):
                 for filename in files:
                     total += cls._file_size(Path(directory) / filename)
         except OSError:
-            pass
+            LOGGER.debug("Could not scan export frame files", exc_info=True)
         return total
 
     @staticmethod

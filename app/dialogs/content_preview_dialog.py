@@ -221,8 +221,8 @@ class ContentPreviewDialog(QDialog):
             self.player.setSource(QUrl.fromLocalFile(str(self.path.resolve())))
             self._sync_mute_button()
             host.setStyleSheet(
-                "QFrame#contentPlayerCard { background: palette(base); border: 1px solid palette(mid); border-radius: 11px; }"
-                "QFrame#contentAudioStage, QVideoWidget#contentVideoSurface { background: palette(alternate-base); border: 0; border-radius: 8px; }"
+                "QFrame#contentPlayerCard { background: palette(base); border: 0; border-radius: 4px; }"
+                "QFrame#contentAudioStage, QVideoWidget#contentVideoSurface { background: palette(alternate-base); border: 0; border-radius: 4px; }"
                 "QLabel#contentAudioMark { color: palette(highlight); font-size: 34px; font-weight: 700; border: 0; }"
                 "QLabel#contentAudioName { font-size: 14px; font-weight: 650; border: 0; }"
                 "QLabel#contentPlaybackStatus { color: palette(mid); font-size: 11px; border: 0; }"

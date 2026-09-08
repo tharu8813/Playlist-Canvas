@@ -251,15 +251,6 @@ class TrackDetailsDialog(QDialog):
         self.playback_slider.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self.playback_slider.setStyleSheet(
-            "QSlider#trackPlaybackSlider::groove:horizontal {"
-            "height: 8px; border-radius: 4px; background: #76859A; }"
-            "QSlider#trackPlaybackSlider::sub-page:horizontal {"
-            "border-radius: 4px; background: #1685D1; }"
-            "QSlider#trackPlaybackSlider::handle:horizontal {"
-            "width: 18px; margin: -6px 0; border-radius: 9px; "
-            "background: #1685D1; border: 2px solid #FFFFFF; }"
-        )
         self.playback_time = QLabel()
         self.playback_time.setObjectName("mutedLabel")
         self.playback_time.setMinimumWidth(78)
@@ -312,8 +303,8 @@ class TrackDetailsDialog(QDialog):
         self.video_scope_badge.setObjectName("trackVideoScopeBadge")
         self.video_scope_badge.setWordWrap(True)
         self.video_scope_badge.setStyleSheet(
-            "background: rgba(22, 133, 209, 0.12); "
-            "border: 1px solid rgba(22, 133, 209, 0.35); "
+            "background: rgba(121, 199, 180, 0.12); "
+            "border: 1px solid rgba(121, 199, 180, 0.35); "
             "border-radius: 7px; padding: 8px 10px; font-weight: 700;"
         )
         self.video_help = QLabel()
