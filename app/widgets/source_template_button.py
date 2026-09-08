@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import QMimeData, QPoint, Qt
+from PySide6.QtCore import QMimeData, QPoint, Qt, QTimer
 from PySide6.QtGui import QDrag, QIcon, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
@@ -52,10 +52,12 @@ class SourceTemplateButton(QPushButton):
         super().__init__(parent)
         self.source_type = source_type
         self.parent_type = parent_type
+        self._variant = False
         self._drag_start = QPoint()
         self.setObjectName("sourceTemplateButton")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(50)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumHeight(72)
         self.setProperty("variant", False)
         card_layout = QHBoxLayout(self)
         card_layout.setContentsMargins(6, 6, 6, 6)
@@ -66,17 +68,21 @@ class SourceTemplateButton(QPushButton):
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         text_layout = QVBoxLayout()
+        self._text_layout = text_layout
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(1)
         self.title_label = QLabel(self)
         self.title_label.setObjectName("sourceTemplateTitle")
         self.description_label = QLabel(self)
         self.description_label.setObjectName("sourceTemplateDescription")
+        self.description_label.setWordWrap(True)
         for label in (self.title_label, self.description_label):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             label.setSizePolicy(
-                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
             )
+        card_layout.setAlignment(self.icon_label, Qt.AlignmentFlag.AlignTop)
+        text_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         text_layout.addWidget(self.title_label)
         text_layout.addWidget(self.description_label)
         card_layout.addWidget(self.icon_label)
@@ -93,12 +99,25 @@ class SourceTemplateButton(QPushButton):
         self.setAccessibleName(title)
         self.setProperty("paletteText", f"{title} {description}")
         self.setProperty("variant", variant)
-        self.setMinimumHeight(44 if variant else 50)
+        self._variant = variant
+        self.setMinimumHeight(62 if variant else 72)
         layout = self.layout()
         if isinstance(layout, QHBoxLayout):
             layout.setContentsMargins(9, 6 if variant else 8, 10, 6 if variant else 8)
         self.style().unpolish(self)
         self.style().polish(self)
+        QTimer.singleShot(0, self._fit_card_height)
+
+    def _fit_card_height(self) -> None:
+        """Keep wrapped descriptions from being compressed by a narrow panel."""
+        margins = self.layout().contentsMargins()
+        base_height = 62 if self._variant else 72
+        required = self._text_layout.sizeHint().height() + margins.top() + margins.bottom()
+        self.setMinimumHeight(max(base_height, required))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_card_height)
 
     def create_mime_data(self) -> QMimeData:
         """Expose payload creation independently for drop handling and tests."""

@@ -181,14 +181,15 @@ QTabBar::tab:disabled { color: @muted; }
 #inspectorSectionHeader:checked { background: @alternate; }
 #inspectorSectionBody { border: 0; border-radius: 0; background: transparent; }
 QPushButton#sourceTemplateButton, QPushButton#sourceTemplateButton[variant="true"] {
-    background: transparent; border: 0; border-bottom: 1px solid @border; border-radius: 0; padding: 0;
+    background: transparent; border: 0; border-bottom: 1px solid @border; border-radius: 0; padding: 0; min-height: 72px;
 }
+QPushButton#sourceTemplateButton[variant="true"] { min-height: 62px; }
 QPushButton#sourceTemplateButton:hover { background: @hover; }
 QPushButton#sourceTemplateButton:pressed { background: #304B44; }
 QPushButton#sourceTemplateButton:pressed QLabel { color: @text; }
 #sourceTemplateIcon { background: transparent; border: 0; border-radius: 0; padding: 0; }
 #sourceTemplateTitle { font-size: 12px; font-weight: 600; }
-#sourceTemplateDescription { font-size: 11px; color: @muted; }
+#sourceTemplateDescription { font-size: 11px; color: @muted; min-height: 15px; }
 #sourceVariantToggle { background: transparent; border: 0; border-radius: 0; }
 #sourceVariantContainer { border-left: 1px solid @border; }
 #trackRow { background: @panel; border: 0; border-bottom: 1px solid @border; border-radius: 0; }
