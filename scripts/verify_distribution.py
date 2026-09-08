@@ -24,6 +24,9 @@ def main() -> int:
     missing = [str(path) for path in REQUIRED_FILES if not (internal / path).is_file()]
     if not executable.is_file():
         missing.append(str(executable.relative_to(root)))
+    numpy_core = internal / "numpy" / "_core"
+    if not numpy_core.is_dir() or not list(numpy_core.glob("_multiarray_umath*.pyd")):
+        missing.append("_internal/numpy/_core/_multiarray_umath*.pyd")
     if missing:
         print("Missing distribution files:")
         print("\n".join(f"- {path}" for path in missing))

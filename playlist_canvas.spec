@@ -2,17 +2,19 @@
 """One-folder Windows build specification for Playlist Canvas."""
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_all
 
 
 project_root = Path(SPECPATH)
+numpy_datas, numpy_binaries, numpy_hiddenimports = collect_all("numpy")
 
 analysis = Analysis(
     [str(project_root / "main.py")],
     pathex=[str(project_root)],
-    binaries=[],
+    binaries=numpy_binaries,
     # FFmpeg is deliberately not bundled. The installed application downloads
     # and checksum-verifies its own per-user copy on first use.
-    datas=[
+    datas=numpy_datas + [
         (str(project_root / "app" / "ui" / "studio.qss"), "app/ui"),
         (str(project_root / "app" / "assets" / "icons" / "check.svg"), "assets/icons"),
         (str(project_root / "app" / "resources" / "app_icon.ico"), "app/resources"),
@@ -23,7 +25,9 @@ analysis = Analysis(
         (str(project_root / "app" / "assets" / "icons" / "spin_up.svg"), "assets/icons"),
         (str(project_root / "LICENSE.txt"), "."),
     ],
-    hiddenimports=["PySide6.QtSvg", "PySide6.QtMultimedia", "PySide6.QtOpenGLWidgets"],
+    hiddenimports=numpy_hiddenimports + [
+        "PySide6.QtSvg", "PySide6.QtMultimedia", "PySide6.QtOpenGLWidgets",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
