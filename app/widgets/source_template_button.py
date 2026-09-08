@@ -57,7 +57,7 @@ class SourceTemplateButton(QPushButton):
         self.setObjectName("sourceTemplateButton")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.setMinimumHeight(72)
+        self.setMinimumHeight(56)
         self.setProperty("variant", False)
         card_layout = QHBoxLayout(self)
         card_layout.setContentsMargins(6, 6, 6, 6)
@@ -100,7 +100,7 @@ class SourceTemplateButton(QPushButton):
         self.setProperty("paletteText", f"{title} {description}")
         self.setProperty("variant", variant)
         self._variant = variant
-        self.setMinimumHeight(62 if variant else 72)
+        self.setMinimumHeight(50 if variant else 56)
         layout = self.layout()
         if isinstance(layout, QHBoxLayout):
             layout.setContentsMargins(9, 6 if variant else 8, 10, 6 if variant else 8)
@@ -111,7 +111,7 @@ class SourceTemplateButton(QPushButton):
     def _fit_card_height(self) -> None:
         """Keep wrapped descriptions from being compressed by a narrow panel."""
         margins = self.layout().contentsMargins()
-        base_height = 62 if self._variant else 72
+        base_height = 50 if self._variant else 56
         required = self._text_layout.sizeHint().height() + margins.top() + margins.bottom()
         self.setMinimumHeight(max(base_height, required))
 

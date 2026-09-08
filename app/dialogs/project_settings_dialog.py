@@ -45,6 +45,7 @@ class ProjectSettingsDialog(QDialog):
         self.author_edit = QLineEdit(settings.author)
         self.description_edit = QPlainTextEdit(settings.description)
         self.description_edit.setMaximumHeight(84)
+        self.description_edit.setTabChangesFocus(True)
         self.title_label = QLabel()
         self.author_label = QLabel()
         self.description_label = QLabel()
