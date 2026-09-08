@@ -1177,9 +1177,12 @@ class SourceInspector(QScrollArea):
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setObjectName("inspectorValueSlider")
         slider.setRange(0, max(1, round((maximum - minimum) / step)))
-        slider.setMinimumWidth(72)
+        slider.setMinimumWidth(64)
         slider.setAccessibleName("Property slider")
-        spin.setMaximumWidth(82)
+        # Room for a signed two-decimal value ("-360.00") plus the stepper
+        # buttons; 82px clipped four-digit widths to "760.".
+        spin.setMinimumWidth(96)
+        spin.setMaximumWidth(104)
 
         def update_spin(position: int) -> None:
             spin.setValue(minimum + position * step)
