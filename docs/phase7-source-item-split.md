@@ -87,12 +87,46 @@ compares every type's registered field-visibility dict against).
   the one failure is the same pre-existing `test_language_packs`
   flakiness noted above.
 
+## Slice 3 — BACKGROUND, ALBUM_COVER (renderer + inspector)
+
+These two types share their image-drawing code with several other
+image-backed types (`IMAGE`, `LOGO`, `WATERMARK`, `VIDEO`), so the split
+needed one more shared helper on each side rather than being self-contained
+like SHAPE/PROGRESS_BAR:
+
+- `app/canvas/renderers/base.py` gained `paint_image_content(item, painter,
+  rect, frame_style)`, extracted verbatim from `_paint_legacy`'s shared
+  `image_backed_types` branch (`frame_style` is what the legacy branch
+  special-cased only for `ALBUM_COVER`; `background_renderer.py` always
+  passes `"rounded"`). `background_renderer.py`/`album_cover_renderer.py`
+  each call `paint_background()`, then `paint_image_content()` when the
+  item has a pixmap or their own non-image fallback drawing (copied
+  verbatim from the old `elif SourceType.BACKGROUND`/`ALBUM_COVER`
+  branches) when it doesn't, then `paint_selection_guide()`.
+- `app/inspector/editors/base.py` gained `apply_image_backed_fields(inspector,
+  source, *, show_file)`: the `image_fit`/`blur`/`brightness`/`contrast`
+  fields every `IMAGE_BACKED_TYPES` member shows the same way, plus `file`
+  (whose own visibility condition differs per type -- `BACKGROUND` gates it
+  on `background_mode == "image"`, `ALBUM_COVER` always shows it).
+  `background_editor.py`/`album_cover_editor.py` call it plus their own
+  remaining fields (`background_mode`/`background_ambient`/
+  `background_track_transition(_seconds)`; `album_frame`).
+- `source_item.py`/`source_inspector.py` register these two renderers/editors
+  directly; `_paint_legacy` and `_update_legacy_source_specific_fields`
+  are unchanged, still the reference implementations the equivalence tests
+  compare against for all 17 types.
+
+### Validation
+
+- `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged.
+- `tests/test_main_window.py` passed unchanged.
+
 ## Remaining work
 
-- 15 of 17 `SourceType`s still render and edit through the legacy
-  adapters. Continue splitting types with a similar shape (e.g.
-  `BACKGROUND`, `ALBUM_COVER`) the same way, on both the renderer and
-  inspector sides, behind the two equivalence tests above.
+- 13 of 17 `SourceType`s still render and edit through the legacy
+  adapters. Continue splitting types with a similar shape the same way,
+  on both the renderer and inspector sides, behind the two equivalence
+  tests above.
 - `SourceItem` and `SourceInspector` still own selection/resize/rotation,
   animation preview wiring, and the shared form-building machinery
   (`_slider_spin_editor`, `_connect_fields`, etc.) -- those stay put;

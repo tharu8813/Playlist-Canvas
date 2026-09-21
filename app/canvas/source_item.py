@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 
-from app.canvas.renderers import progress_renderer, shape_renderer
+from app.canvas.renderers import album_cover_renderer, background_renderer, progress_renderer, shape_renderer
 from app.models.source import Source, SourceType
 from app.models.source_registry import source_registry
 from app.preview.text_template import expand_placeholder_labels
@@ -2162,3 +2162,5 @@ for _source_type in SourceType:
 # the legacy reference pixel-for-pixel.
 source_registry.get(SourceType.SHAPE).renderer = shape_renderer.render
 source_registry.get(SourceType.PROGRESS_BAR).renderer = progress_renderer.render
+source_registry.get(SourceType.BACKGROUND).renderer = background_renderer.render
+source_registry.get(SourceType.ALBUM_COVER).renderer = album_cover_renderer.render

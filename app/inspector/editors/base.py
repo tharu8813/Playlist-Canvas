@@ -85,6 +85,16 @@ def apply_shared_fields(inspector: "SourceInspector", source: Source) -> None:
         inspector._set_field_visible(key, True)
 
 
+def apply_image_backed_fields(inspector: "SourceInspector", source: Source, *, show_file: bool) -> None:
+    """Apply the fields every image-backed type applies the same way
+    (image_fit/blur/brightness/contrast), plus file (whose own visibility
+    condition differs per type, e.g. BACKGROUND gates it on background_mode)."""
+    inspector._set_field_visible("file", show_file)
+    inspector._set_field_visible("image_fit", True)
+    for key in ("blur", "brightness", "contrast"):
+        inspector._set_field_visible(key, True)
+
+
 def finish(inspector: "SourceInspector", source: Source) -> None:
     """Run the same closing steps _update_legacy_source_specific_fields did."""
     inspector._hide_inactive_dependent_fields(source)

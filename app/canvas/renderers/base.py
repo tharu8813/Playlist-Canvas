@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 
 from app.models.source import SourceType
 
@@ -70,6 +70,46 @@ def paint_background(item: "SourceItem", painter: QPainter) -> tuple[QRectF, QBr
         painter.setPen(pen)
         painter.setBrush(fill)
     return rect, fill, pen
+
+
+def paint_image_content(item: "SourceItem", painter: QPainter, rect: QRectF, frame_style: str) -> None:
+    """Draw the item's pixmap clipped to frame_style. Extracted verbatim from
+    _paint_legacy's shared image_backed_types branch (frame_style was that
+    branch's own SourceType.ALBUM_COVER special case, now a parameter)."""
+    display_rect = rect
+    clip_path = QPainterPath()
+    if frame_style == "circle":
+        painter.drawEllipse(rect)
+        clip_path.addEllipse(rect)
+    elif frame_style == "polaroid":
+        painter.setPen(QPen(QColor("#FFFFFF"), max(1.0, item.source.outline_width)))
+        painter.setBrush(QColor("#F8FAFC"))
+        painter.drawRoundedRect(rect, 5, 5)
+        display_rect = rect.adjusted(14, 14, -14, -46)
+        clip_path.addRect(display_rect)
+    else:
+        painter.drawRoundedRect(rect, item.source.border_radius, item.source.border_radius)
+        clip_path.addRoundedRect(rect, item.source.border_radius, item.source.border_radius)
+    painter.setClipPath(clip_path)
+    if item.source.image_fit_mode == "stretch":
+        target = display_rect
+    else:
+        ratio = item._pixmap.width() / max(1, item._pixmap.height())
+        rect_ratio = display_rect.width() / max(1, display_rect.height())
+        contain = item.source.image_fit_mode == "contain"
+        width_limited = ratio > rect_ratio
+        if contain == width_limited:
+            target = QRectF(display_rect.left(), display_rect.center().y() - display_rect.width() / ratio / 2,
+                            display_rect.width(), display_rect.width() / ratio)
+        else:
+            target = QRectF(display_rect.center().x() - display_rect.height() * ratio / 2, display_rect.top(),
+                            display_rect.height() * ratio, display_rect.height())
+    painter.drawPixmap(target, item._pixmap, item._pixmap.rect())
+    painter.setClipping(False)
+    if frame_style == "glass":
+        painter.setBrush(QColor(255, 255, 255, 40))
+        painter.setPen(QPen(QColor(255, 255, 255, 180), 1.5))
+        painter.drawRoundedRect(rect, item.source.border_radius, item.source.border_radius)
 
 
 def paint_selection_guide(item: "SourceItem", painter: QPainter, rect: QRectF) -> None:
