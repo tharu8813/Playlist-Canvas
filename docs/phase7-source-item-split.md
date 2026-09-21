@@ -210,20 +210,37 @@ Slices 1-2, so this was a mechanical extraction with no new shared helper:
 - `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged.
 - `tests/test_main_window.py`: 245 passed, 19 subtests.
 
+## Slice 7 — AUDIO_LEVEL_METER, PARTICLE_OVERLAY (renderer + inspector)
+
+As anticipated, both `elif` branches already delegated their drawing to
+existing helper functions (`app.utils.level_meter_painter.paint_level_meter`,
+`app.utils.particle_painter.paint_particles`), so this slice was a
+mechanical extraction:
+
+- `audio_level_meter_renderer.py`/`particle_overlay_renderer.py` copy the
+  branch verbatim (arg assembly + the helper call) between
+  `paint_background()`/`paint_selection_guide()`.
+- `audio_level_meter_editor.py`/`particle_overlay_editor.py` show their
+  17/12 own field keys (identical to the `for key in (...)` loops in
+  `_update_legacy_source_specific_fields`), then `apply_shared_fields`/
+  `finish` as usual.
+
+### Validation
+
+- `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged.
+- `tests/test_main_window.py`: 245 passed, 19 subtests.
+
 ## Remaining work
 
-- 5 of 17 `SourceType`s still render and edit through the legacy adapters:
-  `AUDIO_LEVEL_METER`, `PARTICLE_OVERLAY`, `LYRICS`, `TRACK_LIST`,
-  `NOW_PLAYING`. Continue splitting them the same way, behind the two
-  equivalence tests above. `AUDIO_LEVEL_METER` and `PARTICLE_OVERLAY`
-  delegate their drawing to existing helper functions
-  (`paint_level_meter`/`paint_particles`) and should be as mechanical as
-  this slice. `LYRICS`, `TRACK_LIST`, and `NOW_PLAYING` are also in
-  `text_types`, so their editors can reuse the same
-  `apply_shared_fields`/hide-then-show pattern; `LYRICS`'s renderer branch
-  in particular is long (subtitle animation/transition state), so extract
-  it carefully and re-run the pixel equivalence test rather than
-  eyeballing it.
+- 3 of 17 `SourceType`s still render and edit through the legacy adapters:
+  `LYRICS`, `TRACK_LIST`, `NOW_PLAYING`. All three are in `text_types`, so
+  their editors can reuse the same `apply_shared_fields`/hide-then-show
+  pattern. `LYRICS`'s renderer branch is long and stateful (subtitle
+  animation/transition progress, ghost-pixmap blur caching), so extract it
+  carefully and re-run the pixel equivalence test rather than eyeballing
+  it. `TRACK_LIST` delegates to `self._paint_track_list`, an existing
+  method already outside the `elif` chain -- likely as mechanical as this
+  slice.
 - `SourceItem` and `SourceInspector` still own selection/resize/rotation,
   animation preview wiring, and the shared form-building machinery
   (`_slider_spin_editor`, `_connect_fields`, etc.) -- those stay put;
