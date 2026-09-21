@@ -12,6 +12,7 @@ below the renderer and UI layers so both can depend on it without a cycle.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 
 from app.timeline.models import TransitionType
@@ -65,6 +66,7 @@ class PresentationWindow:
     timeline_start: float
     timeline_end: float
     source_time_at_start: float = 0.0
+    playback_rate: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,12 +82,15 @@ class PresentationPlan:
     windows: tuple[PresentationWindow, ...] = ()
 
     def _window_at(self, global_seconds: float) -> PresentationWindow | None:
-        for window in self.windows:
-            if window.timeline_start <= global_seconds < window.timeline_end:
-                return window
-        if self.windows and global_seconds >= self.windows[-1].timeline_end:
-            return self.windows[-1]
-        return self.windows[0] if self.windows else None
+        """The window owning this instant: before the first window it is the
+        first window; in a gap between windows it is the one that most
+        recently ended; after the last window it is the last window.
+        """
+        if not self.windows:
+            return None
+        starts = [window.timeline_start for window in self.windows]
+        index = max(0, bisect_right(starts, global_seconds) - 1)
+        return self.windows[index]
 
     def track_at(self, global_seconds: float) -> str | None:
         """The presentation owner's track_id at this global time, or None if empty."""
@@ -93,11 +98,17 @@ class PresentationPlan:
         return window.track_id if window else None
 
     def local_time(self, global_seconds: float) -> float | None:
-        """The owning track's own elapsed seconds at this global time."""
+        """The owning track's own elapsed seconds at this global time.
+
+        Clamped to the window's own span so a query before its start or past
+        its end (including a gap after it, or past the last window) holds
+        steady at that boundary instead of drifting with global time.
+        """
         window = self._window_at(global_seconds)
         if window is None:
             return None
-        return window.source_time_at_start + (global_seconds - window.timeline_start)
+        clamped = min(max(global_seconds, window.timeline_start), window.timeline_end)
+        return window.source_time_at_start + (clamped - window.timeline_start) * window.playback_rate
 
 
 @dataclass(frozen=True, slots=True)

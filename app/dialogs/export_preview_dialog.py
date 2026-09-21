@@ -55,8 +55,6 @@ from app.services.source_store import SourceStore
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.services.playlist_service import PlaylistService
 from app.timeline.compiler import compile_playlist
-from app.timeline.track_schedule import playlist_duration as timeline_playlist_duration
-from app.timeline.track_schedule import resolve_track_windows
 from app.preview.album_art import extract_track_cover
 from app.video.timeline import resolve_video_position, source_video_paths
 from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
@@ -107,11 +105,20 @@ class CpuPreviewSurface(QWidget):
 
 
 class PlaylistTimeline(QSlider):
-    """Global playback slider with visible track boundaries and track numbers."""
+    """Global playback slider with visible track boundaries and track numbers.
 
-    def __init__(self, tracks: list[PlaylistTrack], parent: QWidget | None = None) -> None:
+    ``schedule`` is the same (index, track, start, end) tuple
+    ExportPreviewDialog derives once from CompiledRenderPlan's
+    PresentationPlan, so Preview and this ruler can never disagree on track
+    boundaries, and paintEvent (called every repaint) never recompiles it.
+    """
+
+    def __init__(
+        self, schedule: tuple[tuple[int, PlaylistTrack, float, float], ...],
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)
-        self.tracks = tracks
+        self.schedule = schedule
         self._dragging = False
         self.setMinimumHeight(42)
 
@@ -122,9 +129,8 @@ class PlaylistTimeline(QSlider):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         usable_width = max(1, self.width() - 18)
-        windows = resolve_track_windows(self.tracks)
-        for index, window in enumerate(windows, start=1):
-            start, end = window.start, window.end
+        windows = self.schedule
+        for index, (_schedule_index, _track, start, end) in enumerate(windows, start=1):
             x = 9 + round(start / total * usable_width)
             active = start <= current_seconds < end or (
                 index == len(windows) and current_seconds >= start
@@ -572,7 +578,7 @@ class ExportPreviewDialog(QDialog):
         self._last_active_decoder_count = 0
         self._last_gpu_dropped_frames = 0
         self.play_timer.setInterval(max(8, round(1000 / self.preview_fps)))
-        self.timeline = PlaylistTimeline(tracks)
+        self.timeline = PlaylistTimeline(self._track_schedule)
         self.timeline.setObjectName("previewTimeline")
         self.timeline.setRange(0, max(1, ceil(self._playlist_duration() * TIMELINE_SCALE)))
         self.time_label = QLabel()
@@ -2804,7 +2810,7 @@ class ExportPreviewDialog(QDialog):
         if self._track_schedule:
             self._playlist_duration_cache = self._track_schedule[-1][3]
             return self._playlist_duration_cache
-        self._playlist_duration_cache = timeline_playlist_duration(self.tracks)
+        self._playlist_duration_cache = compile_playlist(self.tracks).duration_seconds
         return self._playlist_duration_cache
 
     def _update_pixmap(self) -> None:

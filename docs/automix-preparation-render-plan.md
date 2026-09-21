@@ -22,9 +22,14 @@ Preview/Export가 그대로 재생할 수 있는 완전히 계산된 상태를 �
 ## 3. Audio Plan
 
 `AudioRenderPlan`(`app/timeline/render_plan.py`)은 실제로 믹스될 클립 배치
-(`AudioRenderClip`)와 향후 전환 구간(`AudioRenderTransition`)을 담는다. 지금은
-`TransitionType.CUT` 외 타입도 표현은 가능하지만 DSP는 없다 -- Compiler는 CUT 스케줄만
-만든다.
+(`AudioRenderClip`)와 전환 구간(`AudioRenderTransition`)을 담는다. `compile_timeline()`은
+`Timeline.transitions`를 그대로 `AudioRenderTransition`으로 변환해 정보를 보존한다 --
+`CROSSFADE`/`EQUAL_POWER`/`BEAT_MATCH`/`AUTOMIX` 타입도 표현은 가능하지만 DSP 렌더링은
+여전히 없다(그 구현은 AutoMix Core 단계의 몫). 컴파일된 clip 집합에 없는 clip을
+참조하는 transition(비활성화된 clip 등)은 조용히 제외된다 -- 존재하지 않는 clip을
+가리키는 transition을 실행 plan에 남기지 않기 위해서다
+(`test_timeline_transitions_are_compiled_into_audio_render_plan`,
+`test_transition_referencing_a_disabled_clip_is_excluded`).
 
 ## 4. Presentation Plan
 
@@ -40,12 +45,36 @@ Preview/Export가 그대로 재생할 수 있는 완전히 계산된 상태를 �
 일치한다. AutoMix가 들어와 오디오가 겹치기 시작해도 이 API 모양은 바뀌지 않는다 --
 Compiler 내부 구현만 바뀐다.
 
+**Gap lookup.** `PresentationPlan._window_at()`는 window의 `timeline_start` 정렬
+목록에 `bisect_right`를 적용해 "이 순간 이전에 시작한 가장 마지막 window"를 고른다.
+그 결과 첫 window 이전은 첫 window, window 사이 gap은 **가장 최근에 끝난 window**
+(몇 번째 window든), 마지막 window 이후는 마지막 window가 된다 -- Preview의
+`ExportPreviewDialog._track_at()`(bisect 기반)이 이미 쓰던 것과 같은 semantics다.
+이전 구현은 순차 스캔이 실패하면 `windows[0]`으로 폴백해, 세 번째 이상 window 뒤의
+gap에서 첫 트랙을 잘못 돌려주는 버그가 있었다
+(`tests/test_render_plan.py::test_presentation_gap_keeps_the_most_recently_ended_owner`).
+
+**Source-time mapping.** `PresentationWindow`는 이제 `playback_rate`도 갖는다.
+`local_time()`은 `source_time_at_start + (clamped_global - timeline_start) *
+playback_rate`로 계산하며, `clamped_global`은 질의 시각을 window 범위
+`[timeline_start, timeline_end]`로 잘라낸 값이다. 이 clamp 덕분에 window 시작 전이나
+window가 끝난 뒤(같은 gap이든 마지막 이후든) local time이 그 트랙의 source 시작/끝에
+고정되고, 글로벌 시간을 따라 계속 흐르지 않는다
+(`test_presentation_local_time_reflects_source_offset`,
+`test_presentation_local_time_reflects_playback_rate`). Sequential 컴파일러는
+`source_in=0, playback_rate=1`만 만들므로 기존 결과는 완전히 동일하다.
+
 ## 5. Metadata Plan
 
 `MetadataPlan.chapters`는 챕터/YouTube 타임스탬프가 최종적으로 공유해야 할 데이터
-형태다. Sequential 컴파일러에서는 `MetadataChapter`가 `PresentationWindow`와 1:1로
-대응해 기존 `resolve_track_windows()` 결과와 정확히 같은 시작/끝을 만든다
-(`tests/test_render_plan.py::test_metadata_chapters_match_legacy_windows`).
+형태다. 챕터의 `start`는 항상 `PresentationWindow.timeline_start`와 같고, `end`는
+**다음 window의 `timeline_start`**(마지막 챕터는 `CompiledRenderPlan.duration_seconds`)
+로 gap을 건너뛰어 이어진다 -- FFmpeg가 항상 요구해 온 "챕터가 전체 타임라인을 빈틈없이
+덮는다"는 규칙과, `PresentationWindow` 자신의 시작/끝만 쓰던 이전 정의를 하나로
+통일한 것이다(gap이 없는 재생목록에서는 두 정의가 우연히 같았다). 이제 FFmpeg 챕터,
+YouTube 타임스탬프, Presentation window가 전부 같은 `MetadataPlan`을 소스로 삼는다
+(`test_metadata_chapter_bridges_gap_to_next_track_start`,
+`test_metadata_chapter_start_matches_presentation_and_youtube_source`).
 
 ## 6. Preview 데이터 흐름 (현재)
 
@@ -74,9 +103,10 @@ PlaylistTrack[] -> compile_playlist() -> PresentationPlan
 `_track_at()`을 통해 재생 위치 -> (인덱스, 트랙, 시작, 끝) 조회에 쓰인다. `_skip_track()`은
 스케줄을 다시 계산하던 것을 캐시된 `self._track_schedule`을 재사용하도록 정리했다 --
 같은 플레이리스트에 대해 Preview 안에서조차 스케줄을 두 번 계산하던 걸 없앤 것.
-`PlaylistTimeline`(재생바 눈금 위젯)의 `paintEvent()`는 `resolve_track_windows()`를
-그대로 쓴다 -- `ExportPreviewDialog` 클래스 밖의 별도 `QSlider` 위젯이라 이번 스코프에
-포함하지 않았다.
+`PlaylistTimeline`(재생바 눈금 위젯)의 `paintEvent()`도 이제 같은 `self._track_schedule`을
+생성자에서 그대로 받아 그린다 -- `resolve_track_windows()`를 직접 부르지 않을 뿐 아니라,
+매 `paintEvent`(리페인트마다 호출됨)마다 `compile_playlist()`를 다시 실행하지도 않는다.
+스케줄이 dialog 생애주기 동안 한 번만 계산되어 재사용되기 때문이다.
 
 ## 7. Export 데이터 흐름 (현재)
 
@@ -85,35 +115,40 @@ PlaylistTrack[] -> compile_playlist() -> CompiledRenderPlan
                                               |
                     FFmpegRenderer._visual_sequence()        (Presentation)
                     FFmpegRenderer._insert_silence_for_gaps()(Presentation)
-                    FFmpegRenderer._track_windows()           (Audio)
-                    FFmpegRenderer._write_export_ffmetadata() (via _track_windows)
+                    FFmpegRenderer._timeline_duration()       (duration_seconds)
+                    FFmpegRenderer._write_export_ffmetadata() (Metadata)
 ```
 
-`FFmpegRenderer`(`app/renderer/ffmpeg_renderer.py`)의 네 지점을 모두
-`compile_playlist(tracks)`로 옮겼다:
+`FFmpegRenderer`(`app/renderer/ffmpeg_renderer.py`)의 모든 타이밍 지점이
+`compile_playlist(tracks)`를 거친다:
 
 - `_visual_sequence()` / `_insert_silence_for_gaps()`는 `PresentationPlan.windows`를
   순회한다. `PresentationWindow`에는 legacy `TrackWindow.floor`(이전 트랙의 끝, gap
   크기 계산용)가 없어서 윈도우들을 한 번 훑어 `floor` 배열을 직접 만든다 -- 이 값은
   원래 `resolve_track_windows()`가 내부적으로 추적하던 cursor와 정확히 같다.
-- `_track_windows()`는 `AudioRenderPlan.clips`에서 `(timeline_start, duration)`을
-  뽑는다. `AudioRenderClip.duration`은 `(source_out - source_in) / playback_rate`인데
-  Sequential 컴파일에서는 `source_in=0, source_out=track.duration_seconds,
-  playback_rate=1`이라 `track.duration_seconds`와 정확히 같다.
-- `_write_export_ffmetadata()`의 챕터 계산은 `_track_windows()`를 그대로 재사용한다
-  (변경 없음). 챕터 end는 **다음 트랙의 시작**(마지막은 전체 duration)으로 계산해야
-  한다는 기존 규칙 -- `test_container_tags_and_contiguous_chapters`가 "chapters are
-  contiguous and cover the whole timeline"을 강제한다 -- 을 그대로 지키기 위해
-  `MetadataPlan.chapters`(각 챕터가 트랙 자신의 끝에서 끝나 트랙 사이 gap을 비워둠)로
-  바로 바꾸지 않았다. Sequential 타임라인엔 gap이 없는 한 두 정의가 동일하지만, gap이
-  있으면 다르다 -- 이 차이는 6절에서 짚은 "Audio active != Presentation owner"와 같은
-  종류의 구분이다.
+- `_timeline_duration()`은 `compile_playlist(tracks, enabled_only=True).duration_seconds`를
+  그대로 반환한다 -- "실행 duration은 컴파일된 clip이 실제로 도달하는 가장 먼 지점"이라는
+  4절/5절과 같은 정책(9절 참고)을 export 경로에도 적용한 것이다.
+- `_write_export_ffmetadata()`의 챕터 계산은 이제 `_track_windows()`를 직접 재구현하지
+  않고 `compile_playlist(tracks, enabled_only=True).metadata.chapters`를 그대로 읽는다
+  (`_track_windows()`는 이 용도로만 쓰였고, 이제 삭제됐다). `MetadataPlan.chapters`가
+  이미 "챕터 end = 다음 트랙 시작, 마지막은 전체 duration"으로 gap을 건너뛰도록
+  통일됐으므로(5절), FFmpeg가 예전부터 요구해 온 "챕터가 타임라인을 빈틈없이 덮는다"는
+  규칙(`test_container_tags_and_contiguous_chapters`)과 정확히 같은 결과를 만든다 --
+  두 번 정의되던 chapter-end 규칙이 이제 한 곳(`compile_timeline()`)에만 있다.
 
 `FFmpegRenderer`는 호출부(`export_controller.py`)가 이미 `track.enabled`로 걸러낸
 `active_tracks`만 넘기므로 `compile_playlist()`의 disabled-clip 제외 로직은 영향이
 없다. `test_ffmpeg_streaming_integration.py`, `test_bounded_export_pipeline.py`가
 그대로 통과해 실제 렌더 출력(콘테이너 태그, 챕터, silence 삽입, concat 매니페스트)이
 바뀌지 않았음을 증명한다.
+
+`ExportOrchestrator.video_clips()`(`app/controllers/export_controller.py`)의
+track-linked 비디오 스케줄링도 같은 이유로 `resolve_track_windows()`에서
+`compile_playlist(tracks).presentation.windows`로 옮겼다 -- `track_id -> PlaylistTrack`
+매핑으로 되찾은 트랙과 그 presentation 시작 시각을 쓴다. `ExportOrchestrator.playlist_duration()`도
+`compile_playlist(tracks, enabled_only=True).duration_seconds`로 옮겨 `_timeline_duration()`과
+같은 정책을 공유한다.
 
 ## 7.5. Metadata 소비처 (PlaylistExportService)
 
@@ -135,15 +170,29 @@ PlaylistTrack` 매핑으로 artist/title을 복원한다. 호출부(`export()`)�
 
 ## 8. Legacy Compatibility
 
-- `resolve_track_windows()` / `playlist_duration()`은 그대로 유지되며 Sequential
-  Compiler가 내부적으로 사용하는 compatibility layer다 (`track_schedule.py`의 기존
-  docstring대로).
+- `resolve_track_windows()` / `playlist_duration()`은 그대로 유지되며 오직
+  `timeline_from_playlist()`(Legacy playlist -> Timeline adapter)와
+  `PlaylistService`의 legacy 편집기 스케줄링, 그리고 `track_schedule.py` 자신의
+  테스트에서만 쓰인다 -- Preview/Export의 실제 실행 경로(timeline marker, video
+  scheduling, export duration, FFmpeg chapter, YouTube timestamp)는 전부
+  `CompiledRenderPlan`을 거친다.
 - `timeline_from_playlist()`도 그대로 유지되며 `compile_playlist()`가 그 위에 얹힌
   convenience 함수다.
 - Project 저장 포맷은 변경하지 않았다. `CompiledRenderPlan`은 저장되지 않는다:
   `Project JSON -> Playlist -> Timeline -> CompiledRenderPlan` 순으로 매번 재계산된다.
 
-## 9. 미래 AutoMix 삽입 지점
+## 9. Duration 정책
+
+`CompiledRenderPlan.duration_seconds`는 **컴파일된 실행 상태가 실제로 도달하는 가장
+먼 지점**이다: `max(clip.timeline_end for clip in compiled_clips, default=0.0)`.
+이전에는 `Timeline.duration`(비활성 clip을 포함해 모든 lane의 최댓값)을 그대로
+썼는데, 비활성 clip이 활성 clip들보다 뒤에 있으면 실행되지도 않을 구간만큼 duration이
+부풀려졌다. 이제 비활성 clip은 duration 계산에서도 완전히 빠진다
+(`test_disabled_clip_does_not_inflate_compiled_duration`). Sequential 재생목록처럼
+gap이 없거나 마지막 clip이 항상 활성 상태인 경우 두 정의는 동일하므로 기존 동작은
+바뀌지 않는다.
+
+## 10. 미래 AutoMix 삽입 지점
 
 ```
 Playlist
@@ -166,22 +215,19 @@ Preview / Export
 Planner 선택/파라미터(예: `automix_enabled`, `transition_preferences`)를 위한 확장
 지점이다. 지금은 비어 있다 -- 실제 필드는 이번 작업 범위 밖.
 
-## 10. 다음 단계 (이번 작업 범위 밖)
+## 11. 다음 단계 (이번 작업 범위 밖)
 
-`ExportTimelinePlanner`, `ExportPreviewDialog`, `FFmpegRenderer` 전부 PresentationPlan/
-AudioRenderPlan을 거치도록 전환 완료 (6·7절 참고). 남은 항목:
+`ExportTimelinePlanner`, `ExportPreviewDialog`(`PlaylistTimeline` 포함),
+`FFmpegRenderer`, `ExportOrchestrator` 전부 PresentationPlan/AudioRenderPlan/
+MetadataPlan을 거치도록 전환 완료 (4·5·6·7절 참고). 남은 항목:
 
-- `PlaylistTimeline`(재생바 눈금 위젯)의 `paintEvent()`도 원한다면 같은 방식으로
-  전환 가능 -- `ExportPreviewDialog` 밖의 별도 위젯이라 이번에는 제외.
-- `PlaylistExportService`는 `MetadataPlan.chapters`로 전환 완료 (7.5절). FFmpeg
-  챕터(`_write_export_ffmetadata`)는 gap 규칙 차이(7절)로 여전히 `_track_windows()`
-  기반 "다음 트랙 시작까지" 로직을 유지 -- `MetadataPlan`을 gap-aware하게 만들지는
-  아직 미결정.
 - Audio Pipeline 분리(`AudioRenderPlan -> AudioPipeline -> PreparedAudio`)는 시작하지
   않았음: `FFmpegRenderer.render()`의 normalize/concat 로직 자체를 건드리는 리스크가
   이번 스코프의 실익보다 크다고 판단. gap 계산(`_insert_silence_for_gaps`)과 클립
-  배치(`_track_windows`, `_visual_sequence`)는 이미 RenderPlan을 거치므로, 다음
-  단계는 normalize/concat 실행 로직 자체를 `AudioPipeline.prepare()`로 감싸는 것.
+  배치(`_visual_sequence`)는 이미 RenderPlan을 거치므로, 다음 단계는 normalize/concat
+  실행 로직 자체를 `AudioPipeline.prepare()`로 감싸는 것.
+- `AudioRenderTransition`은 정보를 보존할 뿐 DSP가 없다 -- `CROSSFADE`/`EQUAL_POWER`/
+  `BEAT_MATCH`/`AUTOMIX`를 실제 오디오 믹스로 렌더링하는 것은 AutoMix Core의 몫.
 - Visualizer의 mixed-audio 소스 정책 (TODO, 섹션 24 참고): 코드에 아직 표시 안 함 --
   실제 visualizer 코드를 건드리지 않았으므로 여기 문서에만 남긴다.
 - AutoMix Core: BPM/beat/key 분석, transition scoring, `AutoMixPlanner` 자체.

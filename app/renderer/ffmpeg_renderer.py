@@ -19,7 +19,6 @@ from PySide6.QtGui import QImage, QImageReader
 
 from app.models.playlist import PlaylistTrack
 from app.timeline.compiler import compile_playlist
-from app.timeline.track_schedule import playlist_duration as timeline_playlist_duration
 from app.renderer.ffmpeg import filter_graph
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
 from app.utils.subprocess_utils import hidden_process_kwargs
@@ -1441,7 +1440,7 @@ class FFmpegRenderer:
 
     @staticmethod
     def _timeline_duration(tracks: list[PlaylistTrack]) -> float:
-        return timeline_playlist_duration(tracks)
+        return compile_playlist(tracks, enabled_only=True).duration_seconds
 
     @staticmethod
     def _ffmetadata_escape(value: str) -> str:
@@ -1472,14 +1471,12 @@ class FFmpegRenderer:
 
         chapters = metadata.include_chapters and len(tracks) > 1
         if chapters:
-            windows = self._track_windows(tracks)
-            total = self._timeline_duration(tracks)
-            for index, (track, (start, _duration)) in enumerate(
-                zip(tracks, windows)
-            ):
-                end = windows[index + 1][0] if index + 1 < len(windows) else total
-                start_ms = max(0, round(start * 1000))
-                end_ms = max(start_ms + 1, round(end * 1000))
+            track_by_id = {track.id: track for track in tracks}
+            plan_chapters = compile_playlist(tracks, enabled_only=True).metadata.chapters
+            for index, chapter in enumerate(plan_chapters):
+                track = track_by_id[chapter.track_id]
+                start_ms = max(0, round(chapter.start * 1000))
+                end_ms = max(start_ms + 1, round(chapter.end * 1000))
                 name = (track.title or track.filename or f"Track {index + 1}").strip()
                 lines.extend([
                     "",
@@ -1492,14 +1489,6 @@ class FFmpegRenderer:
         path = temporary / "metadata.ffmeta"
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
-
-    @staticmethod
-    def _track_windows(tracks: list[PlaylistTrack]) -> list[tuple[float, float]]:
-        """Return sequenced global start/duration pairs for enabled tracks."""
-        return [
-            (clip.timeline_start, clip.duration)
-            for clip in compile_playlist(tracks).audio.clips
-        ]
 
     @staticmethod
     def _parse_progress_seconds(line: str) -> float | None:
