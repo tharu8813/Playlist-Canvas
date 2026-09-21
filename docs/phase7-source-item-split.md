@@ -121,12 +121,58 @@ like SHAPE/PROGRESS_BAR:
 - `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged.
 - `tests/test_main_window.py` passed unchanged.
 
+## Slice 4 — IMAGE, LOGO, WATERMARK, VIDEO (renderer + inspector)
+
+### Renderer
+
+`IMAGE`, `LOGO`, and `WATERMARK` have no `elif` branch of their own in
+`_paint_legacy` -- when they have no pixmap loaded, execution falls all the
+way through the `elif` chain to its trailing `else`, which is a **generic
+name/text placeholder shared by every unmatched type** (this is also how
+`TEXT` and `TIME` render, though those two are unsplit and still go through
+`_paint_legacy` as a whole). Missing this on the first pass caused
+`test_registered_rendering_matches_legacy_pixels_for_every_type` to fail for
+these three types with a default (no file) source -- caught by the test as
+intended.
+
+Fixed by extracting that trailing `else` into
+`app/canvas/renderers/base.py::paint_generic_fallback(item, painter, rect)`
+(rounded rect + word-wrapped name/text, with the `TEXT`/`TRACK_LIST`
+overflow handling and outline-color special case kept verbatim). Now:
+
+- `image_renderer.py`/`logo_renderer.py`/`watermark_renderer.py`: pixmap
+  present -> `paint_image_content(..., "rounded")`; otherwise ->
+  `paint_generic_fallback`.
+- `video_renderer.py`: pixmap present -> same `paint_image_content`;
+  otherwise -> the dark placeholder + play icon + filename, copied verbatim
+  from the old `elif SourceType.VIDEO` branch (this type already had its
+  own branch, so no fallback helper was needed here).
+
+### Inspector
+
+All four are in `IMAGE_BACKED_TYPES`, so they use
+`apply_image_backed_fields()` from Slice 3. `VIDEO` is the one exception the
+legacy code carves out of `file` visibility (its own `video_settings` field
+covers file selection instead), so `video_editor.py` passes
+`show_file=False` and additionally shows `video_settings`. The other three
+pass `show_file=True` and have no fields of their own beyond what
+`apply_image_backed_fields`/`apply_shared_fields` cover.
+
+### Validation
+
+- `tests/test_source_registry.py` (7 tests, 57 subtests) passed, including
+  the pixel comparison for a no-pixmap `IMAGE`/`LOGO`/`WATERMARK` source
+  that caught the missing fallback above.
+- `tests/test_main_window.py` passed unchanged.
+
 ## Remaining work
 
-- 13 of 17 `SourceType`s still render and edit through the legacy
-  adapters. Continue splitting types with a similar shape the same way,
-  on both the renderer and inspector sides, behind the two equivalence
-  tests above.
+- 9 of 17 `SourceType`s still render and edit through the legacy
+  adapters (`TEXT`, `TIME`, `AUDIO_VISUALIZER`, `AUDIO_WAVEFORM`,
+  `AUDIO_LEVEL_METER`, `PARTICLE_OVERLAY`, `LYRICS`, `TRACK_LIST`,
+  `NOW_PLAYING`). `TEXT`/`TIME` will need `paint_generic_fallback` from
+  Slice 4 too, since that is their entire renderer today. Continue
+  splitting the rest the same way, behind the two equivalence tests above.
 - `SourceItem` and `SourceInspector` still own selection/resize/rotation,
   animation preview wiring, and the shared form-building machinery
   (`_slider_spin_editor`, `_connect_fields`, etc.) -- those stay put;

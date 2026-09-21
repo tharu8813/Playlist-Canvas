@@ -27,7 +27,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.inspector.editors import album_cover_editor, background_editor, progress_editor, shape_editor
+from app.inspector.editors import (
+    album_cover_editor,
+    background_editor,
+    image_editor,
+    logo_editor,
+    progress_editor,
+    shape_editor,
+    video_editor,
+    watermark_editor,
+)
 from app.models.source import Source, SourceType
 from app.models.source_registry import source_registry
 from app.dialogs.color_editor_dialog import ColorEditorDialog
@@ -2610,3 +2619,7 @@ source_registry.get(SourceType.SHAPE).inspector = shape_editor.edit
 source_registry.get(SourceType.PROGRESS_BAR).inspector = progress_editor.edit
 source_registry.get(SourceType.BACKGROUND).inspector = background_editor.edit
 source_registry.get(SourceType.ALBUM_COVER).inspector = album_cover_editor.edit
+source_registry.get(SourceType.IMAGE).inspector = image_editor.edit
+source_registry.get(SourceType.LOGO).inspector = logo_editor.edit
+source_registry.get(SourceType.WATERMARK).inspector = watermark_editor.edit
+source_registry.get(SourceType.VIDEO).inspector = video_editor.edit

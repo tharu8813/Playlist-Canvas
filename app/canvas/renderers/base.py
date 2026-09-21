@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 
 from app.models.source import SourceType
 
@@ -110,6 +110,55 @@ def paint_image_content(item: "SourceItem", painter: QPainter, rect: QRectF, fra
         painter.setBrush(QColor(255, 255, 255, 40))
         painter.setPen(QPen(QColor(255, 255, 255, 180), 1.5))
         painter.drawRoundedRect(rect, item.source.border_radius, item.source.border_radius)
+
+
+def paint_generic_fallback(item: "SourceItem", painter: QPainter, rect: QRectF) -> None:
+    """Draw the name/text placeholder _paint_legacy's trailing `else` falls
+    back to for any SourceType with no dedicated branch -- verbatim, including
+    TEXT/TRACK_LIST's overflow handling and the text-bearing types' outline
+    color. IMAGE/LOGO/WATERMARK use this when they have no pixmap to draw."""
+    painter.drawRoundedRect(rect, item.source.border_radius, item.source.border_radius)
+    text_color = (
+        item.source.outline_color
+        if item.source.source_type in {SourceType.TEXT, SourceType.TIME, SourceType.LYRICS, SourceType.TRACK_LIST}
+        else "#FFFFFF"
+    )
+    painter.setPen(QColor(text_color))
+    font = QFont(item.source.font_family, max(8, min(120, int(item.source.font_size))))
+    font.setWeight(QFont.Weight(item.source.font_weight))
+    painter.setFont(font)
+    alignment = {
+        "left": Qt.AlignmentFlag.AlignLeft,
+        "right": Qt.AlignmentFlag.AlignRight,
+    }.get(item.source.text_alignment, Qt.AlignmentFlag.AlignHCenter)
+    text_rect = rect.adjusted(12, 6, -12, -6)
+    text = item._render_text() or item.source.name
+    flags = alignment | Qt.AlignmentFlag.AlignVCenter
+    overflow_types = {SourceType.TEXT, SourceType.TRACK_LIST}
+    if item.source.source_type in overflow_types and item.source.text_overflow != "wrap":
+        lines = (
+            text.splitlines() or [""]
+            if item.source.source_type is SourceType.TRACK_LIST else
+            [" ".join(text.splitlines())]
+        )
+        metrics = painter.fontMetrics()
+        line_height = max(1, metrics.height())
+        block_height = line_height * len(lines)
+        top = max(text_rect.top(), text_rect.center().y() - block_height / 2)
+        painter.save()
+        painter.setClipRect(text_rect)
+        for index, line in enumerate(lines):
+            if item.source.text_overflow == "ellipsis":
+                line = metrics.elidedText(line, Qt.TextElideMode.ElideRight, max(1, int(text_rect.width())))
+            line_rect = QRectF(text_rect.left(), top + index * line_height, text_rect.width(), line_height)
+            item._draw_text(
+                painter, line_rect,
+                alignment | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextSingleLine,
+                line,
+            )
+        painter.restore()
+    else:
+        item._draw_text(painter, text_rect, flags | Qt.TextFlag.TextWordWrap, text)
 
 
 def paint_selection_guide(item: "SourceItem", painter: QPainter, rect: QRectF) -> None:

@@ -19,7 +19,16 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 
-from app.canvas.renderers import album_cover_renderer, background_renderer, progress_renderer, shape_renderer
+from app.canvas.renderers import (
+    album_cover_renderer,
+    background_renderer,
+    image_renderer,
+    logo_renderer,
+    progress_renderer,
+    shape_renderer,
+    video_renderer,
+    watermark_renderer,
+)
 from app.models.source import Source, SourceType
 from app.models.source_registry import source_registry
 from app.preview.text_template import expand_placeholder_labels
@@ -2164,3 +2173,7 @@ source_registry.get(SourceType.SHAPE).renderer = shape_renderer.render
 source_registry.get(SourceType.PROGRESS_BAR).renderer = progress_renderer.render
 source_registry.get(SourceType.BACKGROUND).renderer = background_renderer.render
 source_registry.get(SourceType.ALBUM_COVER).renderer = album_cover_renderer.render
+source_registry.get(SourceType.IMAGE).renderer = image_renderer.render
+source_registry.get(SourceType.LOGO).renderer = logo_renderer.render
+source_registry.get(SourceType.WATERMARK).renderer = watermark_renderer.render
+source_registry.get(SourceType.VIDEO).renderer = video_renderer.render
