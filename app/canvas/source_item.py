@@ -27,11 +27,14 @@ from app.canvas.renderers import (
     background_renderer,
     image_renderer,
     logo_renderer,
+    lyrics_renderer,
+    now_playing_renderer,
     particle_overlay_renderer,
     progress_renderer,
     shape_renderer,
     text_renderer,
     time_renderer,
+    track_list_renderer,
     video_renderer,
     watermark_renderer,
 )
@@ -2189,3 +2192,6 @@ source_registry.get(SourceType.AUDIO_VISUALIZER).renderer = audio_visualizer_ren
 source_registry.get(SourceType.AUDIO_WAVEFORM).renderer = audio_waveform_renderer.render
 source_registry.get(SourceType.AUDIO_LEVEL_METER).renderer = audio_level_meter_renderer.render
 source_registry.get(SourceType.PARTICLE_OVERLAY).renderer = particle_overlay_renderer.render
+source_registry.get(SourceType.LYRICS).renderer = lyrics_renderer.render
+source_registry.get(SourceType.TRACK_LIST).renderer = track_list_renderer.render
+source_registry.get(SourceType.NOW_PLAYING).renderer = now_playing_renderer.render

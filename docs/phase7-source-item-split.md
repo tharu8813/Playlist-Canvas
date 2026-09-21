@@ -230,17 +230,58 @@ mechanical extraction:
 - `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged.
 - `tests/test_main_window.py`: 245 passed, 19 subtests.
 
-## Remaining work
+## Slice 8 — LYRICS, TRACK_LIST, NOW_PLAYING (renderer + inspector)
 
-- 3 of 17 `SourceType`s still render and edit through the legacy adapters:
-  `LYRICS`, `TRACK_LIST`, `NOW_PLAYING`. All three are in `text_types`, so
-  their editors can reuse the same `apply_shared_fields`/hide-then-show
-  pattern. `LYRICS`'s renderer branch is long and stateful (subtitle
-  animation/transition progress, ghost-pixmap blur caching), so extract it
-  carefully and re-run the pixel equivalence test rather than eyeballing
-  it. `TRACK_LIST` delegates to `self._paint_track_list`, an existing
-  method already outside the `elif` chain -- likely as mechanical as this
-  slice.
+The final three types, completing all 17 `SourceType`s.
+
+### Renderer
+
+- `lyrics_renderer.py`: the longest and most stateful branch in
+  `_paint_legacy` -- per-line entrance/leaving alpha and blur driven by
+  `item._subtitle_*` transition state, ghost-pixmap caching via
+  `item._lyric_ghost_pixmap`, and font selection via `item._lyric_fonts`.
+  Copied verbatim rather than restructured, specifically so the pixel
+  equivalence test is the thing verifying it, not a read-through.
+- `track_list_renderer.py`: `self._paint_track_list` was already a
+  standalone method outside the `elif` chain, so this is a two-line
+  wrapper (`paint_background()` -> `item._paint_track_list(...)` ->
+  `paint_selection_guide()`).
+- `now_playing_renderer.py`: copied verbatim from its `elif` branch
+  (style-dependent card color/pen, then label/title/detail text blocks).
+
+### Inspector
+
+All three are in `text_types`, sharing `text`/`font_size`/`font_weight`/
+`font_family`/`text_stroke_color`/`text_stroke_width`/`text_alignment`.
+`lyrics_editor.py` adds its `subtitle_*` fields; `track_list_editor.py`
+adds `text_overflow` (the other member of the `{TEXT, TRACK_LIST}`
+overflow set) plus its `track_list_*` fields; `now_playing_editor.py` adds
+its `now_playing_*` fields.
+
+### Validation
+
+- `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged
+  -- notably including `LYRICS`'s pixel comparison, which is the real
+  check on the verbatim copy above.
+- `tests/test_main_window.py`: 245 passed, 19 subtests.
+- Full isolated suite via `scripts/run_tests.py`.
+
+## Status: complete
+
+All 17 `SourceType`s now render and edit through dedicated
+`app/canvas/renderers/*.py` / `app/inspector/editors/*.py` modules
+registered in `source_registry`, instead of the shared
+`_render_legacy_source`/`_inspect_legacy_source` adapters. `_paint_legacy`
+and `_update_legacy_source_specific_fields` are intentionally left in place
+as the reference implementations `tests/test_source_registry.py` compares
+every type's registered output against; they are candidates for deletion
+in a later cleanup phase once that safety net is no longer needed.
+
+`SourceItem` and `SourceInspector` still own selection/resize/rotation,
+animation preview wiring, and the shared form-building machinery
+(`_slider_spin_editor`, `_connect_fields`, `_paint_track_list`, lyric/text
+helpers, etc.) -- Phase 7's scope was only the type-specific drawing and
+field-visibility bodies.
 - `SourceItem` and `SourceInspector` still own selection/resize/rotation,
   animation preview wiring, and the shared form-building machinery
   (`_slider_spin_editor`, `_connect_fields`, etc.) -- those stay put;

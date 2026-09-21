@@ -35,11 +35,14 @@ from app.inspector.editors import (
     background_editor,
     image_editor,
     logo_editor,
+    lyrics_editor,
+    now_playing_editor,
     particle_overlay_editor,
     progress_editor,
     shape_editor,
     text_editor,
     time_editor,
+    track_list_editor,
     video_editor,
     watermark_editor,
 )
@@ -2635,3 +2638,6 @@ source_registry.get(SourceType.AUDIO_VISUALIZER).inspector = audio_visualizer_ed
 source_registry.get(SourceType.AUDIO_WAVEFORM).inspector = audio_waveform_editor.edit
 source_registry.get(SourceType.AUDIO_LEVEL_METER).inspector = audio_level_meter_editor.edit
 source_registry.get(SourceType.PARTICLE_OVERLAY).inspector = particle_overlay_editor.edit
+source_registry.get(SourceType.LYRICS).inspector = lyrics_editor.edit
+source_registry.get(SourceType.TRACK_LIST).inspector = track_list_editor.edit
+source_registry.get(SourceType.NOW_PLAYING).inspector = now_playing_editor.edit
