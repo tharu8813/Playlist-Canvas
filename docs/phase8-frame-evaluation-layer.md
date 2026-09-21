@@ -51,23 +51,45 @@ duplicating the formula:
   re-deriving `active_index`/`cue_index`/`transition` independently. Its
   now-unused `LyricsService` import was removed.
 
-This is the first slice of the Frame Evaluation Layer, scoped to the one
-piece of math confirmed to be duplicated with real drift risk. It does not
-attempt full unification (returning an injected `FrameState` instead of
-`capture_track`'s mutate-then-restore approach on live `SourceItem`/`Source`
-objects) -- `SourceItem.paint()` still reads live attributes, and
-`capture_track`'s many other branches (text templates, now-playing exit
-progress, background cross-fade, animation in/out opacity) are not yet
-extracted. See "Remaining work" below.
+## Slice 2 -- now-playing exit progress
+
+`resolve_now_playing_exit_state()` was added the same way: lifted verbatim
+from `capture_track`'s inline NOW_PLAYING branch (`visible`/`exit_duration`/
+`exit_start`/`exit_progress`), returned as a `NowPlayingExitState(visible,
+exit_progress)` dataclass. Both `capture_track` and
+`ExportCanvasCapturer._source_state_key`'s NOW_PLAYING branch now call it
+instead of re-deriving the same formula -- another confirmed identical
+duplicate, same shape of risk as the lyrics one.
+
+### Branches checked and left alone
+
+- **Text template expansion**: both call sites already call the shared
+  `expand_track_template()` with the same arguments -- no duplicated
+  formula to extract.
+- **Background cross-fade blend fraction**: both call sites compute
+  `ease_in_out_cubic(elapsed_seconds / fade_seconds)` in one line each --
+  trivially small, already using the same shared `ease_in_out_cubic`, not
+  worth a wrapper function.
+- **Animation in/out progress**: checked and found to be **not a faithful
+  duplicate**. `capture_track` additionally branches on whether the source
+  has its own timeline window (`source.timeline_start`/`timeline_duration`)
+  via `CanvasSnapshot._timeline_window_phase`, using that window's
+  phase/progress in place of the passed-in `animation_phase`/
+  `animation_progress` when present. `ExportCanvasCapturer._source_state_key`'s
+  animation-state cache key only ever uses the passed-in
+  `sample.animation_phase`/`animation_phase_duration` -- it never calls
+  `_timeline_window_phase`. Unifying these would be a *behavior change* (or
+  a confirmation that the export cache key can under-key a source with both
+  a timeline window and an animation style, coalescing two visually
+  different frames), not a pure refactor -- flagged as a separate follow-up
+  investigation rather than folded into this slice.
 
 ## Validation
 
-- New `tests/test_frame_state.py` (5 tests): determinism (same input twice
-  produces an equal `LyricsCueState`), no-lyrics/no-cue case, transition
-  progress over the animation duration (including the "no successor cue"
-  clamp-at-1.0 case matching legacy behavior), `subtitle_animation="none"`
-  never transitions, and that both timing offsets shift the effective
-  elapsed time as before.
+- `tests/test_frame_state.py` (11 tests): determinism for both resolvers,
+  lyrics no-cue/transition-progress/animation-none/timing-offset cases, and
+  now-playing hidden-after-duration/before-exit-window/exit-progress-ramp/
+  exit-duration-clamped/zero-exit-duration cases.
 - `tests/test_export_frame_equivalence.py`, `test_export_plan.py`,
   `test_functional_regressions.py`, `test_auto_line_counts.py` (118 tests)
   passed unchanged -- these already exercise `capture_track` and the
@@ -76,14 +98,9 @@ extracted. See "Remaining work" below.
 
 ## Remaining work
 
-- Extract the other branches `capture_track` and
-  `ExportCanvasCapturer._source_state_key` independently re-derive: text
-  template expansion (already shares `expand_track_template`, lower risk),
-  now-playing exit progress, background cross-fade blend fraction,
-  animation in/out progress. Each is a smaller version of this same
-  pattern: pull the pure formula into `frame_state.py`, have both call
-  sites use it, add a determinism test.
+- The animation in/out progress mismatch above needs its own investigation
+  (spawned separately) before touching it.
 - True full `FrameState` unification (a single resolved value object
   `capture_track` applies instead of computing inline, and `SourceItem`
   reads instead of live-mutated attributes) is a larger, higher-risk
-  change out of scope for this incremental slice.
+  change out of scope for these incremental slices.

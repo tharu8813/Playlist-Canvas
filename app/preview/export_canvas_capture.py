@@ -15,7 +15,7 @@ from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
 from app.preview.canvas_snapshot import CanvasSnapshot
-from app.preview.frame_state import resolve_lyrics_cue_state
+from app.preview.frame_state import resolve_lyrics_cue_state, resolve_now_playing_exit_state
 from app.preview.text_template import expand_track_template
 from app.renderer.export_timeline import ExportFrameSample
 from app.renderer.ffmpeg_renderer import RenderFrame, StaticOverlayLayer
@@ -189,28 +189,19 @@ class ExportCanvasCapturer:
         elif source.source_type is SourceType.TRACK_LIST:
             content_state = ("track_list", sample.track_number)
         elif source.source_type is SourceType.NOW_PLAYING:
-            card_visible = sample.elapsed_seconds <= source.now_playing_duration
-            if not card_visible:
+            exit_state = resolve_now_playing_exit_state(
+                sample.elapsed_seconds, source.now_playing_duration, source.now_playing_exit_duration,
+            )
+            if not exit_state.visible:
                 content_state = ("now_playing", "hidden")
             else:
-                exit_duration = min(
-                    source.now_playing_exit_duration,
-                    source.now_playing_duration,
-                )
-                exit_start = source.now_playing_duration - exit_duration
-                exit_progress: float | None = None
-                if sample.elapsed_seconds >= exit_start and exit_duration > 0.0:
-                    exit_progress = max(0.0, min(
-                        1.0,
-                        (sample.elapsed_seconds - exit_start) / exit_duration,
-                    ))
                 content_state = (
                     "now_playing",
                     sample.track.file_path,
                     sample.track.title,
                     sample.track.artist,
                     sample.track.album,
-                    exit_progress,
+                    exit_state.exit_progress,
                 )
         elif source.source_type is SourceType.PROGRESS_BAR:
             progress = (

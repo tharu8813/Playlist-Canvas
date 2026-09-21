@@ -27,7 +27,7 @@ from app.preview.album_art import (
     extract_track_cover,
     extract_track_personal_color,
 )
-from app.preview.frame_state import resolve_lyrics_cue_state
+from app.preview.frame_state import resolve_lyrics_cue_state, resolve_now_playing_exit_state
 from app.preview.text_template import (
     TEXT_TEMPLATE_TOKEN_NAMES,
     expand_track_template,
@@ -893,12 +893,12 @@ class CanvasSnapshot:
                 artist = track.artist or "Unknown artist"
                 album = f"\n{track.album}" if track.album else ""
                 source.text = f"NOW PLAYING\n{title}\n{artist}{album}"
-                visible = elapsed_seconds <= source.now_playing_duration
-                graphics_item.setVisible(visible)
-                exit_duration = min(source.now_playing_exit_duration, source.now_playing_duration)
-                exit_start = source.now_playing_duration - exit_duration
-                if visible and elapsed_seconds >= exit_start and exit_duration > 0:
-                    exit_progress = max(0.0, min(1.0, (elapsed_seconds - exit_start) / exit_duration))
+                exit_state = resolve_now_playing_exit_state(
+                    elapsed_seconds, source.now_playing_duration, source.now_playing_exit_duration,
+                )
+                graphics_item.setVisible(exit_state.visible)
+                if exit_state.exit_progress is not None:
+                    exit_progress = exit_state.exit_progress
                     # The previous quintic exit stayed almost fully opaque
                     # until the last few frames, which made moving cards look
                     # as if they popped out. Couple position/scale and opacity

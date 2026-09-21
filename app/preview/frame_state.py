@@ -2,14 +2,18 @@
 live Canvas preview (CanvasSnapshot.capture_track) and export's frame
 coalescing (ExportCanvasCapturer._source_state_key).
 
-Both call sites used to independently re-derive the same lyric cue/transition
-timing math -- one to paint it, one to build a cache key -- with a real risk
-of the two drifting apart. resolve_lyrics_cue_state() is the first slice of
-that computation pulled out into one pure, testable function; both call
-sites now resolve the same FrameState value instead of duplicating the
-formula. Later slices can extract the other duplicated branches
-(track template text, now-playing exit progress, background cross-fade,
-animation in/out progress) the same way.
+Both call sites used to independently re-derive the same timing math -- one
+to paint it, one to build a cache key -- with a real risk of the two
+drifting apart. resolve_lyrics_cue_state() and resolve_now_playing_exit_state()
+pull that duplicated computation out into pure, testable functions; both
+call sites now resolve the same FrameState value instead of duplicating the
+formula. Background cross-fade blend and text template expansion were
+checked and found to already be single-line/shared, not worth extracting.
+Animation in/out progress is NOT extracted here: capture_track's version
+additionally accounts for per-source timeline windows
+(CanvasSnapshot._timeline_window_phase) that the export cache-key version
+does not, so the two are not a faithful duplicate -- unifying them would be
+a behavior change, not a pure refactor, and needs its own investigation.
 """
 
 from __future__ import annotations
@@ -69,3 +73,32 @@ def resolve_lyrics_cue_state(
         transition_progress=transition_progress,
         cue_start_seconds=cue_start_seconds,
     )
+
+
+@dataclass(slots=True, frozen=True)
+class NowPlayingExitState:
+    """Whether a NOW_PLAYING card is visible at all, and how far its exit
+    animation has progressed (raw, unEASED -- callers apply their own easing
+    curve to exit_progress for the actual motion/opacity)."""
+
+    visible: bool
+    exit_progress: float | None
+
+
+def resolve_now_playing_exit_state(
+    elapsed_seconds: float,
+    now_playing_duration: float,
+    now_playing_exit_duration: float,
+) -> NowPlayingExitState:
+    """Resolve the NOW_PLAYING source's visibility/exit-progress state at
+    elapsed_seconds. Pulled out of CanvasSnapshot.capture_track's inline
+    now-playing branch verbatim; behavior is unchanged."""
+    visible = elapsed_seconds <= now_playing_duration
+    if not visible:
+        return NowPlayingExitState(visible=False, exit_progress=None)
+    exit_duration = min(now_playing_exit_duration, now_playing_duration)
+    exit_start = now_playing_duration - exit_duration
+    exit_progress: float | None = None
+    if elapsed_seconds >= exit_start and exit_duration > 0.0:
+        exit_progress = max(0.0, min(1.0, (elapsed_seconds - exit_start) / exit_duration))
+    return NowPlayingExitState(visible=True, exit_progress=exit_progress)

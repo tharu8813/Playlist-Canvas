@@ -1,14 +1,15 @@
-"""Phase 8 Frame Evaluation Layer: resolve_lyrics_cue_state() is the shared
-lyric cue/transition resolver used by both CanvasSnapshot.capture_track
-(preview/export painting) and ExportCanvasCapturer._source_state_key
-(export frame coalescing). These tests check it resolves the same input to
-the same FrameState deterministically, and matches the specific cue/
-transition math both call sites relied on before the extraction."""
+"""Phase 8 Frame Evaluation Layer: resolve_lyrics_cue_state() and
+resolve_now_playing_exit_state() are the shared resolvers used by both
+CanvasSnapshot.capture_track (preview/export painting) and
+ExportCanvasCapturer._source_state_key (export frame coalescing). These
+tests check they resolve the same input to the same FrameState
+deterministically, and match the specific timing math both call sites
+relied on before the extraction."""
 
 import unittest
 
 from app.models.playlist import PlaylistTrack
-from app.preview.frame_state import resolve_lyrics_cue_state
+from app.preview.frame_state import resolve_lyrics_cue_state, resolve_now_playing_exit_state
 
 
 def _track(lyrics: list[dict[str, object]], offset: float = 0.0) -> PlaylistTrack:
@@ -63,6 +64,46 @@ class FrameStateTests(unittest.TestCase):
         self.assertEqual(state.cue_index, 0)
         self.assertTrue(state.transitioning)
         self.assertAlmostEqual(state.transition_progress, 0.0)
+
+
+class NowPlayingExitStateTests(unittest.TestCase):
+    def test_same_input_produces_same_state(self) -> None:
+        first = resolve_now_playing_exit_state(3.0, 5.0, 1.0)
+        second = resolve_now_playing_exit_state(3.0, 5.0, 1.0)
+        self.assertEqual(first, second)
+
+    def test_hidden_after_duration_elapses(self) -> None:
+        state = resolve_now_playing_exit_state(6.0, 5.0, 1.0)
+        self.assertFalse(state.visible)
+        self.assertIsNone(state.exit_progress)
+
+    def test_visible_with_no_exit_progress_before_exit_window(self) -> None:
+        state = resolve_now_playing_exit_state(2.0, 5.0, 1.0)
+        self.assertTrue(state.visible)
+        self.assertIsNone(state.exit_progress)
+
+    def test_exit_progress_ramps_within_the_exit_window(self) -> None:
+        # duration=5, exit_duration=1 -> exit window is [4.0, 5.0].
+        just_started = resolve_now_playing_exit_state(4.0, 5.0, 1.0)
+        self.assertEqual(just_started.exit_progress, 0.0)
+
+        halfway = resolve_now_playing_exit_state(4.5, 5.0, 1.0)
+        self.assertAlmostEqual(halfway.exit_progress, 0.5)
+
+        finished = resolve_now_playing_exit_state(5.0, 5.0, 1.0)
+        self.assertEqual(finished.exit_progress, 1.0)
+
+    def test_exit_duration_clamped_to_total_duration(self) -> None:
+        # exit_duration longer than the card's whole lifetime clamps to it,
+        # so the card starts exiting immediately from elapsed=0.
+        state = resolve_now_playing_exit_state(0.0, 3.0, 10.0)
+        self.assertTrue(state.visible)
+        self.assertEqual(state.exit_progress, 0.0)
+
+    def test_zero_exit_duration_never_exits(self) -> None:
+        state = resolve_now_playing_exit_state(5.0, 5.0, 0.0)
+        self.assertTrue(state.visible)
+        self.assertIsNone(state.exit_progress)
 
 
 if __name__ == "__main__":
