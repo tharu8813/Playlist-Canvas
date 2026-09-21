@@ -72,8 +72,8 @@ class SettingsDialog(QDialog):
                  active_preview_backend: str | None = None) -> None:
         super().__init__(parent)
         self.translator = translator
-        self.setMinimumSize(720, 590)
-        self.resize(760, 640)
+        self.setMinimumSize(720, 520)
+        self.resize(720, 560)
         self._ffmpeg_installing = False
         self._ffmpeg_catalog_loading = False
         self._ffmpeg_catalog_loaded = False

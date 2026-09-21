@@ -114,6 +114,15 @@ QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {
 }
 QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QComboBox:hover { border-color: #56605F; }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid @accent; padding: 6px 7px; }
+/* Reset inline QToolButtons Qt creates inside widgets (line-edit clear/leading
+   actions, tab-bar scroll arrows) so they don't inherit the full toolbar-button
+   skin (border/background/28px min-height) sized for standalone buttons. */
+QLineEdit QToolButton, QTabBar QToolButton {
+    background: transparent; border: 0; border-radius: 3px; padding: 2px;
+    margin: 0; min-width: 0; min-height: 0;
+}
+QLineEdit QToolButton:hover, QTabBar QToolButton:hover { background: @hover; border-color: transparent; }
+QLineEdit QToolButton:pressed, QTabBar QToolButton:pressed { background: @field; border-color: transparent; }
 QComboBox::drop-down { border: 0; width: 22px; }
 QComboBox::down-arrow { image: url("@spin_down"); width: 9px; height: 6px; }
 QComboBox QAbstractItemView {

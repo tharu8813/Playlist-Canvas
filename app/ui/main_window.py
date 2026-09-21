@@ -1751,7 +1751,7 @@ class MainWindow(QMainWindow):
         self.source_search.setObjectName("sourceSearch")
         self.source_search.setClearButtonEnabled(True)
         self.source_search.addAction(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView),
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogBack),
             QLineEdit.ActionPosition.LeadingPosition,
         )
         self.source_search.textChanged.connect(self._filter_source_cards)
@@ -3992,6 +3992,7 @@ class MainWindow(QMainWindow):
                 return
             self.left_workspace.setVisible(False)
             self.left_workspace.setMaximumWidth(16_777_215)
+            self.left_workspace.setMinimumWidth(180)
             self._sidebar_transition = False
             self.main_splitter.lock_edge_sizes()
             if sync_action:
@@ -4027,6 +4028,7 @@ class MainWindow(QMainWindow):
                     return
                 self.inspector_stack.setVisible(False)
                 self.inspector_stack.setMaximumWidth(16_777_215)
+                self.inspector_stack.setMinimumWidth(self.inspector.minimumWidth())
                 self.main_splitter.lock_edge_sizes()
                 if sync_action:
                     self.inspector_panel_action.setEnabled(True)
@@ -4052,6 +4054,7 @@ class MainWindow(QMainWindow):
             if self._panel_transition_serial["right"] != serial:
                 return
             self.inspector_stack.setMaximumWidth(16_777_215)
+            self.inspector_stack.setMinimumWidth(self.inspector.minimumWidth())
             self.main_splitter.lock_edge_sizes()
             if sync_action:
                 self.inspector_panel_action.setEnabled(True)
@@ -4087,6 +4090,7 @@ class MainWindow(QMainWindow):
                     return
                 self.bottom_workspace_stack.setVisible(False)
                 self.bottom_workspace_stack.setMaximumHeight(16_777_215)
+                self.bottom_workspace_stack.setMinimumHeight(180)
                 self.workspace_splitter.lock_edge_sizes()
                 if sync_action:
                     self.bottom_panel_action.setEnabled(True)
@@ -4112,6 +4116,7 @@ class MainWindow(QMainWindow):
             if self._panel_transition_serial["bottom"] != serial:
                 return
             self.bottom_workspace_stack.setMaximumHeight(16_777_215)
+            self.bottom_workspace_stack.setMinimumHeight(180)
             self.workspace_splitter.lock_edge_sizes()
             if sync_action:
                 self.bottom_panel_action.setEnabled(True)

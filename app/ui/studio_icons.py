@@ -39,6 +39,7 @@ class StudioIconStyle(QProxyStyle):
             sp.SP_MediaVolumeMuted: '<path d="m11 4-6 5H2v6h3l6 5z m5 5 6 6 m0-6-6 6"/>',
             sp.SP_TitleBarMenuButton: '<path d="M4 6h16 M4 12h16 M4 18h16"/>',
             sp.SP_FileDialogNewFolder: '<path d="M3 6h6l2 3h10v11H3z M12 12v5 M9.5 14.5h5"/>',
+            sp.SP_FileDialogBack: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-5-5"/>',
         }
         shape = paths.get(standard_icon)
         if shape is None:
