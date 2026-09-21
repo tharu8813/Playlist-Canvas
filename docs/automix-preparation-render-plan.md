@@ -115,6 +115,24 @@ PlaylistTrack[] -> compile_playlist() -> CompiledRenderPlan
 그대로 통과해 실제 렌더 출력(콘테이너 태그, 챕터, silence 삽입, concat 매니페스트)이
 바뀌지 않았음을 증명한다.
 
+## 7.5. Metadata 소비처 (PlaylistExportService)
+
+```
+PlaylistTrack[] -> compile_playlist(enabled_only=True) -> MetadataPlan
+                                                                |
+                                        PlaylistExportService.description_text()
+```
+
+`PlaylistExportService.description_text()`(`app/services/playlist_export_service.py`)는
+이제 `MetadataPlan.chapters`를 직접 읽는다. 이 메서드는 챕터의 `start`와 트랙
+객체(artist/title)만 쓰고 `end`는 쓰지 않으므로, 7절에서 FFmpeg 챕터를 그대로 두게
+만든 "gap이 있으면 end 정의가 갈린다"는 문제가 여기엔 없다 -- `MetadataChapter.start`는
+gap 유무와 무관하게 `PresentationWindow.timeline_start`와 항상 같다. `track_id ->
+PlaylistTrack` 매핑으로 artist/title을 복원한다. 호출부(`export()`)가 이미
+`track.enabled`로 필터링한 리스트를 넘기지만, `description_text()` 자체의 계약
+("enabled track order")을 스스로 보장하도록 `compile_playlist(..., enabled_only=True)`를
+명시적으로 사용한다.
+
 ## 8. Legacy Compatibility
 
 - `resolve_track_windows()` / `playlist_duration()`은 그대로 유지되며 Sequential
@@ -155,10 +173,10 @@ AudioRenderPlan을 거치도록 전환 완료 (6·7절 참고). 남은 항목:
 
 - `PlaylistTimeline`(재생바 눈금 위젯)의 `paintEvent()`도 원한다면 같은 방식으로
   전환 가능 -- `ExportPreviewDialog` 밖의 별도 위젯이라 이번에는 제외.
-- `PlaylistExportService`가 `MetadataPlan.chapters`를 직접 소비하도록 전환 (현재는
-  track_id -> PlaylistTrack 매핑이 없고, `MetadataChapter.end`가 트랙 자신의 끝이라
-  gap이 있는 타임라인에서 FFmpeg 챕터의 "다음 트랙 시작까지" 규칙과 다름 -- 7절
-  참고. `MetadataPlan`을 gap-aware하게 만들 것인지 먼저 결정해야 함).
+- `PlaylistExportService`는 `MetadataPlan.chapters`로 전환 완료 (7.5절). FFmpeg
+  챕터(`_write_export_ffmetadata`)는 gap 규칙 차이(7절)로 여전히 `_track_windows()`
+  기반 "다음 트랙 시작까지" 로직을 유지 -- `MetadataPlan`을 gap-aware하게 만들지는
+  아직 미결정.
 - Audio Pipeline 분리(`AudioRenderPlan -> AudioPipeline -> PreparedAudio`)는 시작하지
   않았음: `FFmpegRenderer.render()`의 normalize/concat 로직 자체를 건드리는 리스크가
   이번 스코프의 실익보다 크다고 판단. gap 계산(`_insert_silence_for_gaps`)과 클립
