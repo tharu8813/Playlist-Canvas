@@ -27,6 +27,7 @@ from app.preview.album_art import (
     extract_track_cover,
     extract_track_personal_color,
 )
+from app.preview.frame_state import resolve_lyrics_cue_state
 from app.preview.text_template import (
     TEXT_TEMPLATE_TOKEN_NAMES,
     expand_track_template,
@@ -764,39 +765,24 @@ class CanvasSnapshot:
                 graphics_item._subtitle_transition_progress = 1.0
                 graphics_item._subtitle_previous_line_count = 0
                 graphics_item._subtitle_leaving_line_count = 0
-                effective_lyric_offset = (
-                    track.lyrics_timing_offset_seconds
-                    + source.subtitle_timing_offset
+                cue_state = resolve_lyrics_cue_state(
+                    track, elapsed_seconds,
+                    track.lyrics_timing_offset_seconds, source.subtitle_timing_offset,
+                    source.subtitle_animation, source.subtitle_animation_duration,
                 )
-                lyric_elapsed = max(0.0, elapsed_seconds + effective_lyric_offset)
-                active_cue_index = LyricsService.current_cue_index(
-                    track.lyrics, lyric_elapsed
-                )
-                cue_index = LyricsService.display_cue_index(track.lyrics, lyric_elapsed)
+                active_cue_index = cue_state.active_cue_index
+                cue_index = cue_state.cue_index
                 lyric_cue = track.lyrics[cue_index] if cue_index is not None else None
                 lyric = LyricsService.decode_line_breaks(
                     lyric_cue.get("text", "") if lyric_cue else ""
                 )
-                transitioning = (
-                    cue_index is not None
-                    and active_cue_index == cue_index
-                    and lyric_cue is not None
-                    and source.subtitle_animation != "none"
-                )
+                transitioning = cue_state.transitioning
                 eased = 1.0
                 if transitioning:
-                    cue_start = (
-                        float(lyric_cue.get("start", lyric_elapsed))
-                        - effective_lyric_offset
-                    )
-                    progress = max(0.0, min(1.0, (
-                        (elapsed_seconds - cue_start)
-                        / max(0.05, source.subtitle_animation_duration)
-                    )))
                     # A symmetric ease keeps the lyric stack from jumping most of
                     # its distance in the first few frames. The two styles differ
                     # in how each line is painted, not in this scroll timing.
-                    eased = ease_in_out_cubic(progress)
+                    eased = ease_in_out_cubic(cue_state.transition_progress)
                 if cue_index is not None:
                     context, next_context = _effective_lyric_context(
                         graphics_item, track.lyrics, cue_index,

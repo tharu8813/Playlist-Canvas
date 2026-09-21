@@ -15,10 +15,10 @@ from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
 from app.preview.canvas_snapshot import CanvasSnapshot
+from app.preview.frame_state import resolve_lyrics_cue_state
 from app.preview.text_template import expand_track_template
 from app.renderer.export_timeline import ExportFrameSample
 from app.renderer.ffmpeg_renderer import RenderFrame, StaticOverlayLayer
-from app.services.lyrics_service import LyricsService
 
 
 class ExportCanvasCapturer:
@@ -176,32 +176,15 @@ class ExportCanvasCapturer:
                 ),
             )
         elif source.source_type is SourceType.LYRICS:
-            effective_offset = (
-                sample.track.lyrics_timing_offset_seconds
-                + source.subtitle_timing_offset
+            cue_state = resolve_lyrics_cue_state(
+                sample.track, sample.elapsed_seconds,
+                sample.track.lyrics_timing_offset_seconds, source.subtitle_timing_offset,
+                source.subtitle_animation, source.subtitle_animation_duration,
             )
-            lyric_elapsed = max(0.0, sample.elapsed_seconds + effective_offset)
-            active_index = LyricsService.current_cue_index(
-                sample.track.lyrics, lyric_elapsed,
-            )
-            cue_index = LyricsService.display_cue_index(
-                sample.track.lyrics, lyric_elapsed,
-            )
-            transition: float | None = None
-            if (
-                cue_index is not None
-                and active_index == cue_index
-                and source.subtitle_animation != "none"
-            ):
-                cue = sample.track.lyrics[cue_index]
-                cue_start = float(cue.get("start", lyric_elapsed)) - effective_offset
-                transition = max(0.0, min(
-                    1.0,
-                    (sample.elapsed_seconds - cue_start)
-                    / max(0.05, source.subtitle_animation_duration),
-                ))
+            transition = cue_state.transition_progress if cue_state.transitioning else None
             content_state = (
-                "lyrics", id(sample.track), cue_index, active_index, transition,
+                "lyrics", id(sample.track), cue_state.cue_index, cue_state.active_cue_index,
+                transition,
             )
         elif source.source_type is SourceType.TRACK_LIST:
             content_state = ("track_list", sample.track_number)
