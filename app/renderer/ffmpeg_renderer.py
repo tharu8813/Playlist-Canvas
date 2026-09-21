@@ -19,6 +19,8 @@ from tempfile import TemporaryDirectory, mkstemp
 from PySide6.QtGui import QImage, QImageReader
 
 from app.models.playlist import PlaylistTrack
+from app.timeline.track_schedule import playlist_duration as timeline_playlist_duration
+from app.timeline.track_schedule import resolve_track_windows
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
 from app.utils.subprocess_utils import hidden_process_kwargs
 from app.services.export_validation_service import ExportValidationResult
@@ -794,17 +796,14 @@ class FFmpegRenderer:
     def _visual_sequence(tracks: list[PlaylistTrack], frame_paths: list[Path]) -> list[tuple[Path, float]]:
         """Pair per-track Canvas frames with durations, including manual silent gaps."""
         sequence: list[tuple[Path, float]] = []
-        cursor = 0.0
         last_frame = frame_paths[0]
-        for track, frame_path in zip(tracks, frame_paths, strict=True):
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            gap = max(0.0, start - cursor)
+        windows = resolve_track_windows(tracks)
+        for window, frame_path in zip(windows, frame_paths, strict=True):
+            gap = window.start - window.floor
             if gap > 0.001:
                 sequence.append((last_frame, gap))
-            sequence.append((frame_path, max(0.001, track.duration_seconds)))
+            sequence.append((frame_path, max(0.001, window.track.duration_seconds)))
             last_frame = frame_path
-            cursor = start + track.duration_seconds
         return sequence
 
     @staticmethod
@@ -1506,27 +1505,20 @@ class FFmpegRenderer:
             return [track.duration_seconds for track in tracks]
         combined: list[Path] = []
         combined_durations: list[float] = []
+        windows = resolve_track_windows(tracks)
         total_gap_seconds = 0.0
         gap_count = 0
-        planning_cursor = 0.0
-        for track in tracks:
-            requested = (
-                track.start_time_seconds
-                if track.start_time_seconds is not None else planning_cursor
-            )
-            planned_start = max(planning_cursor, requested)
-            planned_gap = max(0.0, planned_start - planning_cursor)
+        for window in windows:
+            planned_gap = window.start - window.floor
             total_gap_seconds += planned_gap
             if planned_gap > 0.001:
                 gap_count += 1
-            planning_cursor = planned_start + track.duration_seconds
         created_gap_seconds = 0.0
         created_gap_count = 0
-        cursor = 0.0
-        for index, (track, segment) in enumerate(zip(tracks, segments, strict=True)):
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            gap = max(0.0, start - cursor)
+        for index, (window, segment) in enumerate(zip(windows, segments, strict=True)):
+            track = window.track
+            start = window.start
+            gap = start - window.floor
             if gap > 0.001:
                 silence = directory / f"silence_{index:04d}.nut"
 
@@ -1563,7 +1555,6 @@ class FFmpegRenderer:
                 )
             combined.append(segment)
             combined_durations.append(track.duration_seconds)
-            cursor = start + track.duration_seconds
         segments[:] = combined
         return combined_durations
 
@@ -1680,12 +1671,7 @@ class FFmpegRenderer:
 
     @staticmethod
     def _timeline_duration(tracks: list[PlaylistTrack]) -> float:
-        cursor = 0.0
-        for track in tracks:
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            cursor = start + track.duration_seconds
-        return cursor
+        return timeline_playlist_duration(tracks)
 
     @staticmethod
     def _ffmetadata_escape(value: str) -> str:
@@ -1740,14 +1726,10 @@ class FFmpegRenderer:
     @staticmethod
     def _track_windows(tracks: list[PlaylistTrack]) -> list[tuple[float, float]]:
         """Return sequenced global start/duration pairs for enabled tracks."""
-        windows: list[tuple[float, float]] = []
-        cursor = 0.0
-        for track in tracks:
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            windows.append((start, track.duration_seconds))
-            cursor = start + track.duration_seconds
-        return windows
+        return [
+            (window.start, window.track.duration_seconds)
+            for window in resolve_track_windows(tracks)
+        ]
 
     @staticmethod
     def _parse_progress_seconds(line: str) -> float | None:

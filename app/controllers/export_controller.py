@@ -73,6 +73,8 @@ from app.services.app_settings_service import AppSettings, VIDEO_ENCODERS
 from app.services.export_controller import ExportController
 from app.services.export_storage_service import ExportStorageMonitor, estimate_export_storage
 from app.services.playlist_service import PlaylistService
+from app.timeline.track_schedule import playlist_duration as timeline_playlist_duration
+from app.timeline.track_schedule import resolve_track_windows
 from app.services.video_encoder_service import (
     AUTO_VIDEO_ENCODER,
     CPU_H264_ENCODER,
@@ -1158,14 +1160,7 @@ class ExportOrchestrator:
     @staticmethod
     def playlist_duration(tracks: list) -> float:
         """Return the full timeline duration, including any user-created gaps."""
-        cursor = 0.0
-        end = 0.0
-        for track in tracks:
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            cursor = start + track.duration_seconds
-            end = max(end, cursor)
-        return end
+        return timeline_playlist_duration(tracks)
 
     def upscale_warnings(
         self, active_tracks: list, render_settings: RenderSettings,
@@ -1427,13 +1422,9 @@ class ExportOrchestrator:
         clips: list[VideoClipOverlay] = []
         duration_cache: dict[str, float] = {}
 
-        track_windows: list[tuple[object, float]] = []
-        cursor = 0.0
-        for track in tracks:
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            track_windows.append((track, start))
-            cursor = start + track.duration_seconds
+        track_windows = [
+            (window.track, window.start) for window in resolve_track_windows(tracks)
+        ]
 
         planned_sources: list[tuple[Source, list[tuple[list[str], float, float]]]] = []
         ordered_paths: list[str] = []

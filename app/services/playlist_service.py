@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, QSettings, Signal
 
 from app.models.playlist import PlaylistTrack
 from app.renderer.ffmpeg_renderer import FFmpegNotFoundError, FFmpegRenderer
+from app.timeline.track_schedule import resolve_track_windows
 from app.utils.subprocess_utils import hidden_process_kwargs
 
 LOGGER = logging.getLogger(__name__)
@@ -255,26 +256,17 @@ class PlaylistService(QObject):
 
     def minimum_start_time(self, track_id: str) -> float:
         """Return the previous track's effective end time for one timeline row."""
-        cursor = 0.0
-        for track in self._tracks:
-            if track.id == track_id:
-                return cursor
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            cursor = start + track.duration_seconds
+        for window in resolve_track_windows(self._tracks):
+            if window.track.id == track_id:
+                return window.floor
         return 0.0
 
     def timeline_tracks(self) -> list[tuple[PlaylistTrack, float, float]]:
         """Return tracks with effective start and end positions in current order."""
-        cursor = 0.0
-        timeline: list[tuple[PlaylistTrack, float, float]] = []
-        for track in self._tracks:
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            end = start + track.duration_seconds
-            timeline.append((track, start, end))
-            cursor = end
-        return timeline
+        return [
+            (window.track, window.start, window.end)
+            for window in resolve_track_windows(self._tracks)
+        ]
 
     def replace(self, tracks: Iterable[PlaylistTrack]) -> None:
         """Replace the entire playlist, used by the Phase 1D project loader."""

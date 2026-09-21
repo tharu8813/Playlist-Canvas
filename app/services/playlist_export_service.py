@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from app.models.playlist import PlaylistTrack
+from app.timeline.track_schedule import resolve_track_windows
 
 
 class TimestampFormat(str, Enum):
@@ -85,15 +86,11 @@ class PlaylistExportService:
     def description_text(self, tracks: Iterable[PlaylistTrack],
                          timestamp_format: TimestampFormat) -> str:
         """Build timestamp lines from enabled track order and explicit timeline gaps."""
-        cursor = 0.0
         lines: list[str] = []
-        for track in tracks:
-            requested_start = track.start_time_seconds
-            start = max(cursor, requested_start) if requested_start is not None else cursor
-            timestamp = self.format_timestamp(start)
+        for window in resolve_track_windows(list(tracks)):
+            timestamp = self.format_timestamp(window.start)
             prefix = f"[{timestamp}]" if timestamp_format is TimestampFormat.BRACKETED else timestamp
-            lines.append(f"{prefix} {track.artist} - {track.title}")
-            cursor = start + max(0.0, track.duration_seconds)
+            lines.append(f"{prefix} {window.track.artist} - {window.track.title}")
         return "\n".join(lines) + "\n"
 
     @staticmethod

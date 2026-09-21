@@ -8,6 +8,7 @@ from typing import Sequence
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
+from app.timeline.track_schedule import resolve_track_windows
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,17 +67,14 @@ class ExportTimelinePlanner:
         animation_fps: int,
     ) -> list[ExportFrameSample]:
         samples: list[ExportFrameSample] = []
-        cursor = 0.0
         previous_track: PlaylistTrack | None = None
         previous_start = 0.0
         previous_number = 1
 
-        for number, track in enumerate(tracks, start=1):
-            requested = (
-                track.start_time_seconds
-                if track.start_time_seconds is not None else cursor
-            )
-            start = max(cursor, requested)
+        for number, window in enumerate(resolve_track_windows(tracks), start=1):
+            track = window.track
+            cursor = window.floor
+            start = window.start
             intro, outro = ExportTimelinePlanner._animation_durations(track, sources)
             gap = max(0.0, start - cursor)
             if gap > 0.0:

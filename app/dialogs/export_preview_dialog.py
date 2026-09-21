@@ -54,6 +54,8 @@ from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.services.source_store import SourceStore
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.services.playlist_service import PlaylistService
+from app.timeline.track_schedule import playlist_duration as timeline_playlist_duration
+from app.timeline.track_schedule import resolve_track_windows
 from app.preview.album_art import extract_track_cover
 from app.video.timeline import resolve_video_position, source_video_paths
 from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
@@ -118,15 +120,13 @@ class PlaylistTimeline(QSlider):
         current_seconds = self.value() / TIMELINE_SCALE
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        cursor = 0.0
         usable_width = max(1, self.width() - 18)
-        for index, track in enumerate(self.tracks, start=1):
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            end = start + track.duration_seconds
+        windows = resolve_track_windows(self.tracks)
+        for index, window in enumerate(windows, start=1):
+            start, end = window.start, window.end
             x = 9 + round(start / total * usable_width)
             active = start <= current_seconds < end or (
-                index == len(self.tracks) and current_seconds >= start
+                index == len(windows) and current_seconds >= start
             )
             painter.setPen(QPen(QColor("#7BA8D1"), 1.2))
             painter.drawLine(x, 3, x, self.height() - 10)
@@ -139,7 +139,6 @@ class PlaylistTimeline(QSlider):
             else:
                 painter.setPen(QColor("#9BAFC2"))
             painter.drawText(QRect(label_x, 1, 24, 18), Qt.AlignmentFlag.AlignCenter, str(index))
-            cursor = end
         painter.end()
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
@@ -830,18 +829,10 @@ class ExportPreviewDialog(QDialog):
         self,
     ) -> tuple[tuple[int, PlaylistTrack, float, float], ...]:
         """Build immutable sequential start/end boundaries for fast lookup."""
-        cursor = 0.0
-        schedule: list[tuple[int, PlaylistTrack, float, float]] = []
-        for index, track in enumerate(self.tracks):
-            requested = (
-                track.start_time_seconds
-                if track.start_time_seconds is not None else cursor
-            )
-            start = max(cursor, requested)
-            end = start + track.duration_seconds
-            schedule.append((index, track, start, end))
-            cursor = end
-        return tuple(schedule)
+        return tuple(
+            (index, window.track, window.start, window.end)
+            for index, window in enumerate(resolve_track_windows(self.tracks))
+        )
 
     def _track_at(self, playlist_seconds: float) -> tuple[int, PlaylistTrack, float, float] | None:
         """Return the active track plus local time and global start position."""
@@ -2573,14 +2564,8 @@ class ExportPreviewDialog(QDialog):
         if selected is None:
             return
         index = max(0, min(len(self.tracks) - 1, selected[0] + offset))
-        cursor = 0.0
-        for current_index, track in enumerate(self.tracks):
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            if current_index == index:
-                self.timeline.setValue(round(start * TIMELINE_SCALE))
-                return
-            cursor = start + track.duration_seconds
+        windows = resolve_track_windows(self.tracks)
+        self.timeline.setValue(round(windows[index].start * TIMELINE_SCALE))
 
     def _adjust_volume(self, change: int) -> None:
         self.volume_slider.setValue(max(0, min(100, self.volume_slider.value() + change)))
@@ -2812,15 +2797,8 @@ class ExportPreviewDialog(QDialog):
         if self._track_schedule:
             self._playlist_duration_cache = self._track_schedule[-1][3]
             return self._playlist_duration_cache
-        cursor = 0.0
-        total = 0.0
-        for track in self.tracks:
-            requested = track.start_time_seconds if track.start_time_seconds is not None else cursor
-            start = max(cursor, requested)
-            cursor = start + track.duration_seconds
-            total = max(total, cursor)
-        self._playlist_duration_cache = total
-        return total
+        self._playlist_duration_cache = timeline_playlist_duration(self.tracks)
+        return self._playlist_duration_cache
 
     def _update_pixmap(self) -> None:
         if self._image.isNull():
