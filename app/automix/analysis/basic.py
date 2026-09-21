@@ -1,0 +1,231 @@
+"""The default AutoMix analyzer: FFmpeg decode + librosa BPM/beat tracking.
+
+Chosen per docs/automix-phase1-dependency-evaluation.md: librosa carries a
+permissive license, needs no downloaded model, and this project's own
+managed FFmpeg install (see app/ffmpeg/managed_installer.py) handles
+decoding -- so librosa never needs its own audioread/soundfile container
+support, which is the part of the dependency chain most likely to behave
+inconsistently across input formats.
+
+Downbeats are not a real detector output here: librosa.beat.beat_track
+gives BPM and beat timestamps only. Bars are a provisional "every 4th
+beat" 4/4 guess, deliberately capped at a low confidence (see
+PROVISIONAL_METER_CONFIDENCE) so a planner never mistakes it for a real
+downbeat model's output -- see TrackAnalysis.beat_alignment_quality().
+"""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+import threading
+from pathlib import Path
+from typing import Callable
+
+import librosa
+import numpy as np
+
+from app.automix.analysis.provider import AnalysisCancelled
+from app.automix.models import TrackAnalysis
+from app.models.playlist import PlaylistTrack
+from app.utils.subprocess_utils import hidden_process_kwargs
+
+LOGGER = logging.getLogger(__name__)
+
+SAMPLE_RATE = 22050
+"""Mono analysis rate: enough for tempo/onset detection, cheap to decode/hold in memory."""
+
+DEFAULT_TEMPO_RANGE = (70.0, 180.0)
+"""Conventional playlist-music tempo octave; see normalize_tempo_octave()."""
+
+PLAUSIBLE_BPM_RANGE = (20.0, 300.0)
+"""Outside this, a BPM estimate is treated as noise, not a real tempo."""
+
+MINIMUM_ANALYZABLE_SECONDS = 2.0
+SILENCE_PEAK_THRESHOLD = 1e-4
+BEAT_DEDUPE_TOLERANCE_SECONDS = 0.05
+PROVISIONAL_METER_CONFIDENCE = 0.3
+
+
+def normalize_tempo_octave(
+    bpm: float, tempo_range: tuple[float, float] = DEFAULT_TEMPO_RANGE,
+) -> float:
+    """Fold a BPM estimate into ``tempo_range`` by doubling/halving it.
+
+    Beat trackers routinely report the wrong tempo octave (75 vs. 150 BPM,
+    87 vs. 174 BPM, ...). This does not decide which octave is "true" --
+    it just picks the representative within the conventional playlist-music
+    range so two tracks at the same perceived tempo compare equal later
+    (Phase 3 compatibility scoring).
+    """
+    if bpm <= 0.0:
+        return bpm
+    low, high = tempo_range
+    while bpm < low and bpm * 2.0 <= high:
+        bpm *= 2.0
+    while bpm > high and bpm / 2.0 >= low:
+        bpm /= 2.0
+    return bpm
+
+
+class BasicAnalysisProvider:
+    """The always-available default AnalysisProvider (see AnalysisProvider Protocol)."""
+
+    provider_id = "basic"
+    version = "1"
+
+    def __init__(self, ffmpeg_executable: Path) -> None:
+        self.ffmpeg_executable = Path(ffmpeg_executable)
+
+    def analyze(
+        self,
+        track: PlaylistTrack,
+        *,
+        cancel_event: threading.Event,
+        progress: Callable[[float, str], None] | None = None,
+    ) -> TrackAnalysis:
+        def report(fraction: float, message: str) -> None:
+            if progress is not None:
+                progress(fraction, message)
+            if cancel_event.is_set():
+                raise AnalysisCancelled(f"AutoMix analysis cancelled: {message}")
+
+        duration_seconds = max(0.0, float(track.duration_seconds))
+
+        report(0.0, "Decoding audio")
+        signal = self._decode_mono_pcm(Path(track.file_path), cancel_event)
+
+        if len(signal) < int(MINIMUM_ANALYZABLE_SECONDS * SAMPLE_RATE) or (
+            len(signal) == 0 or float(np.max(np.abs(signal))) < SILENCE_PEAK_THRESHOLD
+        ):
+            LOGGER.info(
+                "AutoMix analysis: %s is silent or too short for rhythm analysis", track.file_path,
+            )
+            return TrackAnalysis(
+                track_id=track.id, source_path=track.file_path, duration_seconds=duration_seconds,
+                analyzer_id=self.provider_id, analyzer_version=self.version,
+            )
+
+        report(0.2, "Analyzing rhythm")
+        report(0.4, "Tracking beats")
+        tempo, raw_beat_times = librosa.beat.beat_track(y=signal, sr=SAMPLE_RATE, units="time")
+        beat_times = self._clean_beats(np.atleast_1d(np.asarray(raw_beat_times, dtype=float)), duration_seconds)
+
+        bpm_value = float(np.atleast_1d(tempo)[0]) if np.size(tempo) else 0.0
+        bpm_value = normalize_tempo_octave(bpm_value) if bpm_value > 0.0 else 0.0
+        low, high = PLAUSIBLE_BPM_RANGE
+        if not (low <= bpm_value <= high):
+            bpm_value = 0.0
+        bpm_confidence = self._bpm_confidence(beat_times) if bpm_value > 0.0 else 0.0
+
+        report(0.7, "Resolving bars")
+        downbeats, meter_confidence = self._infer_downbeats(beat_times)
+
+        report(0.9, "Validating result")
+        result = TrackAnalysis(
+            track_id=track.id, source_path=track.file_path, duration_seconds=duration_seconds,
+            bpm=bpm_value if bpm_value > 0.0 else None,
+            bpm_confidence=bpm_confidence,
+            beats=tuple(beat_times.tolist()),
+            downbeats=tuple(downbeats.tolist()),
+            meter_numerator=4 if len(downbeats) else None,
+            meter_denominator=4 if len(downbeats) else None,
+            meter_confidence=meter_confidence,
+            analyzer_id=self.provider_id, analyzer_version=self.version,
+        )
+        report(1.0, "AutoMix analysis completed")
+        return result
+
+    def _decode_mono_pcm(self, path: Path, cancel_event: threading.Event) -> np.ndarray:
+        """Decode ``path`` to mono float32 PCM at SAMPLE_RATE via FFmpeg, without a temp file."""
+        if not path.is_file():
+            raise RuntimeError(f"Audio file is missing: {path}")
+        command = [
+            str(self.ffmpeg_executable), "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-i", str(path), "-vn", "-sn", "-dn",
+            "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1",
+        ]
+        try:
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **hidden_process_kwargs(),
+            )
+        except OSError as error:
+            raise RuntimeError(f"Could not start FFmpeg for AutoMix analysis: {error}") from error
+        # A track longer than a few seconds produces more PCM than the OS
+        # pipe buffer holds; polling process.poll() without also draining
+        # stdout would let FFmpeg block on a full pipe forever. Read both
+        # streams on background threads while the main thread only polls
+        # for cancellation, then join once the process has exited.
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        def drain(stream: object, sink: list[bytes]) -> None:
+            assert stream is not None
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                sink.append(chunk)
+
+        stdout_thread = threading.Thread(target=drain, args=(process.stdout, stdout_chunks), daemon=True)
+        stderr_thread = threading.Thread(target=drain, args=(process.stderr, stderr_chunks), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        try:
+            while process.poll() is None:
+                if cancel_event.wait(0.05):
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise AnalysisCancelled("AutoMix analysis cancelled during decode")
+        finally:
+            stdout_thread.join(timeout=5.0)
+            stderr_thread.join(timeout=5.0)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+        if process.returncode != 0:
+            message = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip() or "unknown FFmpeg error"
+            raise RuntimeError(f"FFmpeg could not decode audio for analysis: {message}")
+        return np.frombuffer(b"".join(stdout_chunks), dtype=np.float32)
+
+    @staticmethod
+    def _clean_beats(beat_times: np.ndarray, duration_seconds: float) -> np.ndarray:
+        """Sort, clip to duration, and drop near-duplicate beats (decode padding, jitter)."""
+        cleaned: list[float] = []
+        previous = float("-inf")
+        tolerance = duration_seconds + BEAT_DEDUPE_TOLERANCE_SECONDS
+        for value in sorted(float(v) for v in beat_times if 0.0 <= v <= tolerance):
+            clipped = min(value, duration_seconds)
+            if clipped - previous < BEAT_DEDUPE_TOLERANCE_SECONDS:
+                continue
+            cleaned.append(clipped)
+            previous = clipped
+        return np.array(cleaned, dtype=float)
+
+    @staticmethod
+    def _bpm_confidence(beat_times: np.ndarray) -> float:
+        """A steady beat grid (low inter-beat-interval variance) means a trustworthy tempo."""
+        if len(beat_times) < 4:
+            return 0.0
+        intervals = np.diff(beat_times)
+        mean_interval = float(np.mean(intervals))
+        if mean_interval <= 0.0:
+            return 0.0
+        coefficient_of_variation = float(np.std(intervals)) / mean_interval
+        return max(0.0, min(1.0, 1.0 - coefficient_of_variation * 2.0))
+
+    @staticmethod
+    def _infer_downbeats(beat_times: np.ndarray) -> tuple[np.ndarray, float]:
+        """Provisional 4/4 bar guess: every 4th beat starting at the first.
+
+        Not a real downbeat detector -- see the module docstring. Returns
+        an empty array (and zero confidence) when there are too few beats
+        to guess a bar structure from.
+        """
+        if len(beat_times) < 4:
+            return np.array([], dtype=float), 0.0
+        return beat_times[0::4], PROVISIONAL_METER_CONFIDENCE

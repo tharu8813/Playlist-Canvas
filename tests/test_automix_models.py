@@ -73,6 +73,26 @@ class TrackAnalysisModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _analysis(vocal_activity=((3.0, 1.0),))
 
+    def test_meter_confidence_out_of_range_is_invalid(self) -> None:
+        with self.assertRaises(ValueError):
+            _analysis(meter_confidence=1.2)
+
+    def test_beat_alignment_quality_reliable(self) -> None:
+        analysis = _analysis(bpm_confidence=0.9, meter_confidence=0.8)
+        self.assertEqual(analysis.beat_alignment_quality(), "reliable")
+
+    def test_beat_alignment_quality_bpm_only_when_meter_uncertain(self) -> None:
+        analysis = _analysis(bpm_confidence=0.9, meter_confidence=0.2)
+        self.assertEqual(analysis.beat_alignment_quality(), "bpm_only")
+
+    def test_beat_alignment_quality_insufficient_without_bpm(self) -> None:
+        analysis = _analysis(bpm=None, bpm_confidence=0.0)
+        self.assertEqual(analysis.beat_alignment_quality(), "insufficient")
+
+    def test_beat_alignment_quality_insufficient_with_low_bpm_confidence(self) -> None:
+        analysis = _analysis(bpm_confidence=0.1)
+        self.assertEqual(analysis.beat_alignment_quality(), "insufficient")
+
     def test_analysis_is_frozen(self) -> None:
         analysis = _analysis()
         with self.assertRaises(Exception):

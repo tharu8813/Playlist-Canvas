@@ -1,3 +1,9 @@
 PySide6>=6.7,<7.0
 mutagen>=1.47,<2.0
 numpy>=1.26,<3.0
+# AutoMix's default BPM/beat analyzer (app/automix/analysis/basic.py). Pulls
+# in scipy, numba/llvmlite, scikit-learn, soundfile, and pooch -- see
+# docs/automix-phase1-dependency-evaluation.md for why librosa was chosen
+# over aubio/Essentia (GPL/AGPL) and Beat This!/Essentia's ML models
+# (PyTorch/TensorFlow cost, kept optional for a later phase instead).
+librosa>=1.0,<2.0

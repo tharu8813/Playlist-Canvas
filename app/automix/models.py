@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import Any
 
+# Thresholds for TrackAnalysis.beat_alignment_quality(). A provisional (not
+# model-based) downbeat guess should never clear the "reliable" bar on its
+# own -- see BasicAnalysisProvider's PROVISIONAL_METER_CONFIDENCE.
+RELIABLE_BPM_CONFIDENCE = 0.6
+RELIABLE_METER_CONFIDENCE = 0.5
+INSUFFICIENT_BPM_CONFIDENCE = 0.35
+
 
 def _is_finite_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value)
@@ -54,6 +61,7 @@ class TrackAnalysis:
 
     meter_numerator: int | None = None
     meter_denominator: int | None = None
+    meter_confidence: float = 0.0
 
     key: str | None = None
     key_confidence: float = 0.0
@@ -86,6 +94,7 @@ class TrackAnalysis:
             or self.meter_denominator <= 0
         ):
             raise ValueError("TrackAnalysis.meter_denominator must be a positive integer when known.")
+        _validate_confidence("TrackAnalysis.meter_confidence", self.meter_confidence)
         if self.key is not None and (not isinstance(self.key, str) or not self.key.strip()):
             raise ValueError("TrackAnalysis.key must be a non-empty string when known.")
         _validate_confidence("TrackAnalysis.key_confidence", self.key_confidence)
@@ -105,6 +114,24 @@ class TrackAnalysis:
         if not isinstance(self.analyzer_id, str) or not isinstance(self.analyzer_version, str):
             raise ValueError("TrackAnalysis analyzer_id/analyzer_version must be strings.")
 
+    def beat_alignment_quality(self) -> str:
+        """Classify how much a transition planner should trust this analysis.
+
+        One of ``"reliable"`` (BPM and bar alignment both trustworthy),
+        ``"bpm_only"`` (usable tempo but an uncertain/provisional downbeat),
+        or ``"insufficient"`` (BPM itself is not trustworthy) -- the three
+        buckets a fallback chain needs (roadmap Phase 2 section 9).
+        """
+        if self.bpm is None or self.bpm_confidence < INSUFFICIENT_BPM_CONFIDENCE:
+            return "insufficient"
+        if (
+            self.beats
+            and self.bpm_confidence >= RELIABLE_BPM_CONFIDENCE
+            and self.meter_confidence >= RELIABLE_METER_CONFIDENCE
+        ):
+            return "reliable"
+        return "bpm_only"
+
     def to_cache_fields(self) -> dict[str, Any]:
         """Serialize every field except identity (track_id/source_path).
 
@@ -120,6 +147,7 @@ class TrackAnalysis:
             "downbeats": list(self.downbeats),
             "meter_numerator": self.meter_numerator,
             "meter_denominator": self.meter_denominator,
+            "meter_confidence": self.meter_confidence,
             "key": self.key,
             "key_confidence": self.key_confidence,
             "energy": self.energy,
@@ -141,6 +169,7 @@ class TrackAnalysis:
             downbeats=tuple(fields.get("downbeats", ())),
             meter_numerator=fields.get("meter_numerator"),
             meter_denominator=fields.get("meter_denominator"),
+            meter_confidence=fields.get("meter_confidence", 0.0),
             key=fields.get("key"),
             key_confidence=fields.get("key_confidence", 0.0),
             energy=fields.get("energy"),

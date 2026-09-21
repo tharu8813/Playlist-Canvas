@@ -142,3 +142,25 @@ optional download.
   reserved for the bottom of the fallback chain (roadmap 1.6) when no
   analyzer is available or analysis fails, not as a quality-competitive
   primary analyzer.
+
+## Phase 2 outcome
+
+`librosa` was adopted as `app/automix/analysis/basic.py`'s `BasicAnalysisProvider`
+(`provider_id="basic"`), confirming the recommendation above. Audio is
+decoded to mono float32 PCM via the project's own managed FFmpeg (piped,
+no temp file) rather than through librosa's own `audioread`/`soundfile`
+loading path, so container/codec support tracks whatever FFmpeg already
+handles elsewhere in the app.
+
+Installed transitive footprint, captured from a Python 3.14 dev sandbox
+(`pip install librosa`): `scipy` 1.18.1, `numba` 0.67.0 + `llvmlite` 0.49.0
+(the largest single wheel, ~43 MB), `scikit-learn` 1.9.1, `soundfile`
+0.14.0, plus `pooch`, `soxr`, `joblib`, `msgpack`, `cloudpickle`,
+`lazy-loader`, `narwhals`, `threadpoolctl`, `platformdirs`. This is a real
+increase from the project's previous three-dependency baseline
+(`PySide6`, `mutagen`, `numpy`) and has **not** been verified against an
+actual PyInstaller build in this change -- `playlist_canvas.spec` was
+updated to `collect_all()` the new packages the same way it already does
+for `numpy`, but a packaged build should be run and AutoMix analysis
+exercised from it before this ships in a release.
+
