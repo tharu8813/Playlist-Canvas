@@ -1,0 +1,150 @@
+"""Immutable AutoMix analysis result model.
+
+TrackAnalysis is cache data, never primary project document data (roadmap
+"Persistence invariant") -- it is derived from an audio file and can always
+be recomputed, so it is never stored inside a PlaylistTrack or project JSON.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from math import isfinite
+from typing import Any
+
+
+def _is_finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value)
+
+
+def _validate_sorted_timestamps(name: str, values: tuple[float, ...], duration_seconds: float) -> None:
+    previous = float("-inf")
+    for value in values:
+        if not _is_finite_number(value) or value < 0.0:
+            raise ValueError(f"{name} must contain finite, non-negative seconds.")
+        if value < previous:
+            raise ValueError(f"{name} must be sorted in ascending order.")
+        if value > duration_seconds:
+            raise ValueError(f"{name} must not exceed the track duration.")
+        previous = value
+
+
+def _validate_confidence(name: str, value: float) -> None:
+    if not _is_finite_number(value) or not (0.0 <= value <= 1.0):
+        raise ValueError(f"{name} must be a finite number between 0.0 and 1.0.")
+
+
+@dataclass(frozen=True, slots=True)
+class TrackAnalysis:
+    """One track's AutoMix-relevant audio analysis.
+
+    Every field beyond ``track_id``/``source_path``/``duration_seconds`` is
+    optional: a provider that only detects BPM leaves beats, key, energy,
+    and vocal_activity at their defaults rather than fabricating values.
+    """
+
+    track_id: str
+    source_path: str
+    duration_seconds: float
+
+    bpm: float | None = None
+    bpm_confidence: float = 0.0
+
+    beats: tuple[float, ...] = ()
+    downbeats: tuple[float, ...] = ()
+
+    meter_numerator: int | None = None
+    meter_denominator: int | None = None
+
+    key: str | None = None
+    key_confidence: float = 0.0
+
+    energy: float | None = None
+    vocal_activity: tuple[tuple[float, float], ...] = ()
+
+    analyzer_id: str = ""
+    analyzer_version: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.track_id, str) or not self.track_id.strip():
+            raise ValueError("TrackAnalysis.track_id must be a non-empty string.")
+        if not isinstance(self.source_path, str) or not self.source_path.strip():
+            raise ValueError("TrackAnalysis.source_path must be a non-empty string.")
+        if not _is_finite_number(self.duration_seconds) or self.duration_seconds < 0.0:
+            raise ValueError("TrackAnalysis.duration_seconds must be finite and non-negative.")
+        if self.bpm is not None and (not _is_finite_number(self.bpm) or self.bpm <= 0.0):
+            raise ValueError("TrackAnalysis.bpm must be a finite positive number when known.")
+        _validate_confidence("TrackAnalysis.bpm_confidence", self.bpm_confidence)
+        _validate_sorted_timestamps("TrackAnalysis.beats", self.beats, self.duration_seconds)
+        _validate_sorted_timestamps("TrackAnalysis.downbeats", self.downbeats, self.duration_seconds)
+        if self.meter_numerator is not None and (
+            not isinstance(self.meter_numerator, int) or isinstance(self.meter_numerator, bool)
+            or self.meter_numerator <= 0
+        ):
+            raise ValueError("TrackAnalysis.meter_numerator must be a positive integer when known.")
+        if self.meter_denominator is not None and (
+            not isinstance(self.meter_denominator, int) or isinstance(self.meter_denominator, bool)
+            or self.meter_denominator <= 0
+        ):
+            raise ValueError("TrackAnalysis.meter_denominator must be a positive integer when known.")
+        if self.key is not None and (not isinstance(self.key, str) or not self.key.strip()):
+            raise ValueError("TrackAnalysis.key must be a non-empty string when known.")
+        _validate_confidence("TrackAnalysis.key_confidence", self.key_confidence)
+        if self.energy is not None and (not _is_finite_number(self.energy) or self.energy < 0.0):
+            raise ValueError("TrackAnalysis.energy must be finite and non-negative when known.")
+        previous_end = float("-inf")
+        for start, end in self.vocal_activity:
+            if not _is_finite_number(start) or not _is_finite_number(end) or start < 0.0:
+                raise ValueError("TrackAnalysis.vocal_activity spans must be finite and non-negative.")
+            if end <= start:
+                raise ValueError("TrackAnalysis.vocal_activity spans must end after they start.")
+            if end > self.duration_seconds:
+                raise ValueError("TrackAnalysis.vocal_activity must not exceed the track duration.")
+            if start < previous_end:
+                raise ValueError("TrackAnalysis.vocal_activity spans must be sorted and non-overlapping.")
+            previous_end = end
+        if not isinstance(self.analyzer_id, str) or not isinstance(self.analyzer_version, str):
+            raise ValueError("TrackAnalysis analyzer_id/analyzer_version must be strings.")
+
+    def to_cache_fields(self) -> dict[str, Any]:
+        """Serialize every field except identity (track_id/source_path).
+
+        Identity is deliberately excluded: the cache is addressed by file
+        fingerprint, not track ID, so two PlaylistTracks pointing at the same
+        media reuse one cache entry (roadmap Phase 1 section 6).
+        """
+        return {
+            "duration_seconds": self.duration_seconds,
+            "bpm": self.bpm,
+            "bpm_confidence": self.bpm_confidence,
+            "beats": list(self.beats),
+            "downbeats": list(self.downbeats),
+            "meter_numerator": self.meter_numerator,
+            "meter_denominator": self.meter_denominator,
+            "key": self.key,
+            "key_confidence": self.key_confidence,
+            "energy": self.energy,
+            "vocal_activity": [list(span) for span in self.vocal_activity],
+            "analyzer_id": self.analyzer_id,
+            "analyzer_version": self.analyzer_version,
+        }
+
+    @classmethod
+    def from_cache_fields(cls, track_id: str, source_path: str, fields: dict[str, Any]) -> "TrackAnalysis":
+        """Rebuild a TrackAnalysis for ``track_id`` from cached, JSON-safe fields."""
+        return cls(
+            track_id=track_id,
+            source_path=source_path,
+            duration_seconds=fields["duration_seconds"],
+            bpm=fields.get("bpm"),
+            bpm_confidence=fields.get("bpm_confidence", 0.0),
+            beats=tuple(fields.get("beats", ())),
+            downbeats=tuple(fields.get("downbeats", ())),
+            meter_numerator=fields.get("meter_numerator"),
+            meter_denominator=fields.get("meter_denominator"),
+            key=fields.get("key"),
+            key_confidence=fields.get("key_confidence", 0.0),
+            energy=fields.get("energy"),
+            vocal_activity=tuple(tuple(span) for span in fields.get("vocal_activity", ())),
+            analyzer_id=fields.get("analyzer_id", ""),
+            analyzer_version=fields.get("analyzer_version", ""),
+        )
