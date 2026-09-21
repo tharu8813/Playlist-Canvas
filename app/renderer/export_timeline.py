@@ -8,7 +8,7 @@ from typing import Sequence
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
-from app.timeline.track_schedule import resolve_track_windows
+from app.timeline.compiler import compile_playlist
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,10 +71,15 @@ class ExportTimelinePlanner:
         previous_start = 0.0
         previous_number = 1
 
-        for number, window in enumerate(resolve_track_windows(tracks), start=1):
-            track = window.track
-            cursor = window.floor
-            start = window.start
+        # Presentation windows carry track_id, not the PlaylistTrack object the
+        # animation math below needs, so resolve it back by id; ids are unique
+        # and stable per timeline_from_playlist().
+        track_by_id = {track.id: track for track in tracks}
+        windows = compile_playlist(tracks).presentation.windows
+        cursor = 0.0
+        for number, window in enumerate(windows, start=1):
+            track = track_by_id[window.track_id]
+            start = window.timeline_start
             intro, outro = ExportTimelinePlanner._animation_durations(track, sources)
             gap = max(0.0, start - cursor)
             if gap > 0.0:

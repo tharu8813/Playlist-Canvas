@@ -18,8 +18,8 @@ from tempfile import TemporaryDirectory, mkstemp
 from PySide6.QtGui import QImage, QImageReader
 
 from app.models.playlist import PlaylistTrack
+from app.timeline.compiler import compile_playlist
 from app.timeline.track_schedule import playlist_duration as timeline_playlist_duration
-from app.timeline.track_schedule import resolve_track_windows
 from app.renderer.ffmpeg import filter_graph
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
 from app.utils.subprocess_utils import hidden_process_kwargs
@@ -797,13 +797,18 @@ class FFmpegRenderer:
         """Pair per-track Canvas frames with durations, including manual silent gaps."""
         sequence: list[tuple[Path, float]] = []
         last_frame = frame_paths[0]
-        windows = resolve_track_windows(tracks)
-        for window, frame_path in zip(windows, frame_paths, strict=True):
-            gap = window.start - window.floor
+        track_by_id = {track.id: track for track in tracks}
+        cursor = 0.0
+        for window, frame_path in zip(
+            compile_playlist(tracks).presentation.windows, frame_paths, strict=True,
+        ):
+            track = track_by_id[window.track_id]
+            gap = window.timeline_start - cursor
             if gap > 0.001:
                 sequence.append((last_frame, gap))
-            sequence.append((frame_path, max(0.001, window.track.duration_seconds)))
+            sequence.append((frame_path, max(0.001, track.duration_seconds)))
             last_frame = frame_path
+            cursor = window.timeline_end
         return sequence
 
     @staticmethod
@@ -1259,20 +1264,31 @@ class FFmpegRenderer:
             return [track.duration_seconds for track in tracks]
         combined: list[Path] = []
         combined_durations: list[float] = []
-        windows = resolve_track_windows(tracks)
+        track_by_id = {track.id: track for track in tracks}
+        windows = compile_playlist(tracks).presentation.windows
+        # PresentationWindow has no "floor" field (the previous track's end,
+        # used below to size the gap): windows are contiguous per-clip, so
+        # it's just the running end of the window before this one.
+        floors: list[float] = []
+        cursor = 0.0
+        for window in windows:
+            floors.append(cursor)
+            cursor = window.timeline_end
         total_gap_seconds = 0.0
         gap_count = 0
-        for window in windows:
-            planned_gap = window.start - window.floor
+        for window, floor in zip(windows, floors):
+            planned_gap = window.timeline_start - floor
             total_gap_seconds += planned_gap
             if planned_gap > 0.001:
                 gap_count += 1
         created_gap_seconds = 0.0
         created_gap_count = 0
-        for index, (window, segment) in enumerate(zip(windows, segments, strict=True)):
-            track = window.track
-            start = window.start
-            gap = start - window.floor
+        for index, (window, floor, segment) in enumerate(
+            zip(windows, floors, segments, strict=True)
+        ):
+            track = track_by_id[window.track_id]
+            start = window.timeline_start
+            gap = start - floor
             if gap > 0.001:
                 silence = directory / f"silence_{index:04d}.nut"
 
@@ -1481,8 +1497,8 @@ class FFmpegRenderer:
     def _track_windows(tracks: list[PlaylistTrack]) -> list[tuple[float, float]]:
         """Return sequenced global start/duration pairs for enabled tracks."""
         return [
-            (window.start, window.track.duration_seconds)
-            for window in resolve_track_windows(tracks)
+            (clip.timeline_start, clip.duration)
+            for clip in compile_playlist(tracks).audio.clips
         ]
 
     @staticmethod

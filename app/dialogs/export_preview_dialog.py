@@ -54,6 +54,7 @@ from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.services.source_store import SourceStore
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.services.playlist_service import PlaylistService
+from app.timeline.compiler import compile_playlist
 from app.timeline.track_schedule import playlist_duration as timeline_playlist_duration
 from app.timeline.track_schedule import resolve_track_windows
 from app.preview.album_art import extract_track_cover
@@ -828,10 +829,17 @@ class ExportPreviewDialog(QDialog):
     def _build_track_schedule(
         self,
     ) -> tuple[tuple[int, PlaylistTrack, float, float], ...]:
-        """Build immutable sequential start/end boundaries for fast lookup."""
+        """Build immutable sequential start/end boundaries for fast lookup.
+
+        Sourced from the same PresentationPlan Export reads, so Preview and
+        Export can never derive a different track boundary for the same
+        playlist. PresentationWindow only carries track_id, so the
+        PlaylistTrack object is resolved back by id.
+        """
+        track_by_id = {track.id: track for track in self.tracks}
         return tuple(
-            (index, window.track, window.start, window.end)
-            for index, window in enumerate(resolve_track_windows(self.tracks))
+            (index, track_by_id[window.track_id], window.timeline_start, window.timeline_end)
+            for index, window in enumerate(compile_playlist(self.tracks).presentation.windows)
         )
 
     def _track_at(self, playlist_seconds: float) -> tuple[int, PlaylistTrack, float, float] | None:
@@ -2564,8 +2572,7 @@ class ExportPreviewDialog(QDialog):
         if selected is None:
             return
         index = max(0, min(len(self.tracks) - 1, selected[0] + offset))
-        windows = resolve_track_windows(self.tracks)
-        self.timeline.setValue(round(windows[index].start * TIMELINE_SCALE))
+        self.timeline.setValue(round(self._track_schedule[index][2] * TIMELINE_SCALE))
 
     def _adjust_volume(self, change: int) -> None:
         self.volume_slider.setValue(max(0, min(100, self.volume_slider.value() + change)))
