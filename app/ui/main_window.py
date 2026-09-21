@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 
 from app.canvas.live_canvas import LiveCanvas
 from app.controllers.autosave_controller import AutosaveController
+from app.controllers.export_controller import ExportOrchestrator
 from app.controllers.history_controller import HistoryController
 from app.controllers.project_controller import ProjectController
 from app.animation.motion import MotionController
@@ -370,6 +371,7 @@ class MainWindow(QMainWindow):
         self.history_controller = HistoryController(self)
         self.project_controller = ProjectController(self)
         self.autosave_controller = AutosaveController(self)
+        self.export_orchestrator = ExportOrchestrator(self)
         recovery_directory = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppLocalDataLocation
         )
@@ -2815,177 +2817,31 @@ class MainWindow(QMainWindow):
     def _stage_export_frame(
         self, image: QImage, duration_seconds: float, stream_key: str = "base",
     ) -> RenderFrame:
-        """Stage a frame synchronously or queue it to the active PNG pipeline."""
-        if self._export_frame_staging is None:
-            raise RenderError("Export frame staging has not been initialized.")
-        if image.isNull():
-            raise RenderError("Could not stage an empty export frame on disk.")
-        self._export_capture_count += 1
-        if self._export_frame_metrics is None:
-            self._export_frame_metrics = ExportFrameStagingMetrics()
-        self._export_frame_metrics.record_capture()
-        previous = self._export_frame_cache.get(stream_key)
-        if previous is not None and image == previous[0]:
-            self._export_frame_metrics.record_reuse()
-            return RenderFrame(previous[1], max(0.001, duration_seconds))
-        # Disk usage queries are surprisingly expensive on synced/network-backed
-        # Windows temp drives. Check periodically instead of once per PNG.
-        if self._export_frame_index % 32 == 0:
-            free_space = shutil.disk_usage(self._export_frame_staging.name).free
-            minimum_free = max(512 * 1024 * 1024, image.width() * image.height() * 8)
-            if free_space < minimum_free:
-                raise RenderError(
-                    "Not enough temporary disk space to safely prepare export frames. "
-                    "Free at least 1 GB on the system temporary drive and try again."
-                )
-        path = Path(self._export_frame_staging.name) / f"frame_{self._export_frame_index:07d}.png"
-        self._export_frame_index += 1
-        owned_image = image.copy()
-        pipeline = self._export_png_pipeline
-        if pipeline is not None:
-            try:
-                pipeline.submit(owned_image, path, stream_key)
-            except PngFrameStagingCancelled as error:
-                raise RenderCancelledError(str(error)) from error
-            except PngFrameStagingError as error:
-                raise RenderError(str(error)) from error
-        else:
-            writer = QImageWriter(str(path), b"png")
-            # Compression level 1 trades a little temporary disk space for much
-            # faster preparation. FFmpeg output quality is unaffected.
-            writer.setCompression(1)
-            writer.setOptimizedWrite(False)
-            if not writer.write(owned_image):
-                raise RenderError(
-                    f"Could not stage an export frame on disk: {writer.errorString()}"
-                )
-            try:
-                staged_bytes = path.stat().st_size
-            except OSError as error:
-                # Diagnostics must never turn a successfully written export frame
-                # into an export failure on an unusual or transient filesystem.
-                LOGGER.warning("Could not measure staged export frame %s: %s", path, error)
-                staged_bytes = 0
-            self._export_frame_metrics.record_file(
-                stream_key, owned_image, staged_bytes,
-            )
-        self._export_frame_cache[stream_key] = (owned_image, path)
-        return RenderFrame(path, max(0.001, duration_seconds))
+        return self.export_orchestrator.stage_frame(image, duration_seconds, stream_key)
 
     def _start_export_png_pipeline(
         self, cancel_event: threading.Event, *, queue_capacity: int = 3,
     ) -> None:
-        """Start bounded PNG writes so Canvas capture can continue concurrently."""
-        if self._export_png_pipeline is not None:
-            raise RenderError("Export PNG staging is already active.")
-        if self._export_frame_metrics is None:
-            self._export_frame_metrics = ExportFrameStagingMetrics()
-
-        def record_written(stream_key: str, image: QImage, byte_count: int) -> None:
-            metrics = self._export_frame_metrics
-            if metrics is not None:
-                metrics.record_file(stream_key, image, byte_count)
-
-        self._export_png_pipeline = PngFrameStagingPipeline(
-            record_written,
-            cancel_event=cancel_event,
-            wait_callback=QApplication.processEvents,
-            queue_capacity=max(1, queue_capacity),
-        )
+        self.export_orchestrator.start_png_pipeline(cancel_event, queue_capacity=queue_capacity)
 
     def _finish_export_png_pipeline(self) -> None:
-        pipeline = self._export_png_pipeline
-        if pipeline is None:
-            return
-        self._export_png_pipeline = None
-        try:
-            pipeline.finish()
-        except PngFrameStagingCancelled as error:
-            raise RenderCancelledError(str(error)) from error
-        except PngFrameStagingError as error:
-            raise RenderError(str(error)) from error
-        LOGGER.info(
-            "PNG frame staging pipeline drained: peak_buffered_frames=%d",
-            pipeline.peak_buffered_frames,
-        )
+        self.export_orchestrator.finish_png_pipeline()
 
     def _cancel_export_png_pipeline(self) -> None:
-        pipeline = self._export_png_pipeline
-        self._export_png_pipeline = None
-        if pipeline is not None:
-            pipeline.cancel()
+        self.export_orchestrator.cancel_png_pipeline()
 
     @staticmethod
     def _export_animation_sample_rate(output_fps: int) -> int:
-        """Sample Canvas motion at the exact frame rate selected for export."""
-        return max(1, min(240, int(output_fps)))
+        return ExportOrchestrator.animation_sample_rate(output_fps)
 
     def _clear_export_frame_staging(self) -> None:
-        """Release disk-backed captured frames after every export completion path."""
-        self._stop_export_storage_monitor()
-        self._cancel_export_png_pipeline()
-        if self._export_frame_metrics is not None:
-            summary = self._export_frame_metrics.snapshot()
-            self._last_export_frame_metrics = summary
-            LOGGER.info(
-                "Export frame staging summary: captures=%d files=%d reused=%d "
-                "bytes=%d largest=%d (%dx%d) elapsed=%.3fs streams=%s",
-                summary.capture_count,
-                summary.unique_file_count,
-                summary.reused_frame_count,
-                summary.total_bytes,
-                summary.largest_file_bytes,
-                summary.largest_width,
-                summary.largest_height,
-                summary.elapsed_seconds,
-                {
-                    key: {
-                        "files": summary.stream_file_counts[key],
-                        "bytes": summary.stream_bytes.get(key, 0),
-                    }
-                    for key in sorted(summary.stream_file_counts)
-                },
-            )
-        if self._export_frame_staging is not None:
-            self._export_frame_staging.cleanup()
-            self._export_frame_staging = None
-        self._export_frame_index = 0
-        self._export_capture_count = 0
-        self._export_frame_cache.clear()
-        self._export_frame_metrics = None
+        self.export_orchestrator.clear_frame_staging()
 
     def _lock_main_form_for_export(self) -> None:
-        """Block every main-form interaction while an export is in flight."""
-        if self._export_ui_lock_state is not None:
-            return
-        central_widget = self.centralWidget()
-        menu_bar = self.menuBar()
-        self._export_ui_lock_state = (
-            central_widget.isEnabled(),
-            menu_bar.isEnabled(),
-            self.toolbar.isEnabled(),
-            self.export_action.isEnabled(),
-            self.acceptDrops(),
-        )
-        central_widget.setEnabled(False)
-        menu_bar.setEnabled(False)
-        self.toolbar.setEnabled(False)
-        self.export_action.setEnabled(False)
-        self.setAcceptDrops(False)
+        self.export_orchestrator.lock_main_form()
 
     def _unlock_main_form_after_export(self) -> None:
-        """Restore the main form after every successful, failed, or cancelled export."""
-        self._export_restore_pending = False
-        state = self._export_ui_lock_state
-        if state is None:
-            return
-        self._export_ui_lock_state = None
-        central_enabled, menu_enabled, toolbar_enabled, export_enabled, accepts_drops = state
-        self.centralWidget().setEnabled(central_enabled)
-        self.menuBar().setEnabled(menu_enabled)
-        self.toolbar.setEnabled(toolbar_enabled)
-        self.export_action.setEnabled(export_enabled)
-        self.setAcceptDrops(accepts_drops)
+        self.export_orchestrator.unlock_main_form()
 
     @staticmethod
     def _export_notification_allowed(
@@ -2993,62 +2849,16 @@ class MainWindow(QMainWindow):
         step: str,
         application_active: bool,
     ) -> bool:
-        """Apply the master, per-stage, and focus notification preferences."""
-        if not settings.export_notifications_enabled:
-            return False
-        enabled_for_step = {
-            "visuals": settings.export_notify_visuals,
-            "audio": settings.export_notify_audio,
-            "effects": settings.export_notify_effects,
-            "encode": settings.export_notify_encode,
-            "complete": settings.export_notify_complete,
-            "failures": settings.export_notify_failures,
-        }.get(step, False)
-        if not enabled_for_step:
-            return False
-        return (
-            settings.export_notification_mode == "always"
-            or not application_active
-        )
+        return ExportOrchestrator.notification_allowed(settings, step, application_active)
 
     def _sync_export_notification_tray(self, settings: AppSettings) -> None:
-        """Create a tray endpoint only while export notifications are enabled."""
-        if not settings.export_notifications_enabled:
-            if self._notification_tray is not None:
-                self._notification_tray.hide()
-                self._notification_tray.deleteLater()
-                self._notification_tray = None
-            return
-        self._ensure_notification_tray()
+        self.export_orchestrator.sync_notification_tray(settings)
 
     def _ensure_notification_tray(self) -> QSystemTrayIcon | None:
-        if self._notification_tray is not None:
-            return self._notification_tray
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            return None
-        icon = QApplication.windowIcon()
-        if icon.isNull():
-            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-        tray = QSystemTrayIcon(icon, self)
-        tray.setToolTip("Playlist Canvas")
-        tray.messageClicked.connect(self._restore_from_export_notification)
-        tray.show()
-        self._notification_tray = tray
-        return tray
+        return self.export_orchestrator.ensure_notification_tray()
 
     def _restore_from_export_notification(self) -> None:
-        """Bring the running export or completed workspace back to the user."""
-        if self.isMinimized():
-            self.showNormal()
-        else:
-            self.show()
-        self.raise_()
-        self.activateWindow()
-        if self._export_dialog is not None:
-            self._export_restore_pending = False
-            self._export_dialog.show()
-            self._export_dialog.raise_()
-            self._export_dialog.activateWindow()
+        self.export_orchestrator.restore_from_notification()
 
     def _show_system_notification(
         self,
@@ -3057,81 +2867,13 @@ class MainWindow(QMainWindow):
         *,
         critical: bool = False,
     ) -> bool:
-        tray = self._ensure_notification_tray()
-        if tray is None:
-            return False
-        icon = (
-            QSystemTrayIcon.MessageIcon.Critical
-            if critical else QSystemTrayIcon.MessageIcon.Information
-        )
-        tray.showMessage(title, message, icon, 7000)
-        return True
+        return self.export_orchestrator.show_system_notification(title, message, critical=critical)
 
     def _notify_export_stage(self, stage: str) -> None:
-        """Notify once when the export crosses into a user-facing phase."""
-        step = ExportProgressDialog._stage_key(stage)
-        if step in self._export_notified_steps:
-            return
-        self._export_notified_steps.add(step)
-        settings = self.settings_service.current
-        application_active = (
-            QApplication.applicationState() == Qt.ApplicationState.ApplicationActive
-        )
-        if not self._export_notification_allowed(
-            settings, step, application_active,
-        ):
-            return
-        korean = self.translator.language is Language.KOREAN
-        names = {
-            "visuals": "화면 준비" if korean else "Visual preparation",
-            "audio": "오디오 준비" if korean else "Audio preparation",
-            "effects": "효과 준비" if korean else "Effects preparation",
-            "encode": "영상 만들기" if korean else "Creating video",
-            "complete": "내보내기 완료" if korean else "Export complete",
-        }
-        name = names.get(step)
-        if name is None:
-            return
-        output_name = (
-            self._active_export_output_path.name
-            if self._active_export_output_path is not None else ""
-        )
-        if step == "complete":
-            title = "내보내기 완료" if korean else "Export complete"
-            message = (
-                f"{output_name} 파일을 만들었습니다."
-                if korean else f"Created {output_name}."
-            )
-        else:
-            title = "내보내기 진행" if korean else "Export progress"
-            message = (
-                f"{name} 단계를 시작했습니다."
-                if korean else f"Started: {name}."
-            )
-        self._show_system_notification(title, message)
+        self.export_orchestrator.notify_stage(stage)
 
     def _notify_export_problem(self, message: str, *, cancelled: bool = False) -> None:
-        settings = self.settings_service.current
-        application_active = (
-            QApplication.applicationState() == Qt.ApplicationState.ApplicationActive
-        )
-        if not self._export_notification_allowed(
-            settings, "failures", application_active,
-        ):
-            return
-        korean = self.translator.language is Language.KOREAN
-        if cancelled:
-            title = "내보내기 취소" if korean else "Export cancelled"
-            detail = (
-                "진행 중인 내보내기를 안전하게 취소했습니다."
-                if korean else "The active export was cancelled safely."
-            )
-        else:
-            title = "내보내기 오류" if korean else "Export failed"
-            detail = message.strip().replace("\n", " ")[:220]
-        self._show_system_notification(
-            title, detail, critical=not cancelled,
-        )
+        self.export_orchestrator.notify_problem(message, cancelled=cancelled)
 
     def _handle_export_render_progress(
         self,
@@ -3140,71 +2882,28 @@ class MainWindow(QMainWindow):
         fraction: float,
         message: str,
     ) -> None:
-        """Keep progress UI, status activity, and notifications synchronized."""
-        overall = (
-            EXPORT_PREPARATION_PROGRESS_WEIGHT
-            + (1.0 - EXPORT_PREPARATION_PROGRESS_WEIGHT) * fraction
-        )
-        export_dialog.update_progress(stage, overall, message)
-        self.activity_progress.update(
-            "export", overall, f"{stage} · {message}",
-        )
-        self._notify_export_stage(stage)
+        self.export_orchestrator.handle_render_progress(export_dialog, stage, fraction, message)
 
     @staticmethod
     def _format_bytes(count: int) -> str:
-        value = float(max(0, count))
-        for unit in ("B", "KB", "MB", "GB"):
-            if value < 1024.0:
-                return f"{value:.1f} {unit}"
-            value /= 1024.0
-        return f"{value:.1f} TB"
+        return ExportOrchestrator.format_bytes(count)
 
     def _start_export_storage_monitor(self, output_path: str | Path) -> None:
-        """Track export-owned files without walking large folders on the UI thread."""
-        self._stop_export_storage_monitor()
-        monitor = ExportStorageMonitor(output_path, self)
-        if self._export_frame_staging is not None:
-            monitor.set_path("frames", self._export_frame_staging.name)
-        monitor.snapshot_ready.connect(self._handle_export_storage_snapshot)
-        self._export_storage_monitor = monitor
-        monitor.start()
-        dialog = self._export_dialog
-        if dialog is not None:
-            dialog.cancel_requested.connect(self._freeze_export_storage_monitor)
+        self.export_orchestrator.start_storage_monitor(output_path)
 
     def _freeze_export_storage_monitor(self) -> None:
-        """Stop live storage sampling the instant a cancel is confirmed.
-
-        Cancellation stops the encoders quickly, but a still-polling monitor kept
-        showing the last few numbers and made the export look like it was still
-        writing. Halt sampling immediately; cleanup still runs in _stop_...().
-        """
-        monitor = self._export_storage_monitor
-        if monitor is not None:
-            monitor.stop()
+        self.export_orchestrator.freeze_storage_monitor()
 
     def _handle_export_storage_path(
         self, kind: str, path: str | Path | None,
     ) -> None:
-        monitor = self._export_storage_monitor
-        if monitor is not None:
-            monitor.set_path(kind, path)
+        self.export_orchestrator.handle_storage_path(kind, path)
 
     def _handle_export_storage_snapshot(self, snapshot: object) -> None:
-        dialog = self._export_dialog
-        if dialog is not None:
-            dialog.update_storage_snapshot(snapshot)
+        self.export_orchestrator.handle_storage_snapshot(snapshot)
 
     def _stop_export_storage_monitor(self) -> None:
-        monitor = self._export_storage_monitor
-        self._export_storage_monitor = None
-        if monitor is None:
-            return
-        monitor.stop()
-        if not monitor.wait(3000):
-            LOGGER.warning("Export storage monitor did not stop within three seconds.")
-        monitor.deleteLater()
+        self.export_orchestrator.stop_storage_monitor()
 
     def _prepare_export_staging_space(
         self, render_settings: RenderSettings, duration_seconds: float,
