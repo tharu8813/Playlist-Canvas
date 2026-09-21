@@ -12,6 +12,7 @@ from app import __version__
 from app.models.playlist import PlaylistTrack
 from app.models.layer import LayerGroup
 from app.models.source import Source
+from app.timeline.models import Timeline, timeline_from_playlist
 
 
 @dataclass(slots=True)
@@ -78,6 +79,11 @@ class ProjectDocument:
     content_library: list[ProjectContent] = field(default_factory=list)
     version: int = 2
     app_version: str = __version__
+
+    @property
+    def timeline(self) -> Timeline:
+        """Derive the legacy editing timeline without persisting duplicate state."""
+        return timeline_from_playlist(self.playlist)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the document into JSON-compatible data."""

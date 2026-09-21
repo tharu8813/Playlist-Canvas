@@ -1,1 +1,1 @@
-"""Timeline package reserved for Phase 3."""
+"""Shared playlist scheduling and UI-independent V2 audio timeline models."""
