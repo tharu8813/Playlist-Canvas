@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 
+from app.canvas.renderers import progress_renderer, shape_renderer
 from app.models.source import Source, SourceType
 from app.models.source_registry import source_registry
 from app.preview.text_template import expand_placeholder_labels
@@ -2154,3 +2155,10 @@ def _render_legacy_source(
 # Bind in the UI layer: core model imports must not initialize Qt multimedia.
 for _source_type in SourceType:
     source_registry.get(_source_type).renderer = _render_legacy_source
+
+# Phase 7: split per-type renderers replace the legacy dispatch one type at a
+# time. _paint_legacy keeps every type's code (including these two) so
+# tests/test_source_registry.py can keep comparing registered output against
+# the legacy reference pixel-for-pixel.
+source_registry.get(SourceType.SHAPE).renderer = shape_renderer.render
+source_registry.get(SourceType.PROGRESS_BAR).renderer = progress_renderer.render
