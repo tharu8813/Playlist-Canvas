@@ -6,7 +6,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QCursor, QDrag, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import (
+    QColor, QCursor, QDrag, QFont, QFontMetrics, QIcon, QPainter, QPen, QPixmap, QPolygonF,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListView,
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QToolButton,
@@ -132,6 +134,7 @@ class ContentLibraryPanel(QWidget):
             self.filter_combo.addItem(value, value)
         self.filter_count_label = QLabel()
         self.filter_count_label.setObjectName("mutedLabel")
+        self._filter_count_full_text = ""
         filter_row.addWidget(self.filter_label)
         filter_row.addWidget(self.filter_combo, 1)
         filter_row.addWidget(self.filter_count_label)
@@ -420,8 +423,35 @@ class ContentLibraryPanel(QWidget):
             count_text += (
                 f" · {added_label} {used_count}"
             )
-        self.filter_count_label.setText(count_text)
+        self._set_filter_count_text(count_text)
         self._update_buttons()
+
+    def _set_filter_count_text(self, text: str) -> None:
+        """Elide the count label instead of letting it clip against the panel edge."""
+        self._filter_count_full_text = text
+        self.filter_count_label.setToolTip(text)
+        metrics = QFontMetrics(self.filter_count_label.font())
+        available = self.filter_count_label.width()
+        if available < 40:
+            # Not laid out yet (e.g. still on another tab); resizeEvent/showEvent
+            # will re-elide once the real width is known.
+            available = 9999
+        self.filter_count_label.setText(
+            metrics.elidedText(text, Qt.TextElideMode.ElideRight, available)
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._filter_count_full_text:
+            self._set_filter_count_text(self._filter_count_full_text)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        # A tab page already has its final layout geometry while hidden, so
+        # switching to this tab shows it without a resize; re-elide here too,
+        # since the very first refresh() can run before any geometry exists.
+        super().showEvent(event)
+        if self._filter_count_full_text:
+            self._set_filter_count_text(self._filter_count_full_text)
 
     def _select_content_id(self, content_id: str) -> None:
         for index in range(self.list.count()):
