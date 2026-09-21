@@ -15,6 +15,7 @@ from app.canvas.source_item import SourceItem
 from app.inspector.source_inspector import SourceInspector
 from app.models.project import ProjectDocument
 from app.models.source import Source, SourceType
+from app.models.source_components import SourceComponent, TextComponent
 from app.models.source_registry import SourceDefinition, SourceRegistry, source_registry
 from app.services.source_store import SourceStore
 from app.utils.i18n import Translator
@@ -30,10 +31,11 @@ class SourceRegistryTests(unittest.TestCase):
             with self.subTest(source_type=source_type):
                 definition = source_registry.get(source_type.value)
                 self.assertIs(definition.type, source_type)
-                self.assertIs(definition.component, Source)
+                self.assertTrue(issubclass(definition.component, SourceComponent))
+                self.assertIs(definition.source_factory, Source)
                 self.assertTrue(callable(definition.renderer))
                 self.assertTrue(callable(definition.inspector))
-                source = definition.component(source_type, "Registered source")
+                source = definition.source_factory(source_type, "Registered source")
                 encoded = source_registry.serialize(source)
                 self.assertEqual(encoded, source.to_dict())
                 self.assertEqual(source_registry.deserialize(encoded), Source.from_dict(encoded))
@@ -45,13 +47,13 @@ class SourceRegistryTests(unittest.TestCase):
         registry = SourceRegistry()
         with self.assertRaisesRegex(ValueError, "Unregistered"):
             registry.get(SourceType.TEXT)
-        definition = SourceDefinition(SourceType.TEXT)
+        definition = SourceDefinition(SourceType.TEXT, TextComponent)
         registry.register(definition)
         self.assertIs(registry.get("text"), definition)
         with self.assertRaisesRegex(ValueError, "already registered"):
             registry.register(definition)
         with self.assertRaises(ValueError):
-            registry.register(SourceDefinition("unknown"))
+            registry.register(SourceDefinition("unknown", TextComponent))
         for value in ("unknown", None, []):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 registry.get(value)

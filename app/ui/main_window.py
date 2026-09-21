@@ -2241,7 +2241,7 @@ class MainWindow(QMainWindow):
                 artboard.top(),
                 min(float(position.y()) - dimensions[1] / 2, artboard.bottom() - dimensions[1]),
             )
-        source = source_registry.get(source_type).component(
+        source = source_registry.get(source_type).source_factory(
             source_type=source_type,
             name=name,
             x=default_x,

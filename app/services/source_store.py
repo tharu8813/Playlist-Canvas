@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 from PySide6.QtCore import QObject, Signal
 
 from app.models.source import Source, SourceType
+from app.models.source_registry import source_registry
 from app.models.layer import LayerGroup
 
 
@@ -200,6 +202,26 @@ class SourceStore(QObject):
     def selected_ids(self) -> tuple[str, ...]:
         """Return the ordered selection shared by Canvas and Layers."""
         return self._selected_ids
+
+    def update_component(self, source_id: str, **changes: object) -> None:
+        """Validate component field edits atomically, then publish the legacy update."""
+        source = self._sources.get(source_id)
+        if source is None:
+            return
+        component = replace(source_registry.component_for(source), **changes)
+        legacy = {
+            name: value for name, value in component.to_source_changes().items()
+            if value != getattr(source, name)
+        }
+        if not legacy:
+            return
+        validated = source_registry.deserialize(source.to_dict() | legacy)
+        updates = {
+            name: getattr(validated, name) for name in legacy
+            if getattr(validated, name) != getattr(source, name)
+        }
+        if updates:
+            self.update(source_id, **updates)
 
     def update(self, source_id: str, **changes: object) -> None:
         """Apply model changes and notify all dependent widgets."""

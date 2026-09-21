@@ -1,6 +1,6 @@
 """Source definitions shared by the model and UI adapter layers.
 
-The core registers the existing Source model/serializer. Canvas and Inspector
+The core registers typed components and the legacy Source factory/serializer. Canvas and Inspector
 bind their legacy callbacks when imported, so model-only use never imports Qt.
 Type-specific implementations can replace these bindings in later phases.
 """
@@ -12,6 +12,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.models.source import Source, SourceType
+from app.models.source_components import (
+    AlbumCoverComponent, BackgroundComponent, ImageComponent, LevelMeterComponent,
+    LyricsComponent, NowPlayingComponent, ParticleComponent, ProgressComponent,
+    ShapeComponent, SourceComponent, TextComponent, TimeComponent,
+    TrackListComponent, VideoComponent, VisualizerComponent, WaveformComponent,
+)
 
 
 @dataclass(slots=True)
@@ -19,7 +25,8 @@ class SourceDefinition:
     """One source type's model, codec and optional UI adapter callbacks."""
 
     type: SourceType
-    component: type[Source] = Source
+    component: type[SourceComponent]
+    source_factory: type[Source] = Source
     serializer: type[Source] = Source
     renderer: Callable[..., None] | None = None
     inspector: Callable[..., None] | None = None
@@ -52,7 +59,29 @@ class SourceRegistry:
             raise ValueError("Project sources must be objects.")
         return self.get(data.get("source_type")).serializer.from_dict(data)
 
+    def component_for(self, source: Source) -> SourceComponent:
+        """Read a fresh, detached snapshot of this source's specific properties."""
+        return self.get(source.source_type).component.from_source(source)
+
 
 source_registry = SourceRegistry()
-for _source_type in SourceType:
-    source_registry.register(SourceDefinition(_source_type))
+for _source_type, _component in {
+    SourceType.IMAGE: ImageComponent,
+    SourceType.VIDEO: VideoComponent,
+    SourceType.TEXT: TextComponent,
+    SourceType.SHAPE: ShapeComponent,
+    SourceType.PROGRESS_BAR: ProgressComponent,
+    SourceType.TIME: TimeComponent,
+    SourceType.ALBUM_COVER: AlbumCoverComponent,
+    SourceType.LOGO: ImageComponent,
+    SourceType.WATERMARK: ImageComponent,
+    SourceType.BACKGROUND: BackgroundComponent,
+    SourceType.AUDIO_VISUALIZER: VisualizerComponent,
+    SourceType.LYRICS: LyricsComponent,
+    SourceType.TRACK_LIST: TrackListComponent,
+    SourceType.NOW_PLAYING: NowPlayingComponent,
+    SourceType.AUDIO_WAVEFORM: WaveformComponent,
+    SourceType.AUDIO_LEVEL_METER: LevelMeterComponent,
+    SourceType.PARTICLE_OVERLAY: ParticleComponent,
+}.items():
+    source_registry.register(SourceDefinition(_source_type, _component))

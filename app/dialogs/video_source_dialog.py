@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.source import Source
+from app.models.source_components import VideoComponent
+from app.models.source_registry import source_registry
 
 
 class VideoSourceDialog(QDialog):
@@ -16,6 +18,9 @@ class VideoSourceDialog(QDialog):
 
     def __init__(self, source: Source, korean: bool, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        video = source_registry.component_for(source)
+        if not isinstance(video, VideoComponent):
+            raise ValueError("Video settings require a video source.")
         self.korean = korean
         self.setWindowTitle("영상 재생 설정" if korean else "Video playback settings")
         self.setMinimumSize(700, 610)
@@ -48,7 +53,7 @@ class VideoSourceDialog(QDialog):
             if korean else "Use the same videos across the whole playlist",
             "timeline",
         )
-        self.timing.setCurrentIndex(max(0, self.timing.findData(source.video_timing_mode)))
+        self.timing.setCurrentIndex(max(0, self.timing.findData(video.timing_mode)))
         self.timing.setMinimumHeight(34)
         scope_layout.addWidget(self.timing)
         self.scope_summary = QLabel()
@@ -92,7 +97,7 @@ class VideoSourceDialog(QDialog):
         media_layout.addWidget(self.timeline_media_help)
         self.media_list = QListWidget()
         self.media_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        for path in source.video_paths:
+        for path in video.paths:
             self.media_list.addItem(path)
         media_layout.addWidget(self.media_list, 1)
         media_actions = QHBoxLayout()
@@ -125,7 +130,7 @@ class VideoSourceDialog(QDialog):
             ("여러 영상을 무작위로 반복" if korean else "Repeat videos randomly", "random"),
         ):
             self.repeat.addItem(label, value)
-        self.repeat.setCurrentIndex(max(0, self.repeat.findData(source.video_repeat_mode)))
+        self.repeat.setCurrentIndex(max(0, self.repeat.findData(video.repeat_mode)))
         self.repeat_help = QLabel()
         self.repeat_help.setObjectName("mutedLabel")
         self.repeat_help.setWordWrap(True)
@@ -137,9 +142,9 @@ class VideoSourceDialog(QDialog):
         repeat_layout.addWidget(self.repeat_help)
         self.cycles = QSpinBox()
         self.cycles.setRange(1, 100_000)
-        self.cycles.setValue(source.video_cycle_count)
+        self.cycles.setValue(video.cycle_count)
         self.unlimited = QCheckBox("끝날 때까지 반복" if korean else "Repeat until the end")
-        self.unlimited.setChecked(source.video_cycle_unlimited)
+        self.unlimited.setChecked(video.cycle_unlimited)
         self.cycle_host = QWidget()
         cycle_row = QHBoxLayout(self.cycle_host)
         cycle_row.setContentsMargins(0, 0, 0, 0)
@@ -157,14 +162,14 @@ class VideoSourceDialog(QDialog):
         self.speed = QDoubleSpinBox()
         self.speed.setRange(0.05, 8.0)
         self.speed.setSingleStep(0.05)
-        self.speed.setValue(source.video_speed)
+        self.speed.setValue(video.speed)
         self.speed.setSuffix("×")
         self.saturation = QDoubleSpinBox()
         self.saturation.setRange(0.0, 3.0)
         self.saturation.setSingleStep(0.05)
-        self.saturation.setValue(source.video_saturation)
+        self.saturation.setValue(video.saturation)
         self.grayscale = QCheckBox("흑백으로 표시" if korean else "Show in grayscale")
-        self.grayscale.setChecked(source.video_grayscale)
+        self.grayscale.setChecked(video.grayscale)
         self.muted = QCheckBox("영상 소리 사용 안 함" if korean else "Do not use video audio")
         self.muted.setChecked(True)
         self.muted.setEnabled(False)
