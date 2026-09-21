@@ -189,17 +189,41 @@ editors.
 - `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged.
 - `tests/test_main_window.py`: 245 passed, 19 subtests.
 
+## Slice 6 — AUDIO_VISUALIZER, AUDIO_WAVEFORM (renderer + inspector)
+
+Both were self-contained `elif` branches in `_paint_legacy`, like
+Slices 1-2, so this was a mechanical extraction with no new shared helper:
+
+- `audio_visualizer_renderer.py`/`audio_waveform_renderer.py`: copied
+  verbatim from their `elif` branches, calling `paint_background()`/
+  `paint_selection_guide()` around the same drawing code (bar/line/arc
+  style dispatch for the visualizer; the sine-sampled path for the
+  waveform).
+- `audio_visualizer_editor.py` shows its 12 `visualizer_*` fields;
+  `audio_waveform_editor.py` shows only `waveform_style` -- matching the
+  legacy code exactly (the waveform renderer reads `visualizer_bars`/
+  `visualizer_line_width` too, but the Inspector never exposes those for
+  this type, so they stay at their defaults for `AUDIO_WAVEFORM` sources).
+
+### Validation
+
+- `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged.
+- `tests/test_main_window.py`: 245 passed, 19 subtests.
+
 ## Remaining work
 
-- 7 of 17 `SourceType`s still render and edit through the legacy adapters:
-  `AUDIO_VISUALIZER`, `AUDIO_WAVEFORM`, `AUDIO_LEVEL_METER`,
-  `PARTICLE_OVERLAY`, `LYRICS`, `TRACK_LIST`, `NOW_PLAYING`. Continue
-  splitting them the same way, behind the two equivalence tests above.
-  `LYRICS`, `TRACK_LIST`, and `NOW_PLAYING` are also in `text_types`, so
-  their editors can reuse the same `apply_shared_fields`/hide-then-show
-  pattern; their renderers are each a large, mostly self-contained block
-  (subtitle animation, track list layout, now-playing card) already
-  isolated by their own `elif` branch, similar in shape to Slices 1-2.
+- 5 of 17 `SourceType`s still render and edit through the legacy adapters:
+  `AUDIO_LEVEL_METER`, `PARTICLE_OVERLAY`, `LYRICS`, `TRACK_LIST`,
+  `NOW_PLAYING`. Continue splitting them the same way, behind the two
+  equivalence tests above. `AUDIO_LEVEL_METER` and `PARTICLE_OVERLAY`
+  delegate their drawing to existing helper functions
+  (`paint_level_meter`/`paint_particles`) and should be as mechanical as
+  this slice. `LYRICS`, `TRACK_LIST`, and `NOW_PLAYING` are also in
+  `text_types`, so their editors can reuse the same
+  `apply_shared_fields`/hide-then-show pattern; `LYRICS`'s renderer branch
+  in particular is long (subtitle animation/transition state), so extract
+  it carefully and re-run the pixel equivalence test rather than
+  eyeballing it.
 - `SourceItem` and `SourceInspector` still own selection/resize/rotation,
   animation preview wiring, and the shared form-building machinery
   (`_slider_spin_editor`, `_connect_fields`, etc.) -- those stay put;

@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
 
 from app.inspector.editors import (
     album_cover_editor,
+    audio_visualizer_editor,
+    audio_waveform_editor,
     background_editor,
     image_editor,
     logo_editor,
@@ -2627,3 +2629,5 @@ source_registry.get(SourceType.WATERMARK).inspector = watermark_editor.edit
 source_registry.get(SourceType.VIDEO).inspector = video_editor.edit
 source_registry.get(SourceType.TEXT).inspector = text_editor.edit
 source_registry.get(SourceType.TIME).inspector = time_editor.edit
+source_registry.get(SourceType.AUDIO_VISUALIZER).inspector = audio_visualizer_editor.edit
+source_registry.get(SourceType.AUDIO_WAVEFORM).inspector = audio_waveform_editor.edit

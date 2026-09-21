@@ -21,6 +21,8 @@ from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 
 from app.canvas.renderers import (
     album_cover_renderer,
+    audio_visualizer_renderer,
+    audio_waveform_renderer,
     background_renderer,
     image_renderer,
     logo_renderer,
@@ -2181,3 +2183,5 @@ source_registry.get(SourceType.WATERMARK).renderer = watermark_renderer.render
 source_registry.get(SourceType.VIDEO).renderer = video_renderer.render
 source_registry.get(SourceType.TEXT).renderer = text_renderer.render
 source_registry.get(SourceType.TIME).renderer = time_renderer.render
+source_registry.get(SourceType.AUDIO_VISUALIZER).renderer = audio_visualizer_renderer.render
+source_registry.get(SourceType.AUDIO_WAVEFORM).renderer = audio_waveform_renderer.render
