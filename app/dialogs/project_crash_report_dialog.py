@@ -87,6 +87,9 @@ class ProjectCrashReportDialog(QDialog):
             lambda: QApplication.clipboard().setText(self.details.toPlainText())
         )
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText(
+            "닫기" if korean else "Close"
+        )
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
 

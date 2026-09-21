@@ -43,6 +43,9 @@ class TextEditorDialog(QDialog):
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
         )
+        if korean:
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+            self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)

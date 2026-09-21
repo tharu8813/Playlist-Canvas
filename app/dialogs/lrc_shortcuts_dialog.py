@@ -29,6 +29,7 @@ class LrcShortcutsDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self.buttons = buttons
         buttons.rejected.connect(self.close)
         buttons.accepted.connect(self.close)
         layout = QVBoxLayout(self)
@@ -43,6 +44,9 @@ class LrcShortcutsDialog(QDialog):
     def retranslate(self) -> None:
         korean = self.translator.language is Language.KOREAN
         self.setWindowTitle("LRC 편집기 단축키" if korean else "LRC Editor Shortcuts")
+        self.buttons.button(QDialogButtonBox.StandardButton.Close).setText(
+            "닫기" if korean else "Close"
+        )
         self.intro.setText(
             "가사 입력란에 커서가 있을 때는 Space와 실행 취소가 일반 텍스트 편집에 사용됩니다."
             if korean else

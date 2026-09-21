@@ -36,6 +36,7 @@ class ShortcutsDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self.buttons = buttons
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         layout = QVBoxLayout(self)
@@ -51,6 +52,9 @@ class ShortcutsDialog(QDialog):
         """Populate the reference table in the selected application language."""
         korean = self.translator.language is Language.KOREAN
         self.setWindowTitle("단축키 안내" if korean else "Keyboard shortcuts")
+        self.buttons.button(QDialogButtonBox.StandardButton.Close).setText(
+            "닫기" if korean else "Close"
+        )
         self.intro.setText(
             "패널 단축키는 메인 창 전체에서 동작합니다. 캔버스 편집 단축키는 캔버스에 포커스가 있을 때 적용되며, 텍스트 입력 중에는 일반 입력을 우선합니다."
             if korean else

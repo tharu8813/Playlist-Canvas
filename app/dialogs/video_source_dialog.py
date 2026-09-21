@@ -187,6 +187,9 @@ class VideoSourceDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
+        if korean:
+            buttons.button(QDialogButtonBox.StandardButton.Save).setText("저장")
+            buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         buttons.accepted.connect(self._validate_accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)

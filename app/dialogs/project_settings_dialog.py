@@ -223,6 +223,12 @@ class ProjectSettingsDialog(QDialog):
         self.canvas_radio.setText("현재 캔버스를 자동 사용" if korean else "Use the current canvas")
         self.custom_radio.setText("사용자 이미지 사용" if korean else "Use a custom image")
         self.choose_thumbnail_button.setText("이미지 선택…" if korean else "Choose image…")
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setText(
+            "저장" if korean else "Save"
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(
+            "취소" if korean else "Cancel"
+        )
         self._update_canvas_summary()
 
     def _choose_thumbnail(self) -> None:
