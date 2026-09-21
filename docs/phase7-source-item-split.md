@@ -165,14 +165,41 @@ pass `show_file=True` and have no fields of their own beyond what
   that caught the missing fallback above.
 - `tests/test_main_window.py` passed unchanged.
 
+## Slice 5 — TEXT, TIME (renderer + inspector)
+
+### Renderer
+
+As predicted in Slice 4: `TEXT` and `TIME` never had a branch of their own
+in `_paint_legacy` -- the generic trailing `else` *is* their renderer, in
+full. `text_renderer.py`/`time_renderer.py` are now just
+`paint_background()` -> `paint_generic_fallback()` -> `paint_selection_guide()`,
+reusing the helper Slice 4 already extracted; no new drawing code needed.
+
+### Inspector
+
+Both are in the legacy function's `text_types` set, so they share `text`,
+`font_size`, `font_weight`, `font_family`, `text_stroke_color`,
+`text_stroke_width`, and `text_alignment`. `text_overflow` is visible only
+for `{TEXT, TRACK_LIST}`, so `text_editor.py` includes it in its own field
+list and `time_editor.py` does not -- the only difference between the two
+editors.
+
+### Validation
+
+- `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged.
+- `tests/test_main_window.py`: 245 passed, 19 subtests.
+
 ## Remaining work
 
-- 9 of 17 `SourceType`s still render and edit through the legacy
-  adapters (`TEXT`, `TIME`, `AUDIO_VISUALIZER`, `AUDIO_WAVEFORM`,
-  `AUDIO_LEVEL_METER`, `PARTICLE_OVERLAY`, `LYRICS`, `TRACK_LIST`,
-  `NOW_PLAYING`). `TEXT`/`TIME` will need `paint_generic_fallback` from
-  Slice 4 too, since that is their entire renderer today. Continue
-  splitting the rest the same way, behind the two equivalence tests above.
+- 7 of 17 `SourceType`s still render and edit through the legacy adapters:
+  `AUDIO_VISUALIZER`, `AUDIO_WAVEFORM`, `AUDIO_LEVEL_METER`,
+  `PARTICLE_OVERLAY`, `LYRICS`, `TRACK_LIST`, `NOW_PLAYING`. Continue
+  splitting them the same way, behind the two equivalence tests above.
+  `LYRICS`, `TRACK_LIST`, and `NOW_PLAYING` are also in `text_types`, so
+  their editors can reuse the same `apply_shared_fields`/hide-then-show
+  pattern; their renderers are each a large, mostly self-contained block
+  (subtitle animation, track list layout, now-playing card) already
+  isolated by their own `elif` branch, similar in shape to Slices 1-2.
 - `SourceItem` and `SourceInspector` still own selection/resize/rotation,
   animation preview wiring, and the shared form-building machinery
   (`_slider_spin_editor`, `_connect_fields`, etc.) -- those stay put;

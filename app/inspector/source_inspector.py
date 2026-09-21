@@ -34,6 +34,8 @@ from app.inspector.editors import (
     logo_editor,
     progress_editor,
     shape_editor,
+    text_editor,
+    time_editor,
     video_editor,
     watermark_editor,
 )
@@ -2623,3 +2625,5 @@ source_registry.get(SourceType.IMAGE).inspector = image_editor.edit
 source_registry.get(SourceType.LOGO).inspector = logo_editor.edit
 source_registry.get(SourceType.WATERMARK).inspector = watermark_editor.edit
 source_registry.get(SourceType.VIDEO).inspector = video_editor.edit
+source_registry.get(SourceType.TEXT).inspector = text_editor.edit
+source_registry.get(SourceType.TIME).inspector = time_editor.edit

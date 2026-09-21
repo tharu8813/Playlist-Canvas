@@ -26,6 +26,8 @@ from app.canvas.renderers import (
     logo_renderer,
     progress_renderer,
     shape_renderer,
+    text_renderer,
+    time_renderer,
     video_renderer,
     watermark_renderer,
 )
@@ -2177,3 +2179,5 @@ source_registry.get(SourceType.IMAGE).renderer = image_renderer.render
 source_registry.get(SourceType.LOGO).renderer = logo_renderer.render
 source_registry.get(SourceType.WATERMARK).renderer = watermark_renderer.render
 source_registry.get(SourceType.VIDEO).renderer = video_renderer.render
+source_registry.get(SourceType.TEXT).renderer = text_renderer.render
+source_registry.get(SourceType.TIME).renderer = time_renderer.render
