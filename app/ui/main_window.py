@@ -48,6 +48,7 @@ from app.canvas.live_canvas import LiveCanvas
 from app.controllers.autosave_controller import AutosaveController
 from app.controllers.export_controller import ExportOrchestrator
 from app.controllers.history_controller import HistoryController
+from app.controllers.preview_controller import PreviewController
 from app.controllers.project_controller import ProjectController
 from app.animation.motion import MotionController
 from app.animation.canvas_preview import CanvasAnimationPreviewController
@@ -344,6 +345,7 @@ class MainWindow(QMainWindow):
         self.project_controller = ProjectController(self)
         self.autosave_controller = AutosaveController(self)
         self.export_orchestrator = ExportOrchestrator(self)
+        self.preview_controller = PreviewController(self)
         recovery_directory = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppLocalDataLocation
         )
@@ -2966,271 +2968,41 @@ class MainWindow(QMainWindow):
             self._history_restoring = restoring
 
     def _open_playlist_preview(self) -> None:
-        """Select the bottom Preview tab and start its embedded playback mode."""
-        preview_index = 2
-        if self.bottom_tabs.currentIndex() != preview_index:
-            self._show_bottom_panel(preview_index)
-            return
-        if self._inline_preview is not None:
-            self.canvas_stack.setCurrentWidget(self._inline_preview)
-            self._inline_preview.setFocus(Qt.FocusReason.OtherFocusReason)
-            return
-        tracks = [track for track in self.playlist_service.tracks if track.enabled]
-        if not tracks:
-            QMessageBox.warning(
-                self,
-                "미리보기" if self.translator.language is Language.KOREAN else "Preview",
-                (
-                    "미리보기를 시작하려면 활성화된 곡을 한 개 이상 추가해 주세요."
-                    if self.translator.language is Language.KOREAN else
-                    "Add at least one enabled track before opening Preview."
-                ),
-            )
-            self._select_edit_bottom_tab(self._last_edit_bottom_tab)
-            return
-        self._show_export_preview(tracks)
+        self.preview_controller.open_playlist_preview()
 
     def _bottom_workspace_tab_changed(self, index: int) -> None:
-        """Enter Preview from its tab and restore editing from either edit tab."""
-        if self._bottom_tab_change_guard:
-            return
-        if index == 2:
-            self._open_playlist_preview()
-            return
-        if index not in {0, 1}:
-            return
-        self._last_edit_bottom_tab = index
-        QSettings().setValue("workspace/bottom_tab", index)
-        if self._inline_preview is not None:
-            self._finish_inline_preview()
+        self.preview_controller.bottom_workspace_tab_changed(index)
 
     def _select_edit_bottom_tab(self, index: int | None = None) -> None:
-        """Select one persisted editing tab without recursively changing modes."""
-        selected = max(0, min(1, self._last_edit_bottom_tab if index is None else index))
-        self._last_edit_bottom_tab = selected
-        self._bottom_tab_change_guard = True
-        try:
-            self.bottom_tabs.setCurrentIndex(selected)
-        finally:
-            self._bottom_tab_change_guard = False
-        QSettings().setValue("workspace/bottom_tab", selected)
+        self.preview_controller.select_edit_bottom_tab(index)
 
     def _show_export_preview(self, tracks: list) -> None:
-        """Show a track-aware playback preview in the main Canvas workspace."""
-        if self._inline_preview is not None:
-            self.canvas_stack.setCurrentWidget(self._inline_preview)
-            self._inline_preview.setFocus(Qt.FocusReason.OtherFocusReason)
-            return
-        executable = None
-        try:
-            executable = FFmpegRenderer(
-                self.settings_service.current.ffmpeg_path or None
-            ).executable
-        except FFmpegNotFoundError:
-            pass
-        preview = ExportPreviewDialog(
-            self.canvas.scene_model, tracks, self.translator,
-            self._export_visualizers(tracks), executable, self, source_store=self.store,
-            embedded=True,
-            preferred_backend=self._preview_backend_for_session,
-        )
-        controls_page = preview.build_embedded_controls_page()
-        self._inline_preview = preview
-        self._inline_preview_controls = controls_page
-        preview.finished.connect(self._finish_inline_preview)
-        self.canvas_stack.addWidget(preview)
-        self.preview_tab_layout.addWidget(controls_page)
-        self.canvas_stack.setCurrentWidget(preview)
-        self._lock_editor_for_inline_preview()
-        track_panel = getattr(preview, "track_list_panel", None)
-        if isinstance(track_panel, QWidget):
-            self._inline_preview_track_panel = track_panel
-            track_panel.setMinimumWidth(0)
-            track_panel.setMaximumWidth(16_777_215)
-            track_panel.setStyleSheet(controls_page.styleSheet())
-            self.preview_track_inspector_layout.addWidget(track_panel)
-        self.inspector_stack.setCurrentWidget(self.preview_track_inspector)
-        self.activity_progress.begin(
-            "inline_preview",
-            "캔버스 미리보기" if self.translator.language is Language.KOREAN
-            else "Canvas preview",
-            detail=(
-                "미리보기 중에는 편집 기능이 잠깁니다."
-                if self.translator.language is Language.KOREAN else
-                "Editing is locked during playback preview."
-            ),
-        )
-        self.statusBar().showMessage(
-            "캔버스에서 전체 미리보기를 재생합니다 · 편집 기능이 잠겼습니다."
-            if self.translator.language is Language.KOREAN else
-            "Playing the full preview on the Canvas · Editing is locked."
-        )
-        preview.show()
-        preview.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.preview_controller.show_export_preview(tracks)
 
     def _lock_editor_for_inline_preview(self) -> None:
-        """Lock project mutation while keeping bottom mode tabs interactive."""
-        if self._preview_ui_lock_state is not None:
-            return
-        widgets = (self.canvas,)
-        actions = tuple(
-            (action, action.isEnabled()) for action in self.findChildren(QAction)
-        )
-        self._preview_ui_lock_state = {
-            "widgets": tuple((widget, widget.isEnabled()) for widget in widgets),
-            "menu": self.menuBar().isEnabled(),
-            "toolbar": self.toolbar.isEnabled(),
-            "toolbar_visible": not self.toolbar.isHidden(),
-            "drops": self.acceptDrops(),
-            "actions": actions,
-            "left_visible": not self.left_workspace.isHidden(),
-            "inspector_visible": not self.inspector_stack.isHidden(),
-            "inspector_page": self.inspector_stack.currentWidget(),
-            "workspace_sizes": tuple(self.workspace_splitter.sizes()),
-            "main_splitter_sizes": tuple(self.main_splitter.sizes()),
-            "sidebar_open_width": max(
-                180, self.left_workspace.width(), self._sidebar_open_width,
-            ),
-        }
-        for widget in widgets:
-            widget.setEnabled(False)
-        for action, _enabled in actions:
-            action.setEnabled(False)
-        self.menuBar().setEnabled(False)
-        self.toolbar.setEnabled(False)
-        self._set_sidebar_visible(False, persist=False, sync_action=False)
-        sizes = self.workspace_splitter.sizes()
-        if len(sizes) == 2:
-            total = max(600, sum(sizes))
-            controls_height = min(250, max(210, round(total * 0.27)))
-            self.workspace_splitter.setSizes([
-                max(280, total - controls_height), controls_height,
-            ])
-        self.setAcceptDrops(False)
+        self.preview_controller.lock_editor_for_inline_preview()
 
     def _finish_inline_preview(self, _result: int = 0) -> None:
-        """Return from the embedded playback page to the editable Canvas."""
-        preview = self._inline_preview
-        if preview is None:
-            return
-        controls_page = self._inline_preview_controls
-        track_panel = self._inline_preview_track_panel
-        self._inline_preview = None
-        self._inline_preview_controls = None
-        self._inline_preview_track_panel = None
-        preview._stop_preview()
-        self.canvas_stack.setCurrentWidget(self.canvas)
-        self.canvas_stack.removeWidget(preview)
-        if track_panel is not None:
-            self.preview_track_inspector_layout.removeWidget(track_panel)
-            track_panel.setParent(preview)
-        if controls_page is not None:
-            self.preview_tab_layout.removeWidget(controls_page)
-            controls_page.deleteLater()
-        preview.deleteLater()
-        self._unlock_editor_after_inline_preview()
-        if self.bottom_tabs.currentIndex() == 2:
-            self._select_edit_bottom_tab()
-        self.activity_progress.finish("inline_preview")
-        self.statusBar().showMessage(
-            "미리보기를 종료하고 캔버스 편집으로 돌아왔습니다."
-            if self.translator.language is Language.KOREAN else
-            "Preview closed; returned to Canvas editing.",
-            2500,
-        )
-        self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
-        # The left workspace expands for 190 ms when Preview releases its UI
-        # lock. Fit against the final layout, not the transient narrow Canvas.
-        self._schedule_canvas_fit(230)
+        self.preview_controller.finish_inline_preview(_result)
 
     def _unlock_editor_after_inline_preview(self) -> None:
-        """Restore exactly the interaction state that preceded inline preview."""
-        state = self._preview_ui_lock_state
-        if state is None:
-            return
-        self._preview_ui_lock_state = None
-        for widget, enabled in state["widgets"]:
-            widget.setEnabled(enabled)
-        for action, enabled in state["actions"]:
-            action.setEnabled(enabled)
-        self.menuBar().setEnabled(bool(state["menu"]))
-        self.toolbar.setEnabled(bool(state["toolbar"]))
-        self.toolbar.setVisible(bool(state["toolbar_visible"]))
-        self._sidebar_open_width = max(
-            180, int(state.get("sidebar_open_width", self._sidebar_open_width)),
-        )
-        self._set_sidebar_visible(
-            bool(state["left_visible"]), persist=False, sync_action=False,
-            restore_sizes=list(state.get("main_splitter_sizes", ())),
-        )
-        inspector_page = state.get("inspector_page", self.inspector)
-        if isinstance(inspector_page, QWidget):
-            self.inspector_stack.setCurrentWidget(inspector_page)
-        else:
-            self.inspector_stack.setCurrentWidget(self.inspector)
-        self.inspector_stack.setVisible(bool(state["inspector_visible"]))
-        workspace_sizes = list(state["workspace_sizes"])
-        if len(workspace_sizes) == 2:
-            self.workspace_splitter.setSizes(workspace_sizes)
-        self.setAcceptDrops(bool(state["drops"]))
-        self._sync_canvas_shortcut_actions(None, self.canvas)
-        self._update_alignment_toolbar_actions()
+        self.preview_controller.unlock_editor_after_inline_preview()
 
     def _preview_source_animation(self, source_id: str) -> None:
-        """Play one source's configured animation directly on the Canvas.
-
-        The preview is non-blocking: the window stays interactive and the very
-        next user action (a click, key press, selection change or edit) stops it
-        and snaps the source back to its real position.
-        """
-        source = self.store.get(source_id)
-        item = self.canvas._items.get(source_id)
-        if source is None or item is None:
-            return
-        if self._animation_preview_active:
-            self.animation_preview_controller.cancel()
-        self._animation_preview_active = True
-        self._animation_preview_cancel_armed = False
-        korean = self.translator.language is Language.KOREAN
-        self.statusBar().showMessage(
-            "애니메이션 미리보기 재생 중 · 다른 동작을 하면 중단됩니다."
-            if korean else
-            "Playing animation preview · Any further action stops it.",
-            2500,
-        )
-        if not self.animation_preview_controller.preview(item, source):
-            self._finish_canvas_animation_preview()
-            return
-        self.canvas.viewport().installEventFilter(self)
-        QTimer.singleShot(0, self._arm_animation_preview_cancel)
+        self.preview_controller.preview_source_animation(source_id)
 
     def _arm_animation_preview_cancel(self) -> None:
-        """Start honouring cancel triggers once the launching edit has settled."""
-        if self._animation_preview_active:
-            self._animation_preview_cancel_armed = True
+        self.preview_controller.arm_animation_preview_cancel()
 
     def _cancel_animation_preview(self, *_args: object) -> None:
-        """Stop an armed preview in response to any further user action."""
-        if self._animation_preview_active and self._animation_preview_cancel_armed:
-            self.animation_preview_controller.cancel()
+        self.preview_controller.cancel_animation_preview(*_args)
 
     def eventFilter(self, watched: object, event: QEvent) -> bool:
-        if self._animation_preview_cancel_armed and event.type() in (
-            QEvent.Type.MouseButtonPress,
-            QEvent.Type.KeyPress,
-            QEvent.Type.Wheel,
-        ):
-            self.animation_preview_controller.cancel()
+        self.preview_controller.handle_viewport_event(event)
         return super().eventFilter(watched, event)
 
     def _finish_canvas_animation_preview(self) -> None:
-        """Restore interaction after the Canvas preview returns to its source state."""
-        if not self._animation_preview_active:
-            return
-        self._animation_preview_active = False
-        self._animation_preview_cancel_armed = False
-        self.canvas.viewport().removeEventFilter(self)
-        self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.preview_controller.finish_canvas_animation_preview()
 
     @staticmethod
     def _playlist_duration(tracks: list) -> float:
