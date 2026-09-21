@@ -104,6 +104,7 @@ from app.services.lyrics_service import (
 )
 from app.services.theme_service import Theme, ThemeService
 from app.services.source_store import SourceStore
+from app.models.source_registry import source_registry
 from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
 from app.services.playlist_export_service import PlaylistExportError, PlaylistExportService
 from app.services.app_settings_service import (
@@ -2240,7 +2241,7 @@ class MainWindow(QMainWindow):
                 artboard.top(),
                 min(float(position.y()) - dimensions[1] / 2, artboard.bottom() - dimensions[1]),
             )
-        source = Source(
+        source = source_registry.get(source_type).component(
             source_type=source_type,
             name=name,
             x=default_x,

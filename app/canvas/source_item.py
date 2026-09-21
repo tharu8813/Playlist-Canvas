@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 
 from app.models.source import Source, SourceType
+from app.models.source_registry import source_registry
 from app.preview.text_template import expand_placeholder_labels
 from app.utils.font_loader import load_application_font
 from app.utils.image_loader import load_pixmap
@@ -1313,6 +1314,18 @@ class SourceItem(QGraphicsObject):
         option: object,
         widget: object | None = None,
     ) -> None:
+        """Dispatch through the source definition without changing legacy pixels."""
+        renderer = source_registry.get(self.source.source_type).renderer
+        if renderer is None:
+            raise RuntimeError(f"No renderer registered for {self.source.source_type.value}")
+        renderer(self, painter, option, widget)
+
+    def _paint_legacy(
+        self,
+        painter: QPainter,
+        option: object,
+        widget: object | None = None,
+    ) -> None:
         """Paint source content plus a compact selection bounding box."""
         if self.source.source_type is SourceType.VIDEO and self._video_preview_suppressed:
             return
@@ -2130,3 +2143,14 @@ class SourceItem(QGraphicsObject):
         if change is QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             self.update()
         return super().itemChange(change, value)
+
+
+def _render_legacy_source(
+    item: SourceItem, painter: QPainter, option: object, widget: object | None,
+) -> None:
+    item._paint_legacy(painter, option, widget)
+
+
+# Bind in the UI layer: core model imports must not initialize Qt multimedia.
+for _source_type in SourceType:
+    source_registry.get(_source_type).renderer = _render_legacy_source

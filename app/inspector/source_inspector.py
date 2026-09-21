@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.source import Source, SourceType
+from app.models.source_registry import source_registry
 from app.dialogs.color_editor_dialog import ColorEditorDialog
 from app.dialogs.text_editor_dialog import TextEditorDialog
 from app.dialogs.video_source_dialog import VideoSourceDialog
@@ -1005,6 +1006,16 @@ class SourceInspector(QScrollArea):
                     break
 
     def _update_source_specific_fields(self, source: Source | None) -> None:
+        """Dispatch type-specific editing through the registered legacy adapter."""
+        if source is None:
+            self._update_legacy_source_specific_fields(None)
+            return
+        inspector = source_registry.get(source.source_type).inspector
+        if inspector is None:
+            raise RuntimeError(f"No inspector registered for {source.source_type.value}")
+        inspector(self, source)
+
+    def _update_legacy_source_specific_fields(self, source: Source | None) -> None:
         source_type = source.source_type if source else None
         is_background = source_type is SourceType.BACKGROUND
         text_types = {
@@ -2580,3 +2591,12 @@ class SourceInspector(QScrollArea):
             f"background: rgba({color.red()}, {color.green()}, {color.blue()}, "
             f"{color.alpha()}); color: {text_color}; border: 1px solid #7B8794;"
         )
+
+
+def _inspect_legacy_source(inspector: SourceInspector, source: Source) -> None:
+    inspector._update_legacy_source_specific_fields(source)
+
+
+# Keep the shared editor until the type-specific split in Phase 7.
+for _source_type in SourceType:
+    source_registry.get(_source_type).inspector = _inspect_legacy_source

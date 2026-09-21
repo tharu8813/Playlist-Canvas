@@ -12,6 +12,7 @@ from app import __version__
 from app.models.playlist import PlaylistTrack
 from app.models.layer import LayerGroup
 from app.models.source import Source
+from app.models.source_registry import source_registry
 from app.timeline.models import Timeline, timeline_from_playlist
 
 
@@ -95,7 +96,7 @@ class ProjectDocument:
             "language": self.language,
             "settings": asdict(self.settings),
             "content_library": [asdict(item) for item in self.content_library],
-            "sources": [source.to_dict() for source in self.sources],
+            "sources": [source_registry.serialize(source) for source in self.sources],
             "groups": [group.to_dict() for group in self.groups],
             "playlist": [track.to_dict() for track in self.playlist],
         }
@@ -158,7 +159,7 @@ class ProjectDocument:
         )):
             raise ValueError("Project identity and timestamp fields must be strings.")
 
-        source_models = [Source.from_dict(entry) for entry in sources]
+        source_models = [source_registry.deserialize(entry) for entry in sources]
         group_models = [LayerGroup.from_dict(entry) for entry in groups]
         track_models = [PlaylistTrack.from_dict(entry) for entry in playlist]
         content_models = [ProjectContent(**entry) for entry in content_library]
