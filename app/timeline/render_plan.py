@@ -13,7 +13,9 @@ below the renderer and UI layers so both can depend on it without a cycle.
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections.abc import Sequence
 from dataclasses import dataclass
+from math import isfinite
 
 from app.timeline.models import TransitionType
 
@@ -139,3 +141,85 @@ class CompiledRenderPlan:
     presentation: PresentationPlan
     metadata: MetadataPlan
     duration_seconds: float
+
+
+def build_presentation_and_metadata(
+    clips: Sequence[AudioRenderClip],
+) -> tuple[PresentationPlan, MetadataPlan, float]:
+    """Derive Presentation ownership, chapters, and duration from placed clips.
+
+    Shared by every compiler (Sequential in app/timeline/compiler.py, and
+    AutoMix in app/automix/planner.py) so gap and chapter semantics can
+    never drift between them (roadmap "Timing invariant"). Presentation
+    ownership switches exactly when each clip starts, regardless of
+    whether an earlier clip's audio is still playing underneath it -- so
+    windows stay non-overlapping even when AudioRenderPlan.clips overlap.
+    Callers are responsible for passing clips already sorted by
+    timeline_start.
+    """
+    windows = tuple(
+        PresentationWindow(
+            track_id=clip.track_id,
+            timeline_start=clip.timeline_start,
+            timeline_end=clip.timeline_end,
+            source_time_at_start=clip.source_in,
+            playback_rate=clip.playback_rate,
+        )
+        for clip in clips
+    )
+    duration = max((clip.timeline_end for clip in clips), default=0.0)
+    chapters = tuple(
+        MetadataChapter(
+            track_id=window.track_id,
+            start=window.timeline_start,
+            end=windows[index + 1].timeline_start if index + 1 < len(windows) else duration,
+        )
+        for index, window in enumerate(windows)
+    )
+    return PresentationPlan(windows=windows), MetadataPlan(chapters=chapters), duration
+
+
+def validate_compiled_render_plan(plan: CompiledRenderPlan) -> None:
+    """Raise ValueError if ``plan`` violates an architecture invariant.
+
+    Compilers are trusted to build correct plans; this exists as a cheap
+    defensive check any compiler (Sequential or AutoMix) can call on its
+    own output, and for tests, per roadmap Phase 4 section 14.
+    """
+    for clip in plan.audio.clips:
+        if not isfinite(clip.timeline_start) or clip.timeline_start < 0.0:
+            raise ValueError(f"Clip {clip.clip_id!r} has an invalid timeline_start.")
+        if not isfinite(clip.source_in) or not isfinite(clip.source_out) or clip.source_out < clip.source_in:
+            raise ValueError(f"Clip {clip.clip_id!r} has invalid source bounds.")
+        if not isfinite(clip.playback_rate) or clip.playback_rate <= 0.0:
+            raise ValueError(f"Clip {clip.clip_id!r} has an invalid playback_rate.")
+
+    clip_ids = {clip.clip_id for clip in plan.audio.clips}
+    for transition in plan.audio.transitions:
+        if transition.clip_a not in clip_ids or transition.clip_b not in clip_ids:
+            raise ValueError("A transition references a clip that is not in the compiled plan.")
+        if not isfinite(transition.duration) or transition.duration <= 0.0:
+            raise ValueError("A transition must have a finite, positive duration.")
+
+    # Ownership is resolved purely by each window's timeline_start (see
+    # PresentationPlan._window_at) -- strictly increasing starts is exactly
+    # what that lookup needs, regardless of whether the underlying audio
+    # clips overlap (AutoMix) or not (Sequential). A window's own
+    # timeline_end reflects its clip's actual audio span and may run past
+    # the next window's start once AutoMix places two clips concurrently;
+    # that is expected, not a violation.
+    previous_start = float("-inf")
+    for window in plan.presentation.windows:
+        if window.timeline_start <= previous_start:
+            raise ValueError("Presentation window starts must be strictly increasing.")
+        previous_start = window.timeline_start
+
+    previous_chapter_start = float("-inf")
+    for chapter in plan.metadata.chapters:
+        if chapter.start < previous_chapter_start:
+            raise ValueError("Chapters must be ordered by start.")
+        previous_chapter_start = chapter.start
+
+    expected_duration = max((clip.timeline_end for clip in plan.audio.clips), default=0.0)
+    if abs(plan.duration_seconds - expected_duration) > 1e-6:
+        raise ValueError("duration_seconds must equal the furthest compiled clip end.")

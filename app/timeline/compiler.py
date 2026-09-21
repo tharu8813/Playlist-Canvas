@@ -20,10 +20,7 @@ from app.timeline.render_plan import (
     AudioRenderPlan,
     AudioRenderTransition,
     CompiledRenderPlan,
-    MetadataChapter,
-    MetadataPlan,
-    PresentationPlan,
-    PresentationWindow,
+    build_presentation_and_metadata,
 )
 
 
@@ -77,29 +74,11 @@ def compile_timeline(
         for transition in timeline.transitions
         if transition.clip_a in compiled_clip_ids and transition.clip_b in compiled_clip_ids
     )
-    windows = tuple(
-        PresentationWindow(
-            track_id=clip.track_id,
-            timeline_start=clip.timeline_start,
-            timeline_end=clip.timeline_end,
-            source_time_at_start=clip.source_in,
-            playback_rate=clip.playback_rate,
-        )
-        for clip in clips
-    )
-    duration = max((clip.timeline_end for clip in clips), default=0.0)
-    chapters = tuple(
-        MetadataChapter(
-            track_id=window.track_id,
-            start=window.timeline_start,
-            end=windows[index + 1].timeline_start if index + 1 < len(windows) else duration,
-        )
-        for index, window in enumerate(windows)
-    )
+    presentation, metadata, duration = build_presentation_and_metadata(clips)
     return CompiledRenderPlan(
         audio=AudioRenderPlan(clips=clips, transitions=transitions),
-        presentation=PresentationPlan(windows=windows),
-        metadata=MetadataPlan(chapters=chapters),
+        presentation=presentation,
+        metadata=metadata,
         duration_seconds=duration,
     )
 
