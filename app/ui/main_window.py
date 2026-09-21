@@ -48,6 +48,9 @@ from PySide6.QtWidgets import (
 )
 
 from app.canvas.live_canvas import LiveCanvas
+from app.controllers.autosave_controller import AutosaveController
+from app.controllers.history_controller import HistoryController
+from app.controllers.project_controller import ProjectController
 from app.animation.motion import MotionController
 from app.animation.canvas_preview import CanvasAnimationPreviewController
 from app.dialogs.export_progress_dialog import ExportProgressDialog
@@ -364,6 +367,9 @@ class MainWindow(QMainWindow):
         self._bottom_tab_change_guard = False
         self._last_edit_bottom_tab = 0
         self.history = HistoryService(self)
+        self.history_controller = HistoryController(self)
+        self.project_controller = ProjectController(self)
+        self.autosave_controller = AutosaveController(self)
         recovery_directory = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppLocalDataLocation
         )
@@ -5402,85 +5408,13 @@ class MainWindow(QMainWindow):
         return adapted
 
     def _new_project(self, *, confirm_unsaved: bool = True) -> bool:
-        if confirm_unsaved and not self._confirm_unsaved_changes():
-            return False
-        dialog = NewProjectDialog(self.translator, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return False
-        canvas_width, canvas_height = dialog.canvas_size
-        selected_preset = dialog.selected_design_preset
-        previous_project_path = self.current_project_path
-        self._history_restoring = True
-        try:
-            self.current_project_path = None
-            self._legacy_project_path = None
-            if hasattr(self, "upgrade_project_action"):
-                self.upgrade_project_action.setEnabled(False)
-            self.project_settings = ProjectSettings()
-            self._project_theme_metadata = self.theme_service.preference.value
-            self._project_language_metadata = self.translator.language.value
-            self.project_content_service.replace([])
-            self.store.replace([])
-            self.playlist_service.replace([])
-            self.canvas.scene_model.set_artboard_size(canvas_width, canvas_height)
-            self.grid_action.setChecked(True)
-            self.snap_action.setChecked(True)
-            self.canvas.scene_model.snap_enabled = True
-            if selected_preset is None:
-                self._add_welcome_sources()
-            else:
-                self.store.replace(self._preset_sources_for_canvas(
-                    selected_preset, canvas_width, canvas_height,
-                ))
-            self.canvas.fit_artboard()
-        finally:
-            self._history_restoring = False
-        try:
-            self.autosave.clear(previous_project_path)
-            self.autosave.clear(None)
-        except ProjectError as error:
-            self.statusBar().showMessage(str(error), 5000)
-        if self._history_ready:
-            self.history.reset(self._project_document().to_dict())
-            self._project_dirty = True
-            self._autosave_debounce_timer.start()
-        else:
-            self._project_dirty = False
-        self._update_project_status()
-        return True
+        return self.project_controller.new_project(confirm_unsaved=confirm_unsaved)
 
     def _show_project_start_dialog(self) -> bool:
-        """Reuse the launch project chooser for File > New and the toolbar action."""
-        if not self._confirm_unsaved_changes():
-            return False
-        while True:
-            dialog = StartupDialog(self.translator, self.recent_projects, self)
-            if dialog.exec() != dialog.DialogCode.Accepted:
-                return False
-            if dialog.action == StartupDialog.NEW_PROJECT:
-                if self._new_project(confirm_unsaved=False):
-                    return True
-                continue
-            if dialog.project_path is not None and self._load_project_path(dialog.project_path):
-                return True
+        return self.project_controller.show_project_start_dialog()
 
     def _project_document(self) -> ProjectDocument:
-        """Collect current UI and domain state into a portable document."""
-        artboard = self.canvas.scene_model.artboard_rect
-        canvas = CanvasSettings(
-            width=artboard.width(), height=artboard.height(),
-            show_grid=self.canvas.scene_model.show_grid,
-            snap_enabled=self.canvas.scene_model.snap_enabled,
-            zoom=self.canvas.transform().m11(),
-        )
-        return ProjectDocument(
-            sources=self.store.sources(), playlist=self.playlist_service.tracks,
-            groups=self.store.groups(),
-            canvas=canvas, theme=self._project_theme_metadata,
-            language=self._project_language_metadata,
-            settings=self.project_settings,
-            content_library=self.project_content_service.items,
-        )
+        return self.project_controller.document()
 
     def _connect_history(self) -> None:
         """Observe all editable Phase 1/2 state and coalesce snapshot commits."""
@@ -5518,23 +5452,7 @@ class MainWindow(QMainWindow):
         self.project_content_service.synchronize(self._project_document())
 
     def show_startup_dialog(self) -> bool:
-        """Block the editor until the user chooses how to start the session."""
-        # Recovery belongs before the project choice.  Requiring the user to click
-        # "New project" first meant a newer snapshot could be silently skipped when
-        # they opened the older saved project from Recents.
-        if self._offer_recovery():
-            return True
-        while self.isVisible():
-            dialog = StartupDialog(self.translator, self.recent_projects, self)
-            if dialog.exec() != dialog.DialogCode.Accepted:
-                return False
-            if dialog.action == StartupDialog.NEW_PROJECT:
-                if self._new_project(confirm_unsaved=False):
-                    return True
-                continue
-            if dialog.project_path is not None and self._load_project_path(dialog.project_path):
-                return True
-        return False
+        return self.project_controller.show_startup_dialog()
 
     def _on_theme_changed(self, preference: str, effective: str) -> None:
         """Apply a selected theme and softly transition the refreshed workspace."""
@@ -5742,630 +5660,103 @@ class MainWindow(QMainWindow):
         )
 
     def _schedule_history(self) -> None:
-        """Coalesce rapid property edits such as dragging into a single undo entry."""
-        if self._history_ready and not self._history_restoring:
-            self._project_change_serial += 1
-            self._project_dirty = True
-            self._update_project_status()
-            self._history_timer.start()
-            self._autosave_debounce_timer.start()
+        self.history_controller.schedule()
 
     def _update_project_status(self) -> None:
-        """Keep a compact, non-modal project/save-state indicator in the toolbar."""
-        if not hasattr(self, "project_status_label"):
-            return
-        korean = self.translator.language is Language.KOREAN
-        name = self.project_settings.title or (
-            "새 프로젝트" if korean else "New project"
-        )
-        saving = (
-            self._project_save_worker is not None
-            and self._project_save_worker.isRunning()
-        )
-        state = (
-            "저장 중" if korean and saving else
-            "Saving" if saving else
-            "저장됨" if korean and not self._project_dirty else
-            "저장 필요" if korean else
-            "Saved" if not self._project_dirty else "Unsaved"
-        )
-        legacy = " · 레거시 JSON" if korean and self._legacy_project_path else (
-            " · Legacy JSON" if self._legacy_project_path else ""
-        )
-        self.project_status_label.setText(f"{name}  ·  {state}{legacy}")
-        self.project_status_label.setToolTip(
-            "프로젝트 스냅샷을 백그라운드에서 저장하고 있습니다."
-            if korean and saving else
-            "The project snapshot is being saved in the background."
-            if saving else
-            "이 프로젝트는 레거시 JSON입니다. 프로젝트 메뉴에서 .pvsproj로 업그레이드할 수 있습니다."
-            if korean and self._legacy_project_path else
-            "This is a legacy JSON project. Upgrade it to .pvsproj from the Project menu."
-            if self._legacy_project_path else
-            "프로젝트를 저장하려면 Ctrl+S를 누르세요." if korean and self._project_dirty else
-            "프로젝트가 저장되어 있습니다." if korean else
-            "Press Ctrl+S to save this project." if self._project_dirty else
-            "This project is saved."
-        )
+        self.project_controller.update_status()
 
     def _commit_history(self) -> None:
-        if self._history_ready and not self._history_restoring:
-            self.history.commit(self._project_document().to_dict())
+        self.history_controller.commit()
 
     def _update_history_actions(self, can_undo: bool, can_redo: bool) -> None:
-        self.undo_action.setEnabled(can_undo)
-        self.redo_action.setEnabled(can_redo)
+        self.history_controller.update_actions(can_undo, can_redo)
 
     def _undo(self) -> None:
-        if self._history_applying:
-            return
-        self._flush_pending_history()
-        selected_source_ids = self.store.selected_ids
-        active_source_id = self.store.selected.id if self.store.selected else None
-        snapshot = self.history.undo()
-        if snapshot is not None:
-            self._restore_history_snapshot(snapshot, selected_source_ids, active_source_id)
+        self.history_controller.undo()
 
     def _redo(self) -> None:
-        if self._history_applying:
-            return
-        self._flush_pending_history()
-        selected_source_ids = self.store.selected_ids
-        active_source_id = self.store.selected.id if self.store.selected else None
-        snapshot = self.history.redo()
-        if snapshot is not None:
-            self._restore_history_snapshot(snapshot, selected_source_ids, active_source_id)
+        self.history_controller.redo()
 
     def _flush_pending_history(self) -> None:
-        """Commit a just-made edit before Undo can navigate past it."""
-        if self._history_timer.isActive():
-            self._history_timer.stop()
-            self._commit_history()
+        self.history_controller.flush_pending()
 
     def _restore_history_snapshot(
         self, snapshot: dict, selected_source_ids: object = (),
         active_source_id: str | None = None,
     ) -> None:
-        """Restore history and preserve the shared Canvas/Layer selection."""
-        if self._history_applying:
-            return
-        self._history_applying = True
-        self._history_restoring = True
-        self.setUpdatesEnabled(False)
-        try:
-            self._apply_project(ProjectDocument.from_dict(snapshot))
-            valid_ids = [
-                source_id for source_id in selected_source_ids
-                if self.store.get(source_id) is not None
-            ] if isinstance(selected_source_ids, (tuple, list)) else []
-            if active_source_id not in valid_ids:
-                active_source_id = valid_ids[-1] if valid_ids else None
-            self.store.select_many(valid_ids, active_source_id)
-        except Exception as error:
-            LOGGER.exception("Undo/redo restore failed")
-            report_unexpected_error("Undo/redo restore", error)
-            QMessageBox.critical(
-                self,
-                "실행 취소 오류" if self.translator.language is Language.KOREAN else "Undo/redo error",
-                str(error),
-            )
-        finally:
-            self.setUpdatesEnabled(True)
-            self._history_restoring = False
-            self._history_applying = False
-            self.canvas.viewport().update()
+        self.history_controller.restore_snapshot(snapshot, selected_source_ids, active_source_id)
 
     def _autosave_project(self) -> None:
-        """Periodically write a recovery document without changing the active project.
-
-        The live models are snapshotted here on the GUI thread; the JSON encode
-        and atomic file write run on an AutosaveWorker so a large project does
-        not stutter the editor every few seconds.
-        """
-        if (not self._history_ready or not self._project_dirty
-                or self._project_save_worker is not None
-                or self._autosave_worker is not None):
-            return
-        korean = self.translator.language is Language.KOREAN
-        try:
-            document_data = self._project_document().to_dict()
-        except (TypeError, ValueError) as error:
-            self.statusBar().showMessage(str(error), 5000)
-            return
-        self.activity_progress.begin(
-            "autosave", "자동 저장" if korean else "Autosaving",
-            detail=(self.project_settings.title or "Untitled Project"),
-        )
-        worker = AutosaveWorker(
-            self.autosave, document_data, self.current_project_path,
-        )
-        worker.succeeded.connect(self._autosave_succeeded)
-        worker.failed.connect(self._autosave_failed)
-        worker.finished.connect(lambda: self._autosave_thread_finished(worker))
-        self._autosave_worker = worker
-        worker.start()
+        self.autosave_controller.autosave()
 
     def _autosave_succeeded(self, _path: object) -> None:
-        self._update_project_status()
-        message = (
-            "자동 저장됨" if self.translator.language is Language.KOREAN else "Autosaved"
-        )
-        self.statusBar().showMessage(message, 2500)
+        self.autosave_controller.succeeded(_path)
 
     def _autosave_failed(self, message: str) -> None:
-        self.statusBar().showMessage(message, 5000)
+        self.autosave_controller.failed(message)
 
     def _autosave_thread_finished(self, worker: AutosaveWorker) -> None:
-        self.activity_progress.finish("autosave")
-        if self._autosave_worker is worker:
-            self._autosave_worker = None
-        worker.deleteLater()
+        self.autosave_controller.thread_finished(worker)
 
     def _offer_recovery(self) -> bool:
-        """Offer recovery of the most recently autosaved workspace on startup."""
-        try:
-            snapshot = None
-            for candidate in self.autosave.recoveries():
-                project_path = candidate.project_path
-                if project_path is not None and project_path.is_file():
-                    try:
-                        recovery_is_newer = (
-                            candidate.saved_at.timestamp() > project_path.stat().st_mtime
-                        )
-                    except OSError:
-                        recovery_is_newer = True
-                    if not recovery_is_newer:
-                        # A normal successful save should already remove this file,
-                        # but stale recoveries can remain after antivirus/file-lock
-                        # interference. Never offer one over a newer project file.
-                        try:
-                            self.autosave.clear_snapshot(candidate)
-                        except ProjectError as error:
-                            # A locked stale file should not hide a different,
-                            # genuinely recoverable workspace.
-                            self.statusBar().showMessage(str(error), 5000)
-                        continue
-                snapshot = candidate
-                break
-        except ProjectError as error:
-            self.statusBar().showMessage(str(error), 5000)
-            return False
-        if snapshot is None:
-            return False
-        korean = self.translator.language is Language.KOREAN
-        answer = QMessageBox.question(
-            self,
-            "자동 저장 복구" if korean else "Autosave recovery",
-            "저장되지 않은 작업을 복구할까요?" if korean
-            else "Restore your most recently autosaved work?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            media_reference = snapshot.project_path or snapshot.path
-            if not self._resolve_project_media(snapshot.document, media_reference):
-                return False
-            self._history_restoring = True
-            try:
-                self._apply_project(snapshot.document)
-                self.current_project_path = snapshot.project_path
-                self._legacy_project_path = (
-                    snapshot.project_path
-                    if snapshot.project_path is not None
-                    and snapshot.project_path.suffix.lower() == ".json" else None
-                )
-                self.upgrade_project_action.setEnabled(self._legacy_project_path is not None)
-                self.history.reset(self._project_document().to_dict())
-            finally:
-                self._history_restoring = False
-            self._project_dirty = True
-            self._autosave_debounce_timer.start()
-            if snapshot.project_path is not None:
-                self.recent_projects.add(snapshot.project_path)
-            return True
-        try:
-            self.autosave.clear_snapshot(snapshot)
-        except ProjectError as error:
-            self.statusBar().showMessage(str(error), 5000)
-        return False
+        return self.autosave_controller.offer_recovery()
 
     def _clear_recovery(self) -> None:
-        try:
-            self.autosave.clear(self.current_project_path)
-        except ProjectError as error:
-            self.statusBar().showMessage(str(error), 5000)
+        self.autosave_controller.clear_recovery()
 
     def _save_project(
         self, force_choose: bool = False, *, wait_for_completion: bool = False,
     ) -> bool:
-        """Start a background save and optionally wait in a responsive event loop."""
-        active_worker = self._project_save_worker
-        if active_worker is not None:
-            self.statusBar().showMessage(
-                "이미 프로젝트를 저장하고 있습니다."
-                if self.translator.language is Language.KOREAN
-                else "The project is already being saved.",
-                3000,
-            )
-            if wait_for_completion:
-                self._wait_for_project_save(active_worker)
-                return self._project_save_succeeded is True
-            return False
-        target = None if force_choose else self.current_project_path
-        if target is None:
-            default = str(default_project_path(self.project_settings.title))
-            selected, _ = QFileDialog.getSaveFileName(
-                self,
-                "프로젝트 저장" if self.translator.language is Language.KOREAN else "Save project",
-                default,
-                "Playlist Canvas Project (*.pvsproj);;Legacy JSON Project (*.project.json *.json)",
-            )
-            if not selected:
-                return False
-            target = Path(selected)
-        try:
-            document_data = self._project_document().to_dict()
-            thumbnail = QImage(self._project_thumbnail_image())
-        except (TypeError, ValueError) as error:
-            self._show_project_error(
-                ProjectError(f"Could not prepare project save: {error}")
-            )
-            return False
-
-        previous_project_path = self.current_project_path
-        worker = ProjectSaveWorker(target, document_data, thumbnail)
-        self._project_save_worker = worker
-        self._project_save_context = (
-            self._project_change_serial, previous_project_path,
+        return self.project_controller.save(
+            force_choose, wait_for_completion=wait_for_completion,
         )
-        self._project_save_succeeded = None
-        worker.succeeded.connect(self._project_save_finished_successfully)
-        worker.failed.connect(self._project_save_failed)
-        worker.finished.connect(lambda: self._project_save_thread_finished(worker))
-        self.save_action.setEnabled(False)
-        self.save_as_action.setEnabled(False)
-        self._autosave_debounce_timer.stop()
-        self.statusBar().showMessage(
-            "프로젝트 저장 중..." if self.translator.language is Language.KOREAN
-            else "Saving project..."
-        )
-        korean = self.translator.language is Language.KOREAN
-        self.activity_progress.begin(
-            "project_save", "프로젝트 저장" if korean else "Saving project",
-            detail=Path(target).name,
-        )
-        worker.start()
-        self._update_project_status()
-        if wait_for_completion:
-            self._wait_for_project_save(worker)
-            return self._project_save_succeeded is True
-        return True
 
     def _wait_for_project_save(self, worker: ProjectSaveWorker) -> None:
-        """Wait for a required save while continuing to process Qt events."""
-        if worker.isRunning():
-            event_loop = QEventLoop(self)
-            worker.finished.connect(event_loop.quit)
-            event_loop.exec()
-        QApplication.processEvents()
+        self.project_controller.wait_for_save(worker)
 
     def _project_save_finished_successfully(self, saved_path: object) -> None:
-        """Commit saved state without hiding edits made during the save."""
-        context = self._project_save_context
-        if context is None:
-            return
-        saved_serial, previous_project_path = context
-        try:
-            self.current_project_path = Path(saved_path)
-            self._legacy_project_path = (
-                self.current_project_path if is_legacy_project_path(self.current_project_path)
-                else None
-            )
-            self.upgrade_project_action.setEnabled(self._legacy_project_path is not None)
-            self.recent_projects.add(self.current_project_path)
-            unchanged_since_snapshot = saved_serial == self._project_change_serial
-            self._project_dirty = not unchanged_since_snapshot
-            if unchanged_since_snapshot:
-                self.autosave.clear(previous_project_path)
-                self.autosave.clear(self.current_project_path)
-            else:
-                self._autosave_debounce_timer.start()
-            self._update_project_status()
-            korean = self.translator.language is Language.KOREAN
-            message = (
-                "프로젝트를 저장했습니다. 저장 중 변경된 내용은 아직 저장되지 않았습니다."
-                if korean and not unchanged_since_snapshot else
-                "Project saved. Changes made during saving remain unsaved."
-                if not unchanged_since_snapshot else
-                "프로젝트를 저장했습니다." if korean else "Project saved."
-            )
-            self.statusBar().showMessage(message, 4000)
-        except ProjectError as error:
-            self._show_project_error(error)
-            self._project_save_succeeded = False
-            return
-        self._project_save_succeeded = True
+        self.project_controller.save_finished_successfully(saved_path)
 
     def _project_save_failed(self, message: str) -> None:
-        self._project_save_succeeded = False
-        if self._project_dirty:
-            self._autosave_debounce_timer.start()
-        self._show_project_error(ProjectError(message))
+        self.project_controller.save_failed(message)
 
     def _project_save_thread_finished(self, worker: ProjectSaveWorker) -> None:
-        self.activity_progress.finish("project_save")
-        if self._project_save_worker is worker:
-            self._project_save_worker = None
-            self._project_save_context = None
-        self.save_action.setEnabled(True)
-        self.save_as_action.setEnabled(True)
-        self._update_project_status()
-        worker.deleteLater()
+        self.project_controller.save_thread_finished(worker)
 
     def _open_project(self) -> None:
-        """Choose a portable package or legacy JSON project."""
-        selected, _ = QFileDialog.getOpenFileName(
-            self,
-            "프로젝트 열기" if self.translator.language is Language.KOREAN else "Open project",
-            "",
-            "Playlist Canvas Project (*.pvsproj *.project.json *.json)",
-        )
-        if not selected:
-            return
-        self._open_project_with_confirmation(Path(selected))
+        self.project_controller.open_project()
 
     def _open_project_with_confirmation(self, path: Path) -> bool:
-        """Replace the workspace after safely resolving unsaved changes."""
-        previous_project_path = self.current_project_path
-        had_unsaved_changes = self._project_dirty
-        if not self._confirm_unsaved_changes():
-            return False
-        loaded = self._load_project_path(Path(path))
-        if loaded and had_unsaved_changes:
-            try:
-                self.autosave.clear(previous_project_path)
-            except ProjectError as error:
-                self.statusBar().showMessage(str(error), 5000)
-        return loaded
+        return self.project_controller.open_project_with_confirmation(path)
 
     def open_project_path(self, path: Path) -> bool:
         """Open a project requested by Explorer or another external launcher."""
-        return self._load_project_path(Path(path))
+        return self.project_controller.open_project_path(path)
 
     def _confirm_unsaved_changes(self) -> bool:
-        """Save, explicitly discard, or keep the active unsaved workspace."""
-        # Opening/replacing the workspace while an older snapshot is still
-        # saving would let its completion overwrite the new active path.
-        if self._project_save_worker is not None:
-            self._wait_for_project_save(self._project_save_worker)
-        if not self._project_dirty:
-            return True
-        korean = self.translator.language is Language.KOREAN
-        response = QMessageBox.warning(
-            self,
-            "저장되지 않은 변경 사항" if korean else "Unsaved changes",
-            "현재 프로젝트에 저장되지 않은 변경 사항이 있습니다. 계속하기 전에 저장할까요?"
-            if korean else
-            "The current project has unsaved changes. Save before continuing?",
-            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Save,
-        )
-        if response == QMessageBox.StandardButton.Save:
-            self._save_project(wait_for_completion=True)
-            return not self._project_dirty
-        return response == QMessageBox.StandardButton.Discard
+        return self.project_controller.confirm_unsaved_changes()
 
     def _load_project_path(self, path: Path) -> bool:
-        """Restore a selected project path through the normal safe load workflow."""
-        korean = self.translator.language is Language.KOREAN
-        stage = "프로젝트 파일 읽기" if korean else "Reading project file"
-        self.activity_progress.begin(
-            "project_load", "프로젝트 불러오기" if korean else "Loading project",
-            detail=f"{stage} · {path.name}",
-        )
-        QApplication.processEvents()
-        previous_document = ProjectDocument.from_dict(self._project_document().to_dict())
-        previous_path = self.current_project_path
-        previous_legacy_path = self._legacy_project_path
-        previous_dirty = self._project_dirty
-        previous_selection = self.store.selected_ids
-        previous_active = self.store.selected.id if self.store.selected is not None else None
-        apply_started = False
-        try:
-            document = ProjectService.load(path)
-            if document.app_version and document.app_version != __version__:
-                korean = self.translator.language is Language.KOREAN
-                QMessageBox.warning(
-                    self,
-                    "프로젝트 버전 차이" if korean else "Project version differs",
-                    (
-                        "이 프로젝트는 다른 버전의 Playlist Canvas에서 저장되었습니다.\n\n"
-                        f"프로젝트 저장 버전: {document.app_version}\n"
-                        f"현재 프로그램 버전: {__version__}\n\n"
-                        "일부 기능이나 표시 결과가 달라질 수 있습니다. 프로젝트를 계속 엽니다."
-                        if korean else
-                        "This project was saved with a different version of Playlist Canvas.\n\n"
-                        f"Project version: {document.app_version}\n"
-                        f"Current app version: {__version__}\n\n"
-                        "Some features or visual results may differ. The project will continue opening."
-                    ),
-                    QMessageBox.StandardButton.Ok,
-                    QMessageBox.StandardButton.Ok,
-                )
-            if (document.settings.title == "Untitled Project"
-                    and path.suffix.lower() == ".json"):
-                document.settings.title = path.stem.removesuffix(".project")
-            stage = "누락된 미디어 확인" if korean else "Validating project media"
-            self.activity_progress.update("project_load", detail=stage)
-            QApplication.processEvents()
-            if not self._resolve_project_media(document, path):
-                return False
-            stage = "프로젝트 작업공간 적용" if korean else "Applying project workspace"
-            self.activity_progress.update("project_load", 0.8, stage)
-            QApplication.processEvents()
-            self._history_restoring = True
-            apply_started = True
-            try:
-                self._apply_project(document)
-                self.history.reset(self._project_document().to_dict())
-            finally:
-                self._history_restoring = False
-            self.current_project_path = path.resolve()
-            self._legacy_project_path = (
-                self.current_project_path if is_legacy_project_path(self.current_project_path)
-                else None
-            )
-            self.upgrade_project_action.setEnabled(self._legacy_project_path is not None)
-            self.recent_projects.add(self.current_project_path)
-            self._project_dirty = False
-            self._update_project_status()
-            message = "프로젝트를 불러왔습니다." if self.translator.language is Language.KOREAN else "Project loaded."
-            self.statusBar().showMessage(message, 4000)
-            if self._legacy_project_path is not None:
-                QTimer.singleShot(0, self._offer_legacy_upgrade)
-            return True
-        except Exception as error:
-            rollback_error: Exception | None = None
-            if apply_started:
-                try:
-                    self._history_restoring = True
-                    self._apply_project(previous_document)
-                    valid_selection = [
-                        source_id for source_id in previous_selection
-                        if self.store.get(source_id) is not None
-                    ]
-                    active = previous_active if previous_active in valid_selection else None
-                    self.store.select_many(valid_selection, active)
-                    self.history.reset(previous_document.to_dict())
-                except Exception as restore_error:  # pragma: no cover - last-resort diagnostics
-                    rollback_error = restore_error
-                    LOGGER.exception("Failed to restore the workspace after project load failure")
-                finally:
-                    self._history_restoring = False
-            self.current_project_path = previous_path
-            self._legacy_project_path = previous_legacy_path
-            self.upgrade_project_action.setEnabled(previous_legacy_path is not None)
-            self._project_dirty = previous_dirty
-            self._update_project_status()
-            self._show_project_load_crash(path, stage, error, rollback_error)
-            return False
-        finally:
-            self.activity_progress.finish("project_load")
+        return self.project_controller.load_path(path)
 
     def _show_project_load_crash(
         self, path: Path, stage: str, error: Exception,
         rollback_error: Exception | None = None,
     ) -> None:
-        """Show detailed, copyable diagnostics for a recoverable load failure."""
-        LOGGER.exception("Project load failed during %s: %s", stage, path)
-        cause: BaseException = error
-        while cause.__cause__ is not None:
-            cause = cause.__cause__
-        korean = self.translator.language is Language.KOREAN
-        guidance = self._project_load_guidance(cause, korean)
-        traceback_text = "".join(
-            traceback_module.format_exception(type(error), error, error.__traceback__)
-        )
-        rollback_text = ""
-        if rollback_error is not None:
-            rollback_text = (
-                "\n\nWORKSPACE RESTORE ERROR\n" + "".join(
-                    traceback_module.format_exception(
-                        type(rollback_error), rollback_error, rollback_error.__traceback__
-                    )
-                )
-            )
-        resolved_path = path.expanduser().resolve()
-        report = (
-            f"Playlist Canvas {__version__}\n"
-            f"Project: {resolved_path}\n"
-            f"Stage: {stage}\n"
-            f"Exception: {type(error).__name__}: {error}\n"
-            f"Root cause: {type(cause).__name__}: {cause}\n"
-            f"Workspace restored: {'no' if rollback_error else 'yes'}\n\n"
-            f"TRACEBACK\n{traceback_text}{rollback_text}"
-        )
-        ProjectCrashReportDialog(
-            project_path=str(resolved_path),
-            stage=stage,
-            exception_type=type(error).__name__,
-            exception_message=str(error),
-            cause_type=type(cause).__name__,
-            cause_message=str(cause),
-            guidance=guidance,
-            report_text=report,
-            log_path=str(log_directory()),
-            korean=korean,
-            parent=self,
-        ).exec()
+        self.project_controller.show_load_crash(path, stage, error, rollback_error)
 
     @staticmethod
     def _project_load_guidance(error: BaseException, korean: bool) -> str:
-        """Return a practical explanation based on the deepest load exception."""
-        name = type(error).__name__
-        message = str(error).casefold()
-        if name == "JSONDecodeError":
-            return ("프로젝트 JSON 구조가 손상되었습니다. 백업 또는 자동 복구 파일을 사용해 보세요."
-                    if korean else "The project JSON is malformed. Try a backup or autosave recovery file.")
-        if name == "BadZipFile" or "zip" in message:
-            return ("프로젝트 패키지가 손상되었거나 올바른 .pvsproj 파일이 아닙니다. 다시 복사하거나 백업을 사용해 보세요."
-                    if korean else "The project package is damaged or is not a valid .pvsproj file. Copy it again or use a backup.")
-        if name in {"PermissionError", "FileNotFoundError"}:
-            return ("파일 위치와 읽기 권한을 확인한 뒤 다시 시도하세요."
-                    if korean else "Check the file location and read permission, then try again.")
-        if name in {"UnicodeDecodeError", "UnicodeError"}:
-            return ("프로젝트 문자가 UTF-8 형식이 아닙니다. 원본 프로그램에서 다시 저장해 보세요."
-                    if korean else "The project text is not valid UTF-8. Save it again from the original application.")
-        if name in {"ValueError", "TypeError", "KeyError"}:
-            return ("프로젝트 데이터가 지원 형식과 맞지 않습니다. 상세 보고서에서 잘못된 항목을 확인하세요."
-                    if korean else "The project data does not match the supported format. Check the detailed report for the invalid field.")
-        return ("상세 보고서를 복사해 문제 파일과 함께 개발자에게 전달하세요."
-                if korean else "Copy the detailed report and provide it with the problematic file to the developer.")
+        return ProjectController.load_guidance(error, korean)
 
     def _resolve_project_media(self, document: ProjectDocument, project_path: Path) -> bool:
-        """Relink missing project assets before the document changes the live workspace."""
-        missing = ProjectMediaService.validate(document, project_path)
-        if not missing:
-            return True
-        dialog = MissingMediaDialog(missing, self.translator, self)
-        if dialog.exec() != dialog.DialogCode.Accepted:
-            return False
-        ProjectMediaService.apply_replacements(document, missing)
-        return True
+        return self.project_controller.resolve_media(document, project_path)
 
     def _apply_project(self, document: ProjectDocument) -> None:
-        """Restore project content while preserving app-wide UI preferences."""
-        self.project_settings = document.settings
-        self.project_content_service.replace(document.content_library)
-        self._project_theme_metadata = document.theme
-        self._project_language_metadata = document.language
-        self.canvas.scene_model.set_artboard_size(
-            document.canvas.width, document.canvas.height
-        )
-        self.grid_action.setChecked(document.canvas.show_grid)
-        self.snap_action.setChecked(document.canvas.snap_enabled)
-        self.canvas.scene_model.snap_enabled = document.canvas.snap_enabled
-        self.canvas.set_zoom(document.canvas.zoom)
-        self.store.replace(document.sources, document.groups)
-        self.playlist_service.replace(document.playlist)
-        self._synchronize_content_library()
+        self.project_controller.apply(document)
 
     def _project_thumbnail_image(self) -> QImage:
-        """Return the custom thumbnail or a clean raster of the current artboard."""
-        if (self.project_settings.thumbnail_mode == "custom"
-                and self.project_settings.thumbnail_path):
-            image = QImage(self.project_settings.thumbnail_path)
-            if not image.isNull():
-                return image.scaled(
-                    480, 270, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-        image = CanvasSnapshot.capture(self.canvas.scene_model, output_scale=0.5)
-        return image.scaled(
-            480, 270, Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        return self.project_controller.thumbnail_image()
 
     def _show_project_settings(self) -> None:
         """Edit project-scoped identity, content policy, and thumbnail."""
@@ -6449,79 +5840,13 @@ class MainWindow(QMainWindow):
                 )
 
     def _offer_legacy_upgrade(self) -> None:
-        """Offer a non-destructive package upgrade after a legacy JSON load."""
-        if (self._legacy_project_path is None
-                or self.current_project_path != self._legacy_project_path):
-            return
-        korean = self.translator.language is Language.KOREAN
-        response = QMessageBox.question(
-            self,
-            "레거시 프로젝트" if korean else "Legacy project",
-            "이 프로젝트는 레거시 JSON 형식입니다. 원본 JSON은 유지하면서 콘텐츠와 "
-            "썸네일을 포함할 수 있는 .pvsproj 형식으로 업그레이드할까요?"
-            if korean else
-            "This project uses the legacy JSON format. Upgrade it to a .pvsproj package "
-            "that can contain content and a thumbnail? The original JSON will be kept.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if response == QMessageBox.StandardButton.Yes:
-            self._upgrade_legacy_project()
+        self.project_controller.offer_legacy_upgrade()
 
     def _upgrade_legacy_project(self) -> None:
-        """Save the active legacy JSON as a validated portable package."""
-        legacy_path = self._legacy_project_path
-        if legacy_path is None or not legacy_path.is_file():
-            self.upgrade_project_action.setEnabled(False)
-            return
-        base_name = legacy_path.stem.removesuffix(".project")
-        default = legacy_path.with_name(f"{base_name}.pvsproj")
-        selected, _ = QFileDialog.getSaveFileName(
-            self,
-            "업그레이드 프로젝트 저장"
-            if self.translator.language is Language.KOREAN else "Save upgraded project",
-            str(default),
-            "Playlist Canvas Project (*.pvsproj)",
-        )
-        if not selected:
-            return
-        target = Path(selected).expanduser()
-        if target.suffix.lower() != ProjectService.PACKAGE_SUFFIX:
-            target = target.with_suffix(ProjectService.PACKAGE_SUFFIX)
-        try:
-            upgraded = ProjectService.save(
-                target, self._project_document(), self._project_thumbnail_image()
-            )
-            # Reloading verifies both the package container and manifest before the
-            # editor switches its active project away from the original JSON.
-            ProjectService.load(upgraded)
-            self.recent_projects.remove(legacy_path)
-            self.recent_projects.add(upgraded)
-            self.autosave.clear(legacy_path)
-            self.current_project_path = upgraded
-            self._legacy_project_path = None
-            self.upgrade_project_action.setEnabled(False)
-            self._project_dirty = False
-            self._update_project_status()
-            QMessageBox.information(
-                self,
-                "업그레이드 완료" if self.translator.language is Language.KOREAN
-                else "Upgrade complete",
-                f"새 프로젝트 패키지를 저장했습니다.\n{upgraded}"
-                if self.translator.language is Language.KOREAN else
-                f"Saved the upgraded project package.\n{upgraded}",
-            )
-        except ProjectError as error:
-            self._show_project_error(error)
+        self.project_controller.upgrade_legacy_project()
 
     def _show_project_error(self, error: ProjectError) -> None:
-        """Display a concise persistence failure without crashing the application."""
-        LOGGER.error("Project operation failed: %s", error)
-        QMessageBox.critical(
-            self,
-            "프로젝트 오류" if self.translator.language is Language.KOREAN else "Project error",
-            str(error),
-        )
+        self.project_controller.show_error(error)
 
     def _toggle_grid(self, visible: bool) -> None:
         self.canvas.scene_model.show_grid = visible

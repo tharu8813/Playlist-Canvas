@@ -1,0 +1,693 @@
+"""Project new/open/save/load orchestration, extracted from MainWindow.
+
+MainWindow still owns the live state (current path, dirty flag, save
+worker, UI widgets/dialogs) and keeps identically-named thin wrapper
+methods that delegate here, so every existing call site and signal
+connection in main_window.py keeps working unchanged. This is a pure move
+of the persistence-orchestration logic, not a rewrite or a behavior change.
+
+Autosave/recovery orchestration (_autosave_project, _offer_recovery, etc.)
+is deliberately left in MainWindow for a later AutosaveController phase.
+"""
+
+from __future__ import annotations
+
+import logging
+import traceback as traceback_module
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import QEventLoop, Qt, QTimer
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+
+from app.dialogs.missing_media_dialog import MissingMediaDialog
+from app.dialogs.new_project_dialog import NewProjectDialog
+from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
+from app.models.project import CanvasSettings, ProjectDocument, ProjectSettings
+from app.preview.canvas_snapshot import CanvasSnapshot
+from app.services.project_media_service import ProjectMediaService
+from app.services.project_persistence_service import (
+    default_project_path,
+    is_legacy_project_path,
+)
+from app.services.project_save_worker import ProjectSaveWorker
+from app.services.project_service import ProjectError, ProjectService
+from app.utils.i18n import Language
+from app.utils.logging_setup import log_directory
+from app import __version__
+
+if TYPE_CHECKING:
+    from app.ui.main_window import MainWindow
+
+LOGGER = logging.getLogger(__name__)
+
+
+class ProjectController:
+    """Own new/open/save/load orchestration on behalf of a MainWindow."""
+
+    def __init__(self, window: "MainWindow") -> None:
+        self.window = window
+
+    # -- document assembly -------------------------------------------------
+
+    def document(self) -> ProjectDocument:
+        """Collect current UI and domain state into a portable document."""
+        window = self.window
+        artboard = window.canvas.scene_model.artboard_rect
+        canvas = CanvasSettings(
+            width=artboard.width(), height=artboard.height(),
+            show_grid=window.canvas.scene_model.show_grid,
+            snap_enabled=window.canvas.scene_model.snap_enabled,
+            zoom=window.canvas.transform().m11(),
+        )
+        return ProjectDocument(
+            sources=window.store.sources(), playlist=window.playlist_service.tracks,
+            groups=window.store.groups(),
+            canvas=canvas, theme=window._project_theme_metadata,
+            language=window._project_language_metadata,
+            settings=window.project_settings,
+            content_library=window.project_content_service.items,
+        )
+
+    def apply(self, document: ProjectDocument) -> None:
+        """Restore project content while preserving app-wide UI preferences."""
+        window = self.window
+        window.project_settings = document.settings
+        window.project_content_service.replace(document.content_library)
+        window._project_theme_metadata = document.theme
+        window._project_language_metadata = document.language
+        window.canvas.scene_model.set_artboard_size(
+            document.canvas.width, document.canvas.height
+        )
+        window.grid_action.setChecked(document.canvas.show_grid)
+        window.snap_action.setChecked(document.canvas.snap_enabled)
+        window.canvas.scene_model.snap_enabled = document.canvas.snap_enabled
+        window.canvas.set_zoom(document.canvas.zoom)
+        window.store.replace(document.sources, document.groups)
+        window.playlist_service.replace(document.playlist)
+        window._synchronize_content_library()
+
+    def thumbnail_image(self) -> QImage:
+        """Return the custom thumbnail or a clean raster of the current artboard."""
+        window = self.window
+        if (window.project_settings.thumbnail_mode == "custom"
+                and window.project_settings.thumbnail_path):
+            image = QImage(window.project_settings.thumbnail_path)
+            if not image.isNull():
+                return image.scaled(
+                    480, 270, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+        image = CanvasSnapshot.capture(window.canvas.scene_model, output_scale=0.5)
+        return image.scaled(
+            480, 270, Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+    # -- status/error UI -----------------------------------------------
+
+    def update_status(self) -> None:
+        """Keep a compact, non-modal project/save-state indicator in the toolbar."""
+        window = self.window
+        if not hasattr(window, "project_status_label"):
+            return
+        korean = window.translator.language is Language.KOREAN
+        name = window.project_settings.title or (
+            "새 프로젝트" if korean else "New project"
+        )
+        saving = (
+            window._project_save_worker is not None
+            and window._project_save_worker.isRunning()
+        )
+        state = (
+            "저장 중" if korean and saving else
+            "Saving" if saving else
+            "저장됨" if korean and not window._project_dirty else
+            "저장 필요" if korean else
+            "Saved" if not window._project_dirty else "Unsaved"
+        )
+        legacy = " · 레거시 JSON" if korean and window._legacy_project_path else (
+            " · Legacy JSON" if window._legacy_project_path else ""
+        )
+        window.project_status_label.setText(f"{name}  ·  {state}{legacy}")
+        window.project_status_label.setToolTip(
+            "프로젝트 스냅샷을 백그라운드에서 저장하고 있습니다."
+            if korean and saving else
+            "The project snapshot is being saved in the background."
+            if saving else
+            "이 프로젝트는 레거시 JSON입니다. 프로젝트 메뉴에서 .pvsproj로 업그레이드할 수 있습니다."
+            if korean and window._legacy_project_path else
+            "This is a legacy JSON project. Upgrade it to .pvsproj from the Project menu."
+            if window._legacy_project_path else
+            "프로젝트를 저장하려면 Ctrl+S를 누르세요." if korean and window._project_dirty else
+            "프로젝트가 저장되어 있습니다." if korean else
+            "Press Ctrl+S to save this project." if window._project_dirty else
+            "This project is saved."
+        )
+
+    def show_error(self, error: ProjectError) -> None:
+        """Display a concise persistence failure without crashing the application."""
+        window = self.window
+        LOGGER.error("Project operation failed: %s", error)
+        QMessageBox.critical(
+            window,
+            "프로젝트 오류" if window.translator.language is Language.KOREAN else "Project error",
+            str(error),
+        )
+
+    # -- new project ---------------------------------------------------
+
+    def new_project(self, *, confirm_unsaved: bool = True) -> bool:
+        window = self.window
+        if confirm_unsaved and not window._confirm_unsaved_changes():
+            return False
+        dialog = NewProjectDialog(window.translator, window)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return False
+        canvas_width, canvas_height = dialog.canvas_size
+        selected_preset = dialog.selected_design_preset
+        previous_project_path = window.current_project_path
+        window._history_restoring = True
+        try:
+            window.current_project_path = None
+            window._legacy_project_path = None
+            if hasattr(window, "upgrade_project_action"):
+                window.upgrade_project_action.setEnabled(False)
+            window.project_settings = ProjectSettings()
+            window._project_theme_metadata = window.theme_service.preference.value
+            window._project_language_metadata = window.translator.language.value
+            window.project_content_service.replace([])
+            window.store.replace([])
+            window.playlist_service.replace([])
+            window.canvas.scene_model.set_artboard_size(canvas_width, canvas_height)
+            window.grid_action.setChecked(True)
+            window.snap_action.setChecked(True)
+            window.canvas.scene_model.snap_enabled = True
+            if selected_preset is None:
+                window._add_welcome_sources()
+            else:
+                window.store.replace(window._preset_sources_for_canvas(
+                    selected_preset, canvas_width, canvas_height,
+                ))
+            window.canvas.fit_artboard()
+        finally:
+            window._history_restoring = False
+        try:
+            window.autosave.clear(previous_project_path)
+            window.autosave.clear(None)
+        except ProjectError as error:
+            window.statusBar().showMessage(str(error), 5000)
+        if window._history_ready:
+            window.history.reset(window._project_document().to_dict())
+            window._project_dirty = True
+            window._autosave_debounce_timer.start()
+        else:
+            window._project_dirty = False
+        window._update_project_status()
+        return True
+
+    def show_project_start_dialog(self) -> bool:
+        """Reuse the launch project chooser for File > New and the toolbar action."""
+        # Imported here (not at module scope) so tests that patch
+        # app.ui.main_window.StartupDialog still intercept it.
+        from app.ui.main_window import StartupDialog
+
+        window = self.window
+        if not window._confirm_unsaved_changes():
+            return False
+        while True:
+            dialog = StartupDialog(window.translator, window.recent_projects, window)
+            if dialog.exec() != dialog.DialogCode.Accepted:
+                return False
+            if dialog.action == StartupDialog.NEW_PROJECT:
+                if window._new_project(confirm_unsaved=False):
+                    return True
+                continue
+            if dialog.project_path is not None and window._load_project_path(dialog.project_path):
+                return True
+
+    def show_startup_dialog(self) -> bool:
+        """Block the editor until the user chooses how to start the session."""
+        from app.ui.main_window import StartupDialog
+
+        window = self.window
+        # Recovery belongs before the project choice.  Requiring the user to click
+        # "New project" first meant a newer snapshot could be silently skipped when
+        # they opened the older saved project from Recents.
+        if window._offer_recovery():
+            return True
+        while window.isVisible():
+            dialog = StartupDialog(window.translator, window.recent_projects, window)
+            if dialog.exec() != dialog.DialogCode.Accepted:
+                return False
+            if dialog.action == StartupDialog.NEW_PROJECT:
+                if window._new_project(confirm_unsaved=False):
+                    return True
+                continue
+            if dialog.project_path is not None and window._load_project_path(dialog.project_path):
+                return True
+        return False
+
+    # -- save ------------------------------------------------------------
+
+    def save(
+        self, force_choose: bool = False, *, wait_for_completion: bool = False,
+    ) -> bool:
+        """Start a background save and optionally wait in a responsive event loop."""
+        window = self.window
+        active_worker = window._project_save_worker
+        if active_worker is not None:
+            window.statusBar().showMessage(
+                "이미 프로젝트를 저장하고 있습니다."
+                if window.translator.language is Language.KOREAN
+                else "The project is already being saved.",
+                3000,
+            )
+            if wait_for_completion:
+                window._wait_for_project_save(active_worker)
+                return window._project_save_succeeded is True
+            return False
+        target = None if force_choose else window.current_project_path
+        if target is None:
+            default = str(default_project_path(window.project_settings.title))
+            selected, _ = QFileDialog.getSaveFileName(
+                window,
+                "프로젝트 저장" if window.translator.language is Language.KOREAN else "Save project",
+                default,
+                "Playlist Canvas Project (*.pvsproj);;Legacy JSON Project (*.project.json *.json)",
+            )
+            if not selected:
+                return False
+            target = Path(selected)
+        try:
+            document_data = window._project_document().to_dict()
+            thumbnail = QImage(window._project_thumbnail_image())
+        except (TypeError, ValueError) as error:
+            window._show_project_error(
+                ProjectError(f"Could not prepare project save: {error}")
+            )
+            return False
+
+        previous_project_path = window.current_project_path
+        worker = ProjectSaveWorker(target, document_data, thumbnail)
+        window._project_save_worker = worker
+        window._project_save_context = (
+            window._project_change_serial, previous_project_path,
+        )
+        window._project_save_succeeded = None
+        worker.succeeded.connect(window._project_save_finished_successfully)
+        worker.failed.connect(window._project_save_failed)
+        worker.finished.connect(lambda: window._project_save_thread_finished(worker))
+        window.save_action.setEnabled(False)
+        window.save_as_action.setEnabled(False)
+        window._autosave_debounce_timer.stop()
+        window.statusBar().showMessage(
+            "프로젝트 저장 중..." if window.translator.language is Language.KOREAN
+            else "Saving project..."
+        )
+        korean = window.translator.language is Language.KOREAN
+        window.activity_progress.begin(
+            "project_save", "프로젝트 저장" if korean else "Saving project",
+            detail=Path(target).name,
+        )
+        worker.start()
+        window._update_project_status()
+        if wait_for_completion:
+            window._wait_for_project_save(worker)
+            return window._project_save_succeeded is True
+        return True
+
+    def wait_for_save(self, worker: ProjectSaveWorker) -> None:
+        """Wait for a required save while continuing to process Qt events."""
+        if worker.isRunning():
+            event_loop = QEventLoop(self.window)
+            worker.finished.connect(event_loop.quit)
+            event_loop.exec()
+        QApplication.processEvents()
+
+    def save_finished_successfully(self, saved_path: object) -> None:
+        """Commit saved state without hiding edits made during the save."""
+        window = self.window
+        context = window._project_save_context
+        if context is None:
+            return
+        saved_serial, previous_project_path = context
+        try:
+            window.current_project_path = Path(saved_path)
+            window._legacy_project_path = (
+                window.current_project_path if is_legacy_project_path(window.current_project_path)
+                else None
+            )
+            window.upgrade_project_action.setEnabled(window._legacy_project_path is not None)
+            window.recent_projects.add(window.current_project_path)
+            unchanged_since_snapshot = saved_serial == window._project_change_serial
+            window._project_dirty = not unchanged_since_snapshot
+            if unchanged_since_snapshot:
+                window.autosave.clear(previous_project_path)
+                window.autosave.clear(window.current_project_path)
+            else:
+                window._autosave_debounce_timer.start()
+            window._update_project_status()
+            korean = window.translator.language is Language.KOREAN
+            message = (
+                "프로젝트를 저장했습니다. 저장 중 변경된 내용은 아직 저장되지 않았습니다."
+                if korean and not unchanged_since_snapshot else
+                "Project saved. Changes made during saving remain unsaved."
+                if not unchanged_since_snapshot else
+                "프로젝트를 저장했습니다." if korean else "Project saved."
+            )
+            window.statusBar().showMessage(message, 4000)
+        except ProjectError as error:
+            window._show_project_error(error)
+            window._project_save_succeeded = False
+            return
+        window._project_save_succeeded = True
+
+    def save_failed(self, message: str) -> None:
+        window = self.window
+        window._project_save_succeeded = False
+        if window._project_dirty:
+            window._autosave_debounce_timer.start()
+        window._show_project_error(ProjectError(message))
+
+    def save_thread_finished(self, worker: ProjectSaveWorker) -> None:
+        window = self.window
+        window.activity_progress.finish("project_save")
+        if window._project_save_worker is worker:
+            window._project_save_worker = None
+            window._project_save_context = None
+        window.save_action.setEnabled(True)
+        window.save_as_action.setEnabled(True)
+        window._update_project_status()
+        worker.deleteLater()
+
+    # -- open/load ---------------------------------------------------------
+
+    def open_project(self) -> None:
+        """Choose a portable package or legacy JSON project."""
+        window = self.window
+        selected, _ = QFileDialog.getOpenFileName(
+            window,
+            "프로젝트 열기" if window.translator.language is Language.KOREAN else "Open project",
+            "",
+            "Playlist Canvas Project (*.pvsproj *.project.json *.json)",
+        )
+        if not selected:
+            return
+        window._open_project_with_confirmation(Path(selected))
+
+    def open_project_with_confirmation(self, path: Path) -> bool:
+        """Replace the workspace after safely resolving unsaved changes."""
+        window = self.window
+        previous_project_path = window.current_project_path
+        had_unsaved_changes = window._project_dirty
+        if not window._confirm_unsaved_changes():
+            return False
+        loaded = window._load_project_path(Path(path))
+        if loaded and had_unsaved_changes:
+            try:
+                window.autosave.clear(previous_project_path)
+            except ProjectError as error:
+                window.statusBar().showMessage(str(error), 5000)
+        return loaded
+
+    def open_project_path(self, path: Path) -> bool:
+        """Open a project requested by Explorer or another external launcher."""
+        return self.window._load_project_path(Path(path))
+
+    def confirm_unsaved_changes(self) -> bool:
+        """Save, explicitly discard, or keep the active unsaved workspace."""
+        window = self.window
+        # Opening/replacing the workspace while an older snapshot is still
+        # saving would let its completion overwrite the new active path.
+        if window._project_save_worker is not None:
+            window._wait_for_project_save(window._project_save_worker)
+        if not window._project_dirty:
+            return True
+        korean = window.translator.language is Language.KOREAN
+        response = QMessageBox.warning(
+            window,
+            "저장되지 않은 변경 사항" if korean else "Unsaved changes",
+            "현재 프로젝트에 저장되지 않은 변경 사항이 있습니다. 계속하기 전에 저장할까요?"
+            if korean else
+            "The current project has unsaved changes. Save before continuing?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if response == QMessageBox.StandardButton.Save:
+            window._save_project(wait_for_completion=True)
+            return not window._project_dirty
+        return response == QMessageBox.StandardButton.Discard
+
+    def load_path(self, path: Path) -> bool:
+        """Restore a selected project path through the normal safe load workflow."""
+        window = self.window
+        korean = window.translator.language is Language.KOREAN
+        stage = "프로젝트 파일 읽기" if korean else "Reading project file"
+        window.activity_progress.begin(
+            "project_load", "프로젝트 불러오기" if korean else "Loading project",
+            detail=f"{stage} · {path.name}",
+        )
+        QApplication.processEvents()
+        previous_document = ProjectDocument.from_dict(window._project_document().to_dict())
+        previous_path = window.current_project_path
+        previous_legacy_path = window._legacy_project_path
+        previous_dirty = window._project_dirty
+        previous_selection = window.store.selected_ids
+        previous_active = window.store.selected.id if window.store.selected is not None else None
+        apply_started = False
+        try:
+            document = ProjectService.load(path)
+            if document.app_version and document.app_version != __version__:
+                korean = window.translator.language is Language.KOREAN
+                QMessageBox.warning(
+                    window,
+                    "프로젝트 버전 차이" if korean else "Project version differs",
+                    (
+                        "이 프로젝트는 다른 버전의 Playlist Canvas에서 저장되었습니다.\n\n"
+                        f"프로젝트 저장 버전: {document.app_version}\n"
+                        f"현재 프로그램 버전: {__version__}\n\n"
+                        "일부 기능이나 표시 결과가 달라질 수 있습니다. 프로젝트를 계속 엽니다."
+                        if korean else
+                        "This project was saved with a different version of Playlist Canvas.\n\n"
+                        f"Project version: {document.app_version}\n"
+                        f"Current app version: {__version__}\n\n"
+                        "Some features or visual results may differ. The project will continue opening."
+                    ),
+                    QMessageBox.StandardButton.Ok,
+                    QMessageBox.StandardButton.Ok,
+                )
+            if (document.settings.title == "Untitled Project"
+                    and path.suffix.lower() == ".json"):
+                document.settings.title = path.stem.removesuffix(".project")
+            stage = "누락된 미디어 확인" if korean else "Validating project media"
+            window.activity_progress.update("project_load", detail=stage)
+            QApplication.processEvents()
+            if not window._resolve_project_media(document, path):
+                return False
+            stage = "프로젝트 작업공간 적용" if korean else "Applying project workspace"
+            window.activity_progress.update("project_load", 0.8, stage)
+            QApplication.processEvents()
+            window._history_restoring = True
+            apply_started = True
+            try:
+                window._apply_project(document)
+                window.history.reset(window._project_document().to_dict())
+            finally:
+                window._history_restoring = False
+            window.current_project_path = path.resolve()
+            window._legacy_project_path = (
+                window.current_project_path if is_legacy_project_path(window.current_project_path)
+                else None
+            )
+            window.upgrade_project_action.setEnabled(window._legacy_project_path is not None)
+            window.recent_projects.add(window.current_project_path)
+            window._project_dirty = False
+            window._update_project_status()
+            message = "프로젝트를 불러왔습니다." if window.translator.language is Language.KOREAN else "Project loaded."
+            window.statusBar().showMessage(message, 4000)
+            if window._legacy_project_path is not None:
+                QTimer.singleShot(0, window._offer_legacy_upgrade)
+            return True
+        except Exception as error:
+            rollback_error: Exception | None = None
+            if apply_started:
+                try:
+                    window._history_restoring = True
+                    window._apply_project(previous_document)
+                    valid_selection = [
+                        source_id for source_id in previous_selection
+                        if window.store.get(source_id) is not None
+                    ]
+                    active = previous_active if previous_active in valid_selection else None
+                    window.store.select_many(valid_selection, active)
+                    window.history.reset(previous_document.to_dict())
+                except Exception as restore_error:  # pragma: no cover - last-resort diagnostics
+                    rollback_error = restore_error
+                    LOGGER.exception("Failed to restore the workspace after project load failure")
+                finally:
+                    window._history_restoring = False
+            window.current_project_path = previous_path
+            window._legacy_project_path = previous_legacy_path
+            window.upgrade_project_action.setEnabled(previous_legacy_path is not None)
+            window._project_dirty = previous_dirty
+            window._update_project_status()
+            window._show_project_load_crash(path, stage, error, rollback_error)
+            return False
+        finally:
+            window.activity_progress.finish("project_load")
+
+    def show_load_crash(
+        self, path: Path, stage: str, error: Exception,
+        rollback_error: Exception | None = None,
+    ) -> None:
+        """Show detailed, copyable diagnostics for a recoverable load failure."""
+        window = self.window
+        LOGGER.exception("Project load failed during %s: %s", stage, path)
+        cause: BaseException = error
+        while cause.__cause__ is not None:
+            cause = cause.__cause__
+        korean = window.translator.language is Language.KOREAN
+        guidance = window._project_load_guidance(cause, korean)
+        traceback_text = "".join(
+            traceback_module.format_exception(type(error), error, error.__traceback__)
+        )
+        rollback_text = ""
+        if rollback_error is not None:
+            rollback_text = (
+                "\n\nWORKSPACE RESTORE ERROR\n" + "".join(
+                    traceback_module.format_exception(
+                        type(rollback_error), rollback_error, rollback_error.__traceback__
+                    )
+                )
+            )
+        resolved_path = path.expanduser().resolve()
+        report = (
+            f"Playlist Canvas {__version__}\n"
+            f"Project: {resolved_path}\n"
+            f"Stage: {stage}\n"
+            f"Exception: {type(error).__name__}: {error}\n"
+            f"Root cause: {type(cause).__name__}: {cause}\n"
+            f"Workspace restored: {'no' if rollback_error else 'yes'}\n\n"
+            f"TRACEBACK\n{traceback_text}{rollback_text}"
+        )
+        ProjectCrashReportDialog(
+            project_path=str(resolved_path),
+            stage=stage,
+            exception_type=type(error).__name__,
+            exception_message=str(error),
+            cause_type=type(cause).__name__,
+            cause_message=str(cause),
+            guidance=guidance,
+            report_text=report,
+            log_path=str(log_directory()),
+            korean=korean,
+            parent=window,
+        ).exec()
+
+    @staticmethod
+    def load_guidance(error: BaseException, korean: bool) -> str:
+        """Return a practical explanation based on the deepest load exception."""
+        name = type(error).__name__
+        message = str(error).casefold()
+        if name == "JSONDecodeError":
+            return ("프로젝트 JSON 구조가 손상되었습니다. 백업 또는 자동 복구 파일을 사용해 보세요."
+                    if korean else "The project JSON is malformed. Try a backup or autosave recovery file.")
+        if name == "BadZipFile" or "zip" in message:
+            return ("프로젝트 패키지가 손상되었거나 올바른 .pvsproj 파일이 아닙니다. 다시 복사하거나 백업을 사용해 보세요."
+                    if korean else "The project package is damaged or is not a valid .pvsproj file. Copy it again or use a backup.")
+        if name in {"PermissionError", "FileNotFoundError"}:
+            return ("파일 위치와 읽기 권한을 확인한 뒤 다시 시도하세요."
+                    if korean else "Check the file location and read permission, then try again.")
+        if name in {"UnicodeDecodeError", "UnicodeError"}:
+            return ("프로젝트 문자가 UTF-8 형식이 아닙니다. 원본 프로그램에서 다시 저장해 보세요."
+                    if korean else "The project text is not valid UTF-8. Save it again from the original application.")
+        if name in {"ValueError", "TypeError", "KeyError"}:
+            return ("프로젝트 데이터가 지원 형식과 맞지 않습니다. 상세 보고서에서 잘못된 항목을 확인하세요."
+                    if korean else "The project data does not match the supported format. Check the detailed report for the invalid field.")
+        return ("상세 보고서를 복사해 문제 파일과 함께 개발자에게 전달하세요."
+                if korean else "Copy the detailed report and provide it with the problematic file to the developer.")
+
+    def resolve_media(self, document: ProjectDocument, project_path: Path) -> bool:
+        """Relink missing project assets before the document changes the live workspace."""
+        window = self.window
+        missing = ProjectMediaService.validate(document, project_path)
+        if not missing:
+            return True
+        dialog = MissingMediaDialog(missing, window.translator, window)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return False
+        ProjectMediaService.apply_replacements(document, missing)
+        return True
+
+    # -- legacy upgrade ------------------------------------------------
+
+    def offer_legacy_upgrade(self) -> None:
+        """Offer a non-destructive package upgrade after a legacy JSON load."""
+        window = self.window
+        if (window._legacy_project_path is None
+                or window.current_project_path != window._legacy_project_path):
+            return
+        korean = window.translator.language is Language.KOREAN
+        response = QMessageBox.question(
+            window,
+            "레거시 프로젝트" if korean else "Legacy project",
+            "이 프로젝트는 레거시 JSON 형식입니다. 원본 JSON은 유지하면서 콘텐츠와 "
+            "썸네일을 포함할 수 있는 .pvsproj 형식으로 업그레이드할까요?"
+            if korean else
+            "This project uses the legacy JSON format. Upgrade it to a .pvsproj package "
+            "that can contain content and a thumbnail? The original JSON will be kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if response == QMessageBox.StandardButton.Yes:
+            window._upgrade_legacy_project()
+
+    def upgrade_legacy_project(self) -> None:
+        """Save the active legacy JSON as a validated portable package."""
+        window = self.window
+        legacy_path = window._legacy_project_path
+        if legacy_path is None or not legacy_path.is_file():
+            window.upgrade_project_action.setEnabled(False)
+            return
+        base_name = legacy_path.stem.removesuffix(".project")
+        default = legacy_path.with_name(f"{base_name}.pvsproj")
+        selected, _ = QFileDialog.getSaveFileName(
+            window,
+            "업그레이드 프로젝트 저장"
+            if window.translator.language is Language.KOREAN else "Save upgraded project",
+            str(default),
+            "Playlist Canvas Project (*.pvsproj)",
+        )
+        if not selected:
+            return
+        target = Path(selected).expanduser()
+        if target.suffix.lower() != ProjectService.PACKAGE_SUFFIX:
+            target = target.with_suffix(ProjectService.PACKAGE_SUFFIX)
+        try:
+            upgraded = ProjectService.save(
+                target, window._project_document(), window._project_thumbnail_image()
+            )
+            # Reloading verifies both the package container and manifest before the
+            # editor switches its active project away from the original JSON.
+            ProjectService.load(upgraded)
+            window.recent_projects.remove(legacy_path)
+            window.recent_projects.add(upgraded)
+            window.autosave.clear(legacy_path)
+            window.current_project_path = upgraded
+            window._legacy_project_path = None
+            window.upgrade_project_action.setEnabled(False)
+            window._project_dirty = False
+            window._update_project_status()
+            QMessageBox.information(
+                window,
+                "업그레이드 완료" if window.translator.language is Language.KOREAN
+                else "Upgrade complete",
+                f"새 프로젝트 패키지를 저장했습니다.\n{upgraded}"
+                if window.translator.language is Language.KOREAN else
+                f"Saved the upgraded project package.\n{upgraded}",
+            )
+        except ProjectError as error:
+            window._show_project_error(error)
