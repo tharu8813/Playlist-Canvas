@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.inspector.editors import progress_editor, shape_editor
 from app.models.source import Source, SourceType
 from app.models.source_registry import source_registry
 from app.dialogs.color_editor_dialog import ColorEditorDialog
@@ -2600,3 +2601,10 @@ def _inspect_legacy_source(inspector: SourceInspector, source: Source) -> None:
 # Keep the shared editor until the type-specific split in Phase 7.
 for _source_type in SourceType:
     source_registry.get(_source_type).inspector = _inspect_legacy_source
+
+# Phase 7: split per-type editors replace the legacy dispatch one type at a
+# time. _update_legacy_source_specific_fields keeps every type's logic
+# (including these two) so tests/test_source_registry.py can keep comparing
+# registered field visibility against the legacy reference.
+source_registry.get(SourceType.SHAPE).inspector = shape_editor.edit
+source_registry.get(SourceType.PROGRESS_BAR).inspector = progress_editor.edit

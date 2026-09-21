@@ -1,6 +1,8 @@
-# Phase 7: SourceItem / Inspector Split (renderer slice 1)
+# Phase 7: SourceItem / Inspector Split
 
-## Scope of this slice
+## Slice 1 — renderer (SHAPE, PROGRESS_BAR)
+
+### Scope of this slice
 
 `SourceItem._paint_legacy` is one continuous procedure: a shared preamble
 (opacity, fill/gradient, pen, shadow), a long `if`/`elif` chain per
@@ -10,12 +12,11 @@ makes a type's drawing code cleanly extractable without touching the rest.
 `SourceInspector._update_legacy_source_specific_fields` is a different
 shape: one flat function that sets visibility for every field in sequence,
 each gated by a `source_type is X` condition, not a branch-per-type
-dispatch. Splitting it by type safely needs its own redesign (e.g. hide
-everything by default, then let each type's editor turn on only its own
-fields) rather than a mechanical extraction. That is deferred to the next
-Phase 7 slice; this slice covers the renderer side only.
+dispatch. Splitting it safely needed its own design (see Slice 2 below)
+rather than a mechanical extraction, so this slice covers the renderer
+side only.
 
-## Changes
+### Changes
 
 - Added `app/canvas/renderers/base.py`: `paint_background(item, painter)`
   and `paint_selection_guide(item, painter, rect)`, extracted verbatim from
@@ -33,7 +34,7 @@ Phase 7 slice; this slice covers the renderer side only.
   the registered renderer against, for every type, every run. No branches
   were deleted from it.
 
-## Validation
+### Validation
 
 - `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged --
   this includes the existing pixel-for-pixel comparison of
@@ -41,19 +42,59 @@ Phase 7 slice; this slice covers the renderer side only.
   types) against `item._paint_legacy()`, for all 17 types.
 - `test_main_window.py`: 245 passed.
 - Full isolated suite via `scripts/run_tests.py`: 40/41 modules passed;
-  the one failure is the already-documented pre-existing
-  `test_language_packs` cp949-encoding flakiness, unrelated to this change
-  (see `HANDOFF.md`).
+  the one failure is a pre-existing `test_language_packs` cp949-console-
+  encoding flakiness in `scripts/run_tests.py` under this machine's
+  Korean locale, reproduced identically on the pre-refactor code and
+  therefore unrelated to this change.
+
+## Slice 2 — inspector (SHAPE, PROGRESS_BAR)
+
+### Design
+
+`_update_legacy_source_specific_fields` has no per-type branch to lift
+out, so the split instead introduces `app/inspector/editors/base.py`:
+
+- `TYPE_SPECIFIC_FIELD_KEYS`: every field key the legacy function toggles
+  purely by `source_type` (i.e. everything except the always-visible
+  shadow group and the toggle-dependent rows `_hide_inactive_dependent_fields`
+  already owns independently of type, such as `gradient_start`/`outline_color`).
+- `hide_type_specific_fields(inspector)`: sets all of those to `False`.
+  A per-type editor calls this first, then shows only the fields it owns.
+- `apply_shared_fields(inspector, source)`: the handful of fields every
+  type applies the same way -- `text_color` (via the existing
+  `_uses_primary_text_color` helper, not tied to one type) and the
+  always-visible shadow group.
+- `finish(inspector, source)`: the same closing steps the legacy function
+  ran (`_hide_inactive_dependent_fields`, `_refresh_property_tabs`).
+
+`app/inspector/editors/shape_editor.py` and `progress_editor.py` each
+call `hide_type_specific_fields` → show their own fields (`"shape"`;
+`"progress_style"`/`"progress_value"`/`"progress_track_color"`/`"progress_mode"`)
+→ `apply_shared_fields` → `finish`. `source_inspector.py` registers these
+two directly; the other 15 types stay on the shared
+`_inspect_legacy_source` adapter, and
+`_update_legacy_source_specific_fields` is untouched (still the reference
+`tests/test_source_registry.py`'s
+`test_registered_inspector_matches_legacy_fields_and_clears_selection`
+compares every type's registered field-visibility dict against).
+
+### Validation
+
+- `tests/test_source_registry.py` (7 tests, 57 subtests) passed unchanged,
+  including the field-visibility-dict comparison for all 17 types.
+- `test_main_window.py`: 245 passed.
+- Full isolated suite via `scripts/run_tests.py`: 40/41 modules passed;
+  the one failure is the same pre-existing `test_language_packs`
+  flakiness noted above.
 
 ## Remaining work
 
-- 15 of 17 SourceTypes still render through `_paint_legacy`. Continue
-  splitting types with a similar branch shape (e.g. `BACKGROUND`,
-  `ALBUM_COVER`) the same way.
-- The Inspector split needs a design pass first: decide how a per-type
-  editor function states "everything else is hidden" without repeating a
-  long list of `_set_field_visible(..., False)` calls per type, then
-  extract type by type behind the existing
-  `test_registered_inspector_matches_legacy_fields_and_clears_selection`
-  pixel/field-equivalence test the same way the renderer split used
-  `test_registered_rendering_matches_legacy_pixels_for_every_type`.
+- 15 of 17 `SourceType`s still render and edit through the legacy
+  adapters. Continue splitting types with a similar shape (e.g.
+  `BACKGROUND`, `ALBUM_COVER`) the same way, on both the renderer and
+  inspector sides, behind the two equivalence tests above.
+- `SourceItem` and `SourceInspector` still own selection/resize/rotation,
+  animation preview wiring, and the shared form-building machinery
+  (`_slider_spin_editor`, `_connect_fields`, etc.) -- those stay put;
+  Phase 7 only moves the type-specific drawing and field-visibility
+  bodies out.
