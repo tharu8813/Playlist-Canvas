@@ -2171,13 +2171,10 @@ def _render_legacy_source(
 
 
 # Bind in the UI layer: core model imports must not initialize Qt multimedia.
-for _source_type in SourceType:
-    source_registry.get(_source_type).renderer = _render_legacy_source
-
-# Phase 7: split per-type renderers replace the legacy dispatch one type at a
-# time. _paint_legacy keeps every type's code (including these two) so
-# tests/test_source_registry.py can keep comparing registered output against
-# the legacy reference pixel-for-pixel.
+# Phase 7 split every SourceType onto its own dedicated renderer below;
+# _paint_legacy keeps every type's code so tests/test_source_registry.py can
+# keep comparing registered output against the legacy reference pixel-for-
+# pixel, but _render_legacy_source is no longer bound to any type here.
 source_registry.get(SourceType.SHAPE).renderer = shape_renderer.render
 source_registry.get(SourceType.PROGRESS_BAR).renderer = progress_renderer.render
 source_registry.get(SourceType.BACKGROUND).renderer = background_renderer.render

@@ -2616,14 +2616,11 @@ def _inspect_legacy_source(inspector: SourceInspector, source: Source) -> None:
     inspector._update_legacy_source_specific_fields(source)
 
 
-# Keep the shared editor until the type-specific split in Phase 7.
-for _source_type in SourceType:
-    source_registry.get(_source_type).inspector = _inspect_legacy_source
-
-# Phase 7: split per-type editors replace the legacy dispatch one type at a
-# time. _update_legacy_source_specific_fields keeps every type's logic
-# (including these two) so tests/test_source_registry.py can keep comparing
-# registered field visibility against the legacy reference.
+# Phase 7 split every SourceType onto its own dedicated editor below;
+# _update_legacy_source_specific_fields keeps every type's logic so
+# tests/test_source_registry.py can keep comparing registered field
+# visibility against the legacy reference, but _inspect_legacy_source is no
+# longer bound to any type here.
 source_registry.get(SourceType.SHAPE).inspector = shape_editor.edit
 source_registry.get(SourceType.PROGRESS_BAR).inspector = progress_editor.edit
 source_registry.get(SourceType.BACKGROUND).inspector = background_editor.edit
