@@ -9,7 +9,11 @@ relied on before the extraction."""
 import unittest
 
 from app.models.playlist import PlaylistTrack
-from app.preview.frame_state import resolve_lyrics_cue_state, resolve_now_playing_exit_state
+from app.models.source import Source, SourceType
+from app.preview.frame_state import (
+    resolve_lyrics_cue_state, resolve_now_playing_exit_state,
+    resolve_timeline_window_phase,
+)
 
 
 def _track(lyrics: list[dict[str, object]], offset: float = 0.0) -> PlaylistTrack:
@@ -104,6 +108,44 @@ class NowPlayingExitStateTests(unittest.TestCase):
         state = resolve_now_playing_exit_state(5.0, 5.0, 0.0)
         self.assertTrue(state.visible)
         self.assertIsNone(state.exit_progress)
+
+
+class TimelineWindowPhaseTests(unittest.TestCase):
+    def test_no_window_never_phases(self) -> None:
+        source = Source(SourceType.SHAPE, "Static", animation_in="slide_left")
+        phase, progress = resolve_timeline_window_phase(source, 5.0)
+        self.assertIsNone(phase)
+        self.assertEqual(progress, 1.0)
+
+    def test_window_with_no_animation_style_never_phases(self) -> None:
+        source = Source(SourceType.SHAPE, "Windowed", timeline_start=1.0)
+        phase, progress = resolve_timeline_window_phase(source, 1.0)
+        self.assertIsNone(phase)
+        self.assertEqual(progress, 1.0)
+
+    def test_entrance_progresses_across_the_window_start(self) -> None:
+        source = Source(
+            SourceType.SHAPE, "Windowed", timeline_start=1.0,
+            animation_in="slide_left", animation_in_duration=1.0,
+        )
+        just_started = resolve_timeline_window_phase(source, 1.0)
+        self.assertEqual(just_started, ("in", 0.0))
+        halfway = resolve_timeline_window_phase(source, 1.5)
+        self.assertEqual(halfway, ("in", 0.5))
+        after = resolve_timeline_window_phase(source, 2.0)
+        self.assertEqual(after, (None, 1.0))
+
+    def test_exit_progresses_across_the_window_end(self) -> None:
+        source = Source(
+            SourceType.SHAPE, "Windowed", timeline_start=1.0,
+            timeline_duration=4.0,
+            animation_out="slide_right", animation_out_duration=1.0,
+        )
+        # Window spans [1.0, 5.0); exit ramps across the final second.
+        just_started = resolve_timeline_window_phase(source, 4.0)
+        self.assertEqual(just_started, ("out", 0.0))
+        halfway = resolve_timeline_window_phase(source, 4.5)
+        self.assertEqual(halfway, ("out", 0.5))
 
 
 if __name__ == "__main__":

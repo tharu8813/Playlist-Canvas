@@ -27,7 +27,10 @@ from app.preview.album_art import (
     extract_track_cover,
     extract_track_personal_color,
 )
-from app.preview.frame_state import resolve_lyrics_cue_state, resolve_now_playing_exit_state
+from app.preview.frame_state import (
+    resolve_lyrics_cue_state, resolve_now_playing_exit_state,
+    resolve_timeline_window_phase,
+)
 from app.preview.text_template import (
     TEXT_TEMPLATE_TOKEN_NAMES,
     expand_track_template,
@@ -1045,7 +1048,7 @@ class CanvasSnapshot:
                     graphics_item, original, gradient_original,
                 ))
                 graphics_item.update()
-            window_phase, window_progress = CanvasSnapshot._timeline_window_phase(
+            window_phase, window_progress = resolve_timeline_window_phase(
                 source, global_seconds,
             )
             source_has_window = source.timeline_start > 0.0 or source.timeline_duration > 0.0
@@ -1201,34 +1204,6 @@ class CanvasSnapshot:
                 graphics_item.setRotation(rotation)
                 graphics_item.setOpacity(opacity)
                 graphics_item._suppress_position_sync = False
-
-    @staticmethod
-    def _timeline_window_phase(
-        source: Source, global_seconds: float,
-    ) -> tuple[str | None, float]:
-        """Return the in/out phase for a source at its own timeline-window edge.
-
-        Sources restricted to a portion of the playlist previously appeared and
-        vanished with a hard cut. When they carry an entrance or exit style,
-        animate them across that style's duration on either side of the window.
-        """
-        start = source.timeline_start
-        duration = source.timeline_duration
-        if start <= 0.0 and duration <= 0.0:
-            return None, 1.0
-        in_duration = (
-            source.animation_in_duration if source.animation_in != "none" else 0.0
-        )
-        out_duration = (
-            source.animation_out_duration if source.animation_out != "none" else 0.0
-        )
-        if in_duration > 0.0 and start <= global_seconds < start + in_duration:
-            return "in", (global_seconds - start) / in_duration
-        if duration > 0.0 and out_duration > 0.0:
-            end = start + duration
-            if end - out_duration <= global_seconds < end:
-                return "out", (global_seconds - (end - out_duration)) / out_duration
-        return None, 1.0
 
     @staticmethod
     def _personal_color_fields(source: Source) -> tuple[str, ...]:

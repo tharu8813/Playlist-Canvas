@@ -4,16 +4,12 @@ coalescing (ExportCanvasCapturer._source_state_key).
 
 Both call sites used to independently re-derive the same timing math -- one
 to paint it, one to build a cache key -- with a real risk of the two
-drifting apart. resolve_lyrics_cue_state() and resolve_now_playing_exit_state()
-pull that duplicated computation out into pure, testable functions; both
-call sites now resolve the same FrameState value instead of duplicating the
-formula. Background cross-fade blend and text template expansion were
-checked and found to already be single-line/shared, not worth extracting.
-Animation in/out progress is NOT extracted here: capture_track's version
-additionally accounts for per-source timeline windows
-(CanvasSnapshot._timeline_window_phase) that the export cache-key version
-does not, so the two are not a faithful duplicate -- unifying them would be
-a behavior change, not a pure refactor, and needs its own investigation.
+drifting apart. resolve_lyrics_cue_state(), resolve_now_playing_exit_state(),
+and resolve_timeline_window_phase() pull that duplicated computation out
+into pure, testable functions; both call sites now resolve the same
+FrameState value instead of duplicating the formula. Background cross-fade
+blend and text template expansion were checked and found to already be
+single-line/shared, not worth extracting.
 """
 
 from __future__ import annotations
@@ -21,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.models.playlist import PlaylistTrack
+from app.models.source import Source
 from app.services.lyrics_service import LyricsService
 
 
@@ -102,3 +99,36 @@ def resolve_now_playing_exit_state(
     if elapsed_seconds >= exit_start and exit_duration > 0.0:
         exit_progress = max(0.0, min(1.0, (elapsed_seconds - exit_start) / exit_duration))
     return NowPlayingExitState(visible=True, exit_progress=exit_progress)
+
+
+def resolve_timeline_window_phase(
+    source: Source, global_seconds: float,
+) -> tuple[str | None, float]:
+    """Return the in/out phase for a source at its own timeline-window edge.
+
+    Sources restricted to a portion of the playlist previously appeared and
+    vanished with a hard cut. When they carry an entrance or exit style,
+    animate them across that style's duration on either side of the window.
+    Pulled out of CanvasSnapshot._timeline_window_phase verbatim; behavior is
+    unchanged. ExportCanvasCapturer._source_state_key now calls this too, so
+    a source with both a timeline window and an animation style gets a cache
+    key that reflects the window animation instead of silently coalescing
+    visually different frames.
+    """
+    start = source.timeline_start
+    duration = source.timeline_duration
+    if start <= 0.0 and duration <= 0.0:
+        return None, 1.0
+    in_duration = (
+        source.animation_in_duration if source.animation_in != "none" else 0.0
+    )
+    out_duration = (
+        source.animation_out_duration if source.animation_out != "none" else 0.0
+    )
+    if in_duration > 0.0 and start <= global_seconds < start + in_duration:
+        return "in", (global_seconds - start) / in_duration
+    if duration > 0.0 and out_duration > 0.0:
+        end = start + duration
+        if end - out_duration <= global_seconds < end:
+            return "out", (global_seconds - (end - out_duration)) / out_duration
+    return None, 1.0

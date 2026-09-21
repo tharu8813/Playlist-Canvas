@@ -61,6 +61,32 @@ exit_progress)` dataclass. Both `capture_track` and
 instead of re-deriving the same formula -- another confirmed identical
 duplicate, same shape of risk as the lyrics one.
 
+## Slice 3 -- timeline-window animation phase (bug fix)
+
+The "Animation in/out progress" branch flagged below as a follow-up turned
+out to be a real, reachable bug, not just a risk. `source.timeline_start`/
+`timeline_duration` and `source.animation_in`/`animation_out` are
+independent fields (`app/models/source.py`) -- nothing in the model or the
+per-source timing UI keeps a source from having both a timeline window and
+a non-`"none"` entrance/exit style at once. When it does,
+`CanvasSnapshot.capture_track` correctly paints the window's own
+phase/progress (via what was `_timeline_window_phase`), but
+`ExportCanvasCapturer._source_state_key`'s cache key only ever reflected
+`sample.animation_phase` -- a track-level phase (playlist intro/outro gaps)
+that is unrelated to and can be `None` throughout a source's timeline-window
+animation. Two export frames with visually different window-animation
+progress could resolve to the identical `("stable",)` cache key and get
+wrongly coalesced into one frame in the rendered video.
+
+Fixed by lifting `_timeline_window_phase` into `frame_state.py` as
+`resolve_timeline_window_phase()` (verbatim logic, no behavior change to
+`capture_track`) and wiring `_source_state_key` to call it too, mirroring
+`capture_track`'s `source_has_window` branch: when a source has its own
+timeline window, both call sites now key/paint off the window's
+phase/progress instead of the passed-in `animation_phase`/
+`animation_progress`. Regression coverage:
+`tests/test_export_frame_equivalence.py::ExportFrameEquivalenceTests::test_timeline_window_animation_changes_export_cache_key`.
+
 ### Branches checked and left alone
 
 - **Text template expansion**: both call sites already call the shared
@@ -70,36 +96,20 @@ duplicate, same shape of risk as the lyrics one.
   `ease_in_out_cubic(elapsed_seconds / fade_seconds)` in one line each --
   trivially small, already using the same shared `ease_in_out_cubic`, not
   worth a wrapper function.
-- **Animation in/out progress**: checked and found to be **not a faithful
-  duplicate**. `capture_track` additionally branches on whether the source
-  has its own timeline window (`source.timeline_start`/`timeline_duration`)
-  via `CanvasSnapshot._timeline_window_phase`, using that window's
-  phase/progress in place of the passed-in `animation_phase`/
-  `animation_progress` when present. `ExportCanvasCapturer._source_state_key`'s
-  animation-state cache key only ever uses the passed-in
-  `sample.animation_phase`/`animation_phase_duration` -- it never calls
-  `_timeline_window_phase`. Unifying these would be a *behavior change* (or
-  a confirmation that the export cache key can under-key a source with both
-  a timeline window and an animation style, coalescing two visually
-  different frames), not a pure refactor -- flagged as a separate follow-up
-  investigation rather than folded into this slice.
 
 ## Validation
 
-- `tests/test_frame_state.py` (11 tests): determinism for both resolvers,
-  lyrics no-cue/transition-progress/animation-none/timing-offset cases, and
+- `tests/test_frame_state.py`: determinism for all three resolvers,
+  lyrics no-cue/transition-progress/animation-none/timing-offset cases,
   now-playing hidden-after-duration/before-exit-window/exit-progress-ramp/
-  exit-duration-clamped/zero-exit-duration cases.
-- `tests/test_export_frame_equivalence.py`, `test_export_plan.py`,
-  `test_functional_regressions.py`, `test_auto_line_counts.py` (118 tests)
-  passed unchanged -- these already exercise `capture_track` and the
+  exit-duration-clamped/zero-exit-duration cases, and timeline-window
+  phase in/out/no-window/no-animation-style cases.
+- `tests/test_export_frame_equivalence.py`, `test_export_plan.py` passed
+  after the Slice 3 fix -- these already exercise `capture_track` and the
   export coalescing path pixel/behavior-equivalently.
-- `tests/test_main_window.py` passed unchanged.
 
 ## Remaining work
 
-- The animation in/out progress mismatch above needs its own investigation
-  (spawned separately) before touching it.
 - True full `FrameState` unification (a single resolved value object
   `capture_track` applies instead of computing inline, and `SourceItem`
   reads instead of live-mutated attributes) is a larger, higher-risk

@@ -15,7 +15,10 @@ from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
 from app.preview.canvas_snapshot import CanvasSnapshot
-from app.preview.frame_state import resolve_lyrics_cue_state, resolve_now_playing_exit_state
+from app.preview.frame_state import (
+    resolve_lyrics_cue_state, resolve_now_playing_exit_state,
+    resolve_timeline_window_phase,
+)
 from app.preview.text_template import expand_track_template
 from app.renderer.export_timeline import ExportFrameSample
 from app.renderer.ffmpeg_renderer import RenderFrame, StaticOverlayLayer
@@ -277,33 +280,37 @@ class ExportCanvasCapturer:
             return None
 
         animation_state: tuple[object, ...] = ("stable",)
-        if sample.animation_phase is not None:
-            style = (
-                source.animation_in
-                if sample.animation_phase == "in"
-                else source.animation_out
-            )
+        window_phase, window_progress = resolve_timeline_window_phase(
+            source, global_seconds,
+        )
+        source_has_window = source.timeline_start > 0.0 or source.timeline_duration > 0.0
+        phase = window_phase if source_has_window else sample.animation_phase
+        if phase is not None:
+            style = source.animation_in if phase == "in" else source.animation_out
             if style != "none":
-                configured_duration = (
-                    source.animation_in_duration
-                    if sample.animation_phase == "in"
-                    else source.animation_out_duration
-                )
-                effective_duration = max(0.001, min(
-                    configured_duration,
-                    sample.animation_phase_duration,
-                ))
-                if sample.animation_phase == "in":
-                    raw_progress = sample.elapsed_seconds / effective_duration
+                if window_phase is not None:
+                    raw_progress = window_progress
                 else:
-                    exit_start = max(
-                        0.0, sample.track.duration_seconds - effective_duration,
+                    configured_duration = (
+                        source.animation_in_duration
+                        if phase == "in"
+                        else source.animation_out_duration
                     )
-                    raw_progress = (
-                        sample.elapsed_seconds - exit_start
-                    ) / effective_duration
+                    effective_duration = max(0.001, min(
+                        configured_duration,
+                        sample.animation_phase_duration,
+                    ))
+                    if phase == "in":
+                        raw_progress = sample.elapsed_seconds / effective_duration
+                    else:
+                        exit_start = max(
+                            0.0, sample.track.duration_seconds - effective_duration,
+                        )
+                        raw_progress = (
+                            sample.elapsed_seconds - exit_start
+                        ) / effective_duration
                 animation_state = (
-                    sample.animation_phase,
+                    phase,
                     style,
                     max(0.0, min(1.0, raw_progress)),
                 )

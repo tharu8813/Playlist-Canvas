@@ -807,6 +807,36 @@ class ExportFrameEquivalenceTests(unittest.TestCase):
             _pixel_signature(optimized[-1].image),
         )
 
+    def test_timeline_window_animation_changes_export_cache_key(self) -> None:
+        """A source with its own timeline window must not be coalesced across
+        that window's entrance animation just because the track-level
+        animation_phase (which the window is independent of) stays None."""
+        scene = CanvasScene()
+        source = Source(
+            SourceType.SHAPE, "Windowed", timeline_start=1.0,
+            animation_in="slide_left", animation_in_duration=1.0,
+        )
+        scene.addItem(SourceItem(source))
+        track = PlaylistTrack("windowed.wav", "Windowed", duration_seconds=5.0)
+        capturer = ExportCanvasCapturer(
+            scene, [track], 5.0, set(), [(None, None)],
+            lambda image, seconds, _key: RenderFrame(image, seconds),
+            lambda: None, lambda _track, _key: None,
+        )
+        # Both samples sit inside the window's [1.0, 2.0) entrance animation
+        # at different progress; sample.animation_phase is None throughout
+        # because this is a per-source window, not a track-level gap.
+        just_started = ExportFrameSample(track, 1, 0.0, 0.5, 1.0, 1.0)
+        halfway = ExportFrameSample(track, 1, 0.0, 0.5, 1.5, 1.5)
+        self.assertIsNone(just_started.animation_phase)
+        self.assertIsNone(halfway.animation_phase)
+
+        key_start = capturer._source_state_key(source, just_started)
+        key_halfway = capturer._source_state_key(source, halfway)
+
+        self.assertIsNotNone(key_start)
+        self.assertNotEqual(key_start, key_halfway)
+
 
 if __name__ == "__main__":
     unittest.main()
