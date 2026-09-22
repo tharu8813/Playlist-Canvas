@@ -126,6 +126,74 @@ class RenderAutomixAudioSegmentsUnitTests(unittest.TestCase):
         provider_id = create_provider.call_args.args[0]
         self.assertEqual(provider_id, "auto")
 
+    def test_structure_analysis_feeds_compile_automix_when_sonara_is_available(self) -> None:
+        """Commit C: Preview/Export must pass real structure data (from
+        StructureAnalysisService + its own persistent cache, not
+        MainWindow's UI-session dict) into compile_automix()."""
+        import threading
+
+        from app.automix.analysis.service import AnalysisBatchResult
+        from app.automix.renderer import AutoMixRenderError
+
+        renderer = _renderer()
+        tracks = [PlaylistTrack("a.mp3", "A", duration_seconds=30.0)]
+        fake_structures = {"fake": "structures"}
+
+        class _FakeStructureResult:
+            analyses = fake_structures
+
+        with (
+            patch("app.automix.analysis.registry.create_analysis_provider"),
+            patch(
+                "app.automix.workflow.AutoMixWorkflow.analyze",
+                return_value=AnalysisBatchResult(analyses={}, failures={}),
+            ),
+            patch("app.automix.structure.sonara.sonara_available", return_value=True),
+            patch(
+                "app.automix.structure.service.StructureAnalysisService.analyze_tracks",
+                return_value=_FakeStructureResult(),
+            ) as analyze_structure,
+            patch(
+                "app.automix.planner.compile_automix", side_effect=AutoMixRenderError("stop"),
+            ) as compile_automix,
+        ):
+            result = renderer._render_automix_audio_segments(
+                tracks, Path("."), 30.0, None, threading.Event(),
+            )
+        self.assertIsNone(result)
+        analyze_structure.assert_called_once()
+        compile_automix.assert_called_once()
+        self.assertEqual(compile_automix.call_args.kwargs.get("structures"), fake_structures)
+
+    def test_structure_analysis_is_skipped_when_sonara_is_unavailable(self) -> None:
+        import threading
+
+        from app.automix.analysis.service import AnalysisBatchResult
+        from app.automix.renderer import AutoMixRenderError
+
+        renderer = _renderer()
+        tracks = [PlaylistTrack("a.mp3", "A", duration_seconds=30.0)]
+
+        with (
+            patch("app.automix.analysis.registry.create_analysis_provider"),
+            patch(
+                "app.automix.workflow.AutoMixWorkflow.analyze",
+                return_value=AnalysisBatchResult(analyses={}, failures={}),
+            ),
+            patch("app.automix.structure.sonara.sonara_available", return_value=False),
+            patch(
+                "app.automix.structure.service.StructureAnalysisService.analyze_tracks",
+            ) as analyze_structure,
+            patch(
+                "app.automix.planner.compile_automix", side_effect=AutoMixRenderError("stop"),
+            ) as compile_automix,
+        ):
+            renderer._render_automix_audio_segments(
+                tracks, Path("."), 30.0, None, threading.Event(),
+            )
+        analyze_structure.assert_not_called()
+        self.assertEqual(compile_automix.call_args.kwargs.get("structures"), {})
+
 
 class RenderFixedCrossfadeAudioSegmentsUnitTests(unittest.TestCase):
     """No real FFmpeg needed: exercises the fallback/degradation logic only."""

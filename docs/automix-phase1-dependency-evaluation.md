@@ -675,3 +675,223 @@ commit only makes structure data collectible.
   candidate/scoring logic -- none of that exists yet; it is Commit C's
   job.
 
+## AutoMix v3 Commit C outcome (structure-aware / phrase-aware / energy-aware Planner v2)
+
+Wires Commit B's structure data into the real Preview/Export planner and
+fixes two correctness issues found while doing so (effective BPM
+propagation, target-BPM policy divergence). No renderer DSP changes
+(EQ/bass-swap/filter transitions remain future work); the FFmpeg
+`filter_complex` graph in `app/automix/renderer.py` is untouched.
+
+**1. How structure data actually reaches the Preview/Export planner**
+
+Previously Commit B's structure results only ever landed in
+`MainWindow.automix_structures`, a UI session dict the real render path
+(`FFmpegRenderer._render_automix_audio_segments`, called by both Preview
+and Export -- the single shared code path) never read. Fixed directly in
+that method: it now also constructs `StructureAnalysisService(SonaraStructureProvider())`
+(the same class Commit B built, with its own persistent
+`StructureAnalysisCache` -- not `MainWindow`'s dict, which the renderer
+has no business depending on) immediately after rhythm analysis, gated by
+the same `sonara_available()` up-front probe the interactive path uses,
+and passes the result into `compile_automix(..., structures=structure_result.analyses)`.
+`app/automix/planner.compile_automix()` gained `structures` as its fourth,
+**optional** parameter (default `None`) -- every existing call site that
+doesn't pass it behaves byte-for-byte as before (confirmed by
+`test_structures_omitted_matches_the_pre_commit_c_result`). Real,
+end-to-end confirmation this session: `tests.test_automix_ffmpeg_integration`
+run against the real FFmpeg/Beat This!/Sonara install completed the full
+Preview/Export pipeline (analysis -> structure -> plan -> render)
+successfully, and a manual script (below) traced real structure data all
+the way into a rendered `CompiledRenderPlan`.
+
+**2. New outgoing/incoming candidate generation**
+
+`app/automix/candidates.py` gained `_structure_outgoing_anchor()`
+(`outro_start_seconds`, else the last section's start, else `None`) and
+`_structure_incoming_anchor()` (`intro_end_seconds`, else the first
+section's end, else `None`). When either resolves, `generate_candidates()`
+generates one *additional* candidate per bar length anchored there (on
+top of, never instead of, the existing tail-based/head-based candidates),
+still snapped to the nearest real beat/downbeat and scored identically to
+any other candidate -- confirmed by
+`test_structure_anchor_adds_a_candidate_near_the_outro`/
+`..._near_the_intro_end`. With no structure data at all, the candidate
+list is unchanged (`test_no_structure_data_matches_the_pre_commit_c_result`).
+
+**3. Structure/downbeat snap**
+
+Unchanged mechanism, reused: `_nearest_anchor()` (already existed) snaps
+any naive candidate position -- tail-based, head-based, or now structure-
+anchored -- to the nearest real downbeat (BEAT_MATCH) or beat
+(BEAT_ALIGNED_CROSSFADE). `_beat_based_candidate()` was generalized to
+accept an optional `outgoing_naive_override`/`incoming_naive_override`
+instead of always computing the tail/0.0 position itself, so the
+structure-anchored candidates go through the exact same snap-and-score
+path as the regular ones -- no separate, unvalidated "structure mode".
+
+**4. Local energy scoring**
+
+New `WEIGHT_LOCAL_ENERGY_CONTINUITY` (0.05) bonus, additive on top of the
+existing global-scalar energy comparison: when both sides have structure
+data, `TrackStructureAnalysis.energy_at(cue_seconds)` (Commit B's pure
+helper) is compared at the *actual* candidate cue points instead of each
+track's one overall energy figure -- `test_local_energy_continuity_bonus_rewards_similar_local_energy`.
+Silently a no-op without structure energy curves on both sides.
+
+**5. Vocal overlap scoring (actual transition window)**
+
+Real bug found and fixed: the outgoing side's vocal-overlap check used
+`[outgoing_source_time, outgoing.duration_seconds]` -- the whole rest of
+the track, not the actual transition span -- while the incoming side
+already correctly used `[incoming_source_time, incoming_source_time +
+duration_seconds]`. Now both sides use the real window. This only ever
+*removes* false-positive penalties (a wider window can only find more
+"overlap" than the truthful one) -- confirmed directly against
+`_score_beat_candidate` with fixed cue positions in
+`test_vocal_overlap_only_checks_the_actual_transition_window`, since
+end-to-end best-candidate selection can pick a different bar/anchor
+between runs and make a wider assertion flaky.
+
+**6. Incoming/outgoing trim policy**
+
+Two new penalties, both additive and both **uncapped** on purpose (unlike
+every other scoring component here, which clamps its own severity to
+1.0): `WEIGHT_INCOMING_TRIM_PENALTY` (0.08) once `incoming_source_time`
+exceeds `INCOMING_TRIM_SOFT_LIMIT_SECONDS` (30s), and
+`WEIGHT_OUTGOING_TAIL_TRIM_PENALTY` (0.05) once the outgoing cue leaves
+more than `MAXIMUM_OUTGOING_TAIL_TRIM_SECONDS` (60s) of the track's own
+tail unused. Uncapped so a genuinely implausible structure anchor (a
+"600-second outro" that is really a structure-analysis error) can outweigh
+even a simultaneous structure-anchor bonus and drive the final
+(still-clamped-to-[0,1]) score low enough to lose to the plain tail-based
+candidate -- confirmed by
+`test_falls_back_to_the_regular_bar_candidate_when_the_anchor_is_implausible`,
+which needed the uncapped severity to actually pass (a capped version was
+tried first and failed: the anchor bonus and a capped penalty could
+roughly cancel out).
+
+**7. Effective BPM propagation (fixes the documented v1 simplification)**
+
+`app/automix/planner.py` now tracks `applied_rates: dict[str, float]`
+(track_id -> the `playback_rate` actually given to that track's own clip)
+while placing tracks. Before planning a transition, the outgoing side's
+`TrackAnalysis` is passed through a new
+`_effective_analysis_for_outgoing(analysis, playback_rate)`, which returns
+a `dataclasses.replace(analysis, bpm=analysis.bpm * playback_rate)` view
+(a no-op when `playback_rate == 1.0`, i.e. every first clip and every
+non-BEAT_MATCH-chained clip) -- every other field (beats/downbeats/key/
+energy/vocal_activity, all in the track's own original media time, never
+affected by playback rate) passes through unchanged. Confirmed with a
+real chain in `test_second_transition_uses_the_first_transitions_actual_rate`
+(120/124/128 BPM, three tracks): the old code would have planned B->C
+against B's raw 124 BPM; the fix plans it against B's actual ~120 BPM (the
+rate A->B already gave it), so `clip_c.playback_rate` differs measurably
+from the old formula's result -- asserted directly, not just "some
+difference exists".
+
+**8. Target BPM policy unification**
+
+Real, independent bug found while implementing propagation: `candidates.py`'s
+`resolve_target_bpm()` computed a confidence-weighted **midpoint** between
+outgoing and incoming BPM for scoring, but `planner.py`'s `_plan_overlap()`
+had always applied a *different*, independently-derived "favor outgoing"
+formula (`outgoing.bpm / incoming_effective_bpm`) as the clip's real rate
+-- the two had silently diverged since whichever transition first
+introduced both formulas. Fixed by simplifying `resolve_target_bpm(outgoing)
+-> float` to always return `outgoing.bpm` (dropping the now-unused
+confidence parameters entirely, not just ignoring them) and having
+`planner.py` apply `best.incoming_rate` (the candidate's own field)
+directly instead of recomputing anything -- the two can no longer
+disagree by construction. Confirmed by
+`test_applied_clip_rate_matches_the_winning_candidates_own_rate`, and (as
+a side effect) `TransitionCandidate.outgoing_rate` is now always exactly
+`1.0`, matching the planner's actual, never-revisited-once-fixed outgoing
+rate policy.
+
+**9. Structure absent / one-sided structure fallback**
+
+`structures` is `Mapping[str, TrackStructureAnalysis] | None = None` end
+to end (`compile_automix` -> `_place_tracks` -> `_plan_overlap` ->
+`generate_candidates`), and every lookup is a plain `.get(track_id)` --
+`None` for one side, both sides, or a track_id present in `structures` but
+absent from `analyses` (or vice versa) are all handled the same way: that
+side's structure-specific bonuses/candidates simply don't apply, rhythm-
+only planning proceeds exactly as it already did. Confirmed by
+`test_one_sided_structure_data_is_safe`/`does_not_break_the_pair`,
+`test_structure_present_for_a_track_missing_from_analyses_is_harmless`,
+and `test_incompatible_tempo_still_falls_back_regardless_of_structure`
+(structure-aware scoring never resurrects a pair `evaluate_compatibility`
+already rejected -- the same degrade chain, Structure-aware Beat Match ->
+Beat Match -> Beat-aligned Crossfade -> Fixed Crossfade -> Sequential,
+still starts from the same compatibility gate as before Commit C).
+
+**10. Candidate count and planning performance**
+
+Real measurement, this session, three real 150s tracks (accented 4/4
+fixture, real Beat This!/Sonara analysis): one pair's candidate count went
+from 2 (bar-length candidates that actually fit the length/duration
+constraints, out of the 3 `BAR_LENGTHS` tried) to 4 with structure data
+(two more, anchored at the real `outro_start`/`intro_end`). Both
+`generate_candidates()` calls together: **0.18ms**. A full 3-track
+`compile_automix()` (2 transitions) with real structure data: **0.35ms**.
+Entirely negligible next to either analyzer's own cost -- no planner
+architecture change was justified purely on performance grounds, matching
+the roadmap's own instruction not to optimize prematurely.
+
+**11. Real Beat This! + Sonara synthetic integration result, this session**
+
+Three real 150s accented-4/4 tracks (A=128 BPM, B=128 BPM, C=130 BPM),
+analyzed by the actual installed `beat-this` 1.1.0 and `sonara` 0.3.6:
+
+```
+A: bpm=130.43 quality=reliable   intro_end=0.0   outro_start=149.16  sections=5
+B: bpm=130.43 quality=reliable   intro_end=0.0   outro_start=149.16  sections=5
+C: bpm=130.43 quality=bpm_only   intro_end=0.0   outro_start=145.08  sections=9
+
+compile_automix() (preferred_bars=8):
+  A->B: BEAT_MATCH        start=142.50  duration=7.50
+  B->C: EQUAL_POWER        start=291.54  duration=0.96
+  all three clips: playback_rate = 1.0000 (all three BPMs coincided at
+    130.43 on this synthetic fixture once analyzed, so no rate change was
+    ever needed -- not a general claim about typical real-music BPM
+    spread, just what this particular run measured)
+
+Total analysis time (3 tracks x 150s): rhythm (Beat This!) 17.39s,
+structure (Sonara) 0.39s.
+```
+
+This demonstrates the fallback chain working correctly on real (not
+hand-crafted) analyzer output, not just the synthetic arrays the unit
+tests construct directly: A->B (both `"reliable"`) got `BEAT_MATCH`; B->C
+(C only `"bpm_only"`, same P1.5-era meter-plausibility gate from the
+earlier commit, unrelated to Commit C) correctly degraded to
+`EQUAL_POWER` (`TransitionStrategy.BEAT_ALIGNED_CROSSFADE`) instead of
+forcing a beat match neither side could actually support -- exactly the
+degrade-chain behavior roadmap section item 23/29 (via Commit B) asks
+for, now demonstrated with structure data actually present and scored.
+
+**12. Remaining limitations, not smoothed over**
+
+- Track C's `"bpm_only"` result (same class of finding as P1.5's 132 BPM
+  anomaly) means real/imperfect analyzer output still occasionally fails
+  the meter-plausibility gate on this synthetic fixture family -- expected
+  behavior (an honest "not reliable" beats a confidently wrong one), but
+  underscores that the accented-click fixtures still don't fully stand in
+  for real music.
+- `meter_denominator` remains not a validated time signature (P1.5,
+  unchanged by Commit C) -- structure boundaries here deliberately use
+  timestamps/downbeats directly rather than trusting it, per the roadmap's
+  own instruction.
+- No stem separation, no EQ/bass-swap/filter transition DSP -- the
+  renderer still only ever produces `acrossfade`/`concat`-based transitions
+  (`app/automix/renderer.py`, untouched this commit).
+- Structure anchors are still a single point each (`outro_start`/
+  `intro_end`/nearest section boundary) -- no attempt to consider multiple
+  candidate sections per side, phrase detection within a section, or
+  multi-bar structural alignment beyond what a bar-length candidate already
+  tries.
+- Real-music verification: not performed here either (same environment
+  limitation as P1.5/Commit B -- no licensed audio files available); the
+  real-analyzer test above used synthetic audio, not real songs.
+

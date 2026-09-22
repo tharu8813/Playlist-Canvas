@@ -68,19 +68,22 @@ class EvaluateCompatibilityTests(unittest.TestCase):
 
 
 class ResolveTargetBpmTests(unittest.TestCase):
-    def test_equal_confidence_gives_plain_midpoint(self) -> None:
-        target = resolve_target_bpm(_analysis("a", 120.0), 130.0, 0.8, 0.8)
-        self.assertAlmostEqual(target, 125.0)
+    """"Favor outgoing" policy (Commit C): the target is always the
+    outgoing track's own (possibly chain-propagated effective) BPM --
+    unified with the rate planner.py actually applies, see
+    resolve_target_bpm's docstring. No confidence weighting is left to
+    test; ``outgoing.bpm`` alone determines the result."""
 
-    def test_zero_confidence_both_sides_falls_back_to_midpoint(self) -> None:
-        target = resolve_target_bpm(_analysis("a", 120.0), 130.0, 0.0, 0.0)
-        self.assertAlmostEqual(target, 125.0)
+    def test_target_is_always_the_outgoing_tracks_own_bpm(self) -> None:
+        self.assertAlmostEqual(resolve_target_bpm(_analysis("a", 120.0)), 120.0)
+        self.assertAlmostEqual(resolve_target_bpm(_analysis("a", 95.5)), 95.5)
 
-    def test_higher_confidence_pulls_target_toward_that_track(self) -> None:
-        target = resolve_target_bpm(_analysis("a", 120.0), 130.0, 1.0, 0.0)
-        self.assertAlmostEqual(target, 120.0)
-        target = resolve_target_bpm(_analysis("a", 120.0), 130.0, 0.0, 1.0)
-        self.assertAlmostEqual(target, 130.0)
+    def test_incoming_bpm_and_confidence_have_no_effect(self) -> None:
+        # The function only ever reads outgoing.bpm now -- there is nothing
+        # else to vary; this documents that explicitly for a reader coming
+        # from the pre-Commit-C confidence-weighted-midpoint policy.
+        outgoing = _analysis("a", 120.0)
+        self.assertEqual(resolve_target_bpm(outgoing), resolve_target_bpm(outgoing))
 
 
 if __name__ == "__main__":

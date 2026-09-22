@@ -1360,6 +1360,8 @@ class FFmpegRenderer:
             from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
             from app.automix.settings import AutoMixTransitionSettings
             from app.automix.workflow import AutoMixWorkflow
+            from app.automix.structure.service import StructureAnalysisService
+            from app.automix.structure.sonara import SonaraStructureProvider, sonara_available
             # "auto" -- the same policy the interactive playlist-badge
             # analysis path uses (AutoMixAnalysisController.start), so
             # Preview and Export can never resolve to a different analyzer
@@ -1379,8 +1381,28 @@ class FFmpegRenderer:
             self._report(progress_callback, "Preparing audio", 0.05, "Analyzing tracks for AutoMix")
             workflow = AutoMixWorkflow(provider)
             analysis_result = workflow.analyze(active_tracks, cancel_event=cancel_event)
+
+            # Structure analysis (Commit C): the same StructureAnalysisService
+            # + persistent StructureAnalysisCache Commit B already built for
+            # the interactive playlist-badge path, reused here directly --
+            # this is the one place Preview/Export actually compile a
+            # CompiledRenderPlan, so it must not depend on
+            # MainWindow.automix_structures (a UI session cache the renderer
+            # has no business reading). Optional and independent from rhythm
+            # analysis: unavailable/failed structure analysis never blocks
+            # AutoMix, it only means compile_automix() gets no structure
+            # data for the affected track(s) (see its own docstring).
+            structures: dict = {}
+            if sonara_available():
+                self._report(progress_callback, "Preparing audio", 0.15, "Analyzing track structure")
+                structure_result = StructureAnalysisService(SonaraStructureProvider()).analyze_tracks(
+                    active_tracks, cancel_event=cancel_event,
+                )
+                structures = structure_result.analyses
+
             plan = compile_automix(
                 active_tracks, analysis_result.analyses, AutoMixTransitionSettings(enabled=True),
+                structures=structures,
             )
             if not plan.audio.clips:
                 return None

@@ -94,21 +94,29 @@ def evaluate_compatibility(
     )
 
 
-def resolve_target_bpm(
-    outgoing: TrackAnalysis, incoming_effective_bpm: float, outgoing_confidence: float,
-    incoming_confidence: float,
-) -> float:
-    """Confidence-weighted midpoint between the two tempos (documented policy).
+def resolve_target_bpm(outgoing: TrackAnalysis) -> float:
+    """Target tempo for a BEAT_MATCH transition: always the outgoing track's own tempo.
 
-    Equal confidence gives a plain midpoint; a more confident analysis
-    pulls the target toward its own tempo. Both confidences at zero also
-    falls back to a plain midpoint rather than dividing by zero. Because
-    this is a convex combination of the two tempos, the resulting rate
-    change for *either* track never exceeds the full tempo_shift_percent
-    already gated by evaluate_compatibility() -- no separate clamping is
-    needed.
+    Not a confidence-weighted midpoint (an earlier version of this
+    function was): app/automix/planner.py never revisits a clip's rate
+    once it has been placed -- a clip plays two roles (outgoing for its
+    own transition, incoming for the one that placed it), and changing its
+    rate after placement would retroactively invalidate the transition
+    that set it (see planner.py's module docstring, "favor outgoing").
+    "Always match outgoing" is therefore not a preference but the only
+    target that can ever actually be applied to a real render, so this
+    function's result and the plan planner.py actually builds can no
+    longer diverge (candidates.py's own ``TransitionCandidate.outgoing_rate``
+    is consequently always 1.0, and ``incoming_rate`` is exactly the rate
+    planner.py applies to the incoming clip -- previously planner.py
+    recomputed a separate, independent formula for that rate instead of
+    using the candidate's own).
+
+    ``outgoing`` must already carry its own *effective* BPM here -- raw
+    analyzed BPM adjusted for any playback_rate a previous transition
+    already applied to it in a chain (see
+    ``planner._effective_analysis_for_outgoing``) -- not necessarily its
+    raw analyzed BPM, so tempo drift does not compound silently across a
+    chain of transitions.
     """
-    weight_outgoing = outgoing_confidence if (outgoing_confidence + incoming_confidence) > 0.0 else 0.5
-    weight_incoming = incoming_confidence if (outgoing_confidence + incoming_confidence) > 0.0 else 0.5
-    total_weight = weight_outgoing + weight_incoming
-    return (outgoing.bpm * weight_outgoing + incoming_effective_bpm * weight_incoming) / total_weight
+    return outgoing.bpm

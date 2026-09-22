@@ -15,21 +15,33 @@ rate after it has already been placed (i.e. when it later becomes
 "outgoing") would retroactively invalidate a decision already made for its
 predecessor's transition. This planner resolves that by never revisiting a
 clip's rate once fixed: only the *incoming* clip of a BEAT_MATCH transition
-gets a non-1.0 rate, chosen to match the *outgoing* track's own analyzed
-BPM ("favor outgoing", one of Phase 3's documented target-BPM policies).
-The outgoing clip's own audio placement and rate are always left exactly
-as they were.
+gets a non-1.0 rate, chosen to match the *outgoing* track's own BPM ("favor
+outgoing" -- see app.automix.compatibility.resolve_target_bpm, whose result
+this planner now applies directly as the incoming clip's rate instead of
+recomputing an independent formula, so candidate scoring and the plan
+actually rendered can no longer disagree on the target). The outgoing
+clip's own audio placement and rate are always left exactly as they were.
 
-Known v1 simplification: each transition's target BPM uses the outgoing
-track's raw analyzed BPM, not any rate already applied to it by an earlier
-transition. Tempo drift can compound slightly over a long chain of
-transitions; the fix (propagating each clip's *effective* BPM forward
-through the chain) is deferred until real usage shows it matters.
+Effective BPM propagation (Commit C, fixes the v1 simplification this
+docstring used to describe): a clip already carrying a non-1.0
+playback_rate -- because it was the *incoming* half of the previous
+transition -- has an actual sounding tempo different from its raw analyzed
+BPM. `_effective_analysis_for_outgoing` builds a `TrackAnalysis` view with
+`bpm` replaced by that real, currently-playing tempo (`raw_bpm *
+playback_rate`) before it is ever passed to `evaluate_compatibility`/
+`generate_candidates` as the "outgoing" side of the *next* transition --
+every other field (beats/downbeats/key/energy/vocal_activity, all
+positions in the track's own original media time, never affected by
+playback rate) passes through unchanged. Without this, a chain of several
+transitions could compound tempo drift silently, since each pair would be
+planned against a BPM number no longer matching what is actually playing
+by the time that transition happens.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 from app.automix.candidates import (
     TransitionStrategy,
@@ -39,6 +51,7 @@ from app.automix.candidates import (
 from app.automix.compatibility import evaluate_compatibility
 from app.automix.models import TrackAnalysis
 from app.automix.settings import AutoMixTransitionSettings
+from app.automix.structure.models import TrackStructureAnalysis
 from app.models.playlist import PlaylistTrack
 from app.timeline.models import TransitionType
 from app.timeline.render_plan import (
@@ -67,6 +80,7 @@ def compile_automix(
     tracks: Sequence[PlaylistTrack],
     analyses: Mapping[str, TrackAnalysis],
     settings: AutoMixTransitionSettings,
+    structures: Mapping[str, TrackStructureAnalysis] | None = None,
 ) -> CompiledRenderPlan:
     """Compile enabled ``tracks`` into a CompiledRenderPlan with AutoMix overlaps.
 
@@ -78,9 +92,17 @@ def compile_automix(
     policy"). Missing or incompatible analysis on any one pair only
     degrades that pair -- it never prevents earlier or later pairs from
     getting a full AutoMix transition.
+
+    ``structures`` is optional (defaults to ``None``, meaning "no structure
+    data at all") and independent per track: a track missing from it, or
+    entirely absent, only ever removes the structure-aware
+    bonuses/candidates for that side of a pair (see
+    ``app.automix.candidates.generate_candidates``) -- rhythm-only
+    planning behaves exactly as it did before this parameter existed.
     """
     selected = [track for track in tracks if track.enabled]
-    clips, transitions = _place_tracks(selected, analyses, settings)
+    structures = structures or {}
+    clips, transitions = _place_tracks(selected, analyses, structures, settings)
     presentation, metadata, duration = build_presentation_and_metadata(clips)
     plan = CompiledRenderPlan(
         audio=AudioRenderPlan(clips=clips, transitions=transitions),
@@ -92,15 +114,38 @@ def compile_automix(
     return plan
 
 
+def _effective_analysis_for_outgoing(
+    analysis: TrackAnalysis, playback_rate: float,
+) -> TrackAnalysis:
+    """A view of ``analysis`` with ``bpm`` replaced by the tempo it is
+    actually sounding at right now (raw analyzed BPM * the rate already
+    applied to this clip by the transition that placed it) -- see the
+    module docstring's "Effective BPM propagation". ``playback_rate`` is
+    always 1.0 for a clip that was never rate-shifted (the first clip, or
+    one placed by a non-BEAT_MATCH/fallback transition), so this is a
+    no-op in every case except a BEAT_MATCH clip chained after another.
+    """
+    if analysis.bpm is None or playback_rate == 1.0:
+        return analysis
+    return replace(analysis, bpm=analysis.bpm * playback_rate)
+
+
 def _place_tracks(
     tracks: list[PlaylistTrack],
     analyses: Mapping[str, TrackAnalysis],
+    structures: Mapping[str, TrackStructureAnalysis],
     settings: AutoMixTransitionSettings,
 ) -> tuple[tuple[AudioRenderClip, ...], tuple[AudioRenderTransition, ...]]:
     clips: list[AudioRenderClip] = []
     transitions: list[AudioRenderTransition] = []
     natural_cursor = 0.0
     actual_cursor = 0.0
+    # track_id -> the playback_rate actually applied to that track's own
+    # clip (1.0 unless it was the incoming half of a BEAT_MATCH transition)
+    # -- consulted when that same track later becomes the *outgoing* side
+    # of the next transition, so its real (rate-adjusted) tempo is what
+    # gets planned against, not its raw analyzed BPM.
+    applied_rates: dict[str, float] = {}
 
     for index, track in enumerate(tracks):
         natural_floor = natural_cursor
@@ -122,7 +167,8 @@ def _place_tracks(
             previous = clips[-1]
             previous_track = tracks[index - 1]
             timeline_start, source_in, playback_rate, transition = _plan_overlap(
-                previous, previous_track, track, analyses, settings, actual_cursor,
+                previous, previous_track, track, analyses, structures, settings, actual_cursor,
+                applied_rates.get(previous_track.id, 1.0),
             )
             if transition is not None:
                 transitions.append(transition)
@@ -136,6 +182,7 @@ def _place_tracks(
             playback_rate=playback_rate,
         )
         clips.append(clip)
+        applied_rates[track.id] = playback_rate
         natural_cursor = natural_start + track.duration_seconds
         actual_cursor = clip.timeline_end
 
@@ -147,8 +194,10 @@ def _plan_overlap(
     previous_track: PlaylistTrack,
     track: PlaylistTrack,
     analyses: Mapping[str, TrackAnalysis],
+    structures: Mapping[str, TrackStructureAnalysis],
     settings: AutoMixTransitionSettings,
     actual_cursor: float,
+    outgoing_applied_rate: float,
 ) -> tuple[float, float, float, AudioRenderTransition | None]:
     """Decide clip placement for ``track`` following ``previous_clip`` with no explicit gap.
 
@@ -163,18 +212,27 @@ def _plan_overlap(
     if outgoing_analysis is None or incoming_analysis is None or not settings.enabled:
         return fallback
 
-    compatibility = evaluate_compatibility(outgoing_analysis, incoming_analysis, settings)
-    candidates = generate_candidates(outgoing_analysis, incoming_analysis, compatibility, settings)
+    effective_outgoing_analysis = _effective_analysis_for_outgoing(outgoing_analysis, outgoing_applied_rate)
+
+    compatibility = evaluate_compatibility(effective_outgoing_analysis, incoming_analysis, settings)
+    candidates = generate_candidates(
+        effective_outgoing_analysis, incoming_analysis, compatibility, settings,
+        outgoing_structure=structures.get(previous_track.id),
+        incoming_structure=structures.get(track.id),
+    )
     best = select_best_candidate(candidates)
     if best is None or best.strategy is TransitionStrategy.CUT or best.duration_seconds <= 0.0:
         return fallback
 
     source_in = best.incoming_source_time
-    playback_rate = 1.0
-    if best.strategy is TransitionStrategy.BEAT_MATCH and compatibility.incoming_effective_bpm:
-        # See module docstring: "favor outgoing" -- only the incoming clip's
-        # rate ever moves, matching the outgoing track's own analyzed BPM.
-        playback_rate = outgoing_analysis.bpm / compatibility.incoming_effective_bpm
+    # Unified with the candidate's own computed rate (see
+    # compatibility.resolve_target_bpm's docstring): previously this
+    # recomputed an independent "outgoing.bpm / incoming_effective_bpm"
+    # formula here, which could silently diverge from what candidates.py
+    # had actually scored. best.incoming_rate is already 1.0 for every
+    # non-BEAT_MATCH strategy (fixed_crossfade/beat_aligned_crossfade/cut),
+    # so this replaces the old strategy-specific branch too.
+    playback_rate = best.incoming_rate
 
     # Anchor timestamps are in the original media, not the playlist clock.
     # Keep the outgoing tail intact and fade over what remains after the anchor.
