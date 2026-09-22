@@ -250,3 +250,132 @@ and only replaces the rhythm fields (`bpm`, `bpm_confidence`, `beats`,
   `FFmpegRenderer._render_automix_audio_segments`, the latter still
   hardcoded to `"basic"` pending an actual settings UI toggle).
 
+## AutoMix v3 P1 outcome (activation + real-model validation)
+
+P0 above shipped `BeatThisAnalysisProvider` and a selection point, but
+nothing in the real app actually selected it -- `MainWindow`'s AutoMix
+analysis call and Export/Preview rendering both still resolved to
+`"basic"`. P1 wires real usage and fixes three correctness issues found
+while doing so.
+
+- **Provider selection is now actually wired**: `app/automix/analysis/registry.py`
+  gained an `"auto"` policy (`create_analysis_provider("auto", ...)` ->
+  Beat This! if `beat_this_available()` -- `importlib.util.find_spec` for
+  `torch`/`beat_this`, which resolves importability without importing
+  either -- else basic). `MainWindow._maybe_start_automix_analysis()`
+  (the playlist-badge analysis path) and
+  `FFmpegRenderer._render_automix_audio_segments` (Preview/Export
+  rendering) both now pass `"auto"`, so they can never resolve to a
+  different analyzer for the same playlist.
+- **Fallback cache poisoning (confirmed and fixed)**: `AnalysisCache` is
+  namespaced by `provider.provider_id`/`version`, fixed at
+  `AnalysisService` construction -- but a hybrid provider's *fallback*
+  result carries the fallback's own `analyzer_id` (e.g. `"basic"`), not
+  the provider's. `AnalysisService.store()`'s envelope used the fixed
+  namespace regardless, so a `"beat_this"`-unavailable fallback got cached
+  under the `"beat_this"` namespace, and `load()` did not check whether
+  the cached result's own `analyzer_id` actually matched -- a real
+  regression matching the reported scenario exactly. Fixed in
+  `AnalysisService._analyze_one`: a cache hit is only accepted when
+  `cached.analyzer_id == self.provider.provider_id`; a provenance mismatch
+  is treated as a miss and re-analyzed. Regression test:
+  `tests/test_automix_analysis_service.py::test_fallback_result_is_not_cached_as_a_provider_success`
+  (unavailable -> fallback cached; engine "recovers" -> next run must
+  actually re-invoke it; genuine success then cached and reused).
+- **`basic_result.bpm is None` skip condition was wrong** (confirmed):
+  it conflated "librosa found no *usable* BPM" with "the track is
+  silent/too short," which are not the same thing, and could make Beat
+  This! never even run on a track Basic's beat tracker simply failed on --
+  exactly the case Beat This! exists to help with. Fixed to check
+  `basic_result.energy is None` instead: `energy` is left at its
+  dataclass default `None` only by `BasicAnalysisProvider`'s own early
+  return for a silent/too-short track; every other path through
+  `analyze()` (including "beats found but BPM rejected as implausible")
+  always computes a real energy value. Regression test:
+  `tests/test_automix_beat_this.py::test_attempts_inference_when_basic_found_no_bpm_on_a_non_silent_track`.
+- **Cache identity now includes checkpoint + installed package version**:
+  `BeatThisAnalysisProvider.__init__` sets `self.version` to
+  `"{implementation_version}+{checkpoint}+pkg{beat-this package version}"`
+  (via `importlib.metadata.version("beat-this")`, metadata-only, no
+  torch import), so switching checkpoints or upgrading the `beat-this`
+  package both invalidate previously cached results automatically.
+- **Unknown `provider_id` now raises** `ValueError` instead of silently
+  degrading to `"basic"` -- a typo/wiring bug should be loud, not hidden;
+  `"auto"` remains the deliberate "degrade if unavailable" choice. Both
+  call sites catch `ValueError` alongside `ImportError` and log at error
+  level without crashing.
+
+### Real Beat This! 1.1.0 / `final0` run (this session, CPU, no CUDA available)
+
+`pip install beat-this` succeeded (`beat-this-1.1.0`, `torch-2.14.0+cpu`,
+`torchaudio-2.11.0`, plus `einops`/`rotary-embedding-torch`/`sympy`/
+`fsspec`/`filelock`/`jinja2`/`mpmath`/`MarkupSafe`). First use downloaded
+the `final0` checkpoint (77.3 MB, from
+`https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt`,
+cached at `~/.cache/torch/hub/checkpoints/beat_this-final0.ckpt`) in ~8s.
+`tests/test_automix_beat_this_real_model.py` (opt-in,
+`PLAYLIST_CANVAS_TEST_BEAT_THIS=1`) passed both tests end to end --
+inference validity, and a full `compile_automix()` +
+`AutoMixAudioPipeline.render()` pass.
+
+A manual, throwaway script (two synthetic 3-minute click+tone tracks, 128
+and 132 BPM) additionally confirmed, with real numbers:
+
+```
+cache identity: provider_id='beat_this' version='1+final0+pkg1.1.0'
+
+Track A: analyzer_id=beat_this, bpm=130.43, bpm_confidence=1.000,
+         beats=385, downbeats=385, meter_confidence=1.000,
+         beat_alignment_quality() = 'reliable'
+Track B: analyzer_id=beat_this, bpm=130.43, bpm_confidence=1.000,
+         beats=397, downbeats=397, meter_confidence=1.000,
+         beat_alignment_quality() = 'reliable'
+
+Basic-only analyze() for the same 180s track: bpm=129.20, beats=383,
+downbeats=96, meter_confidence=0.3, beat_alignment_quality() = 'bpm_only'
+
+compile_automix(): 1 transition, type=BEAT_MATCH, start=172.50s,
+duration=7.50s -- a real BEAT_MATCH transition was actually selected,
+which Basic's own "bpm_only" tier could never produce (candidates.py
+requires "reliable" on both sides).
+```
+
+CPU timing (same 180s track): Basic-only 7.15s; Beat This! first call
+(includes model construction/warmup) 19.49s; second call with the model
+already loaded and reused 11.45s; additional Beat This! cost over
+basic-only analysis once the model is warm: **~4.3s per 3-minute track on
+CPU**. Every track analyzed after the first in a batch pays only this
+warm cost, not the ~8-12s load/warmup, since `AnalysisService` shares one
+provider instance across the whole batch and `BeatThisAnalysisProvider`
+loads its model at most once (`_load_model`, lock-guarded).
+
+Both synthetic tracks converged to the same reported BPM (130.43) despite
+being generated at different target BPMs (128/132) -- plausible for this
+specific synthetic click+sine-tone stress signal (not real music), not
+investigated further; flagged here rather than silently reported as a
+clean result.
+
+**CUDA**: not available in this environment (`torch.cuda.is_available()`
+is `False`, CPU-only wheel installed) -- device selection
+(`"cuda" if torch.cuda.is_available() else "cpu"`) was verified by code
+reading and by the CPU branch actually running above, not by an actual
+CUDA run. This remains unverified on real GPU hardware; flagged as a real
+limitation, not assumed to work.
+
+### Storage
+
+`beat-this` + `torch` (CPU wheel) + transitive dependencies: the `torch`
+wheel alone was 124.1 MB downloaded; combined with `torchaudio`,
+`einops`, `rotary-embedding-torch`, `sympy`, `fsspec`, `filelock`,
+`jinja2`, `mpmath`, `MarkupSafe`, and `beat-this` itself, total download
+was on the order of 150-200 MB, plus the installed (unpacked) size which
+is typically larger for torch specifically (commonly 500 MB-1 GB
+installed for a CPU wheel; not measured precisely in this session). The
+`final0` checkpoint adds 77.3 MB on first use. None of this affects the
+app's default install or its normal (non-opt-in) test run -- confirmed:
+`scripts/run_tests.py` and every non-opt-in AutoMix test suite complete in
+well under a second of AutoMix-related work even with `beat-this`
+installed on this machine, since normal tests never construct a working
+FFmpeg + `transition_mode="automix"` + enough real playback/analysis to
+reach the `"auto"` resolution with a functioning decode path.
+

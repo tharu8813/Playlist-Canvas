@@ -4043,6 +4043,10 @@ class MainWindowSafetyTests(unittest.TestCase):
             start.assert_called_once()
             called_tracks = start.call_args[0][0]
             self.assertEqual([track.title for track in called_tracks], ["A"])
+            # "auto": Beat This! when available, else basic -- the same
+            # policy Preview/Export rendering uses, so the two paths can
+            # never disagree on which analyzer produced a given result.
+            self.assertEqual(start.call_args.kwargs.get("provider_id"), "auto")
 
     def test_export_resolutions_follow_project_canvas_ratio(self) -> None:
         dialog = ExportSettingsDialog(

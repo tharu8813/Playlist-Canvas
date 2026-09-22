@@ -146,7 +146,18 @@ class AnalysisService:
                 cached = TrackAnalysis.from_cache_fields(
                     representative.id, representative.file_path, cached_fields,
                 )
-                return path_key, cached, None
+                # A hybrid provider (e.g. BeatThisAnalysisProvider) that
+                # degraded to a fallback result stamps that result with the
+                # fallback's own analyzer_id (e.g. "basic"), not this
+                # provider's -- even though AnalysisCache is namespaced by
+                # this provider's identity (provider.provider_id/version).
+                # Accepting such an entry as a hit would let one transient
+                # failure permanently shadow this provider (a later run
+                # with the real dependency/model available would keep
+                # replaying the stale fallback instead of ever trying
+                # again). Treat a provenance mismatch as a miss instead.
+                if cached.analyzer_id == self.provider.provider_id:
+                    return path_key, cached, None
         if cancel_event.is_set():
             return path_key, None, None
         try:

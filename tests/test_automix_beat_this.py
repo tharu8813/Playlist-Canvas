@@ -34,7 +34,19 @@ def _track(name: str = "a.wav", duration_seconds: float = 30.0) -> PlaylistTrack
     return PlaylistTrack(file_path=name, title=name, duration_seconds=duration_seconds)
 
 
-def _basic_result(track: PlaylistTrack, *, bpm: float | None = 100.0) -> TrackAnalysis:
+def _basic_result(
+    track: PlaylistTrack, *, bpm: float | None = 100.0, silent: bool = False,
+) -> TrackAnalysis:
+    """``silent=True`` reproduces BasicAnalysisProvider's own early return
+    for a too-short/silent track (only identity fields set, energy=None).
+    ``bpm=None, silent=False`` reproduces librosa finding no *usable* BPM on
+    an otherwise fully-decoded, non-silent track (energy IS set) -- the
+    distinction BeatThisAnalysisProvider.analyze() now relies on."""
+    if silent:
+        return TrackAnalysis(
+            track_id=track.id, source_path=track.file_path, duration_seconds=track.duration_seconds,
+            analyzer_id="basic", analyzer_version="2",
+        )
     return TrackAnalysis(
         track_id=track.id, source_path=track.file_path, duration_seconds=track.duration_seconds,
         bpm=bpm, bpm_confidence=0.5 if bpm is not None else 0.0,
@@ -94,11 +106,12 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         self.assertEqual(result.energy, basic_result.energy)
 
     def test_skips_inference_when_basic_analysis_found_no_signal(self) -> None:
-        """A too-short/silent track: BasicAnalysisProvider already gave up
-        (bpm=None); Beat This inference must not even be attempted."""
+        """A genuinely too-short/silent track (BasicAnalysisProvider's own
+        early return, energy left at its default None): Beat This inference
+        must not even be attempted."""
         track = _track(duration_seconds=1.0)
         provider = BeatThisAnalysisProvider(Path("ffmpeg"))
-        basic_result = _basic_result(track, bpm=None)
+        basic_result = _basic_result(track, silent=True)
         with (
             patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
             patch.object(provider, "_load_model") as load_model,
@@ -106,6 +119,28 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
             result = provider.analyze(track, cancel_event=threading.Event())
         load_model.assert_not_called()
         self.assertIs(result, basic_result)
+
+    def test_attempts_inference_when_basic_found_no_bpm_on_a_non_silent_track(self) -> None:
+        """Regression: librosa failing to find a usable BPM is not the same
+        thing as the track being silent/too-short (energy IS set here) --
+        Beat This must still be attempted, and used if it succeeds."""
+        track = _track(duration_seconds=30.0)
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        basic_result = _basic_result(track, bpm=None)
+        self.assertIsNotNone(basic_result.energy)  # sanity: not the silent-track shape
+        beats = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+        downbeats = np.array([1.0, 3.0])
+        fake_model = _FakeFile2Beats(beats, downbeats)
+        with (
+            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            patch.object(provider, "_load_model", return_value=fake_model) as load_model,
+        ):
+            result = provider.analyze(track, cancel_event=threading.Event())
+        load_model.assert_called_once()
+        self.assertEqual(fake_model.calls, [track.file_path])
+        self.assertEqual(result.analyzer_id, "beat_this")
+        self.assertAlmostEqual(result.bpm, 120.0, delta=0.5)
+        self.assertEqual(result.beats, tuple(beats.tolist()))
 
     def test_falls_back_to_basic_when_beat_this_is_not_installed(self) -> None:
         track = _track()
@@ -252,9 +287,11 @@ class AnalysisProviderRegistryTests(unittest.TestCase):
         provider = create_analysis_provider("basic", Path("ffmpeg"))
         self.assertEqual(provider.provider_id, "basic")
 
-    def test_unknown_provider_id_falls_back_to_basic(self) -> None:
-        provider = create_analysis_provider("nonexistent", Path("ffmpeg"))
-        self.assertEqual(provider.provider_id, "basic")
+    def test_unknown_provider_id_raises_instead_of_silently_falling_back(self) -> None:
+        """A typo'd/unrecognized provider_id is a wiring bug, not a
+        deliberate choice -- must not be silently swallowed into "basic"."""
+        with self.assertRaises(ValueError):
+            create_analysis_provider("nonexistent", Path("ffmpeg"))
 
     def test_beat_this_provider_id_returns_a_beat_this_provider(self) -> None:
         """Construction alone must not import torch/beat_this (lazy import
@@ -262,6 +299,23 @@ class AnalysisProviderRegistryTests(unittest.TestCase):
         provider = create_analysis_provider("beat_this", Path("ffmpeg"))
         self.assertEqual(provider.provider_id, "beat_this")
         self.assertIsInstance(provider, BeatThisAnalysisProvider)
+
+    def test_auto_selects_basic_when_beat_this_is_not_importable(self) -> None:
+        with patch("app.automix.analysis.registry.beat_this_available", return_value=False):
+            provider = create_analysis_provider("auto", Path("ffmpeg"))
+        self.assertEqual(provider.provider_id, "basic")
+
+    def test_auto_selects_beat_this_when_available(self) -> None:
+        with patch("app.automix.analysis.registry.beat_this_available", return_value=True):
+            provider = create_analysis_provider("auto", Path("ffmpeg"))
+        self.assertEqual(provider.provider_id, "beat_this")
+
+    def test_beat_this_available_does_not_import_torch(self) -> None:
+        """find_spec-based probing must not trigger the actual heavy import."""
+        from app.automix.analysis.registry import beat_this_available
+        with patch.dict("sys.modules", {"torch": None}):
+            # torch stubbed unimportable: probe must report False, not raise.
+            self.assertFalse(beat_this_available())
 
 
 if __name__ == "__main__":

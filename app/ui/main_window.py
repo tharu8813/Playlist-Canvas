@@ -2316,7 +2316,12 @@ class MainWindow(QMainWindow):
             ).executable
         except FFmpegNotFoundError:
             return
-        self.automix_analysis_controller.start(tracks, ffmpeg_executable)
+        # "auto": Beat This! when its optional dependency is available,
+        # otherwise the basic analyzer -- the same policy
+        # FFmpegRenderer._render_automix_audio_segments uses for Preview/
+        # Export, so this playlist-badge analysis and the render path can
+        # never disagree on which analyzer produced a given result.
+        self.automix_analysis_controller.start(tracks, ffmpeg_executable, provider_id="auto")
 
     def _automix_analyses_received(self, analyses: dict[str, TrackAnalysis]) -> None:
         """Merge a completed background analysis pass into the session cache."""

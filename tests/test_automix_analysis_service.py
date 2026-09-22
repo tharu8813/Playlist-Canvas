@@ -33,6 +33,34 @@ class _StubProvider:
         )
 
 
+class _RecoveringHybridProvider:
+    """Simulates a hybrid provider (like BeatThisAnalysisProvider) whose
+    advanced engine is unavailable at first, then recovers -- its own
+    analyze() always reports the *actual* analyzer_id/version that produced
+    each result (its own identity when the advanced engine ran, or the
+    fallback's when it degraded), exactly like BeatThisAnalysisProvider
+    does by returning its owned BasicAnalysisProvider's result verbatim."""
+
+    provider_id = "beat_this"
+    version = "1"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.available = False
+
+    def analyze(self, track, *, cancel_event, progress=None) -> TrackAnalysis:
+        self.calls.append(track.file_path)
+        if self.available:
+            return TrackAnalysis(
+                track_id=track.id, source_path=track.file_path, duration_seconds=track.duration_seconds,
+                bpm=120.0, analyzer_id=self.provider_id, analyzer_version=self.version,
+            )
+        return TrackAnalysis(
+            track_id=track.id, source_path=track.file_path, duration_seconds=track.duration_seconds,
+            bpm=118.0, analyzer_id="basic", analyzer_version="2",
+        )
+
+
 class _CancellingProvider:
     provider_id = "cancelling"
     version = "1"
@@ -153,6 +181,41 @@ class AnalysisServiceTests(unittest.TestCase):
         result = service.analyze_tracks([])
         self.assertEqual(result.analyses, {})
         self.assertEqual(result.failures, {})
+
+    def test_fallback_result_is_not_cached_as_a_provider_success(self) -> None:
+        """Regression: a hybrid provider's own-identity cache namespace must
+        not be permanently poisoned by one fallback result -- once the
+        advanced engine becomes available again, the next analyze_tracks()
+        call must actually invoke it, not keep replaying the stale
+        fallback it was necessarily written under."""
+        with TemporaryDirectory(prefix="automix-service-") as directory:
+            provider = _RecoveringHybridProvider()
+            cache = AnalysisCache(
+                Path(directory) / "cache",
+                analyzer_id=provider.provider_id, analyzer_version=provider.version,
+            )
+            service = AnalysisService(provider, cache=cache)
+            track = _track(Path(directory), "a.mp3")
+
+            # First run: the advanced engine is unavailable; the hybrid
+            # provider degrades to a basic-analyzer-provenance result.
+            result = service.analyze_tracks([track])
+            self.assertEqual(len(provider.calls), 1)
+            self.assertEqual(result.analyses[track.id].analyzer_id, "basic")
+
+            provider.available = True
+
+            # Second run must re-invoke the provider despite the cache
+            # entry that now exists under provider.provider_id's namespace.
+            result = service.analyze_tracks([track])
+            self.assertEqual(len(provider.calls), 2)
+            self.assertEqual(result.analyses[track.id].analyzer_id, "beat_this")
+
+            # Third run: a genuine success is now cached and must be served
+            # from it without a third provider call.
+            result = service.analyze_tracks([track])
+            self.assertEqual(len(provider.calls), 2)
+            self.assertEqual(result.analyses[track.id].analyzer_id, "beat_this")
 
     def test_progress_reports_completion_for_every_track(self) -> None:
         with TemporaryDirectory(prefix="automix-service-") as directory:

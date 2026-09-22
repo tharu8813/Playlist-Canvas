@@ -64,6 +64,24 @@ MINIMUM_DOWNBEATS_FOR_METER = 2
 _TIMESTAMP_DEDUPE_TOLERANCE_SECONDS = 1e-3
 
 
+def _installed_beat_this_version() -> str:
+    """The installed ``beat-this`` distribution's version, or "unavailable".
+
+    Uses importlib.metadata, which reads installed-package metadata
+    (dist-info) without importing the package itself -- safe to call
+    unconditionally, even when torch/beat_this are not installed at all,
+    without triggering the heavy import this whole module otherwise avoids
+    until analyze() actually needs it.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        return version("beat-this")
+    except PackageNotFoundError:
+        return "unavailable"
+    except Exception:  # noqa: BLE001 - a version string must never block construction
+        return "unknown"
+
+
 class BeatThisAnalysisProvider:
     """Hybrid AnalysisProvider: Beat This! for rhythm, BasicAnalysisProvider for the rest.
 
@@ -75,10 +93,15 @@ class BeatThisAnalysisProvider:
 
     provider_id = "beat_this"
     version = "1"
-    """Cache-key identity (app/automix/cache.py hashes provider_id+version
-    into the cache filename): bump this if the confidence calibration or
-    output mapping below changes in a way that should invalidate previously
-    cached beat_this results, independent of the upstream model version."""
+    """This *implementation's* version: bump it if the confidence
+    calibration or output mapping in this module changes in a way that
+    should invalidate previously cached results, independent of the
+    upstream model/package version. Accessed on the class (not an
+    instance) this stays "1" -- see __init__, which combines it with the
+    checkpoint name and the installed ``beat-this`` package version into
+    the actual per-instance cache identity (self.version), so a checkpoint
+    change or a package upgrade also invalidates old cache entries without
+    a manual version bump here."""
 
     def __init__(
         self, ffmpeg_executable: Path, *,
@@ -89,6 +112,12 @@ class BeatThisAnalysisProvider:
         self._checkpoint = checkpoint
         self._model = None
         self._model_lock = threading.Lock()
+        # Shadows the class attribute above with the full cache identity for
+        # this instance (app/automix/cache.py keys entries by
+        # provider_id+version). importlib.metadata reads installed-package
+        # metadata without importing/executing the package, so this never
+        # eagerly loads torch just to compute a version string.
+        self.version = f"{BeatThisAnalysisProvider.version}+{checkpoint}+pkg{_installed_beat_this_version()}"
 
     def analyze(
         self, track: PlaylistTrack, *,
@@ -102,9 +131,19 @@ class BeatThisAnalysisProvider:
         basic_result = self._basic.analyze(track, cancel_event=cancel_event, progress=progress)
         if cancel_event.is_set():
             raise AnalysisCancelled("AutoMix analysis cancelled before Beat This inference.")
-        if basic_result.bpm is None:
-            # Too short/silent -- the basic analyzer already gave up; a
-            # beat/downbeat model has no signal to do better with either.
+        if basic_result.energy is None:
+            # `energy` is only ever left at its default None by
+            # BasicAnalysisProvider's own early return for a silent/too-short
+            # track (see basic.py's MINIMUM_ANALYZABLE_SECONDS/
+            # SILENCE_PEAK_THRESHOLD check) -- every other path through
+            # analyze() always computes a real energy value, even when
+            # librosa's own BPM estimate is rejected as implausible. That
+            # distinction matters: "librosa could not find a usable BPM" is
+            # not the same thing as "there is no audio signal to analyze",
+            # and Beat This! can succeed on tracks librosa's beat tracker
+            # fails on (that is the whole point of adding it). Skipping
+            # inference here is therefore only a true silent/too-short
+            # short-circuit, never a proxy for "basic found no BPM".
             return basic_result
         try:
             raw_beats, raw_downbeats = self._run_inference(track, cancel_event, progress)

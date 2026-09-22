@@ -105,6 +105,27 @@ class RenderAutomixAudioSegmentsUnitTests(unittest.TestCase):
                     Path("."), 30.0, None, cancel_event,
                 )
 
+    def test_uses_the_auto_provider_policy(self) -> None:
+        """Regression: Export/Preview rendering must resolve the analyzer
+        with the same "auto" policy as the interactive playlist-badge
+        analysis path (AutoMixAnalysisController), never a different one --
+        see app/automix/analysis/registry.py."""
+        import threading
+
+        renderer = _renderer()
+        with patch(
+            "app.automix.analysis.registry.create_analysis_provider",
+            side_effect=ValueError("stop here"),
+        ) as create_provider:
+            result = renderer._render_automix_audio_segments(
+                [PlaylistTrack("a.mp3", "A", duration_seconds=30.0)],
+                Path("."), 30.0, None, threading.Event(),
+            )
+        self.assertIsNone(result)  # ValueError from provider selection degrades, not raises
+        create_provider.assert_called_once()
+        provider_id = create_provider.call_args.args[0]
+        self.assertEqual(provider_id, "auto")
+
 
 class RenderFixedCrossfadeAudioSegmentsUnitTests(unittest.TestCase):
     """No real FFmpeg needed: exercises the fallback/degradation logic only."""

@@ -1360,18 +1360,20 @@ class FFmpegRenderer:
             from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
             from app.automix.settings import AutoMixTransitionSettings
             from app.automix.workflow import AutoMixWorkflow
-            # "basic" for now -- Export/Preview rendering has no settings
-            # plumbing for provider selection yet (a future UI toggle has one
-            # place to route through: create_analysis_provider). The
-            # interactive playlist-badge analysis path
-            # (AutoMixAnalysisController.start) already accepts provider_id.
-            # Constructed here, inside the same try/except ImportError as
-            # the other lazy imports above, so a missing/broken analyzer
-            # dependency is reported exactly like before instead of raising
-            # from inside the AutoMixRenderError-only block below.
-            provider = create_analysis_provider("basic", self.executable)
+            # "auto" -- the same policy the interactive playlist-badge
+            # analysis path uses (AutoMixAnalysisController.start), so
+            # Preview and Export can never resolve to a different analyzer
+            # for the same playlist. Constructed here, inside the same
+            # try/except as the other lazy imports above, so a missing/
+            # broken analyzer dependency is reported exactly like before
+            # instead of raising from inside the AutoMixRenderError-only
+            # block below.
+            provider = create_analysis_provider("auto", self.executable)
         except ImportError as error:
             LOGGER.warning("AutoMix export skipped, a dependency is unavailable: %s", error)
+            return None
+        except ValueError as error:
+            LOGGER.error("AutoMix export misconfigured: %s", error)
             return None
         try:
             self._report(progress_callback, "Preparing audio", 0.05, "Analyzing tracks for AutoMix")

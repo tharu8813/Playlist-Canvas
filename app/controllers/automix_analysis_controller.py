@@ -56,6 +56,12 @@ class _AutoMixAnalysisWorker(QThread):
         except ImportError as error:
             LOGGER.warning("AutoMix analysis is unavailable: %s", error)
             return
+        except ValueError as error:
+            # An unrecognized provider_id is a wiring bug (see registry.py),
+            # not a missing-dependency situation -- log it loudly but still
+            # never crash the background worker over it.
+            LOGGER.error("AutoMix analysis misconfigured: %s", error)
+            return
         workflow = AutoMixWorkflow(provider)
         result = workflow.analyze(self._tracks, cancel_event=self._cancel_event)
         if not self._cancel_event.is_set():
