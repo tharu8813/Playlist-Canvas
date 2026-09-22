@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from app.ui.main_window import MainWindow
 
 PREVIEW_TAB_INDEX = 2
+PREVIEW_MIX_ACTIVITY = "preview_mix"
 
 
 class PreviewController:
@@ -164,6 +165,7 @@ class PreviewController:
             if window.translator.language is Language.KOREAN else
             "Playing the full preview on the Canvas · Editing is locked."
         )
+        self._track_background_mix_progress(preview)
         preview.show()
         preview.setFocus(Qt.FocusReason.OtherFocusReason)
 
@@ -199,7 +201,17 @@ class PreviewController:
 
         window = self.window
         temp_dir = TemporaryDirectory(prefix="playlist-preview-audio-")
-        controller = PreviewAudioController(FFmpegRenderer(executable), window)
+        if transition_mode == "automix":
+            # Analysis lands per track; once Preview is open it plays AutoMix
+            # as far as it is analyzed, then the unchanged export mix.
+            from app.controllers.progressive_automix_controller import ProgressiveAutoMixController
+
+            controller = ProgressiveAutoMixController(
+                FFmpegRenderer(executable), window,
+                korean=window.translator.language is Language.KOREAN,
+            )
+        else:
+            controller = PreviewAudioController(FFmpegRenderer(executable), window)
         dialog = PreviewPreparationDialog(window.translator, window)
         result: dict[str, tuple[Path, object]] = {}
 
@@ -233,6 +245,55 @@ class PreviewController:
         controller.shutdown()
         temp_dir.cleanup()
         return None, None, None
+
+    def _track_background_mix_progress(self, preview) -> None:
+        """Mirror a still-running blended-audio render in the status bar progress.
+
+        Preview plays the per-track audio meanwhile and hot-swaps to the mix
+        when it lands (ExportPreviewDialog._on_blended_audio_ready); this only
+        makes that background work visible until it finishes or Preview closes.
+        """
+        controller = getattr(preview, "_blended_audio_controller", None)
+        if controller is None:
+            return
+        window = self.window
+        korean = window.translator.language is Language.KOREAN
+        window.activity_progress.begin(
+            PREVIEW_MIX_ACTIVITY,
+            "미리보기 믹스 준비" if korean else "Preparing preview mix",
+            0.0,
+            detail=(
+                "준비되는 동안 개별 곡 오디오로 재생하고, 완료되면 믹스로 전환합니다."
+                if korean else
+                "Playing per-track audio meanwhile; switches to the mix when ready."
+            ),
+        )
+
+        def on_progress(_stage: str, fraction: float, message: str) -> None:
+            # The progressive controller's messages are the live state itself
+            # ("Analyzing 3 / 12 ...", "AutoMix ready through track 4"): show them as the label.
+            label = message if hasattr(controller, "progressive_ready") and message else None
+            window.activity_progress.update(PREVIEW_MIX_ACTIVITY, fraction, detail=message or None, label=label)
+
+        def on_ready(*_args: object) -> None:
+            window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)
+            window.statusBar().showMessage(
+                "미리보기 믹스가 준비되어 재생 중인 위치에서 전환했습니다." if korean else
+                "Preview mix ready; switched over at the current position.",
+                4000,
+            )
+
+        def on_failed(*_args: object) -> None:
+            window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)
+            window.statusBar().showMessage(
+                "미리보기 믹스를 준비하지 못해 개별 곡 오디오로 계속 재생합니다." if korean else
+                "Could not prepare the preview mix; continuing with per-track audio.",
+                6000,
+            )
+
+        controller.progress.connect(on_progress)
+        controller.audio_ready.connect(on_ready)
+        controller.audio_failed.connect(on_failed)
 
     def lock_editor_for_inline_preview(self) -> None:
         """Lock project mutation while keeping bottom mode tabs interactive."""
@@ -300,6 +361,7 @@ class PreviewController:
         if window.bottom_tabs.currentIndex() == PREVIEW_TAB_INDEX:
             window._select_edit_bottom_tab()
         window.activity_progress.finish("inline_preview")
+        window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)  # render cancelled with Preview
         window.statusBar().showMessage(
             "미리보기를 종료하고 캔버스 편집으로 돌아왔습니다."
             if window.translator.language is Language.KOREAN else

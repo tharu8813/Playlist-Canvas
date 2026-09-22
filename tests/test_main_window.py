@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import os
@@ -57,6 +59,7 @@ from app.dialogs.export_preview_dialog import (
     _transition_display_regions,
 )
 from app.dialogs.preview_preparation_dialog import PreviewPreparationDialog
+from app.controllers.progressive_automix_controller import ProgressiveAutoMixController
 from app.controllers.preview_audio_controller import PreviewAudioController
 from app.timeline.render_plan import AudioRenderTransition
 from app.timeline.models import TransitionType
@@ -5863,7 +5866,7 @@ class MainWindowSafetyTests(unittest.TestCase):
                 self.audio_ready.emit(str(blended_path), plan)
 
             with (
-                patch.object(PreviewAudioController, "start", fake_start),
+                patch.object(ProgressiveAutoMixController, "start", fake_start),
                 patch.object(PreviewPreparationDialog, "exec", return_value=QDialog.DialogCode.Accepted),
             ):
                 self.window.preview_controller.show_export_preview(tracks)
@@ -5903,7 +5906,7 @@ class MainWindowSafetyTests(unittest.TestCase):
                 return QDialog.DialogCode.Rejected
 
             with (
-                patch.object(PreviewAudioController, "start") as start,
+                patch.object(ProgressiveAutoMixController, "start") as start,
                 patch.object(PreviewPreparationDialog, "exec", fake_skip_exec),
             ):
                 self.window.preview_controller.show_export_preview(tracks)
@@ -5915,6 +5918,13 @@ class MainWindowSafetyTests(unittest.TestCase):
                 self.assertIsNotNone(preview._blended_audio_controller)
                 # The adopted controller was not restarted a second time.
                 start.assert_called_once()
+
+                # The background render shows up in the bottom status-bar progress.
+                activity = self.window.activity_progress
+                self.assertIn("preview_mix", activity.active_keys)
+                preview._blended_audio_controller.progress.emit("Combining mix", 0.4, "Combining mix 12.0s / 30.0s")
+                self.assertEqual(activity.progress_bar.value(), 400)
+                self.assertIn("Combining mix 12.0s / 30.0s", activity.toolTip())
 
                 # Seek near the end and start playing, then simulate the
                 # adopted controller's render finishing -- same regression
@@ -5935,8 +5945,206 @@ class MainWindowSafetyTests(unittest.TestCase):
                     preview._blended_audio_controller.audio_ready.emit(str(blended_path), plan)
                 set_position.assert_not_called()  # deferred until seekable, per the hot-swap fix
                 self.assertAlmostEqual(preview._playhead_seconds, 85.0, places=2)
+                self.assertNotIn("preview_mix", activity.active_keys)
             finally:
                 self.window._finish_inline_preview()
+
+    def _open_progressive_preview(self, directory: str):
+        """Skip-path Preview adopting a (not started) progressive controller, plus partial plans."""
+        from app.automix.progressive import ProgressiveAnalysis, partial_plan
+        from tests.test_automix_planner import ENABLED, _analysis
+
+        tracks = [PlaylistTrack(f"{name}.wav", name.upper(), duration_seconds=120.0) for name in "abc"]
+        self.window.playlist_service.replace(tracks)
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="automix")
+        fake_ffmpeg = Path(directory) / "ffmpeg.exe"
+        fake_ffmpeg.touch()
+        self.window.settings_service.save(replace(self.window.settings_service.current, ffmpeg_path=str(fake_ffmpeg)))
+
+        def fake_skip_exec(dialog) -> int:
+            dialog.skipped = True
+            return QDialog.DialogCode.Rejected
+
+        with (
+            patch.object(ProgressiveAutoMixController, "start"),
+            patch.object(PreviewPreparationDialog, "exec", fake_skip_exec),
+        ):
+            self.window.preview_controller.show_export_preview(tracks)
+        preview = self.window._inline_preview
+        self.addCleanup(self.window._finish_inline_preview)
+        state = ProgressiveAnalysis(tracks, structure_enabled=False)
+        plans = {}
+        for count in (2, 3):
+            for track in tracks[:count]:
+                state.record_rhythm(track.id, _analysis(track.id, 120.0, 120.0))
+            plans[count] = partial_plan(tracks, state, ENABLED)
+        files = {}
+        for name in ("p2", "p3", "final"):
+            files[name] = Path(directory) / f"{name}.flac"
+            files[name].touch()
+        return preview, tracks, plans, files
+
+    def _media_patches(self, preview):
+        player = preview.media_player
+        return (
+            patch.object(player, "setSource"), patch.object(player, "setPosition"),
+            patch.object(player, "play"), patch.object(player, "pause"),
+            patch.object(player, "mediaStatus", return_value=QMediaPlayer.MediaStatus.LoadingMedia),
+            patch.object(player, "isSeekable", return_value=False),
+        )
+
+    def _play_at(self, preview, seconds: float, playing: bool = True) -> None:
+        preview._playing = playing
+        preview._advancing_playhead = True  # position only, not a user seek
+        try:
+            preview.timeline.setValue(round(seconds * TIMELINE_SCALE))
+        finally:
+            preview._advancing_playhead = False
+        preview._playhead_seconds = seconds
+
+    def test_progressive_partial_mix_swaps_in_and_per_track_audio_plays_after_it(self) -> None:
+        with TemporaryDirectory(prefix="playlist-progressive-") as directory:
+            preview, tracks, plans, files = self._open_progressive_preview(directory)
+            self.assertTrue(preview._progressive)
+            controller = preview._blended_audio_controller
+            first = plans[2].audio.transitions[0]
+            covered = plans[2].audio.clips[1].timeline_end
+            patches = self._media_patches(preview)
+            with patches[0] as set_source, patches[1], patches[2], patches[3], patches[4], patches[5]:
+                self._play_at(preview, 5.0)
+                controller.progressive_ready.emit(str(files["p2"]), plans[2], covered, 0.5)
+                self.assertIs(preview._compiled_plan, plans[2])
+                self.assertEqual(preview._blended_audio_until, covered)
+                self.assertEqual(preview._per_track_gain, 0.5)
+                self.assertEqual(Path(set_source.call_args.args[0].toLocalFile()), files["p2"])
+                # The seek waits for the new source; it targets exactly the kept playhead.
+                self.assertEqual(preview._pending_media_seek_ms, 5000)
+                self.assertAlmostEqual(preview._playhead_seconds, 5.0)
+                self.assertEqual(preview.timeline.value(), round(5.0 * TIMELINE_SCALE))
+                self.assertEqual(preview.progressive_swap_count, 1)
+
+                # Past the partial mix, the sequential tail is per-track audio at the mix's level.
+                self._play_at(preview, covered + 1.0)
+                preview._start_audio_at_playhead()
+                self.assertEqual(Path(set_source.call_args.args[0].toLocalFile()).name, "c.wav")
+                self.assertEqual(preview._active_track_index, 2)
+                self.assertAlmostEqual(preview.audio_output.volume(),
+                                       preview.volume_slider.value() / 100.0 * 0.5, places=3)
+            self.assertLess(first.timeline_start, covered)
+
+    def test_progressive_swap_waits_while_a_transition_is_sounding(self) -> None:
+        with TemporaryDirectory(prefix="playlist-progressive-") as directory:
+            preview, tracks, plans, files = self._open_progressive_preview(directory)
+            controller = preview._blended_audio_controller
+            first = plans[2].audio.transitions[0]
+            patches = self._media_patches(preview)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                preview._apply_blended_audio(files["p2"], plans[2], plans[2].audio.clips[1].timeline_end)
+                preview._media_source_ready = True
+                self._play_at(preview, first.timeline_start + first.duration / 2)
+                controller.progressive_ready.emit(str(files["p3"]), plans[3], plans[3].audio.clips[2].timeline_end, 0.5)
+                self.assertIs(preview._compiled_plan, plans[2])  # the sounding A->B keeps its audio
+                self.assertIsNotNone(preview._pending_swap)
+                self._play_at(preview, first.timeline_start + first.duration + 1.0)
+                preview._try_apply_pending_swap()
+                self.assertIs(preview._compiled_plan, plans[3])  # B->C arrives at a solo stretch
+
+    def test_a_mix_arriving_mid_swap_waits_for_the_previous_source_to_load(self) -> None:
+        with TemporaryDirectory(prefix="playlist-progressive-") as directory:
+            preview, tracks, plans, files = self._open_progressive_preview(directory)
+            controller = preview._blended_audio_controller
+            patches = self._media_patches(preview)
+            with patches[0] as set_source, patches[1], patches[2], patches[3], patches[4] as status, patches[5] as seekable:
+                self._play_at(preview, 5.0)
+                controller.progressive_ready.emit(str(files["p2"]), plans[2], plans[2].audio.clips[1].timeline_end, 0.5)
+                self.assertFalse(preview._media_source_ready)
+                controller.progressive_ready.emit(str(files["p3"]), plans[3], plans[3].audio.clips[2].timeline_end, 0.5)
+                self.assertIs(preview._compiled_plan, plans[2])  # previous swap still loading
+                status.return_value = QMediaPlayer.MediaStatus.LoadedMedia
+                seekable.return_value = True
+                preview._resume_pending_media_seek()
+                self.assertIs(preview._compiled_plan, plans[3])
+                self.assertEqual(Path(set_source.call_args.args[0].toLocalFile()), files["p3"])
+
+    def test_user_seek_applies_a_mix_that_was_unsafe_at_the_old_position(self) -> None:
+        with TemporaryDirectory(prefix="playlist-progressive-") as directory:
+            preview, tracks, plans, files = self._open_progressive_preview(directory)
+            controller = preview._blended_audio_controller
+            from app.automix.progressive import divergence_seconds
+
+            patches = self._media_patches(preview)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                preview._apply_blended_audio(files["p2"], plans[2], plans[2].audio.clips[1].timeline_end)
+                preview._media_source_ready = True
+                self._play_at(preview, divergence_seconds(plans[2], plans[3]) + 3.0)  # listener outran analysis
+                controller.progressive_ready.emit(str(files["p3"]), plans[3], plans[3].audio.clips[2].timeline_end, 0.5)
+                self.assertIs(preview._compiled_plan, plans[2])
+                preview.timeline.setValue(round(10.0 * TIMELINE_SCALE))  # user seek
+                self.assertIs(preview._compiled_plan, plans[3])
+                self.assertAlmostEqual(preview._playhead_seconds, 10.0)
+
+    def test_paused_preview_takes_a_mix_even_inside_a_transition(self) -> None:
+        with TemporaryDirectory(prefix="playlist-progressive-") as directory:
+            preview, tracks, plans, files = self._open_progressive_preview(directory)
+            controller = preview._blended_audio_controller
+            first = plans[2].audio.transitions[0]
+            patches = self._media_patches(preview)
+            with patches[0] as set_source, patches[1], patches[2], patches[3], patches[4], patches[5]:
+                preview._apply_blended_audio(files["p2"], plans[2], plans[2].audio.clips[1].timeline_end)
+                self._play_at(preview, first.timeline_start + 1.0, playing=False)
+                controller.progressive_ready.emit(str(files["p3"]), plans[3], plans[3].audio.clips[2].timeline_end, 0.5)
+                self.assertIs(preview._compiled_plan, plans[3])
+                set_source.assert_not_called()  # the new source loads on the next Play
+                self.assertAlmostEqual(preview._playhead_seconds, first.timeline_start + 1.0)
+
+    def test_final_mix_waits_for_a_safe_moment_and_is_not_displaced_by_a_late_partial(self) -> None:
+        with TemporaryDirectory(prefix="playlist-progressive-") as directory:
+            preview, tracks, plans, files = self._open_progressive_preview(directory)
+            controller = preview._blended_audio_controller
+            first = plans[3].audio.transitions[0]
+            patches = self._media_patches(preview)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                preview._apply_blended_audio(files["p3"], plans[3], plans[3].audio.clips[2].timeline_end)
+                preview._media_source_ready = True
+                self._play_at(preview, first.timeline_start + 1.0)
+                controller.audio_ready.emit(str(files["final"]), plans[3])
+                controller.progressive_ready.emit(str(files["p2"]), plans[2], 1.0, 0.5)
+                self.assertEqual(preview._pending_swap[0], files["final"])
+                self._play_at(preview, first.timeline_start + first.duration + 1.0)
+                preview._try_apply_pending_swap()
+                self.assertEqual(preview._blended_audio_path, files["final"])
+                self.assertEqual(preview._blended_audio_until, math.inf)
+
+    def test_background_mix_progress_clears_on_failure_or_when_preview_closes(self) -> None:
+        track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
+        track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)
+        self.window.playlist_service.replace([track_a, track_b])
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="automix")
+        with TemporaryDirectory(prefix="playlist-fake-ffmpeg-") as directory:
+            fake_ffmpeg = Path(directory) / "ffmpeg.exe"
+            fake_ffmpeg.touch()
+            self.window.settings_service.save(
+                replace(self.window.settings_service.current, ffmpeg_path=str(fake_ffmpeg)),
+            )
+
+            def fake_skip_exec(self) -> int:
+                self.skipped = True
+                return QDialog.DialogCode.Rejected
+
+            activity = self.window.activity_progress
+            for outcome in ("failed", "closed"):
+                with self.subTest(outcome):
+                    with (
+                        patch.object(ProgressiveAutoMixController, "start"),
+                        patch.object(PreviewPreparationDialog, "exec", fake_skip_exec),
+                    ):
+                        self.window.preview_controller.show_export_preview([track_a, track_b])
+                    self.assertIn("preview_mix", activity.active_keys)
+                    if outcome == "failed":
+                        self.window._inline_preview._blended_audio_controller.audio_failed.emit("boom")
+                        self.assertNotIn("preview_mix", activity.active_keys)
+                    self.window._finish_inline_preview()
+                    self.assertNotIn("preview_mix", activity.active_keys)
 
     def test_track_lyrics_dialog_previews_audio_with_synchronized_lyrics(self) -> None:
         saved_volumes: list[int] = []

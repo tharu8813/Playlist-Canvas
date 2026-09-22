@@ -32,6 +32,8 @@ LOGGER = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int, str], None]
 """(completed_tracks, total_tracks, message) -> None."""
+ResultCallback = Callable[[str, "TrackStructureAnalysis | None"], None]
+"""(track_id, structure or None on failure) -> None, as each track finishes."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +67,7 @@ class StructureAnalysisService:
         self, tracks: Sequence[PlaylistTrack], *,
         cancel_event: threading.Event | None = None,
         progress: ProgressCallback | None = None,
+        on_result: ResultCallback | None = None,
     ) -> StructureAnalysisBatchResult:
         """Analyze every track, deduplicating identical source files.
 
@@ -115,6 +118,9 @@ class StructureAnalysisService:
                     report(f"Structure analysis failed: {os.path.basename(group[0].file_path)}")
                 else:
                     report("Structure analysis cancelled")
+                if on_result is not None and (result is not None or error is not None):
+                    for track in group:
+                        on_result(track.id, analyses.get(track.id))
 
         if cancel_event.is_set():
             LOGGER.info(

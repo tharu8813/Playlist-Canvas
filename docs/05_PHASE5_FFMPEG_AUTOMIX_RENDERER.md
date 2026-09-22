@@ -429,3 +429,37 @@ falls back to its type's legacy acrossfade with identical timing.
   `?` unknown. Unknown data never triggers a rule.
 - The planner logs one `AutoMix transition: ...` line per transition at INFO
   (app log: `%LOCALAPPDATA%\PlaylistCanvas\logs\playlist-canvas.log`).
+
+---
+
+## Addendum: progressive AutoMix preview (implemented)
+
+When the user starts Preview without waiting for the AutoMix preparation,
+`ProgressiveAutoMixController` (`app/controllers/progressive_automix_controller.py`)
+keeps AutoMix growing while the listener plays; the policy is pure code in
+`app/automix/progressive.py`.
+
+- **Analysis per track.** Beat This and Sonara run side by side;
+  `AnalysisService`/`StructureAnalysisService.analyze_tracks(on_result=...)`
+  report each track as it finishes (and still write the persistent caches).
+  The *frontier* is the leading run of tracks with both analyses done.
+- **Planning per event.** `partial_plan()` calls the unchanged
+  `compile_automix()` with analyses for the frontier only: pairs past it fall
+  back to sequential, and because the planner is strictly left to right,
+  every planned transition is already the final one. Only the previous clip's
+  tail changes when a transition is appended; `divergence_seconds()` locates it.
+- **Rendering is coalesced.** `RenderScheduler` renders a partial mix (the
+  analyzed clips only, FLAC) only when Preview is attached and the listener's
+  next junction is unrendered or an unrendered change is within 60 s; after a
+  0.5 s debounce (max 2 s), one render at a time. Complete analysis skips
+  partial mixes and runs the export pipeline (`prepare_playlist_audio`) once,
+  so the final Preview plan and audio are exactly Export's.
+- **Swapping is playhead-aware.** Preview applies a new mix only when
+  `swap_is_safe()`: before the change point (with a 2 s margin while playing),
+  never inside or entering a sounding transition, and never while the previous
+  swap's source is still loading (the existing pending-seek/generation
+  handshake is reused, not bypassed). A user seek applies a waiting mix.
+- **Level.** Partial mixes get one frozen gain from per-track `ebur128`
+  measurements (energy-weighted to -16 LUFS, peak-capped at -1.5 dBFS, as
+  linear loudnorm would); per-track audio after a partial mix plays at the
+  same gain. The export loudnorm runs only on the final mix.

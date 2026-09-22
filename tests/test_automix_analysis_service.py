@@ -151,6 +151,26 @@ class AnalysisServiceTests(unittest.TestCase):
             self.assertEqual(result.analyses["a"].track_id, "a")
             self.assertEqual(result.analyses["b"].track_id, "b")
 
+    def test_on_result_reports_every_track_as_it_finishes_including_failures_and_shared_media(self) -> None:
+        with TemporaryDirectory(prefix="automix-service-") as directory:
+            good = _track(Path(directory), "good.mp3")
+            bad = _track(Path(directory), "bad.mp3")
+            twin = PlaylistTrack(file_path=good.file_path, title="twin", duration_seconds=30.0)
+            provider = _StubProvider(fail_paths=frozenset({bad.file_path}))
+            service = AnalysisService(
+                provider, cache=AnalysisCache(Path(directory) / "cache", analyzer_id="stub", analyzer_version="1"),
+            )
+            reported: dict[str, object] = {}
+            result = service.analyze_tracks([good, bad, twin], on_result=reported.__setitem__)
+            self.assertEqual(set(reported), {good.id, bad.id, twin.id})
+            self.assertIsNone(reported[bad.id])
+            self.assertEqual(reported[good.id], result.analyses[good.id])
+            self.assertEqual(reported[twin.id].track_id, twin.id)
+            # A cache hit reports too (the progressive preview's fast path).
+            again: dict[str, object] = {}
+            service.analyze_tracks([good], on_result=again.__setitem__)
+            self.assertEqual(set(again), {good.id})
+
     def test_cancellation_before_start_skips_all_tracks(self) -> None:
         with TemporaryDirectory(prefix="automix-service-") as directory:
             provider = _StubProvider()

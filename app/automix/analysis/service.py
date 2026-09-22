@@ -23,6 +23,8 @@ LOGGER = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int, str], None]
 """(completed_tracks, total_tracks, message) -> None."""
+ResultCallback = Callable[[str, "TrackAnalysis | None"], None]
+"""(track_id, analysis or None on failure) -> None, as each track finishes."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +57,7 @@ class AnalysisService:
         self, tracks: Sequence[PlaylistTrack], *,
         cancel_event: threading.Event | None = None,
         progress: ProgressCallback | None = None,
+        on_result: ResultCallback | None = None,
     ) -> AnalysisBatchResult:
         """Analyze every track, deduplicating identical source files.
 
@@ -106,6 +109,9 @@ class AnalysisService:
                     report(f"AutoMix analysis failed: {os.path.basename(group[0].file_path)}")
                 else:
                     report("AutoMix analysis cancelled")
+                if on_result is not None and (result is not None or error is not None):
+                    for track in group:
+                        on_result(track.id, analyses.get(track.id))
 
         if cancel_event.is_set():
             LOGGER.info(

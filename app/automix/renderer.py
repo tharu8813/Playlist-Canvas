@@ -363,8 +363,14 @@ class AutoMixAudioPipeline:
         *,
         cancel_event: threading.Event | None = None,
         progress: ProgressCallback | None = None,
+        container: str = "nut",
     ) -> PreparedAudio:
-        """Render ``plan`` using ``track_paths`` (track_id -> source file) for its clips."""
+        """Render ``plan`` using ``track_paths`` (track_id -> source file) for its clips.
+
+        ``container="flac"`` writes a directly playable lossless file instead
+        of the PCM/NUT intermediate -- for progressive Preview, whose partial
+        mixes skip the downstream loudness/AAC stage.
+        """
         cancel_event = cancel_event or threading.Event()
 
         def report(stage: str, fraction: float, message: str) -> None:
@@ -397,7 +403,8 @@ class AutoMixAudioPipeline:
         # format the legacy sequential path's own per-track intermediates
         # already use (see _normalize_audio in ffmpeg_renderer.py), so the
         # concat/decode step downstream needs no special-casing.
-        output_path = output_directory / "automix_mix.nut"
+        output_path = output_directory / f"automix_mix.{container}"
+        codec = ["-c:a", "flac", "-compression_level", "0"] if container == "flac" else ["-c:a", "pcm_s16le"]
         expected_duration = max(clip.timeline_end for clip in clips)
 
         def command(dsp: bool) -> list[str]:
@@ -408,7 +415,7 @@ class AutoMixAudioPipeline:
             arguments.extend([
                 "-filter_complex", filter_complex,
                 "-map", f"[{output_label}]",
-                "-c:a", "pcm_s16le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-f", "nut",
+                *codec, "-ar", str(SAMPLE_RATE), "-ac", "2", "-f", container,
                 "-progress", "pipe:1", "-nostats", "-y", str(output_path),
             ])
             return arguments

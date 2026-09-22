@@ -108,6 +108,7 @@ def compile_automix(
     analyses: Mapping[str, TrackAnalysis],
     settings: AutoMixTransitionSettings,
     structures: Mapping[str, TrackStructureAnalysis] | None = None,
+    *, log_diagnostics: bool = True,
 ) -> CompiledRenderPlan:
     """Compile enabled ``tracks`` into a CompiledRenderPlan with AutoMix overlaps.
 
@@ -129,7 +130,7 @@ def compile_automix(
     """
     selected = [track for track in tracks if track.enabled]
     structures = structures or {}
-    clips, transitions = _place_tracks(selected, analyses, structures, settings)
+    clips, transitions = _place_tracks(selected, analyses, structures, settings, log_diagnostics)
     presentation, metadata, duration = build_presentation_and_metadata(clips)
     plan = CompiledRenderPlan(
         audio=AudioRenderPlan(clips=clips, transitions=transitions),
@@ -162,6 +163,7 @@ def _place_tracks(
     analyses: Mapping[str, TrackAnalysis],
     structures: Mapping[str, TrackStructureAnalysis],
     settings: AutoMixTransitionSettings,
+    log_diagnostics: bool = True,
 ) -> tuple[tuple[AudioRenderClip, ...], tuple[AudioRenderTransition, ...]]:
     clips: list[AudioRenderClip] = []
     transitions: list[AudioRenderTransition] = []
@@ -195,7 +197,7 @@ def _place_tracks(
             previous_track = tracks[index - 1]
             timeline_start, source_in, playback_rate, transition, trimmed_outgoing_source_out = _plan_overlap(
                 previous, previous_track, track, analyses, structures, settings, actual_cursor,
-                applied_rates.get(previous_track.id, 1.0),
+                applied_rates.get(previous_track.id, 1.0), log_diagnostics,
             )
             if transition is not None:
                 transitions.append(transition)
@@ -231,6 +233,7 @@ def _plan_overlap(
     settings: AutoMixTransitionSettings,
     actual_cursor: float,
     outgoing_applied_rate: float,
+    log_diagnostics: bool = True,
 ) -> tuple[float, float, float, AudioRenderTransition | None, float]:
     """Decide clip placement for ``track`` following ``previous_clip`` with no explicit gap.
 
@@ -303,7 +306,8 @@ def _plan_overlap(
         dsp=decision.dsp, dsp_reasons=decision.reasons,
     )
     # One line per transition in the app log, for tuning against real music.
-    LOGGER.info("AutoMix transition: %s", describe_transition(
-        transition, previous_track.title or previous_track.id, track.title or track.id,
-    ))
+    if log_diagnostics:
+        LOGGER.info("AutoMix transition: %s", describe_transition(
+            transition, previous_track.title or previous_track.id, track.title or track.id,
+        ))
     return timeline_start, source_in, playback_rate, transition, best.outgoing_source_out
