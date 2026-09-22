@@ -354,6 +354,103 @@ class CompileAutomixStructureTests(unittest.TestCase):
             self.assertNotEqual(transition.type, TransitionType.BEAT_MATCH)
 
 
+class TransitionGeometryTests(unittest.TestCase):
+    """Commit C.1: AudioRenderTransition.duration must always match the
+    winning candidate's own duration_seconds -- the exact bug reported: a
+    structure anchor far from the track's natural end used to inflate the
+    actual rendered overlap far beyond what was scored (200s track,
+    outro_start=170, candidate duration=16 rendered as ~30s)."""
+
+    def test_structure_anchor_transition_duration_matches_the_candidate(self) -> None:
+        tracks = [_track("a", 200.0), _track("b", 200.0)]
+        analyses = {"a": _analysis("a", 120.0, 200.0), "b": _analysis("b", 120.0, 200.0)}
+        structures = {"a": _structure("a", 200.0, outro_start=170.0)}
+        plan = compile_automix(tracks, analyses, ENABLED, structures=structures)
+        validate_compiled_render_plan(plan)
+        self.assertEqual(len(plan.audio.transitions), 1)
+        transition = plan.audio.transitions[0]
+        # The reported bug: this landed near 30s (200 - 170) instead of
+        # the ~16s an 8-bar/120 BPM candidate actually scores.
+        self.assertLess(transition.duration, 20.0)
+        self.assertGreater(transition.duration, 10.0)
+        clip_a, _clip_b = plan.audio.clips
+        # The outgoing clip's audio must actually be trimmed to match --
+        # not still extend all the way to the track's own natural end.
+        self.assertLess(clip_a.source_out, 200.0)
+        self.assertAlmostEqual(clip_a.timeline_end, transition.timeline_start + transition.duration, places=6)
+
+    def test_outgoing_clip_source_out_stays_within_bounds(self) -> None:
+        tracks = [_track("a", 200.0), _track("b", 200.0)]
+        analyses = {"a": _analysis("a", 120.0, 200.0), "b": _analysis("b", 120.0, 200.0)}
+        structures = {"a": _structure("a", 200.0, outro_start=170.0)}
+        plan = compile_automix(tracks, analyses, ENABLED, structures=structures)
+        clip_a = plan.audio.clips[0]
+        self.assertGreater(clip_a.source_out, clip_a.source_in)
+        self.assertLessEqual(clip_a.source_out, 200.0)
+
+    def test_max_transition_seconds_invariant_holds_with_a_non_bar_aligned_anchor(self) -> None:
+        tracks = [_track("a", 400.0), _track("b", 400.0)]
+        analyses = {"a": _analysis("a", 120.0, 400.0), "b": _analysis("b", 120.0, 400.0)}
+        # An anchor nowhere near a clean bar boundary -- exercises real
+        # downbeat snapping, not just a convenient round number.
+        structures = {"a": _structure("a", 400.0, outro_start=311.3)}
+        plan = compile_automix(tracks, analyses, ENABLED, structures=structures)
+        validate_compiled_render_plan(plan)
+        self.assertTrue(plan.audio.transitions)
+        for transition in plan.audio.transitions:
+            self.assertGreaterEqual(transition.duration, ENABLED.min_transition_seconds)
+            self.assertLessEqual(transition.duration, ENABLED.max_transition_seconds)
+
+    def test_rate_above_one_needs_more_than_a_timeline_seconds_of_incoming_source(self) -> None:
+        """114 -> 120 BPM: incoming has to speed up (rate > 1) to catch up
+        to 120, so it needs *more* than duration_seconds of its own source
+        audio for the transition -- not duration_seconds directly."""
+        outgoing = _analysis("a", 120.0, 60.0)
+        incoming = _analysis("b", 114.0, 60.0)
+        compatibility = evaluate_compatibility(outgoing, incoming, ENABLED)
+        best = select_best_candidate(generate_candidates(outgoing, incoming, compatibility, ENABLED))
+        self.assertIsNotNone(best)
+        self.assertGreater(best.incoming_rate, 1.0)
+        self.assertGreater(best.duration_seconds * best.incoming_rate, best.duration_seconds)
+
+    def test_rate_below_one_needs_less_than_a_timeline_seconds_of_incoming_source(self) -> None:
+        """126 -> 120 BPM: incoming has to slow down (rate < 1), needs
+        *less* than duration_seconds of its own source audio."""
+        outgoing = _analysis("a", 120.0, 60.0)
+        incoming = _analysis("b", 126.0, 60.0)
+        compatibility = evaluate_compatibility(outgoing, incoming, ENABLED)
+        best = select_best_candidate(generate_candidates(outgoing, incoming, compatibility, ENABLED))
+        self.assertIsNotNone(best)
+        self.assertLess(best.incoming_rate, 1.0)
+        self.assertLess(best.duration_seconds * best.incoming_rate, best.duration_seconds)
+
+    def test_preview_and_export_produce_identical_transition_geometry(self) -> None:
+        """Both Preview and Export call this exact same compile_automix()
+        with the same inputs -- documents/confirms that identity."""
+        tracks = [_track("a", 200.0), _track("b", 200.0)]
+        analyses = {"a": _analysis("a", 120.0, 200.0), "b": _analysis("b", 120.0, 200.0)}
+        structures = {"a": _structure("a", 200.0, outro_start=170.0)}
+        preview_plan = compile_automix(tracks, analyses, ENABLED, structures=structures)
+        export_plan = compile_automix(tracks, analyses, ENABLED, structures=structures)
+        self.assertEqual(preview_plan, export_plan)
+
+    def test_three_track_chain_transition_durations_stay_within_bounds(self) -> None:
+        """Item 22: effective BPM propagation must keep holding, and now
+        also produce in-bounds transition durations throughout the chain."""
+        tracks = [_track("a", 60.0), _track("b", 60.0), _track("c", 60.0)]
+        analyses = {
+            "a": _analysis("a", 120.0, 60.0),
+            "b": _analysis("b", 124.0, 60.0),
+            "c": _analysis("c", 128.0, 60.0),
+        }
+        plan = compile_automix(tracks, analyses, ENABLED)
+        validate_compiled_render_plan(plan)
+        self.assertTrue(plan.audio.transitions)
+        for transition in plan.audio.transitions:
+            self.assertGreaterEqual(transition.duration, ENABLED.min_transition_seconds)
+            self.assertLessEqual(transition.duration, ENABLED.max_transition_seconds)
+
+
 class SingleTrackAndEdgeCaseTests(unittest.TestCase):
     def test_single_track_has_no_transitions(self) -> None:
         plan = compile_automix([_track("a", 60.0)], {"a": _analysis("a", 120.0, 60.0)}, ENABLED)

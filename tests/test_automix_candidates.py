@@ -310,6 +310,24 @@ class StructureAwareCandidateTests(unittest.TestCase):
         dissimilar = _score_with_local_energy(outgoing, incoming, compatibility, settings, 0.9, 0.1)
         self.assertGreater(similar, dissimilar)
 
+    def test_duplicate_candidate_from_a_structure_anchor_is_removed(self) -> None:
+        """When a structure anchor snaps to the exact same downbeat as the
+        plain tail-based candidate for the same bar length, the two are
+        geometrically identical -- _deduplicate_candidates() must keep only
+        one, and the result must stay deterministic across repeated calls."""
+        outgoing = _analysis("a", 128.0, duration=200.0)
+        incoming = _analysis("b", 128.0, duration=200.0)
+        # 4 bars at 128 BPM / 4-4 meter = 7.5s -- the plain tail candidate
+        # for bars=4 naturally lands at (200 - 7.5) snapped to a downbeat.
+        # Anchor the outro right at that same natural tail position so the
+        # structure-anchored bars=4 candidate snaps to the identical spot.
+        outgoing_structure = _structure("a", 200.0, outro_start=192.5)
+        first = self._generate(outgoing, incoming, outgoing_structure=outgoing_structure)
+        second = self._generate(outgoing, incoming, outgoing_structure=outgoing_structure)
+        self.assertEqual(first, second)
+        keys = [(c.outgoing_source_time, c.incoming_source_time, c.bars, c.strategy) for c in first]
+        self.assertEqual(len(keys), len(set(keys)), "duplicate candidate geometry was not deduplicated")
+
     def test_vocal_overlap_only_checks_the_actual_transition_window(self) -> None:
         """Regression: the outgoing side previously checked vocal activity
         all the way to the track's own end, wider than the real transition
@@ -344,6 +362,98 @@ class StructureAwareCandidateTests(unittest.TestCase):
         # Sanity: vocals actually inside the real window must still penalize.
         inside_window_score = score(replace(outgoing, vocal_activity=((185.0, 195.0),)))
         self.assertLess(inside_window_score, baseline)
+
+
+class ScoreSaturationTests(unittest.TestCase):
+    """Commit C.1: score is an unclamped ranking signal, not a 0..1
+    probability -- a perfect-confidence base candidate must not swallow the
+    advanced bonuses on top of it (see _score_beat_candidate's removed
+    upper clamp)."""
+
+    def _perfect_score(self, outgoing, incoming, settings, **structure_kwargs) -> float:
+        from app.automix.candidates import _score_beat_candidate
+
+        compatibility = evaluate_compatibility(outgoing, incoming, settings)
+        score, _reasons = _score_beat_candidate(
+            outgoing, incoming, compatibility, 8, TransitionStrategy.BEAT_MATCH, settings,
+            0.0, 0.0, 190.0, 0.0, 10.0,
+            **structure_kwargs,
+        )
+        return score
+
+    def _perfect_pair(self):
+        outgoing = _analysis("a", 128.0, duration=200.0, bpm_confidence=1.0, meter_confidence=1.0)
+        incoming = _analysis("b", 128.0, duration=200.0, bpm_confidence=1.0, meter_confidence=1.0)
+        settings = AutoMixTransitionSettings(preferred_bars=8)
+        return outgoing, incoming, settings
+
+    def test_perfect_base_conditions_reach_exactly_one_before_any_bonus(self) -> None:
+        outgoing, incoming, settings = self._perfect_pair()
+        score = self._perfect_score(outgoing, incoming, settings)
+        self.assertAlmostEqual(score, 1.0, places=6)
+
+    def test_structure_anchor_bonus_still_beats_an_otherwise_identical_candidate(self) -> None:
+        """A tie at a clamped 1.0 would make this test meaningless -- the
+        whole point of removing the upper clamp is that a structure-aware
+        candidate scores strictly higher than the same candidate without
+        the anchor, even though the un-bonused score is already the
+        theoretical base maximum."""
+        outgoing, incoming, settings = self._perfect_pair()
+        baseline = self._perfect_score(outgoing, incoming, settings)
+        outgoing_structure = _structure("a", 200.0, outro_start=190.0)
+        with_anchor = self._perfect_score(outgoing, incoming, settings, outgoing_structure=outgoing_structure)
+        self.assertGreater(with_anchor, baseline)
+        self.assertGreaterEqual(baseline, 1.0)
+
+    def test_key_bonus_still_moves_ranking_at_perfect_base_confidence(self) -> None:
+        outgoing, incoming, settings = self._perfect_pair()
+        baseline = self._perfect_score(outgoing, incoming, settings)
+        compatible_key = self._perfect_score(
+            replace(outgoing, key="C major", key_confidence=0.8),
+            replace(incoming, key="G major", key_confidence=0.8),
+            settings,
+        )
+        self.assertGreater(compatible_key, baseline)
+
+    def test_energy_bonus_still_moves_ranking_at_perfect_base_confidence(self) -> None:
+        outgoing, incoming, settings = self._perfect_pair()
+        baseline = self._perfect_score(outgoing, incoming, settings)
+        similar_energy = self._perfect_score(
+            replace(outgoing, energy=0.7), replace(incoming, energy=0.72), settings,
+        )
+        self.assertGreater(similar_energy, baseline)
+
+
+class RateAwareVocalWindowTests(unittest.TestCase):
+    """Commit C.1: the vocal-overlap window must use each side's own
+    source-space span (duration_seconds * rate), not the raw timeline
+    duration -- otherwise a rate far from 1.0 silently mis-judges overlap."""
+
+    def test_incoming_vocal_window_uses_the_source_span_not_the_timeline_duration(self) -> None:
+        from app.automix.candidates import _score_beat_candidate
+
+        outgoing = _analysis("a", 128.0, duration=200.0)
+        incoming = _analysis("b", 128.0, duration=200.0)
+        settings = AutoMixTransitionSettings()
+        compatibility = evaluate_compatibility(outgoing, incoming, settings)
+        outgoing_with_vocals = replace(outgoing, vocal_activity=((185.0, 195.0),))
+        duration_seconds = 10.0
+        incoming_rate = 2.0  # source span is 20s, twice the timeline duration
+
+        def score(incoming_analysis) -> float:
+            result, _reasons = _score_beat_candidate(
+                outgoing_with_vocals, incoming_analysis, compatibility, 8, TransitionStrategy.BEAT_MATCH,
+                settings, 0.0, 0.0, 185.0, 0.0, duration_seconds,
+                incoming_source_span=duration_seconds * incoming_rate,
+            )
+            return result
+
+        baseline = score(incoming)
+        # Vocals land at 12-14s into the incoming track: outside the naive
+        # (timeline-duration) window [0, 10) but inside the real,
+        # rate-aware source window [0, 20).
+        outside_naive_window_score = score(replace(incoming, vocal_activity=((12.0, 14.0),)))
+        self.assertLess(outside_naive_window_score, baseline)
 
 
 def _score_with_local_energy(outgoing, incoming, compatibility, settings, outgoing_energy, incoming_energy):

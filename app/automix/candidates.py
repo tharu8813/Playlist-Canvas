@@ -97,6 +97,13 @@ treated with rising skepticism -- a plausible outro is usually tens of
 seconds, not minutes; an anchor this far from the end more likely reflects
 a structure-analysis error than a deliberately long instrumental outro."""
 
+_DURATION_EPSILON_SECONDS = 1e-6
+"""Floating-point tolerance for the exact-duration invariant (Commit C.1):
+a candidate whose source-space window would overrun the track by more than
+this is rejected outright, never silently clamped -- clamping would quietly
+shrink the transition below the ``duration_seconds`` it was scored for,
+recreating the same "scored 16s, rendered something else" bug in miniature."""
+
 
 class TransitionStrategy(str, Enum):
     """A planning-time classification, not a DSP instruction.
@@ -115,12 +122,31 @@ class TransitionStrategy(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class TransitionCandidate:
-    """One possible transition point between two tracks, with its own score."""
+    """One possible transition point between two tracks, with its own score.
+
+    Execution geometry (Commit C.1): ``duration_seconds`` is the
+    authoritative *timeline* length of the transition -- the planner
+    applies it directly as ``AudioRenderTransition.duration`` and trims the
+    outgoing clip's ``source_out`` to ``outgoing_source_out``, rather than
+    deriving the actual overlap from clip timeline arithmetic (which could
+    silently diverge from what was scored whenever a structure anchor sat
+    well before the track's natural end -- see planner.py's module
+    docstring). ``outgoing_source_out`` and ``incoming_source_time`` are
+    both in *source* (original media) seconds, same as
+    ``outgoing_source_time``; converting a timeline duration into how much
+    source audio either side actually consumes needs each side's own
+    playback rate (``outgoing_source_out - outgoing_source_time ==
+    duration_seconds * outgoing_playback_rate`` -- the rate already fixed
+    on the outgoing clip by whatever placed it, not this candidate's own
+    ``outgoing_rate``, which is always 1.0; see
+    ``app.automix.compatibility.resolve_target_bpm``).
+    """
 
     from_track_id: str
     to_track_id: str
 
     outgoing_source_time: float
+    outgoing_source_out: float
     incoming_source_time: float
 
     bars: int
@@ -155,6 +181,7 @@ def generate_candidates(
     outgoing: TrackAnalysis, incoming: TrackAnalysis,
     compatibility: TransitionCompatibility, settings: AutoMixTransitionSettings,
     *,
+    outgoing_playback_rate: float = 1.0,
     outgoing_structure: TrackStructureAnalysis | None = None,
     incoming_structure: TrackStructureAnalysis | None = None,
 ) -> list[TransitionCandidate]:
@@ -166,6 +193,14 @@ def generate_candidates(
     FIXED_CROSSFADE (incompatible tempo or missing BPM, but both tracks
     have enough source duration for a plain timed crossfade) -> CUT (not
     enough room for even a fixed crossfade).
+
+    ``outgoing_playback_rate`` is the rate the *outgoing* clip is already
+    playing at (fixed by whatever transition placed it, 1.0 for a clip
+    that was never rate-shifted) -- required to convert this candidate's
+    authoritative *timeline* ``duration_seconds`` into how much *source*
+    audio the outgoing side actually needs (Commit C.1; see
+    ``TransitionCandidate``'s docstring). Defaults to 1.0 for callers
+    (mostly tests) that plan a single pair in isolation.
 
     ``outgoing_structure``/``incoming_structure`` are optional and
     independent of each other (one-sided structure data is used safely --
@@ -203,6 +238,7 @@ def generate_candidates(
         for bars in BAR_LENGTHS
         if (candidate := _beat_based_candidate(
             outgoing, incoming, compatibility, bars, strategy, settings,
+            outgoing_playback_rate=outgoing_playback_rate,
             outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
         )) is not None
     ]
@@ -221,9 +257,12 @@ def generate_candidates(
             if (candidate := _beat_based_candidate(
                 outgoing, incoming, compatibility, bars, strategy, settings,
                 outgoing_naive_override=outgoing_anchor, incoming_naive_override=incoming_anchor,
+                outgoing_playback_rate=outgoing_playback_rate,
                 outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
             )) is not None
         )
+
+    candidates = _deduplicate_candidates(candidates)
 
     if not candidates:
         return _fallback_candidates(
@@ -231,6 +270,22 @@ def generate_candidates(
             reasons=("- no bar length fit within the transition-length and track-duration limits",),
         )
     return candidates
+
+
+def _deduplicate_candidates(candidates: list[TransitionCandidate]) -> list[TransitionCandidate]:
+    """Drop a structure-anchored candidate that snapped to the exact same
+    geometry as a regular one (e.g. the structure anchor and the plain
+    tail position land on the same downbeat) -- order-preserving (keeps
+    the first occurrence) so this stays fully deterministic."""
+    seen: set[tuple[float, float, int, TransitionStrategy]] = set()
+    deduplicated: list[TransitionCandidate] = []
+    for candidate in candidates:
+        key = (candidate.outgoing_source_time, candidate.incoming_source_time, candidate.bars, candidate.strategy)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(candidate)
+    return deduplicated
 
 
 def _structure_outgoing_anchor(structure: TrackStructureAnalysis | None) -> float | None:
@@ -266,6 +321,7 @@ def _beat_based_candidate(
     *,
     outgoing_naive_override: float | None = None,
     incoming_naive_override: float | None = None,
+    outgoing_playback_rate: float = 1.0,
     outgoing_structure: TrackStructureAnalysis | None = None,
     incoming_structure: TrackStructureAnalysis | None = None,
 ) -> TransitionCandidate | None:
@@ -282,36 +338,59 @@ def _beat_based_candidate(
         incoming_rate = 1.0
         seconds_per_bar = (outgoing.meter_numerator or DEFAULT_METER_NUMERATOR) * 60.0 / outgoing.bpm
 
+    # duration_seconds is the authoritative *timeline* length (roadmap
+    # C.1's core invariant): everything below derives from it, nothing
+    # below is ever used to redefine it. beats/downbeats/vocal_activity/
+    # structure timestamps are all in *source* seconds, so converting this
+    # timeline duration into how much source audio each side actually
+    # consumes needs each side's own playback rate -- outgoing_playback_rate
+    # (already fixed by whatever placed the outgoing clip, never this
+    # candidate's own outgoing_rate, which is always 1.0 -- "favor
+    # outgoing") for the outgoing side, incoming_rate (this candidate's own
+    # field) for the incoming side.
     duration_seconds = bars * seconds_per_bar
     if not (settings.min_transition_seconds <= duration_seconds <= settings.max_transition_seconds):
         return None
-    if duration_seconds > outgoing.duration_seconds or duration_seconds > incoming.duration_seconds:
+
+    outgoing_source_span = duration_seconds * outgoing_playback_rate
+    incoming_source_span = duration_seconds * incoming_rate
+    if (outgoing_source_span > outgoing.duration_seconds
+            or incoming_source_span > incoming.duration_seconds):
         return None
 
     naive_outgoing_time = (
         outgoing_naive_override if outgoing_naive_override is not None
-        else max(0.0, outgoing.duration_seconds - duration_seconds)
+        else max(0.0, outgoing.duration_seconds - outgoing_source_span)
     )
     naive_outgoing_time = max(0.0, min(naive_outgoing_time, outgoing.duration_seconds))
     outgoing_anchors = outgoing.downbeats if strategy is TransitionStrategy.BEAT_MATCH else outgoing.beats
-    outgoing_source_time, outgoing_snap = _nearest_anchor(outgoing_anchors, naive_outgoing_time)
+    # Bounded so the source window this candidate actually needs
+    # (outgoing_source_span, fixed by duration_seconds) never overruns the
+    # track regardless of which side of the naive position the nearest
+    # anchor happens to fall on -- see _nearest_bounded_anchor.
+    outgoing_source_time, outgoing_snap = _nearest_bounded_anchor(
+        outgoing_anchors, naive_outgoing_time, outgoing.duration_seconds - outgoing_source_span,
+    )
+    outgoing_source_out = min(outgoing_source_time + outgoing_source_span, outgoing.duration_seconds)
 
     naive_incoming_time = incoming_naive_override if incoming_naive_override is not None else 0.0
     naive_incoming_time = max(0.0, min(naive_incoming_time, incoming.duration_seconds))
     incoming_anchors = incoming.downbeats if strategy is TransitionStrategy.BEAT_MATCH else incoming.beats
-    incoming_source_time, incoming_snap = _nearest_anchor(incoming_anchors, naive_incoming_time)
-    if incoming.duration_seconds - incoming_source_time < duration_seconds:
-        return None
+    incoming_source_time, incoming_snap = _nearest_bounded_anchor(
+        incoming_anchors, naive_incoming_time, incoming.duration_seconds - incoming_source_span,
+    )
 
     confidence = min(outgoing.bpm_confidence, incoming.bpm_confidence)
     score, reasons = _score_beat_candidate(
         outgoing, incoming, compatibility, bars, strategy, settings, outgoing_snap, incoming_snap,
         outgoing_source_time, incoming_source_time, duration_seconds,
+        outgoing_source_span=outgoing_source_span, incoming_source_span=incoming_source_span,
         outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
     )
     return TransitionCandidate(
         from_track_id=outgoing.track_id, to_track_id=incoming.track_id,
-        outgoing_source_time=outgoing_source_time, incoming_source_time=incoming_source_time,
+        outgoing_source_time=outgoing_source_time, outgoing_source_out=outgoing_source_out,
+        incoming_source_time=incoming_source_time,
         bars=bars, duration_seconds=duration_seconds,
         outgoing_bpm=outgoing.bpm, incoming_bpm=incoming.bpm, target_bpm=target_bpm,
         outgoing_rate=outgoing_rate, incoming_rate=incoming_rate,
@@ -327,12 +406,39 @@ def _nearest_anchor(anchors: tuple[float, ...], naive_time: float) -> tuple[floa
     return nearest, abs(nearest - naive_time)
 
 
+def _nearest_bounded_anchor(
+    anchors: tuple[float, ...], naive_time: float, upper_bound: float,
+) -> tuple[float, float]:
+    """Like ``_nearest_anchor``, but never returns a position past
+    ``upper_bound`` (Commit C.1's exact-duration invariant: the nearest
+    *unconstrained* anchor to a tail-based naive position lands after it
+    about as often as before it -- a plain ``_nearest_anchor`` snap could
+    then push ``outgoing_source_time``/``incoming_source_time`` far enough
+    that ``+ source_span`` overruns the track, even for perfectly ordinary
+    candidates, not just structure-anchored edge cases).
+
+    Prefers the nearest anchor that still satisfies the bound; if none do
+    (a very short track, or an override already past the bound), clamps
+    directly to ``upper_bound`` instead of snapping to any anchor at all --
+    still guarantees the caller's downstream ``... + source_span <=
+    duration + epsilon`` check always holds, by construction.
+    """
+    eligible = tuple(anchor for anchor in anchors if anchor <= upper_bound + _DURATION_EPSILON_SECONDS)
+    if eligible:
+        nearest = min(eligible, key=lambda anchor: abs(anchor - naive_time))
+        return nearest, abs(nearest - naive_time)
+    clamped = max(0.0, min(naive_time, upper_bound))
+    return clamped, abs(clamped - naive_time)
+
+
 def _score_beat_candidate(
     outgoing: TrackAnalysis, incoming: TrackAnalysis, compatibility: TransitionCompatibility,
     bars: int, strategy: TransitionStrategy, settings: AutoMixTransitionSettings,
     outgoing_snap: float, incoming_snap: float,
     outgoing_source_time: float, incoming_source_time: float, duration_seconds: float,
     *,
+    outgoing_source_span: float | None = None,
+    incoming_source_span: float | None = None,
     outgoing_structure: TrackStructureAnalysis | None = None,
     incoming_structure: TrackStructureAnalysis | None = None,
 ) -> tuple[float, tuple[str, ...]]:
@@ -382,16 +488,25 @@ def _score_beat_candidate(
         if energy_similarity >= 0.8:
             reasons.append("+ similar energy level")
 
+    # Both windows are *source*-space spans (Commit C.1): duration_seconds
+    # is a timeline quantity, and beats/vocal_activity/structure timestamps
+    # are all source-space, so at any playback rate other than 1.0 "cue +
+    # duration_seconds" is the wrong window -- it must be "cue + this
+    # side's own source span" (duration_seconds * that side's rate).
+    # Falls back to duration_seconds itself when a caller doesn't pass a
+    # span (rate 1.0, source and timeline seconds coincide).
+    resolved_outgoing_span = outgoing_source_span if outgoing_source_span is not None else duration_seconds
+    resolved_incoming_span = incoming_source_span if incoming_source_span is not None else duration_seconds
+
     if outgoing.vocal_activity and incoming.vocal_activity:
-        # Both windows are the *actual* transition span now (previously the
-        # outgoing side checked all the way to the track's own end, a wider
-        # window than the real overlap whenever a structure/other anchor
-        # placed the cue well before the natural tail).
+        # Previously the outgoing side checked all the way to the track's
+        # own end, wider than the real overlap whenever a structure/other
+        # anchor placed the cue well before the natural tail.
         outgoing_tail_has_vocals = _has_activity_in_range(
-            outgoing.vocal_activity, outgoing_source_time, outgoing_source_time + duration_seconds,
+            outgoing.vocal_activity, outgoing_source_time, outgoing_source_time + resolved_outgoing_span,
         )
         incoming_head_has_vocals = _has_activity_in_range(
-            incoming.vocal_activity, incoming_source_time, incoming_source_time + duration_seconds,
+            incoming.vocal_activity, incoming_source_time, incoming_source_time + resolved_incoming_span,
         )
         if outgoing_tail_has_vocals and incoming_head_has_vocals:
             score -= WEIGHT_VOCAL_OVERLAP_PENALTY
@@ -442,7 +557,16 @@ def _score_beat_candidate(
         score -= WEIGHT_OUTGOING_TAIL_TRIM_PENALTY * trim_severity
         reasons.append(f"- outgoing cue starts {outgoing_tail_unused:.1f}s before the track's own end")
 
-    return max(0.0, min(1.0, score)), tuple(reasons)
+    # No upper clamp (Commit C.1): score is a ranking signal, not a
+    # probability/confidence (see `confidence`, a separate field, for
+    # that). The base five weights above already sum to 1.0 on their own,
+    # so a highly reliable candidate can legitimately reach ~1.0 before any
+    # bonus is even considered -- clamping to 1.0 there made every
+    # advanced bonus (key/energy/structure/local-energy) a no-op for
+    # exactly the candidates confident enough to matter most, and made two
+    # candidates that only differ by a bonus tie instead of the bonus
+    # actually breaking the tie in ranking.
+    return max(0.0, score), tuple(reasons)
 
 
 def _has_activity_in_range(spans: tuple[tuple[float, float], ...], start: float, end: float) -> bool:
@@ -459,16 +583,22 @@ def _fallback_candidates(
     if duration_seconds < settings.min_transition_seconds:
         return [TransitionCandidate(
             from_track_id=outgoing.track_id, to_track_id=incoming.track_id,
-            outgoing_source_time=outgoing.duration_seconds, incoming_source_time=0.0,
+            outgoing_source_time=outgoing.duration_seconds, outgoing_source_out=outgoing.duration_seconds,
+            incoming_source_time=0.0,
             bars=0, duration_seconds=0.0,
             outgoing_bpm=outgoing.bpm, incoming_bpm=incoming.bpm, target_bpm=None,
             outgoing_rate=1.0, incoming_rate=1.0,
             score=0.1, confidence=0.0, strategy=TransitionStrategy.CUT,
             reasons=reasons + ("- not enough source duration for even a fixed crossfade",),
         )]
+    # rate is always 1.0 for a fixed crossfade, so the source span equals
+    # duration_seconds and outgoing_source_out lands exactly at the
+    # track's own end -- consistent with the exact-duration invariant
+    # without needing separate span bookkeeping for this simple case.
     return [TransitionCandidate(
         from_track_id=outgoing.track_id, to_track_id=incoming.track_id,
         outgoing_source_time=max(0.0, outgoing.duration_seconds - duration_seconds),
+        outgoing_source_out=outgoing.duration_seconds,
         incoming_source_time=0.0,
         bars=0, duration_seconds=duration_seconds,
         outgoing_bpm=outgoing.bpm, incoming_bpm=incoming.bpm, target_bpm=None,

@@ -36,6 +36,30 @@ playback rate) passes through unchanged. Without this, a chain of several
 transitions could compound tempo drift silently, since each pair would be
 planned against a BPM number no longer matching what is actually playing
 by the time that transition happens.
+
+Candidate duration is authoritative (Commit C.1, fixes a real bug the
+structure-anchor feature exposed): `TransitionCandidate.duration_seconds`
+is now applied *directly* as `AudioRenderTransition.duration`, and the
+outgoing clip's `source_out` is trimmed (via `dataclasses.replace` on the
+already-appended clip -- `AudioRenderClip` is immutable) to
+`best.outgoing_source_out`, instead of deriving the actual overlap from
+`previous_clip.timeline_end - timeline_start`. That derivation silently
+assumed the outgoing clip always plays to its own natural end
+(`source_out == track.duration_seconds`, never trimmed), which was true
+for every candidate *before* structure anchors existed (a tail-based cue
+always lands near the track's real end anyway) but breaks whenever a
+structure anchor (an early `outro_start`) sits well before it: a candidate
+scored as a 16-second transition could render as a 30-second one, because
+the "overlap" was actually "anchor position to the untrimmed clip's own
+end," not the candidate's own `duration_seconds`. AutoMix intentionally
+allows skipping part of a track's outro this way (subject to the existing
+outgoing-tail-trim scoring penalty, `app.automix.candidates.WEIGHT_OUTGOING_TAIL_TRIM_PENALTY`)
+-- this fix makes what actually gets rendered match what was scored,
+without changing that policy. `build_presentation_and_metadata()` derives
+presentation/chapter ownership purely from each window's *start* (never
+from a clip's own `timeline_end`), so trimming a clip's `source_out` here
+needs no special-casing there -- confirmed by
+`tests/test_automix_planner.py`'s dedicated geometry tests.
 """
 
 from __future__ import annotations
@@ -166,12 +190,18 @@ def _place_tracks(
         else:
             previous = clips[-1]
             previous_track = tracks[index - 1]
-            timeline_start, source_in, playback_rate, transition = _plan_overlap(
+            timeline_start, source_in, playback_rate, transition, trimmed_outgoing_source_out = _plan_overlap(
                 previous, previous_track, track, analyses, structures, settings, actual_cursor,
                 applied_rates.get(previous_track.id, 1.0),
             )
             if transition is not None:
                 transitions.append(transition)
+                # AudioRenderClip is immutable: the previous clip was
+                # already appended in an earlier iteration, so the trim
+                # this transition's candidate requires (see planner.py's
+                # module docstring, "Candidate duration is authoritative")
+                # replaces it in place rather than mutating it.
+                clips[-1] = replace(previous, source_out=trimmed_outgoing_source_out)
 
         clip = AudioRenderClip(
             clip_id=f"automix:{track.id}",
@@ -198,15 +228,19 @@ def _plan_overlap(
     settings: AutoMixTransitionSettings,
     actual_cursor: float,
     outgoing_applied_rate: float,
-) -> tuple[float, float, float, AudioRenderTransition | None]:
+) -> tuple[float, float, float, AudioRenderTransition | None, float]:
     """Decide clip placement for ``track`` following ``previous_clip`` with no explicit gap.
 
-    Returns (timeline_start, source_in, playback_rate, transition_or_none).
-    Falls back to plain sequential adjacency (rate 1.0, no transition)
-    whenever analysis is missing, tempo is incompatible, or the best
-    candidate is a CUT.
+    Returns (timeline_start, source_in, playback_rate, transition_or_none,
+    trimmed_outgoing_source_out). The last element is only meaningful when
+    a transition was actually produced -- ``_place_tracks`` uses it to
+    replace the already-appended previous clip's ``source_out`` (see
+    module docstring, "Candidate duration is authoritative"); ignored by
+    callers whenever ``transition_or_none`` is ``None``. Falls back to
+    plain sequential adjacency (rate 1.0, no transition) whenever analysis
+    is missing, tempo is incompatible, or the best candidate is a CUT.
     """
-    fallback = (actual_cursor, 0.0, 1.0, None)
+    fallback = (actual_cursor, 0.0, 1.0, None, previous_clip.source_out)
     outgoing_analysis = analyses.get(previous_track.id)
     incoming_analysis = analyses.get(track.id)
     if outgoing_analysis is None or incoming_analysis is None or not settings.enabled:
@@ -217,6 +251,7 @@ def _plan_overlap(
     compatibility = evaluate_compatibility(effective_outgoing_analysis, incoming_analysis, settings)
     candidates = generate_candidates(
         effective_outgoing_analysis, incoming_analysis, compatibility, settings,
+        outgoing_playback_rate=previous_clip.playback_rate,
         outgoing_structure=structures.get(previous_track.id),
         incoming_structure=structures.get(track.id),
     )
@@ -235,19 +270,25 @@ def _plan_overlap(
     playback_rate = best.incoming_rate
 
     # Anchor timestamps are in the original media, not the playlist clock.
-    # Keep the outgoing tail intact and fade over what remains after the anchor.
     timeline_start = previous_clip.timeline_start + (
         best.outgoing_source_time - previous_clip.source_in
     ) / previous_clip.playback_rate
-    overlap = previous_clip.timeline_end - timeline_start
-    incoming_available = (track.duration_seconds - source_in) / playback_rate
-    if (timeline_start <= previous_clip.timeline_start or overlap <= 0.0
-            or overlap > incoming_available):
+    if timeline_start <= previous_clip.timeline_start:
         return fallback
+
+    # duration_seconds is authoritative (Commit C.1): the actual overlap is
+    # exactly the candidate's own timeline duration, never derived from
+    # previous_clip.timeline_end (which assumed the outgoing clip always
+    # plays to its own untrimmed natural end -- see module docstring).
+    # candidates.py already validated that best.outgoing_source_out /
+    # best.incoming_source_time + this candidate's own source spans fit
+    # within each track's real duration, so no further availability check
+    # is needed here.
+    overlap = best.duration_seconds
 
     transition_type = _STRATEGY_TRANSITION_TYPES[best.strategy]
     transition = AudioRenderTransition(
         clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
         timeline_start=timeline_start, duration=overlap, type=transition_type,
     )
-    return timeline_start, source_in, playback_rate, transition
+    return timeline_start, source_in, playback_rate, transition, best.outgoing_source_out

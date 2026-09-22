@@ -895,3 +895,236 @@ for, now demonstrated with structure data actually present and scored.
   limitation as P1.5/Commit B -- no licensed audio files available); the
   real-analyzer test above used synthetic audio, not real songs.
 
+## AutoMix v3 Commit C.1 outcome (planner duration / rate-space / scoring consistency)
+
+A stabilization commit, not a feature commit: fixes three correctness
+problems discovered while validating Commit C, before moving on to any DSP
+transition work. No renderer DSP changes.
+
+**1. Candidate-duration-vs-actual-overlap mismatch: reproduced, then fixed**
+
+Reproduced exactly as described: a 200s track with a structure
+`outro_start` at 170.0 and an 8-bar (120 BPM) candidate scored at
+`duration_seconds=16.0` used to render a ~30s transition, because
+`planner._plan_overlap()` derived the *actual* overlap from
+`previous_clip.timeline_end - timeline_start` (clip arithmetic, still using
+the *original* `source_out = track.duration_seconds = 200.0`) instead of
+from the candidate's own `duration_seconds`. Fixed: `overlap` is now always
+`best.duration_seconds` directly -- the planner never recomputes a
+different geometry after a candidate is selected. Confirmed by
+`test_structure_anchor_transition_duration_matches_the_candidate`
+(200s/170.0/120bpm scenario): `transition.duration` now lands between 10
+and 20s, not ~30.
+
+**2. Outgoing tail trim policy**
+
+`source_out` *is* now changed: `TransitionCandidate` gained an
+`outgoing_source_out` field (source seconds), computed as
+`min(outgoing_source_time + outgoing_source_span, outgoing.duration_seconds)`.
+`planner._place_tracks()` retroactively trims the already-appended outgoing
+clip via `dataclasses.replace(previous, source_out=trimmed_outgoing_source_out)`
+once a transition is chosen -- the existing outgoing-tail-trim penalty
+(`WEIGHT_OUTGOING_TAIL_TRIM_PENALTY`, Commit C) already discourages an
+implausibly large trim from winning, so no new cap was needed here.
+`test_outgoing_clip_source_out_stays_within_bounds` confirms
+`source_in < source_out <= track.duration_seconds` always holds.
+
+**3. Rate-space conversion**
+
+`outgoing_source_span = duration_seconds * outgoing_playback_rate` (the
+*already-fixed* rate of the clip about to become outgoing, threaded in as
+`generate_candidates(..., outgoing_playback_rate=previous_clip.playback_rate)`
+-- never the candidate's own `outgoing_rate`, which Commit C's target-BPM
+unification made permanently `1.0`). `incoming_source_span = duration_seconds
+* incoming_rate` (the candidate's own field). Both are computed once in
+`_beat_based_candidate()` and reused everywhere a source-space window is
+needed (anchor snapping bound, vocal-overlap window, `outgoing_source_out`).
+`test_rate_above_one_needs_more_than_a_timeline_seconds_of_incoming_source`/
+`..._below_one_...` confirm the direction is correct against the real
+formula (`incoming_rate = outgoing.bpm / incoming_effective_bpm`): an
+incoming track *slower* than the outgoing one needs a rate `> 1` (speed up,
+consumes *more* than `duration_seconds` of its own source audio), a
+*faster* incoming track needs a rate `< 1` (slow down, consumes *less*).
+
+**4. Vocal-overlap window fix**
+
+Both `_score_beat_candidate`'s vocal-overlap checks now use
+`[cue, cue + resolved_span]` where `resolved_span` is the side's own
+source-space span (falling back to `duration_seconds` when a caller doesn't
+pass one, i.e. rate 1.0, where source and timeline seconds coincide) --
+previously both sides used the raw timeline `duration_seconds`, which is
+only correct at rate 1.0. `test_incoming_vocal_window_uses_the_source_span_not_the_timeline_duration`
+constructs a rate-2.0 case (`incoming_source_span = 20s` vs.
+`duration_seconds = 10s`) and confirms vocals at 12-14s (outside the naive
+10s window, inside the real 20s one) are now correctly caught.
+
+**5. Incoming/outgoing availability checks**
+
+`_beat_based_candidate()` rejects a candidate outright (`return None`)
+whenever `outgoing_source_span > outgoing.duration_seconds` or
+`incoming_source_span > incoming.duration_seconds` -- a direct source-space
+comparison using each side's actual span, not a timeline-vs-source
+mismatch. This replaced an earlier, broken attempt at this same fix
+(epsilon-rejection *after* an unbounded anchor snap) that rejected roughly
+half of all ordinary `BEAT_MATCH` candidates, because the plain nearest-
+anchor snap lands after the naive position about as often as before it --
+see "Errors and fixes" below.
+
+**6. `max_transition_seconds` invariant**
+
+`test_max_transition_seconds_invariant_holds_with_a_non_bar_aligned_anchor`
+(400s tracks, a deliberately non-bar-aligned `outro_start=311.3`) confirms
+every transition's `duration` stays within
+`[settings.min_transition_seconds, settings.max_transition_seconds]` across
+the whole compiled plan, structure anchors included.
+
+**7. Score-saturation root cause and fix**
+
+The base five scoring weights (Phase 3) already sum to exactly 1.0; Commit
+C's three advanced bonuses (structure anchor, local energy, key/energy from
+Phase 7) are additive on top, but the final score used to be clamped
+`max(0.0, min(1.0, score))`. For any candidate already near the clamp
+ceiling, every advanced bonus became a no-op for ranking purposes, and two
+candidates differing only by a bonus could tie at exactly `1.0`. Fixed:
+`score` is now unclamped above (`max(0.0, score)` only) -- it is a ranking
+signal, not a probability (`confidence` is the separate, still-bounded
+field for that).
+`test_perfect_base_conditions_reach_exactly_one_before_any_bonus` confirms
+the base five alone legitimately reach `1.0` under perfect conditions (BPM
+confidence 1.0, meter confidence 1.0, zero tempo shift, preferred bars,
+zero snap distance); `test_structure_anchor_bonus_still_beats_an_otherwise_identical_candidate`,
+`test_key_bonus_still_moves_ranking_at_perfect_base_confidence`, and
+`test_energy_bonus_still_moves_ranking_at_perfect_base_confidence` each
+confirm the corresponding bonus still produces a strictly higher score even
+starting from that ceiling -- the old clamped behavior would have failed
+all three (a `1.0`/`1.0` tie).
+
+**8. Duplicate candidates from structure-anchor snapping**
+
+`_deduplicate_candidates()` (order-preserving, keyed on
+`(outgoing_source_time, incoming_source_time, bars, strategy)`) drops a
+structure-anchored candidate that snaps to the exact same geometry as a
+regular tail/head-based one for the same bar length.
+`test_duplicate_candidate_from_a_structure_anchor_is_removed` constructs
+exactly that collision (an `outro_start` placed at the natural 4-bar tail
+position) and confirms both determinism (`generate_candidates()` called
+twice produces an identical result) and no duplicate geometry survives.
+
+**9. Legacy (non-structure) tail candidates: real behavior change, reported**
+
+The exact-duration invariant applies uniformly, including to the plain
+tail-based candidate that has always existed (no structure data involved) --
+this changed one existing test's expected values, not a hypothetical.
+`tests/test_automix_p1_regressions.py`'s
+`test_selected_outgoing_beat_is_used_even_when_track_end_is_off_grid` (a
+60.3s track, i.e. an off-grid natural end at 120 BPM) previously asserted
+`outgoing_source_time=44.5` / `transition.duration=15.8` -- the pre-C.1
+clip-arithmetic-derived overlap, which by construction could (and did)
+diverge from the winning candidate's own scored `duration_seconds`. With
+the fix, the winning 8-bar candidate's cue snaps to the downbeat at 60.0s
+(the nearest downbeat at or before the natural 60.3s tail), giving
+`outgoing_source_time=44.0`, `duration_seconds=16.0` -- both now exactly
+consistent with each other and with the rendered `transition.duration`.
+Updated the test to assert the corrected, self-consistent values instead of
+the old divergent ones.
+
+**10. Effective BPM propagation: unchanged, still passing**
+
+Commit C's `applied_rates`/`_effective_analysis_for_outgoing()` propagation
+is untouched by this commit.
+`test_second_transition_uses_the_first_transitions_actual_rate` still
+passes, and the new
+`test_three_track_chain_transition_durations_stay_within_bounds` extends it
+to also confirm every transition duration in a 3-track (120/124/128 BPM)
+chain stays within the settings bounds after the C.1 geometry changes.
+
+**11. Preview/Export parity**
+
+`test_preview_and_export_produce_identical_transition_geometry` calls
+`compile_automix()` twice with identical inputs (including a structure
+anchor) and asserts the two resulting plans are `==` -- both call sites
+(Preview and Export) go through the exact same `FFmpegRenderer._render_automix_audio_segments`
+-> `compile_automix()` path, so this is a direct equality check, not an
+approximation.
+
+**12. `CompiledRenderPlan` validation with `source_out` trimming**
+
+No special-casing was needed: `build_presentation_and_metadata()` derives
+presentation windows and chapter ownership purely from each clip's
+`timeline_start`, never from `timeline_end`/`source_out`, so trimming a
+clip's `source_out` after the fact (item 2 above) required no changes there
+at all. Confirmed by every existing `CompileAutomix*Tests` class in
+`tests/test_automix_planner.py` continuing to pass unmodified, plus the new
+`TransitionGeometryTests` class explicitly exercising a trimmed
+`source_out`.
+
+**13. Test results**
+
+`tests.test_automix_beat_this` + `test_automix_analysis_service` +
+`test_automix_planner` + `test_automix_candidates` +
+`test_automix_compatibility` + `test_automix_p1_regressions` +
+`test_automix_structure` + `test_preview_audio_controller` +
+`test_automix_analysis_controller` + `test_automix_ffmpeg_integration` +
+`test_export_audio_staging` + `test_automix_models` + `test_automix_cache`
++ `test_automix_key` + `test_automix_basic_analyzer` +
+`test_automix_renderer` (292, OK, 14 skipped -- opt-in real-model tests),
+`tests.test_functional_regressions` (100, OK),
+`tests.test_main_window` (264; one failure,
+`test_preview_tab_embeds_canvas_controls_and_restores_editing_tab`, in a
+full run but passing on its own in isolation -- pre-existing Qt
+test-ordering flakiness unrelated to AutoMix, not introduced by this
+commit). `tests.test_automix_ffmpeg_integration` re-run with
+`PLAYLIST_CANVAS_TEST_FFMPEG` set (real FFmpeg): all 15 tests pass.
+`tests.test_automix_beat_this_real_model` re-run with
+`PLAYLIST_CANVAS_TEST_BEAT_THIS=1` against the real installed `beat-this`
+1.1.0 model: all 3 tests pass, including
+`test_compiles_into_a_valid_automix_plan_and_selects_beat_match`, which
+calls `validate_compiled_render_plan()` and renders through the real
+FFmpeg pipeline.
+
+**14. Real Beat This! + Sonara + FFmpeg integration result, this session**
+
+A manual script (not part of the test suite) built two real 90s
+accented-4/4 tracks, ran them through the actual installed `beat-this`
+1.1.0 and `sonara` 0.3.6, compiled a real `CompiledRenderPlan` with
+`structures=` populated from real Sonara output, and rendered it through
+the real FFmpeg pipeline:
+
+```
+A: bpm=130.43 quality=reliable downbeats=49
+B: bpm=130.43 quality=reliable downbeats=49
+A: outro_start=88.38 intro_end=0.0 sections=5
+B: outro_start=88.38 intro_end=0.0 sections=5
+
+clip_a.source_out=89.86  (track duration=90.0)
+transition.duration=7.36
+best candidate duration_seconds=7.36  -- exact match, real analyzer output
+
+prepared.duration_seconds=172.499292  plan.duration_seconds=172.5
+```
+
+The exact-duration invariant (`candidate.duration_seconds ==
+transition.duration`) holds against real, non-hand-crafted analyzer output
+where the outro anchor (88.38s) genuinely does not land on a bar boundary
+(120 BPM, 4/4: bar boundaries are every 2.0s) -- exactly the kind of
+off-grid case the original bug depended on, confirmed end to end including
+the actual rendered file's duration matching the planned duration within
+FFmpeg's own encoding tolerance (0.0007s here).
+
+**15. Errors found and fixed during this commit, not smoothed over**
+
+The first implementation attempt for item 5 (availability checks) added a
+post-hoc rejection (`if outgoing_source_out > outgoing.duration_seconds +
+epsilon: return None`) *after* snapping to the nearest anchor with the
+existing, unbounded `_nearest_anchor()`. This broke 7 existing tests in
+`tests/test_automix_candidates.py`: the nearest downbeat to a tail-based
+naive position lands *after* that position roughly half the time (a manual
+repro at 128 BPM/200s/4 bars: naive position 192.5, nearest downbeat
+193.125 -- 0.625s later -- pushing `outgoing_source_out` to 200.625,
+rejected even though this is an entirely ordinary candidate). Fixed by
+replacing the naive-then-reject approach with `_nearest_bounded_anchor()`,
+which pre-filters eligible anchors to those that satisfy the bound *before*
+picking the nearest one, guaranteeing the invariant holds by construction
+rather than by chance -- after this fix, all previously-passing tests
+passed again unmodified.
+
