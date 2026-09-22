@@ -64,3 +64,32 @@ stem 없으면 AutoMix 실패, online-only dependency, license 불명 모델 bun
 
 ## 권장 commit
 `feat: add optional stem-aware AutoMix transitions`
+
+
+---
+
+## Outcome (2026-09-23): implementation deferred
+
+### Why not now
+1. **No confirmed conflict that full-mix DSP cannot handle.** The gate for this phase is listening evidence; none was possible in this run. The objective checks that were possible (Phase 02/04, real songs) showed no low-end build-up in beat-matched windows (<150 Hz power -0.5..-2.6 dB vs solo context for BASS_SWAP / FILTER_BLEND / FILTER_SWEEP): the band-split DSP already keeps two bass lines apart.
+2. **The real gap is vocal *detection*, not separation for mixing.** Phase 05 showed the only vocal signal the app had was inverted on real music and removed it; vocal-aware DSP is now correct but dormant. A stem model is one way to get vocal activity, but it is the most expensive one.
+3. **Cost measured on this machine** (CPU-only, torch 2.14 CPU, local StemLab install of Meta's htdemucs, 84 MB MIT weights): **46 s wall for a 30 s excerpt (~1.5x realtime)** -> ~5 min per 3.5-min song, ~1.5 h for a 20-song playlist. Beat This + Sonara take seconds per song. Stems at that cost cannot sit on the progressive Preview path, and even as background enrichment they would keep a laptop busy for an hour. Roformer-class vocal models are 0.2-1.7 GB and slower.
+
+### Model / licence notes (from the local StemLab provenance file, checked 2026-09-16)
+| model | size | licence status |
+|---|---|---|
+| htdemucs (Meta) | 84 MB | MIT code and weights -- redistributable with notice |
+| Mel-Band RoFormer vocals (KimberleyJSN) | 913 MB | model card says MIT, training-data terms not established |
+| MDX23C DrumSep | 438 MB | no licence file found -- do not bundle |
+All need PyTorch (already the optional Beat This dependency). Weights would be a one-time download into the app's data folder, never an online-only dependency.
+
+### Conditions to start
+- A listening panel (Phase 02 TODO) finds vocal-on-vocal or bass clashes that VOCAL_SAFE_EQ/BASS_SWAP audibly fail on, **and**
+- either a GPU is common among users or a vocal-activity model an order of magnitude cheaper than full separation is available (a vocal-activity detector only needs "is someone singing", not four clean stems).
+
+### Architecture proposal (for when it starts)
+- `app/automix/stems/` with a `StemAnalysisService` beside (not inside) `AnalysisService`/`StructureAnalysisService`: provider protocol, per-track futures, cancel event, same `on_result` callback shape.
+- Output first: `vocal_activity` spans only (vocal-stem RMS gate, the same -20 dB relative gate used for ground truth in Phase 05), merged into `TrackAnalysis` at planning time -- the planner and the Phase 05 selector already consume them. Stem audio for bass/kick handoff later, only if listening asks for it.
+- Cache: its own store keyed by the existing file fingerprint + provider id + model id + weights SHA256 + implementation version; failures and cancellations never written (no poisoning); size-capped cleanup.
+- Scheduling: strictly after rhythm/structure, idle priority, one track at a time, never blocking Preview or Export. Plans compiled before stems exist stay valid; a later plan with vocal data is a new generation (Preview swaps it in with the existing safe-swap rule; Export uses whatever is cached when it starts). Preview/Export parity then holds because both read the same cache state at compile time.
+- Resources: CPU fallback always; GPU memory checked before loading; temp stems in the render temp dir, deleted after the RMS pass.
