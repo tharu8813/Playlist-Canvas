@@ -46,9 +46,11 @@ class RenderWorker(QThread):
                  visualizers: list[VisualizerOverlay] | None = None,
                  static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer] | None = None,
                  video_clips: list[VideoClipOverlay] | None = None,
-                 metadata: ExportMetadata | None = None) -> None:
+                 metadata: ExportMetadata | None = None,
+                 automix_enabled: bool = False) -> None:
         super().__init__()
         self.renderer = renderer
+        self.automix_enabled = automix_enabled
         if isinstance(image, PreparedVideoInput):
             self.image = image
         elif isinstance(image, list):
@@ -84,6 +86,7 @@ class RenderWorker(QThread):
                 visualizers=self.visualizers, static_layers=self.static_layers,
                 video_clips=self.video_clips, metadata=self.metadata,
                 storage_path_callback=self.storage_path_changed.emit,
+                use_automix=self.automix_enabled,
             )
         except RenderCancelledError:
             self.cancelled.emit()

@@ -6700,7 +6700,7 @@ class MainWindowSafetyTests(unittest.TestCase):
                 pass
 
         class WorkerStub:
-            def __init__(self, *arguments: object) -> None:
+            def __init__(self, *arguments: object, **keywords: object) -> None:
                 captured_worker_arguments.append(arguments)
                 self.progress = SignalStub()
                 self.succeeded = SignalStub()
@@ -6819,7 +6819,7 @@ class MainWindowSafetyTests(unittest.TestCase):
                 pass
 
         class WorkerStub:
-            def __init__(self, *arguments: object) -> None:
+            def __init__(self, *arguments: object, **keywords: object) -> None:
                 captured_worker_arguments.append(arguments)
                 self.progress = SignalStub()
                 self.succeeded = SignalStub()
@@ -6999,7 +6999,7 @@ class MainWindowSafetyTests(unittest.TestCase):
                 pass
 
         class WorkerStub:
-            def __init__(self, *arguments: object) -> None:
+            def __init__(self, *arguments: object, **keywords: object) -> None:
                 captured_worker_arguments.append(arguments)
                 self.progress = SignalStub()
                 self.succeeded = SignalStub()

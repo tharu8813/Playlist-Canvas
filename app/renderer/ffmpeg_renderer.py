@@ -262,8 +262,18 @@ class FFmpegRenderer:
                video_clips: list[VideoClipOverlay] | None = None,
                metadata: "ExportMetadata | None" = None,
                storage_path_callback: Callable[[str, Path | None], None] | None = None,
+               use_automix: bool = False,
                ) -> RenderResult:
-        """Create a static Canvas video whose audio is the ordered enabled playlist."""
+        """Create a static Canvas video whose audio is the ordered enabled playlist.
+
+        ``use_automix`` swaps only the audio content for an AutoMix-blended
+        mix (app/automix/) when analysis and rendering succeed; video/Canvas
+        timing, chapters, and the exported duration are always the legacy
+        sequential values, unchanged (see _render_automix_audio_segments).
+        A failed or unavailable AutoMix render falls back to the normal
+        sequential audio path automatically -- ``use_automix=True`` never
+        turns a working export into a failed one.
+        """
         cancel_event = cancel_event or threading.Event()
         if cancel_event.is_set():
             raise RenderCancelledError("Rendering was cancelled.")
@@ -431,12 +441,21 @@ class FFmpegRenderer:
             self._validate_visual_timeline(
                 visual_sequence, static_layers, total_duration, selected_settings.fps,
             )
-            segments = self._normalize_audio(
-                active_tracks, temporary, selected_settings, progress_callback, cancel_event
+            automix_segments = (
+                self._render_automix_audio_segments(
+                    active_tracks, temporary, total_duration, progress_callback, cancel_event,
+                )
+                if use_automix else None
             )
-            segment_durations = self._insert_silence_for_gaps(
-                active_tracks, segments, temporary, selected_settings, progress_callback, cancel_event
-            )
+            if automix_segments is not None:
+                segments, segment_durations = automix_segments
+            else:
+                segments = self._normalize_audio(
+                    active_tracks, temporary, selected_settings, progress_callback, cancel_event
+                )
+                segment_durations = self._insert_silence_for_gaps(
+                    active_tracks, segments, temporary, selected_settings, progress_callback, cancel_event
+                )
             concat_path = temporary / "playlist.ffconcat"
             self._write_concat_file(concat_path, segments, segment_durations)
             audio_path = temporary / "playlist_audio.m4a"
@@ -1174,6 +1193,73 @@ class FFmpegRenderer:
         else:
             cap = max(1, min(4, cpu_count // 2))
         return min(track_count, cap)
+
+    def _render_automix_audio_segments(
+        self, active_tracks: list[PlaylistTrack], temporary: Path, sequential_duration: float,
+        progress_callback: Callable[[str, float, str], None] | None,
+        cancel_event: threading.Event,
+    ) -> tuple[list[Path], list[float]] | None:
+        """Render AutoMix-blended audio, padded with silence to ``sequential_duration``.
+
+        Only the audio *content* changes here -- the returned segments'
+        total duration always equals ``sequential_duration`` exactly, so
+        video timing, chapters, and the exported duration stay the legacy
+        sequential values downstream (roadmap Phase 8: AutoMix's visual
+        timing integration is intentionally out of scope for this pass;
+        see docs/automix-phase1-dependency-evaluation.md's final section).
+
+        Returns ``None`` -- meaning "use the normal sequential audio path
+        instead" -- whenever AutoMix's dependencies are unavailable or
+        analysis/rendering fails for any reason. A bad AutoMix attempt
+        must degrade the export, never corrupt or abort it. Returns
+        ``None`` (never raises) unless the export itself was cancelled,
+        in which case cancellation propagates like any other stage.
+        """
+        try:
+            from app.automix.analysis.basic import BasicAnalysisProvider
+            from app.automix.planner import compile_automix
+            from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
+            from app.automix.settings import AutoMixTransitionSettings
+            from app.automix.workflow import AutoMixWorkflow
+        except ImportError as error:
+            LOGGER.warning("AutoMix export skipped, a dependency is unavailable: %s", error)
+            return None
+        try:
+            self._report(progress_callback, "Preparing audio", 0.05, "Analyzing tracks for AutoMix")
+            workflow = AutoMixWorkflow(BasicAnalysisProvider(self.executable))
+            analysis_result = workflow.analyze(active_tracks, cancel_event=cancel_event)
+            plan = compile_automix(
+                active_tracks, analysis_result.analyses, AutoMixTransitionSettings(enabled=True),
+            )
+            if not plan.audio.clips:
+                return None
+            self._report(progress_callback, "Preparing audio", 0.2, "Rendering AutoMix transitions")
+            prepared = AutoMixAudioPipeline(self.executable).render(
+                plan.audio,
+                {track.id: track.file_path for track in active_tracks},
+                temporary,
+                cancel_event=cancel_event,
+                progress=lambda _stage, fraction, message: self._report(
+                    progress_callback, "Preparing audio", 0.2 + fraction * 0.3, message,
+                ),
+            )
+        except AutoMixRenderError as error:
+            if cancel_event.is_set():
+                raise RenderCancelledError("Rendering was cancelled.") from error
+            LOGGER.warning("AutoMix export failed, falling back to sequential audio: %s", error)
+            return None
+        segments = [prepared.path]
+        segment_durations = [prepared.duration_seconds]
+        pad_seconds = sequential_duration - prepared.duration_seconds
+        if pad_seconds > 0.05:
+            silence_path = temporary / "automix_pad_silence.nut"
+            self._run([
+                "-f", "lavfi", "-t", f"{pad_seconds:.6f}", "-i", "anullsrc=r=48000:cl=stereo",
+                "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "nut", "-y", str(silence_path),
+            ], cancel_event=cancel_event)
+            segments.append(silence_path)
+            segment_durations.append(pad_seconds)
+        return segments, segment_durations
 
     def _normalize_audio(self, tracks: list[PlaylistTrack], directory: Path,
                          settings: RenderSettings,

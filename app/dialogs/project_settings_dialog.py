@@ -235,14 +235,19 @@ class ProjectSettingsDialog(QDialog):
             "이 프로젝트에서 AutoMix 사용 (베타)" if korean else "Enable AutoMix for this project (beta)"
         )
         self.automix_help.setText(
-            "활성화하면 내보내기와 미리보기에서 곡을 분석해 템포에 맞춰 자연스럽게 이어줍니다. "
-            "분석에 실패하거나 템포가 맞지 않는 곡은 자동으로 일반 크로스페이드로 대체됩니다. "
-            "이 설정은 프로젝트별로 저장됩니다."
+            "활성화하면 곡을 분석해 내보내기 오디오를 템포에 맞춰 자연스럽게 이어줍니다. "
+            "분석에 실패하거나 템포가 맞지 않는 곡은 자동으로 일반 크로스페이드로 대체됩니다.\n\n"
+            "현재는 오디오에만 적용됩니다 — 앨범 커버·가사·트랙 전환 등 화면 타이밍과 "
+            "전체 재생 시간(짧아진 오디오 뒤는 무음)은 기존과 동일하며, Preview 화면에는 "
+            "아직 반영되지 않습니다. 이 설정은 프로젝트별로 저장됩니다."
             if korean else
-            "When enabled, export and Preview analyze tracks and blend between them using "
-            "tempo-aware transitions. A track that cannot be analyzed, or whose tempo does not "
-            "match, automatically falls back to a plain crossfade. This setting is saved with "
-            "the project, not the application."
+            "When enabled, export analyzes tracks and blends between them using tempo-aware "
+            "audio transitions. A track that cannot be analyzed, or whose tempo does not match, "
+            "automatically falls back to a plain crossfade.\n\n"
+            "This currently affects audio only -- on-screen timing (album art, lyrics, track "
+            "switches) and the overall video length (silence after the shortened audio ends) "
+            "stay exactly as before, and Preview does not reflect it yet. This setting is saved "
+            "with the project, not the application."
         )
         self.thumbnail_group.setTitle("프로젝트 썸네일" if korean else "Project thumbnail")
         self.canvas_radio.setText("현재 캔버스를 자동 사용" if korean else "Use the current canvas")

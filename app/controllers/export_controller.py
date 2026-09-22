@@ -1115,6 +1115,7 @@ class ExportOrchestrator:
             static_layers,
             video_clips,
             export_metadata,
+            automix_enabled=window.project_settings.automix_enabled,
         )
         export_dialog = window._export_dialog
         window._render_worker.progress.connect(
