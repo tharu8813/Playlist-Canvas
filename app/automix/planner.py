@@ -64,6 +64,7 @@ needs no special-casing there -- confirmed by
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
@@ -76,7 +77,7 @@ from app.automix.compatibility import evaluate_compatibility
 from app.automix.models import TrackAnalysis
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
-from app.automix.transition_style import select_transition_dsp
+from app.automix.transition_style import describe_transition, select_transition_dsp
 from app.models.playlist import PlaylistTrack
 from app.timeline.models import TransitionType
 from app.timeline.render_plan import (
@@ -88,6 +89,7 @@ from app.timeline.render_plan import (
     validate_compiled_render_plan,
 )
 
+LOGGER = logging.getLogger(__name__)
 _GAP_EPSILON = 1e-6
 
 _STRATEGY_TRANSITION_TYPES = {
@@ -291,12 +293,17 @@ def _plan_overlap(
     # DSP Phase 2: the mixing style is decided here, where the analysis and
     # the exact window both exist, and travels in the plan -- the renderer
     # never re-derives it. Timing above is already final and is not touched.
-    dsp = select_transition_dsp(
+    decision = select_transition_dsp(
         best, compatibility, effective_outgoing_analysis, incoming_analysis,
         structures.get(previous_track.id), structures.get(track.id),
     )
     transition = AudioRenderTransition(
         clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
-        timeline_start=timeline_start, duration=overlap, type=transition_type, dsp=dsp,
+        timeline_start=timeline_start, duration=overlap, type=transition_type,
+        dsp=decision.dsp, dsp_reasons=decision.reasons,
     )
+    # One line per transition in the app log, for tuning against real music.
+    LOGGER.info("AutoMix transition: %s", describe_transition(
+        transition, previous_track.title or previous_track.id, track.title or track.id,
+    ))
     return timeline_start, source_in, playback_rate, transition, best.outgoing_source_out

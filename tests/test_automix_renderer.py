@@ -246,8 +246,8 @@ class TransitionStyleGraphTests(unittest.TestCase):
 
     def test_filter_blend_staggers_bands_asymmetrically(self) -> None:
         graph = self._pair_graph(TransitionDsp.FILTER_BLEND)
-        self.assertIn("[c0low]afade=t=out:st=52.000000:d=3.600000", graph)   # out lows go first
-        self.assertIn("[c1low]afade=t=in:st=4.400000:d=3.600000", graph)     # in lows come last
+        self.assertIn("[c0low]afade=t=out:st=55.360000:d=0.960000", graph)   # short staggered swap,
+        self.assertIn("[c1low]afade=t=in:st=3.680000:d=0.960000", graph)     # outgoing leads by 4%
         self.assertIn("[c0high]afade=t=out:st=54.800000:d=5.200000", graph)  # out highs linger
         self.assertIn("[c1high]afade=t=in:st=0.000000:d=5.200000", graph)    # in highs arrive first
         self.assertIn("[c1mid]afade=t=in:st=2.000000:d=4.800000", graph)
@@ -277,9 +277,9 @@ class TransitionStyleGraphTests(unittest.TestCase):
         graph, label = build_filter_graph(clips, transitions)
         # b: bass-swap head, filter-blend tail.
         self.assertIn("[c1low]afade=t=in:st=2.800000:d=2.000000:curve=qsin,"
-                      "afade=t=out:st=54.000000:d=2.700000:curve=qsin[c1lowe]", graph)
+                      "afade=t=out:st=56.520000:d=0.720000:curve=qsin[c1lowe]", graph)
         # c: filter-blend head; its SHORT_FADE tail adds no band fade.
-        self.assertIn("[c2low]afade=t=in:st=3.300000:d=2.700000:curve=qsin[c2lowe]", graph)
+        self.assertIn("[c2low]afade=t=in:st=2.760000:d=0.720000:curve=qsin[c2lowe]", graph)
         self.assertNotIn("[c3pre]", graph)  # d only touches SHORT_FADE: no crossover
         self.assertIn("[m2][c3]acrossfade=d=3.000000:curve1=qsin:curve2=qsin[m3sum]", graph)
         self.assertEqual(graph.count("alimiter="), 3)
@@ -543,7 +543,8 @@ def _tones(components: list[tuple[float, float]], duration: float) -> np.ndarray
 
 
 def _spectrum_level(segment: np.ndarray, frequency: float) -> float:
-    spectrum = np.abs(np.fft.rfft(segment * np.hanning(len(segment))))
+    window = np.hanning(len(segment))
+    spectrum = np.abs(np.fft.rfft(segment * window)) * 2.0 / window.sum()  # tone amplitude, length-independent
     frequencies = np.fft.rfftfreq(len(segment), 1.0 / SAMPLE_RATE)
     return float(spectrum[np.argmin(np.abs(frequencies - frequency))])
 
@@ -810,11 +811,12 @@ class RealTransitionStyleRenderTests(unittest.TestCase):
         self.assertGreater(late["mid"][1], 10 * late["mid"][0])
         self.assertGreater(early["high"][1], 0.1 * early["high"][0])  # incoming highs already in
 
-        # FILTER_BLEND c->d: incoming highs lead, outgoing lows leave first, lows never overlap.
-        early, gap, late = (self._levels(audio, windows[2], *p, "c", "d") for p in ((0.05, 0.3), (0.46, 0.54), (0.6, 0.8)))
+        # FILTER_BLEND c->d: incoming highs lead; the lows swap briefly mid-window, never dropping out.
+        early, handoff, late = (self._levels(audio, windows[2], *p, "c", "d") for p in ((0.05, 0.3), (0.46, 0.54), (0.6, 0.8)))
         self.assertGreater(early["high"][1], 0.2 * early["high"][0])
         self.assertGreater(early["low"][0], 10 * early["low"][1])
-        self.assertLess(max(gap["low"]), 0.15 * early["low"][0])
+        self.assertGreater(max(handoff["low"]), 0.3 * early["low"][0])  # no bass hole
+        self.assertLess(min(handoff["low"]), 0.7 * early["low"][0])     # and no full double bass
         self.assertGreater(late["high"][0], 0.2 * late["high"][1])   # outgoing highs linger
         self.assertLess(late["low"][0], 0.05 * late["low"][1])
 
@@ -867,8 +869,31 @@ class RealTransitionStyleRenderTests(unittest.TestCase):
 
         steady = np.mean([rms(t) for t in np.arange(5.0, 15.0, 0.1)])
         levels = [rms(t) for t in np.arange(22.0, 29.9, 0.1)]
-        self.assertGreater(min(levels), 0.35 * steady)  # the noise ("mids/highs") carries through
+        # Phase 2's bass gap dipped this bass-heavy fixture to -7 dB; the staggered swap keeps it within -3 dB.
+        self.assertGreater(min(levels), 10 ** (-3 / 20) * steady)
         self.assertLess(max(levels), 1.42 * steady)
+
+    def test_filter_blend_bass_overlap_is_brief_and_below_bass_swap(self) -> None:
+        paths = {"a": self._source("a", _tones([(90.0, 0.3)], 30.0)), "b": self._source("b", _tones([(107.0, 0.3)], 30.0))}
+
+        def overlap(dsp: TransitionDsp) -> tuple[float, float]:
+            """(peak of min(out bass, in bass) re steady, seconds both >= -12 dB) over the window."""
+            audio = self._render([_clip("a", "a", 0.0, 30.0), _clip("b", "b", 22.0, 30.0)],
+                                 [_styled("a", "b", 22.0, 8.0, dsp)], paths)[:, 0]
+            steady = _spectrum_level(audio[5 * SAMPLE_RATE:int(5.2 * SAMPLE_RATE)], 90.0)
+            peak, both = 0.0, 0.0
+            for start in np.arange(22.0, 29.8, 0.05):
+                segment = audio[int(start * SAMPLE_RATE):int((start + 0.2) * SAMPLE_RATE)]
+                shared = min(_spectrum_level(segment, 90.0), _spectrum_level(segment, 107.0)) / steady
+                peak = max(peak, shared)
+                both += 0.05 if shared >= 10 ** (-12 / 20) else 0.0
+            return peak, both
+
+        blend_peak, blend_time = overlap(TransitionDsp.FILTER_BLEND)
+        swap_peak, swap_time = overlap(TransitionDsp.BASS_SWAP)
+        self.assertLess(blend_peak, 10 ** (-6 / 20))   # never two basses near full level
+        self.assertLess(blend_peak, swap_peak)
+        self.assertLess(blend_time, 0.5 * swap_time)
 
 
 if __name__ == "__main__":

@@ -285,5 +285,32 @@ class RealSharedPlanTests(unittest.TestCase):
                 self.assertLess(pixels[2 if channel == 0 else 0], 40)
 
 
+    def test_repeated_preparation_plans_and_renders_the_same_dsp(self):
+        # Preview (PreviewAudioController) and Export both call
+        # prepare_playlist_audio; the style must be a pure function of the inputs.
+        from tests.test_automix_ffmpeg_integration import _write_tone_wav
+        from app.automix.analysis.service import AnalysisBatchResult
+        executable = Path(os.environ['PLAYLIST_CANVAS_TEST_FFMPEG'])
+        with TemporaryDirectory() as directory:
+            directory = Path(directory)
+            tracks = [_track('a', 20.3), _track('b', 20.3)]
+            for index, track in enumerate(tracks):
+                track.file_path = str(directory / f'{track.id}.wav')
+                _write_tone_wav(Path(track.file_path), 220 + index * 220, track.duration_seconds)
+            analyses = {t.id: _analysis(t.id, 120, t.duration_seconds) for t in tracks}
+            renderer = FFmpegRenderer(executable)
+            settings = RenderSettings(fps=10, video_codec='libx264', crf=18, preset='ultrafast', output_width=32, output_height=32)
+            plans, outputs = [], []
+            for run in ('preview', 'export'):
+                with patch('app.automix.workflow.AutoMixWorkflow.analyze', return_value=AnalysisBatchResult(analyses, {})):
+                    audio = renderer.prepare_playlist_audio(tracks, directory / run, settings, 'automix', plan_callback=plans.append)
+                outputs.append(Path(audio).read_bytes())
+            self.assertEqual(plans[0], plans[1])
+            (transition,) = plans[0].audio.transitions
+            self.assertIsNotNone(transition.dsp)
+            self.assertTrue(transition.dsp_reasons[0].startswith(f'* {transition.dsp.value}'))
+            self.assertEqual(outputs[0], outputs[1])
+
+
 if __name__ == '__main__':
     unittest.main()

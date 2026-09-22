@@ -99,12 +99,15 @@ BAND_ENVELOPES: Mapping[TransitionDsp, Mapping[str, tuple[tuple[float, float], t
         "mid": ((0.40, 0.65), (0.40, 0.65)),
         "high": (_FULL_WINDOW, _FULL_WINDOW),
     },
-    # A 3-band stand-in for a filter sweep: the outgoing track loses its lows
-    # first (a closing high-pass), the incoming one arrives highs-first and
-    # gets its lows last. The lows never overlap -- a short bass-less gap
-    # instead of two kicks flamming against each other.
+    # A 3-band stand-in for a filter sweep: the incoming track arrives
+    # highs-first and the outgoing one keeps its highs longest. The lows swap
+    # in a short, slightly staggered equal-power handoff around the middle
+    # (outgoing leads by 4%): two kicks share only ~0.35 s at <= -7 dB each
+    # (8 s window), and the bass never drops out. Phase 2's (0-45%)/(55-100%)
+    # lows left a bass-less gap: a -7 dB level hole on bass-heavy material,
+    # vs ~-2.2 dB now (DSP Phase 2.1 envelope comparison).
     TransitionDsp.FILTER_BLEND: {
-        "low": ((0.0, 0.45), (0.55, 1.0)),
+        "low": ((0.42, 0.54), (0.46, 0.58)),
         "mid": ((0.15, 0.75), (0.25, 0.85)),
         "high": ((0.35, 1.0), (0.0, 0.65)),
     },

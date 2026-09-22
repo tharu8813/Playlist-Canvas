@@ -7,7 +7,7 @@ from app.automix.candidates import TransitionCandidate, TransitionStrategy
 from app.automix.compatibility import TransitionCompatibility
 from app.automix.models import TrackAnalysis
 from app.automix.structure.models import TrackStructureAnalysis
-from app.automix.transition_style import select_transition_dsp
+from app.automix.transition_style import describe_transition, select_transition_dsp
 from app.timeline.render_plan import TransitionDsp
 
 
@@ -43,6 +43,9 @@ def _structure(track_id: str, energy: float) -> TrackStructureAnalysis:
 
 class SelectTransitionDspTests(unittest.TestCase):
     def select(self, candidate=None, compatibility=None, outgoing=None, incoming=None, **structures):
+        return self.decide(candidate, compatibility, outgoing, incoming, **structures).dsp
+
+    def decide(self, candidate=None, compatibility=None, outgoing=None, incoming=None, **structures):
         return select_transition_dsp(
             candidate or _candidate(), compatibility or _compatibility(),
             outgoing or _analysis("a"), incoming or _analysis("b"),
@@ -115,6 +118,109 @@ class SelectTransitionDspTests(unittest.TestCase):
         incoming = _analysis("b", vocal_activity=((1.0, 2.0),), key="A minor", energy=0.5)
         results = {self.select(outgoing=replace(outgoing), incoming=replace(incoming)) for _ in range(20)}
         self.assertEqual(results, {TransitionDsp.VOCAL_SAFE_EQ})
+
+
+_VOCALS_BOTH = dict(outgoing=_analysis("a", vocal_activity=((0.0, 120.0),)),
+                    incoming=_analysis("b", vocal_activity=((0.0, 120.0),)))
+_ENERGY_JUMP = dict(outgoing_structure=_structure("a", 0.9), incoming_structure=_structure("b", 0.3))
+
+
+class SelectorPrecedenceTests(unittest.TestCase):
+    """Rule order is policy: short -> vocal/key -> energy/drift -> bass swap."""
+
+    select = SelectTransitionDspTests.select
+    decide = SelectTransitionDspTests.decide
+
+    def test_short_beats_vocal_overlap(self) -> None:
+        self.assertIs(self.select(_candidate(duration=3.0), **_VOCALS_BOTH), TransitionDsp.SHORT_FADE)
+
+    def test_long_vocal_overlap_is_vocal_safe(self) -> None:
+        self.assertIs(self.select(_candidate(duration=8.0), **_VOCALS_BOTH), TransitionDsp.VOCAL_SAFE_EQ)
+
+    def test_vocal_overlap_beats_energy_mismatch(self) -> None:
+        self.assertIs(self.select(**_VOCALS_BOTH, **_ENERGY_JUMP), TransitionDsp.VOCAL_SAFE_EQ)
+
+    def test_energy_mismatch_on_reliable_beat_match_is_filter_blend(self) -> None:
+        self.assertIs(self.select(**_ENERGY_JUMP), TransitionDsp.FILTER_BLEND)
+
+    def test_clean_reliable_beat_match_is_bass_swap(self) -> None:
+        self.assertIs(self.select(), TransitionDsp.BASS_SWAP)
+
+
+class UnknownDataTests(unittest.TestCase):
+    """Missing analysis is never evidence for a style."""
+
+    select = SelectTransitionDspTests.select
+    decide = SelectTransitionDspTests.decide
+
+    def test_no_optional_analysis_degrades_to_the_plain_styles(self) -> None:
+        # _analysis() has no key, energy, vocals; no structure passed.
+        self.assertIs(self.select(), TransitionDsp.BASS_SWAP)
+        self.assertIsNone(self.select(_candidate(TransitionStrategy.BEAT_ALIGNED_CROSSFADE)))
+
+    def test_one_sided_data_never_triggers_a_rule(self) -> None:
+        cases = {
+            "vocals": dict(outgoing=_analysis("a", vocal_activity=((0.0, 120.0),))),
+            "key": dict(outgoing=_analysis("a", key="C major")),
+            "energy": dict(outgoing=_analysis("a", energy=1.0), incoming=_analysis("b", energy=None)),
+            "structure": dict(outgoing_structure=_structure("a", 1.0)),
+        }
+        for name, fields in cases.items():
+            with self.subTest(name):
+                self.assertIs(self.select(**fields), TransitionDsp.BASS_SWAP)
+
+    def test_unknowns_are_reported_as_unknown(self) -> None:
+        reasons = self.decide().reasons
+        self.assertIn("? vocal activity unknown", reasons)
+        self.assertIn("? key unknown", reasons)
+        self.assertIn("? energy unknown", reasons)
+
+
+class DecisionReasonTests(unittest.TestCase):
+    decide = SelectTransitionDspTests.decide
+
+    def test_first_reason_names_the_deciding_rule_with_its_numbers(self) -> None:
+        cases = [
+            (dict(candidate=_candidate(duration=2.8)), "* short_fade: transition only 2.8s (< 4.0s)"),
+            (dict(**_VOCALS_BOTH), "* vocal_safe_eq: vocals overlap"),
+            (dict(outgoing=_analysis("a", key="C major"), incoming=_analysis("b", key="F# major")),
+             "* vocal_safe_eq: keys clash"),
+            (dict(**_ENERGY_JUMP), "* filter_blend: local energy delta 0.60 (>= 0.3)"),
+            (dict(candidate=_candidate(TransitionStrategy.BEAT_ALIGNED_CROSSFADE), compatibility=_compatibility(0.9125)),
+             "* filter_blend: kicks would drift 73ms"),
+            (dict(), "* bass_swap: clean reliable beat match"),
+            (dict(candidate=_candidate(TransitionStrategy.FIXED_CROSSFADE)),
+             "* legacy crossfade: fixed_crossfade has no reliable rhythm to style on"),
+        ]
+        for fields, expected in cases:
+            with self.subTest(expected):
+                self.assertEqual(self.decide(**fields).reasons[0], expected)
+
+    def test_facts_list_every_signal_the_selector_read(self) -> None:
+        decision = self.decide(
+            _candidate(TransitionStrategy.BEAT_ALIGNED_CROSSFADE), _compatibility(1.6),
+            _analysis("a", key="C major", energy=0.5, vocal_activity=((0.0, 120.0),)),
+            _analysis("b", key="G major", energy=0.42, vocal_activity=((0.0, 50.0),)),
+        )
+        self.assertEqual(decision.reasons[1:], (
+            "+ beat_aligned_crossfade (own tempo)",
+            "- vocals active in both transition windows",
+            "+ keys compatible (C major -> G major)",
+            "+ global energy delta 0.08",
+            "  tempo delta 1.6%",
+            "- expected kick drift 128ms",
+        ))
+
+    def test_describe_transition_is_one_line_with_the_reasons(self) -> None:
+        from app.timeline.models import TransitionType
+        from app.timeline.render_plan import AudioRenderTransition
+        decision = self.decide()
+        transition = AudioRenderTransition("a", "b", 172.4, 8.0, TransitionType.BEAT_MATCH,
+                                           decision.dsp, decision.reasons)
+        line = describe_transition(transition, "Song A", "Song B")
+        self.assertNotIn("\n", line)
+        self.assertTrue(line.startswith("Song A -> Song B time=172.4s duration=8.0s type=beat_match dsp=bass_swap "))
+        self.assertIn("reasons=[* bass_swap: clean reliable beat match; + beat_match (rate-matched); ", line)
 
 
 if __name__ == "__main__":

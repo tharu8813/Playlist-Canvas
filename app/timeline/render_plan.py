@@ -63,6 +63,9 @@ class AudioRenderTransition:
 
     ``dsp=None`` keeps the type's own rendering (EQUAL_POWER qsin, CROSSFADE
     tri, BEAT_MATCH bass swap), so plans that never set it are unchanged.
+    ``dsp_reasons`` is runtime diagnostics from whoever chose ``dsp`` (the
+    AutoMix selector): why that style, for tuning. Never read by the
+    renderer, never persisted -- compiled plans are rebuilt, not saved.
     """
 
     clip_a: str
@@ -71,6 +74,7 @@ class AudioRenderTransition:
     duration: float
     type: TransitionType = TransitionType.CUT
     dsp: TransitionDsp | None = None
+    dsp_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

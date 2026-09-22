@@ -415,3 +415,17 @@ styles, SHORT_FADE included, get the transition-window limiter. Timing is
 never touched: every style renders exactly `AudioRenderTransition.duration`.
 Without the DSP filters, or if a DSP render fails, every styled transition
 falls back to its type's legacy acrossfade with identical timing.
+
+### Phase 2.1 -- tuning and explainability
+
+- FILTER_BLEND lows no longer leave a bass-less gap (0-45% / 55-100%, a -7 dB
+  level hole on bass-heavy material). They now swap in a short, staggered
+  equal-power handoff: outgoing 42-54%, incoming 46-58%. Measured on a
+  bass-heavy synthetic fixture: RMS dip -2.2 dB; the two basses share at most
+  -6.8 dB each, for ~0.35 s of an 8 s window (BASS_SWAP: -3.7 dB for ~1.35 s).
+- `AudioRenderTransition.dsp_reasons` carries the selector's reasons (runtime
+  only, never persisted, never read by the renderer). `reasons[0]` (`*`) is the
+  deciding rule; the rest list every fact read: `+` favourable, `-` conflict,
+  `?` unknown. Unknown data never triggers a rule.
+- The planner logs one `AutoMix transition: ...` line per transition at INFO
+  (app log: `%LOCALAPPDATA%\PlaylistCanvas\logs\playlist-canvas.log`).
