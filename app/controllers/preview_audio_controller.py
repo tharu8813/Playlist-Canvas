@@ -18,7 +18,7 @@ import logging
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal, QEventLoop
+from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QObject, QThread, Signal
 
 from app.models.playlist import PlaylistTrack
 from app.renderer.ffmpeg_renderer import FFmpegRenderer, RenderCancelledError, RenderError
@@ -144,9 +144,19 @@ class PreviewAudioController(QObject):
     def _forget(self, worker: "_PreviewAudioWorker") -> None:
         if self._worker is worker:
             self._worker = None
+        if self._shutting_down:
+            # shutdown() takes exclusive ownership of this worker's
+            # wait()/deleteLater() sequence once shutdown has started (see
+            # shutdown() below). Scheduling deletion here too raced
+            # shutdown()'s own wait()/deleteLater() call on Windows: the
+            # deferred-delete event could destroy the C++ QThread object
+            # while shutdown()'s nested event loop was still processing
+            # events for it, producing a 0xC0000409 fail-fast crash the
+            # very first time this was exercised under real threading.
+            return
         worker.deleteLater()
         pending, self._pending = self._pending, None
-        if pending is not None and not self._shutting_down:
+        if pending is not None:
             self.start(*pending)
 
     def cancel(self) -> None:
@@ -162,15 +172,46 @@ class PreviewAudioController(QObject):
             self._worker = None
 
     def shutdown(self) -> None:
-        """Finish cancellation before the owner or its temporary files are deleted."""
+        """Finish cancellation before the owner or its temporary files are deleted.
+
+        Takes exclusive ownership of the worker's wait()/deleteLater()
+        sequence: disconnecting `finished` here (before reconnecting it to
+        the local wait loop below) guarantees `_forget()` cannot run again
+        for this worker, so there is no other code path left that could
+        delete the underlying C++ QThread object while this method still
+        holds and waits on it.
+        """
         self._shutting_down = True
         self.cancel()
-        worker = self._worker
-        if worker is not None and worker.isRunning():
+        worker, self._worker = self._worker, None
+        if worker is None:
+            return
+        try:
+            worker.finished.disconnect()
+        except RuntimeError:
+            return  # The C++ QThread object is already gone.
+        try:
+            running = worker.isRunning()
+        except RuntimeError:
+            return
+        if running:
             loop = QEventLoop()
             worker.finished.connect(loop.quit)
             # Paint and queued completion signals keep flowing during shutdown.
             # New user actions must not reenter the owner's destruction path.
-            if worker.isRunning():
-                loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        try:
             worker.wait()
+        except RuntimeError:
+            pass
+        worker.deleteLater()
+        # A plain deleteLater() only *schedules* deletion for whenever some
+        # later, unrelated event loop iteration happens to process it --
+        # which, in practice, was often a *different* controller's own
+        # shutdown() nested loop (MainWindow shuts several of these down in
+        # sequence on close). Processing several controllers' leftover
+        # QThread deletions interleaved with another controller's still-
+        # live thread completion inside the same loop pass reproduced the
+        # 0xC0000409 crash deterministically. Forcing this one object's
+        # DeferredDelete to run right now removes that ambiguity entirely.
+        QCoreApplication.sendPostedEvents(worker, QEvent.Type.DeferredDelete)

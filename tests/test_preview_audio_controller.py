@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+
+from PySide6.QtCore import QThread, QTimer
+from PySide6.QtWidgets import QApplication
 
 from app.controllers.preview_audio_controller import (
     PreviewAudioController,
@@ -97,6 +101,70 @@ class PreviewAudioControllerTests(unittest.TestCase):
         controller._worker = _DeletedWorker()
         controller.cancel()  # must not raise
         self.assertIsNone(controller._worker)
+
+
+class PreviewAudioControllerShutdownTests(unittest.TestCase):
+    """Real-threading regressions for the shutdown()/_forget() ownership race.
+
+    A prior version let `_forget()` (connected to `finished` in start())
+    call `worker.deleteLater()` even while `shutdown()` was still waiting
+    on that same worker in a nested QEventLoop -- on Windows this produced
+    a 0xC0000409 fail-fast crash the first time it was exercised under
+    real threading rather than mocks. These tests use a real QThread and
+    a real event loop specifically to catch that class of bug again; a
+    passing assertion here is not enough on its own; the whole process
+    must also exit cleanly (verified by the harness that invokes this
+    module, not by any assertion below).
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_shutdown_waits_for_a_running_worker_without_deleting_it_early(self) -> None:
+        class SlowWorker(QThread):
+            def __init__(self, parent: object) -> None:
+                super().__init__(parent)
+                self.release = threading.Event()
+
+            def run(self) -> None:
+                self.release.wait(5)
+
+            def cancel(self) -> None:
+                pass
+
+        controller = PreviewAudioController(_renderer())
+        worker = SlowWorker(controller)
+        controller._worker = worker
+        worker.finished.connect(lambda w=worker, c=controller: c._forget(w))
+        worker.start()
+        start = time.monotonic()
+        controller.cancel()
+        self.assertLess(time.monotonic() - start, 0.2)
+        self.assertIs(controller._worker, worker)
+        self.assertTrue(worker.isRunning())
+
+        heartbeat: list[bool] = []
+        QTimer.singleShot(30, lambda: heartbeat.append(True))
+        QTimer.singleShot(60, worker.release.set)
+        controller.shutdown()
+
+        self.assertTrue(heartbeat, "shutdown() must keep processing Qt events while it waits")
+        self.assertIsNone(controller._worker)
+
+    def test_pending_replacement_is_dropped_after_shutdown(self) -> None:
+        release = threading.Event()
+        controller = PreviewAudioController(_renderer())
+        with patch.object(_PreviewAudioWorker, "run", lambda self: release.wait(5)):
+            controller.start([_track("old.mp3")], Path("."), "automix", 3.0)
+            old = controller._worker
+            controller.start([_track("new.mp3")], Path("."), "automix", 3.0)
+            self.assertIs(controller._worker, old)
+            self.assertIsNotNone(controller._pending)
+            QTimer.singleShot(10, release.set)
+            controller.shutdown()
+            self.assertIsNone(controller._pending)
+            self.assertIsNone(controller._worker)
 
 
 if __name__ == "__main__":

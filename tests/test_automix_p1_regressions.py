@@ -137,6 +137,50 @@ class WorkerLifetimeTests(unittest.TestCase):
             self.assertTrue(heartbeat)
             self.assertIsNone(controller._worker)
 
+    def test_sequential_shutdown_of_multiple_controllers_does_not_crash(self):
+        """Reproduces MainWindow's real close sequence: several of these
+        controllers each call shutdown() one after another. A plain
+        deleteLater() only *schedules* deletion for whenever some later,
+        unrelated event loop happens to process it -- which was often a
+        *different* controller's own shutdown() nested loop, and processing
+        one controller's leftover QThread deletion interleaved with
+        another's still-live thread completion inside the same loop pass
+        reproduced a Windows 0xC0000409 crash deterministically before
+        shutdown() was changed to flush its own worker's deletion
+        immediately instead of leaving it pending for whichever event loop
+        runs next.
+        """
+        class SlowWorker(QThread):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.release = threading.Event()
+            def run(self):
+                self.release.wait(5)
+            def cancel(self):
+                pass
+
+        renderer = FFmpegRenderer.__new__(FFmpegRenderer)
+        first = AutoMixAnalysisController()
+        second = PreviewAudioController(renderer)
+        first_worker = SlowWorker(first)
+        second_worker = SlowWorker(second)
+        first._worker = first_worker
+        second._worker = second_worker
+        first_worker.finished.connect(lambda: first._forget(first_worker))
+        second_worker.finished.connect(lambda: second._forget(second_worker))
+        first_worker.start()
+        second_worker.start()
+        # first finishes almost immediately, so its deleteLater() would
+        # otherwise still be pending when second's shutdown() opens its own
+        # nested loop below.
+        first_worker.release.set()
+        first.shutdown()
+        self.assertIsNone(first._worker)
+
+        QTimer.singleShot(30, second_worker.release.set)
+        second.shutdown()
+        self.assertIsNone(second._worker)
+
     def test_replacement_waits_for_cancelled_analysis_to_finish(self):
         from app.controllers.automix_analysis_controller import _AutoMixAnalysisWorker
         release = threading.Event()
