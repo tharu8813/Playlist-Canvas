@@ -104,3 +104,4 @@ Not changed: SHORT_FADE 4 s, energy jump 0.30, kick drift 50 ms, all band envelo
 
 ### Tests
 `tests/test_automix_diagnostics.py` (rows/CSV/JSON/metrics), audible-bound cases in `tests/test_automix_candidates.py` and `tests/test_automix_basic_analyzer.py`, Beat This tests moved to the signal API.
+**Commit:** `fad3a72 refine: tune AutoMix transition selection against real music`. Full suite: 1036 passed, 1 pre-existing failure (`test_real_video_preview_performance`, Phase 09).

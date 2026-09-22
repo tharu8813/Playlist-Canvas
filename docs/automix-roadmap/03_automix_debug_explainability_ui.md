@@ -64,3 +64,16 @@ style override, threshold editor, DSP 재렌더 trigger, persisted project forma
 
 ## 권장 commit
 `feat: add AutoMix transition diagnostics to preview`
+
+
+---
+
+## Outcome (2026-09-23)
+
+- **UI:** a collapsible **"AutoMix details" / "AutoMix 상세"** section under Preview's track list (`app/widgets/automix_details_panel.py`), shown whenever Preview plays a blended mode (AutoMix or crossfade), in both the dialog and the embedded editor preview (it travels with the track panel into the right inspector). Collapsed by default -- a debug view, not a control surface.
+- **Content:** one row per junction (`01→02  3:25 · 16.0s · Bass swap`, incl. back-to-back/gap junctions); the selected row shows A→B, start, length, style, strategy, bars, candidate score, outgoing/incoming/target BPM, incoming rate, tempo delta, cues, structure cues (outro / intro end), energy delta, vocal overlap, key clash, and the selector's reasons. Unknown values read "unknown", never "no".
+- **State:** "Preparing the mix" (sequential plan still playing), "Provisional · AutoMix through track N" (progressive partial mix; N = clips the partial mix fully covers), "Final plan". The row under the playhead is bold and follows playback and seeks.
+- **Copy:** "Copy text" (all rows, human readable) and "Copy JSON" (`app.automix.diagnostics.rows_to_json`, the same rows the listening report writes).
+- **Performance / boundaries:** reads only the playing `CompiledRenderPlan` (`AudioRenderTransition.details`/`dsp_reasons` from Phase 02); no analysis, planning or rendering is triggered; per-frame work is a scan of the transition windows with an early exit when the marked row does not change. No style override, no threshold editing, no persisted format change.
+- **Timeline:** Preview's timeline already draws every transition window; left unchanged.
+- **Tests:** `tests/test_automix_details_panel.py` (empty, sequential, no-reason fallback, provisional/final, playhead highlight, copy text/JSON, collapse/reopen, language switch) and `test_automix_details_follow_the_playing_plan_from_provisional_to_final` in `tests/test_main_window.py`.

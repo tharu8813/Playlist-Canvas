@@ -6115,6 +6115,25 @@ class MainWindowSafetyTests(unittest.TestCase):
                 self.assertEqual(preview._blended_audio_path, files["final"])
                 self.assertEqual(preview._blended_audio_until, math.inf)
 
+    def test_automix_details_follow_the_playing_plan_from_provisional_to_final(self) -> None:
+        with TemporaryDirectory(prefix="playlist-progressive-") as directory:
+            preview, tracks, plans, files = self._open_progressive_preview(directory)
+            panel = preview.automix_details
+            self.assertIsNotNone(panel)
+            self.assertIn(panel, preview.track_list_panel.findChildren(type(panel)))
+            self.assertEqual(panel._state[0], "waiting")
+            patches = self._media_patches(preview)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                preview._apply_blended_audio(files["p2"], plans[2], plans[2].audio.clips[1].timeline_end)
+                self.assertEqual(panel._state, ("provisional", 2))
+                self.assertEqual(len(panel.rows), len(tracks) - 1)
+                first = plans[2].audio.transitions[0]
+                preview.timeline.setValue(round((first.timeline_start + 0.5) * TIMELINE_SCALE))
+                self.assertEqual(panel.current_index, 0)
+                preview._apply_blended_audio(files["final"], plans[3])
+                self.assertEqual(panel._state, ("final", None))
+                self.assertIn(("bars", 8), plans[3].audio.transitions[1].details)
+
     def test_every_source_type_has_its_own_palette_glyph(self) -> None:
         from app.ui.studio_icons import source_icon
 

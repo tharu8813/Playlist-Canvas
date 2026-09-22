@@ -66,6 +66,7 @@ from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
 from app.video.decoder_backpressure import VideoDecoderBackpressure
 from app.video.preview_proxy import PreviewProxyCache, PreviewProxyWorker
 from app.utils.i18n import Language, Translator
+from app.widgets.automix_details_panel import AutoMixDetailsPanel, ready_through
 
 TIMELINE_SCALE = 100
 _BLENDED_AUDIO_TRACK_INDEX = -2
@@ -770,6 +771,12 @@ class ExportPreviewDialog(QDialog):
         track_panel_header.addWidget(self.track_list_count_label)
         track_panel_layout.addLayout(track_panel_header)
         track_panel_layout.addWidget(self.track_list, 1)
+        # Read-only "why does this transition sound like that" for blended previews.
+        self.automix_details: AutoMixDetailsPanel | None = None
+        if self._transition_mode != "none":
+            self.automix_details = AutoMixDetailsPanel(translator)
+            track_panel_layout.addWidget(self.automix_details)
+            self._refresh_automix_details()
         self.shortcut_hint_label = QLabel()
         self.shortcut_hint_label.setObjectName("mutedLabel")
         self.shortcut_hint_label.setWordWrap(True)
@@ -1108,7 +1115,24 @@ class ExportPreviewDialog(QDialog):
                        for clip in plan.audio.clips)
         return self._selection_has_audio(selected, playlist_seconds)
 
+    def _refresh_automix_details(self, covered_until: float | None = None) -> None:
+        """Show the playing plan's transitions: waiting (sequential), provisional or final."""
+        panel = getattr(self, "automix_details", None)
+        if panel is None:
+            return
+        if covered_until is None:
+            state, through = ("final" if self._blended_audio_path is not None else "waiting"), None
+        elif math.isinf(covered_until):
+            state, through = "final", None
+        else:
+            state, through = "provisional", ready_through(self._compiled_plan, covered_until)
+        panel.set_plan(self._compiled_plan, self.tracks, state=state, ready_through=through)
+        panel.set_playhead(self._playhead_seconds if hasattr(self, "_playhead_seconds") else 0.0)
+
     def _on_seeked(self, _value: int) -> None:
+        panel = getattr(self, "automix_details", None)
+        if panel is not None:
+            panel.set_playhead(self.timeline.value() / TIMELINE_SCALE)
         if not self._advancing_playhead:
             self._playhead_seconds = self.timeline.value() / TIMELINE_SCALE
             self._force_video_seek = True
@@ -3416,6 +3440,7 @@ class ExportPreviewDialog(QDialog):
         # sequential boundaries even after the final AutoMix plan arrived.
         self.timeline.set_schedule(self._track_schedule, plan.audio.transitions)
         self._populate_track_list()
+        self._refresh_automix_details(covered_until)
         self._base_track_id = ""
         self._force_video_seek = True
         self._schedule_refresh()
@@ -3477,6 +3502,8 @@ class ExportPreviewDialog(QDialog):
         self.performance_title_label.setText("성능" if korean else "Performance")
         self.track_list_title_label.setText("트랙" if korean else "Tracks")
         self._populate_track_list()
+        if getattr(self, "automix_details", None) is not None:
+            self.automix_details.retranslate()
         self.timeline_title_label.setText(
             ("재생 타임라인" if korean else "Playback timeline")
             if self.embedded else
