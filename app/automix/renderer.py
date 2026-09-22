@@ -18,9 +18,11 @@ adjacency, a silence-padded concat for an explicit gap, or FFmpeg's
 ``duration`` parameter reproduces a transition's overlap directly, so no
 manual global-timeline delay bookkeeping is needed at all. This keeps the
 graph readable and lets it scale to many tracks as one filter_complex
-chain instead of one delay-position per input. BEAT_MATCH junctions add a
-three-band bass-swap on top of the same acrossfade overlap (see
-LOW_CROSSOVER_HZ below); every other junction type is unchanged.
+chain instead of one delay-position per input. A transition carrying a
+DSP style (``AudioRenderTransition.dsp``, chosen by the planner; BEAT_MATCH
+defaults to bass swap) adds band envelopes and a window limiter on top of
+the same acrossfade overlap (see BAND_ENVELOPES below); a transition
+without one renders exactly as before.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from app.timeline.models import TransitionType
-from app.timeline.render_plan import AudioRenderClip, AudioRenderPlan, AudioRenderTransition
+from app.timeline.render_plan import AudioRenderClip, AudioRenderPlan, AudioRenderTransition, TransitionDsp
 from app.utils.subprocess_utils import hidden_process_kwargs
 
 LOGGER = logging.getLogger(__name__)
@@ -59,7 +61,7 @@ curve; tri (linear/triangular) is a plain crossfade. CUT never reaches
 here -- see build_filter_graph(). BEAT_MATCH only uses its qsin entry as
 the fallback when the bass-swap DSP below is unavailable."""
 
-# Bass-swap DSP for BEAT_MATCH transitions. Each participating clip is split
+# Band DSP for styled transitions (BASS_SWAP / VOCAL_SAFE_EQ / FILTER_BLEND). Each participating clip is split
 # into three Linkwitz-Riley bands by ``acrossover`` over its WHOLE length (a
 # DJ mixer's EQ is always in circuit): LR bands sum back to an allpass, so a
 # clip with every band at unity keeps a flat magnitude response, and running
@@ -79,24 +81,45 @@ LOW_CROSSOVER_HZ = 200
 """Below ~200 Hz sit kick fundamentals and bass lines, the part that muddies
 when two tracks play at once; above it are kick click and bass harmonics."""
 HIGH_CROSSOVER_HZ = 2500
-"""Splits body/vocal mids from presence/hats so later styles (vocal-safe,
-filter sweeps) can treat them separately; Phase 1 fades mid and high alike."""
+"""Splits body/vocal mids from presence/hats so VOCAL_SAFE_EQ and
+FILTER_BLEND can move them separately."""
 _CROSSOVER_ORDER = "4th"
-BASS_SWAP_BANDS: Mapping[str, tuple[float, float]] = {
-    "low": (0.35, 0.60),
-    "mid": (0.0, 1.0),
-    "high": (0.0, 1.0),
+_FULL_WINDOW = (0.0, 1.0)
+BAND_ENVELOPES: Mapping[TransitionDsp, Mapping[str, tuple[tuple[float, float], tuple[float, float]]]] = {
+    # Bass lines barely overlap; mids/highs crossfade like qsin.
+    TransitionDsp.BASS_SWAP: {
+        "low": ((0.35, 0.60), (0.35, 0.60)),
+        "mid": (_FULL_WINDOW, _FULL_WINDOW),
+        "high": (_FULL_WINDOW, _FULL_WINDOW),
+    },
+    # Bass swap plus a mid (vocal/chord) swap just after it, so two vocal
+    # lines -- or two clashing keys -- share only a short handoff.
+    TransitionDsp.VOCAL_SAFE_EQ: {
+        "low": ((0.35, 0.60), (0.35, 0.60)),
+        "mid": ((0.40, 0.65), (0.40, 0.65)),
+        "high": (_FULL_WINDOW, _FULL_WINDOW),
+    },
+    # A 3-band stand-in for a filter sweep: the outgoing track loses its lows
+    # first (a closing high-pass), the incoming one arrives highs-first and
+    # gets its lows last. The lows never overlap -- a short bass-less gap
+    # instead of two kicks flamming against each other.
+    TransitionDsp.FILTER_BLEND: {
+        "low": ((0.0, 0.45), (0.55, 1.0)),
+        "mid": ((0.15, 0.75), (0.25, 0.85)),
+        "high": ((0.35, 1.0), (0.0, 0.65)),
+    },
 }
-"""Per band, the (start, end) of its qsin handoff as normalized transition
-progress. Outgoing holds unity until ``start`` and is silent after ``end``;
-incoming mirrors it. Low hands off inside a narrow window so the two bass
-lines barely overlap; mid/high use the full window like the qsin crossfade."""
-_BASS_SWAP_CURVE = "qsin"
-BASS_SWAP_PEAK_LIMIT = 0.97
+"""Per style and band: ((outgoing start, end), (incoming start, end)) of each
+qsin fade as normalized transition progress. Outgoing holds unity until its
+start and is silent after its end; incoming is silent until its start and at
+unity after its end. SHORT_FADE is absent: it needs no band split."""
+_BANDS = ("low", "mid", "high")
+_BAND_FADE_CURVE = "qsin"
+DSP_PEAK_LIMIT = 0.97
 """Summing two enveloped tracks can overshoot full scale, and the pcm_s16le
 intermediate would hard-clip it irrecoverably. A lookahead limiter runs on
 the transition window only; below this level it is bit-transparent."""
-_BASS_SWAP_REQUIRED_FILTERS = frozenset({"acrossover", "afade", "amix", "alimiter", "asplit", "acrossfade"})
+_DSP_REQUIRED_FILTERS = frozenset({"acrossover", "afade", "amix", "alimiter", "asplit", "acrossfade"})
 
 
 class AutoMixRenderError(RuntimeError):
@@ -117,39 +140,42 @@ class PreparedAudio:
 
 def build_filter_graph(
     clips: Sequence[AudioRenderClip], transitions: Sequence[AudioRenderTransition],
-    *, bass_swap: bool = True,
+    *, transition_dsp: bool = True,
 ) -> tuple[str, str]:
     """Build the filter_complex graph for ``clips``, in input order.
 
     Returns ``(filter_complex, output_label)``. Input ``i`` in the
     eventual FFmpeg command must be ``clips[i]``'s own source file, in the
     same order. Pure and FFmpeg-free: safe to unit test without a real
-    executable. ``bass_swap=False`` renders BEAT_MATCH as the plain qsin
-    acrossfade (the fallback when the DSP filters are unavailable).
+    executable. ``transition_dsp=False`` renders every DSP-styled transition
+    as its type's plain legacy acrossfade (BEAT_MATCH: qsin) -- the fallback
+    when the DSP filters are unavailable. Timing is identical either way.
     """
     if not clips:
         raise AutoMixRenderError("Cannot render an AudioRenderPlan with no clips.")
 
     transition_by_pair = {(t.clip_a, t.clip_b): t for t in transitions}
-    # swapped[i] is the bass-swap transition between clips[i] and clips[i + 1], if any.
-    swapped: list[AudioRenderTransition | None] = []
+    # styles[i] is the DSP style of the junction between clips[i] and clips[i + 1], if any.
+    styles: list[TransitionDsp | None] = []
     for index in range(1, len(clips)):
         transition = transition_by_pair.get((clips[index - 1].clip_id, clips[index].clip_id))
-        uses_dsp = bass_swap and transition is not None and _uses_bass_swap(transition)
-        swapped.append(transition if uses_dsp else None)
+        styles.append(transition_dsp_style(transition) if transition_dsp and transition is not None else None)
+
+    def band_side(index: int) -> BandSide | None:
+        if not 0 <= index < len(styles) or styles[index] not in BAND_ENVELOPES:
+            return None
+        transition = transition_by_pair[(clips[index].clip_id, clips[index + 1].clip_id)]
+        return styles[index], transition.duration
+
     filters: list[str] = []
     labels = [f"c{index}" for index in range(len(clips))]
     for index, clip in enumerate(clips):
-        incoming = swapped[index - 1] if index > 0 else None
-        outgoing = swapped[index] if index < len(swapped) else None
+        incoming, outgoing = band_side(index - 1), band_side(index)
         if incoming is None and outgoing is None:
             filters.append(_clip_filter_chain(index, clip, labels[index]))
         else:
             filters.append(_clip_filter_chain(index, clip, f"{labels[index]}pre"))
-            filters.extend(_bass_swap_band_filters(
-                f"{labels[index]}pre", labels[index], clip.duration,
-                incoming.duration if incoming else 0.0, outgoing.duration if outgoing else 0.0,
-            ))
+            filters.extend(_band_filters(f"{labels[index]}pre", labels[index], clip.duration, incoming, outgoing))
 
     running_label = labels[0]
     if clips[0].timeline_start > _GAP_EPSILON:
@@ -161,8 +187,10 @@ def build_filter_graph(
         previous_clip, clip = clips[index - 1], clips[index]
         transition = transition_by_pair.get((previous_clip.clip_id, clip.clip_id))
         next_label = f"m{index}"
-        if swapped[index - 1] is not None:
-            filters.extend(_bass_swap_fold_filters(running_label, labels[index], next_label, transition))
+        style = styles[index - 1]
+        if style is not None:
+            curve = "nofade" if style in BAND_ENVELOPES else "qsin"  # SHORT_FADE: full-band qsin
+            filters.extend(_limited_overlap_filters(running_label, labels[index], next_label, transition, curve))
         elif transition is not None and transition.duration > 0.0:
             curve = _CURVE_BY_TRANSITION_TYPE.get(transition.type, "tri")
             filters.append(
@@ -196,86 +224,97 @@ def _clip_filter_chain(index: int, clip: AudioRenderClip, label: str) -> str:
     return ",".join(parts) + f"[{label}]"
 
 
-def _uses_bass_swap(transition: AudioRenderTransition) -> bool:
-    return transition.type == TransitionType.BEAT_MATCH and transition.duration > 0.0
+def transition_dsp_style(transition: AudioRenderTransition) -> TransitionDsp | None:
+    """The DSP style this transition renders with, ``None`` for the type's legacy acrossfade.
+
+    An explicit ``dsp`` from the plan wins. Without one, BEAT_MATCH keeps its
+    Phase 1 bass swap and every other type its legacy curve.
+    """
+    if transition.duration <= 0.0:
+        return None
+    if transition.dsp is not None:
+        return transition.dsp
+    return TransitionDsp.BASS_SWAP if transition.type == TransitionType.BEAT_MATCH else None
 
 
-def bass_swap_fade_windows(
-    band: str, clip_duration: float, incoming_duration: float, outgoing_duration: float,
+BandSide = tuple[TransitionDsp, float]
+"""(band style, transition duration) for one side of a clip."""
+
+
+def band_fade_windows(
+    band: str, clip_duration: float, incoming: BandSide | None, outgoing: BandSide | None,
 ) -> list[tuple[str, float, float]]:
     """``(fade_type, start, length)`` afade windows for one band of one clip.
 
     Times are clip-local timeline seconds (after atempo). The incoming
-    window is the clip's first ``incoming_duration`` seconds and the
-    outgoing one its last ``outgoing_duration`` -- exactly the regions
-    acrossfade overlaps -- so envelopes follow the plan's geometry without
-    recomputing any of it. 0 means no transition on that side.
+    window is the clip's first ``duration`` seconds and the outgoing one its
+    last -- exactly the regions acrossfade overlaps -- so envelopes follow
+    the plan's geometry without recomputing any of it. ``None`` means that
+    side has no band-DSP transition.
     """
-    handoff_start, handoff_end = BASS_SWAP_BANDS[band]
     windows: list[tuple[str, float, float]] = []
-    if incoming_duration > 0.0:
-        windows.append(("in", incoming_duration * handoff_start, incoming_duration * (handoff_end - handoff_start)))
-    if outgoing_duration > 0.0:
-        window_start = clip_duration - outgoing_duration
-        windows.append((
-            "out", window_start + outgoing_duration * handoff_start,
-            outgoing_duration * (handoff_end - handoff_start),
-        ))
+    if incoming is not None:
+        style, duration = incoming
+        start, end = BAND_ENVELOPES[style][band][1]
+        windows.append(("in", duration * start, duration * (end - start)))
+    if outgoing is not None:
+        style, duration = outgoing
+        start, end = BAND_ENVELOPES[style][band][0]
+        window_start = clip_duration - duration
+        windows.append(("out", window_start + duration * start, duration * (end - start)))
     return windows
 
 
-def _bass_swap_band_filters(
-    source: str, output: str, clip_duration: float, incoming_duration: float, outgoing_duration: float,
+def _band_filters(
+    source: str, output: str, clip_duration: float, incoming: BandSide | None, outgoing: BandSide | None,
 ) -> list[str]:
     """Split ``source`` into bands, envelope each, and sum them back into ``output``."""
-    bands = list(BASS_SWAP_BANDS)
-    band_labels = [f"{output}{band}" for band in bands]
+    band_labels = [f"{output}{band}" for band in _BANDS]
     filters = [
         f"[{source}]acrossover=split={LOW_CROSSOVER_HZ} {HIGH_CROSSOVER_HZ}:order={_CROSSOVER_ORDER}"
         + "".join(f"[{label}]" for label in band_labels)
     ]
-    for band, label in zip(bands, band_labels):
+    for band, label in zip(_BANDS, band_labels):
         fades = [
-            f"afade=t={fade_type}:st={start:.6f}:d={length:.6f}:curve={_BASS_SWAP_CURVE}"
-            for fade_type, start, length in bass_swap_fade_windows(
-                band, clip_duration, incoming_duration, outgoing_duration,
-            )
+            f"afade=t={fade_type}:st={start:.6f}:d={length:.6f}:curve={_BAND_FADE_CURVE}"
+            for fade_type, start, length in band_fade_windows(band, clip_duration, incoming, outgoing)
         ]
         filters.append(f"[{label}]{','.join(fades) or 'anull'}[{label}e]")
     filters.append(
         "".join(f"[{label}e]" for label in band_labels)
-        + f"amix=inputs={len(bands)}:normalize=0[{output}]"
+        + f"amix=inputs={len(_BANDS)}:normalize=0[{output}]"
     )
     return filters
 
 
-def _bass_swap_fold_filters(
-    running: str, incoming: str, output: str, transition: AudioRenderTransition,
+def _limited_overlap_filters(
+    running: str, incoming: str, output: str, transition: AudioRenderTransition, curve: str,
 ) -> list[str]:
-    """Overlap-sum two already-enveloped clips, then limit only the overlap window.
+    """Overlap two clips with ``curve``, then limit only the overlap window.
 
-    Both sides carry their own band envelopes, so acrossfade just sums the
-    last/first ``duration`` seconds (nofade). The limiter runs on that window
-    alone, cut at ``transition.timeline_start`` in the running timeline, so
-    audio outside the transition is untouched.
+    Band styles pass ``nofade``: both sides already carry their envelopes,
+    so acrossfade just sums the last/first ``duration`` seconds. SHORT_FADE
+    passes ``qsin``. The limiter runs on that window alone, cut at
+    ``transition.timeline_start`` in the running timeline, so audio outside
+    the transition is untouched.
     """
     start = transition.timeline_start
     end = start + transition.duration
     summed = f"{output}sum"
     return [
-        f"[{running}][{incoming}]acrossfade=d={transition.duration:.6f}:curve1=nofade:curve2=nofade[{summed}]",
+        f"[{running}][{incoming}]acrossfade=d={transition.duration:.6f}:curve1={curve}:curve2={curve}[{summed}]",
         f"[{summed}]asplit=3[{output}a][{output}b][{output}c]",
         f"[{output}a]atrim=end={start:.6f}[{output}pre]",
         f"[{output}b]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS,"
-        f"alimiter=limit={BASS_SWAP_PEAK_LIMIT}:level=0:latency=1[{output}win]",
+        f"alimiter=limit={DSP_PEAK_LIMIT}:level=0:latency=1[{output}win]",
         f"[{output}c]atrim=start={end:.6f},asetpts=PTS-STARTPTS[{output}post]",
         f"[{output}pre][{output}win][{output}post]concat=n=3:v=0:a=1[{output}]",
     ]
 
 
 @lru_cache(maxsize=None)
-def ffmpeg_supports_bass_swap(executable: str) -> bool:
-    """Whether ``executable`` has every filter the bass-swap DSP needs (cached per path)."""
+def ffmpeg_supports_transition_dsp(executable: str) -> bool:
+    """Whether ``executable`` has every filter the transition DSP needs (cached per path)."""
     try:
         result = subprocess.run(
             [executable, "-hide_banner", "-filters"], capture_output=True, text=True,
@@ -284,7 +323,7 @@ def ffmpeg_supports_bass_swap(executable: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     names = {parts[1] for parts in (line.split() for line in result.stdout.splitlines()) if len(parts) > 2}
-    return _BASS_SWAP_REQUIRED_FILTERS <= names
+    return _DSP_REQUIRED_FILTERS <= names
 
 
 def _atempo_filters(rate: float) -> list[str]:
@@ -339,10 +378,10 @@ class AutoMixAudioPipeline:
             raise AutoMixRenderError(f"Audio file is missing for track: {missing[0].track_id}")
 
         report("Preparing clips", 0.05, f"Preparing {len(clips)} clip(s)")
-        bass_swap = any(_uses_bass_swap(t) for t in plan.transitions)
-        if bass_swap and not ffmpeg_supports_bass_swap(str(self.ffmpeg_executable)):
-            LOGGER.warning("FFmpeg lacks the bass-swap filters; BEAT_MATCH falls back to a qsin crossfade.")
-            bass_swap = False
+        use_dsp = any(transition_dsp_style(t) is not None for t in plan.transitions)
+        if use_dsp and not ffmpeg_supports_transition_dsp(str(self.ffmpeg_executable)):
+            LOGGER.warning("FFmpeg lacks the transition DSP filters; styled transitions use their legacy crossfade.")
+            use_dsp = False
 
         output_directory.mkdir(parents=True, exist_ok=True)
         # PCM in a NUT container, not AAC: this file is an *intermediate*
@@ -358,8 +397,8 @@ class AutoMixAudioPipeline:
         output_path = output_directory / "automix_mix.nut"
         expected_duration = max(clip.timeline_end for clip in clips)
 
-        def command(use_bass_swap: bool) -> list[str]:
-            filter_complex, output_label = build_filter_graph(clips, plan.transitions, bass_swap=use_bass_swap)
+        def command(dsp: bool) -> list[str]:
+            filter_complex, output_label = build_filter_graph(clips, plan.transitions, transition_dsp=dsp)
             arguments = [str(self.ffmpeg_executable), "-hide_banner", "-loglevel", "error", "-nostdin"]
             for clip in clips:
                 arguments.extend(["-i", str(Path(track_paths[clip.track_id]))])
@@ -379,14 +418,14 @@ class AutoMixAudioPipeline:
 
         try:
             try:
-                self._run(command(bass_swap), cancel_event, on_progress_line)
+                self._run(command(use_dsp), cancel_event, on_progress_line)
             except AutoMixRenderCancelled:
                 raise
             except AutoMixRenderError as error:
-                if not bass_swap:
+                if not use_dsp:
                     raise
-                # Same plan, same geometry -- only the BEAT_MATCH mixing DSP degrades.
-                LOGGER.warning("Bass-swap render failed (%s); retrying BEAT_MATCH as a qsin crossfade.", error)
+                # Same plan, same geometry -- only the transition mixing DSP degrades.
+                LOGGER.warning("Transition DSP render failed (%s); retrying with legacy crossfades.", error)
                 output_path.unlink(missing_ok=True)  # never let a partial DSP file survive into the retry
                 self._run(command(False), cancel_event, on_progress_line)
         except AutoMixRenderCancelled:

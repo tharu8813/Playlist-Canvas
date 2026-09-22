@@ -385,3 +385,33 @@ signal for its entire length, including across the non-BEAT_MATCH junction.
 The recombined magnitude response is flat (within +/-0.5 dB), but phase is
 altered. Limiting the crossover to the window would splice raw audio against
 its phase-shifted recombination and produce a click at the window edges.
+
+---
+
+## Addendum: DSP Phase 2 -- transition style selector (implemented)
+
+`AudioRenderTransition` carries an optional `dsp: TransitionDsp | None`
+(`app/timeline/render_plan.py`). `TransitionType` still says what kind of
+junction it is; `dsp` says how the renderer mixes that exact window. `None`
+keeps the type's own rendering (EQUAL_POWER qsin, CROSSFADE tri, BEAT_MATCH
+Phase 1 bass swap), so every non-AutoMix plan is unchanged.
+
+The AutoMix planner chooses the style once per transition, after the
+candidate (and so the exact window) is fixed, in
+`app/automix/transition_style.select_transition_dsp`. The renderer never
+re-reads analysis; Preview and Export share the plan and so the style.
+Rules, first match wins:
+
+1. FIXED_CROSSFADE / CUT -> `None` (legacy tri).
+2. window < 4 s -> `SHORT_FADE` (full-band qsin, no band split).
+3. vocals on both sides of the window, or known clashing keys -> `VOCAL_SAFE_EQ`.
+4. local (else global) energy difference >= 0.3, or, for a non-rate-matched
+   BEAT_ALIGNED_CROSSFADE, kick drift > 50 ms across the window -> `FILTER_BLEND`.
+5. BEAT_MATCH -> `BASS_SWAP`; BEAT_ALIGNED_CROSSFADE -> `None` (legacy qsin).
+
+Band styles reuse the Phase 1 whole-clip crossover (same trade-off), with a
+per-style, per-side band envelope table (`renderer.BAND_ENVELOPES`). All
+styles, SHORT_FADE included, get the transition-window limiter. Timing is
+never touched: every style renders exactly `AudioRenderTransition.duration`.
+Without the DSP filters, or if a DSP render fails, every styled transition
+falls back to its type's legacy acrossfade with identical timing.

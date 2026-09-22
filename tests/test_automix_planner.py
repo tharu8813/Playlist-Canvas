@@ -13,7 +13,7 @@ from app.automix.structure.models import TrackSection, TrackStructureAnalysis
 from app.models.playlist import PlaylistTrack
 from app.timeline.compiler import compile_playlist
 from app.timeline.models import TransitionType
-from app.timeline.render_plan import validate_compiled_render_plan
+from app.timeline.render_plan import TransitionDsp, validate_compiled_render_plan
 
 
 def _beats(bpm: float, duration: float) -> tuple[float, ...]:
@@ -469,6 +469,48 @@ class SingleTrackAndEdgeCaseTests(unittest.TestCase):
         plan = compile_automix(tracks, analyses, ENABLED)
         validate_compiled_render_plan(plan)
 
+
+class TransitionDspSelectionTests(unittest.TestCase):
+    """DSP Phase 2: the planner, not the renderer, decides each window's mix."""
+
+    def test_reliable_beat_match_is_planned_as_bass_swap(self) -> None:
+        tracks = [_track("a", 60.0), _track("b", 60.0)]
+        analyses = {"a": _analysis("a", 120.0, 60.0), "b": _analysis("b", 120.0, 60.0)}
+        (transition,) = compile_automix(tracks, analyses, ENABLED).audio.transitions
+        self.assertIs(transition.type, TransitionType.BEAT_MATCH)
+        self.assertIs(transition.dsp, TransitionDsp.BASS_SWAP)
+
+    def test_overlapping_vocals_change_only_the_style_not_the_geometry(self) -> None:
+        tracks = [_track("a", 60.0), _track("b", 60.0)]
+        plain = {"a": _analysis("a", 120.0, 60.0), "b": _analysis("b", 120.0, 60.0)}
+        vocal = {key: replace(value, vocal_activity=((0.0, 60.0),)) for key, value in plain.items()}
+        # Vocal overlap also nudges candidate *scores*, but every candidate is
+        # penalized equally here, so the chosen window must stay the same.
+        plain_plan = compile_automix(tracks, plain, ENABLED)
+        vocal_plan = compile_automix(tracks, vocal, ENABLED)
+        self.assertIs(vocal_plan.audio.transitions[0].dsp, TransitionDsp.VOCAL_SAFE_EQ)
+        self.assertEqual(replace(vocal_plan.audio.transitions[0], dsp=None),
+                         replace(plain_plan.audio.transitions[0], dsp=None))
+        self.assertEqual(vocal_plan.audio.clips, plain_plan.audio.clips)
+
+    def test_fixed_crossfade_fallback_keeps_the_legacy_mix(self) -> None:
+        tracks = [_track("a", 60.0), _track("b", 60.0)]
+        analyses = {"a": _analysis("a", None, 60.0), "b": _analysis("b", None, 60.0)}
+        (transition,) = compile_automix(tracks, analyses, ENABLED).audio.transitions
+        self.assertIs(transition.type, TransitionType.CROSSFADE)
+        self.assertIsNone(transition.dsp)
+
+    def test_same_inputs_always_plan_the_same_styles(self) -> None:
+        tracks = [_track("a", 60.0), _track("b", 60.0), _track("c", 60.0)]
+        analyses = {
+            "a": _analysis("a", 120.0, 60.0),
+            "b": replace(_analysis("b", 120.0, 60.0), energy=0.9),
+            "c": replace(_analysis("c", 124.0, 60.0), energy=0.2),
+        }
+        plans = [compile_automix(tracks, analyses, ENABLED) for _ in range(5)]
+        self.assertTrue(all(plan == plans[0] for plan in plans))
+        self.assertEqual([t.dsp for t in plans[0].audio.transitions],
+                         [TransitionDsp.BASS_SWAP, TransitionDsp.FILTER_BLEND])
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum
 from math import isfinite
 
 from app.timeline.models import TransitionType
@@ -41,15 +42,35 @@ class AudioRenderClip:
         return self.timeline_start + self.duration
 
 
+class TransitionDsp(str, Enum):
+    """How a transition's overlap is mixed, chosen by whoever built the plan.
+
+    Separate from ``TransitionType`` (which also describes non-AutoMix
+    timeline transitions): the type says what kind of junction this is, the
+    DSP style says how the renderer mixes that exact window. Never changes
+    timing -- every style renders the same ``duration``.
+    """
+
+    BASS_SWAP = "bass_swap"
+    VOCAL_SAFE_EQ = "vocal_safe_eq"
+    FILTER_BLEND = "filter_blend"
+    SHORT_FADE = "short_fade"
+
+
 @dataclass(frozen=True, slots=True)
 class AudioRenderTransition:
-    """A resolved transition window; DSP for non-CUT types is a later phase."""
+    """A resolved transition window and, optionally, how to mix it.
+
+    ``dsp=None`` keeps the type's own rendering (EQUAL_POWER qsin, CROSSFADE
+    tri, BEAT_MATCH bass swap), so plans that never set it are unchanged.
+    """
 
     clip_a: str
     clip_b: str
     timeline_start: float
     duration: float
     type: TransitionType = TransitionType.CUT
+    dsp: TransitionDsp | None = None
 
 
 @dataclass(frozen=True, slots=True)

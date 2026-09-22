@@ -76,6 +76,7 @@ from app.automix.compatibility import evaluate_compatibility
 from app.automix.models import TrackAnalysis
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
+from app.automix.transition_style import select_transition_dsp
 from app.models.playlist import PlaylistTrack
 from app.timeline.models import TransitionType
 from app.timeline.render_plan import (
@@ -287,8 +288,15 @@ def _plan_overlap(
     overlap = best.duration_seconds
 
     transition_type = _STRATEGY_TRANSITION_TYPES[best.strategy]
+    # DSP Phase 2: the mixing style is decided here, where the analysis and
+    # the exact window both exist, and travels in the plan -- the renderer
+    # never re-derives it. Timing above is already final and is not touched.
+    dsp = select_transition_dsp(
+        best, compatibility, effective_outgoing_analysis, incoming_analysis,
+        structures.get(previous_track.id), structures.get(track.id),
+    )
     transition = AudioRenderTransition(
         clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
-        timeline_start=timeline_start, duration=overlap, type=transition_type,
+        timeline_start=timeline_start, duration=overlap, type=transition_type, dsp=dsp,
     )
     return timeline_start, source_in, playback_rate, transition, best.outgoing_source_out
