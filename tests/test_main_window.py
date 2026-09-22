@@ -66,7 +66,7 @@ from app.ffmpeg.managed_installer import (
 )
 from app.services.autosave_service import RecoverySnapshot
 from app.services.project_service import ProjectError, ProjectService
-from app.services.app_settings_service import AppSettings
+from app.services.app_settings_service import AppSettings, AppSettingsService
 from app.services.update_service import ReleaseInfo
 from app.services.theme_service import Theme
 from app.services.playlist_service import AudioImportCandidate, PlaylistService
@@ -5792,6 +5792,31 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertIn("미리보기 화면에서 변경할 수 없습니다", dialog.preview_backend_hint.text())
         finally:
             dialog.close()
+
+    def test_automix_setting_defaults_off_and_is_exposed_by_dialog(self) -> None:
+        self.assertFalse(AppSettings().automix_enabled)
+        dialog = SettingsDialog(
+            self.window.settings_service.current,
+            self.window.translator.language,
+            self.window.theme_service.preference,
+            self.window.translator,
+            self.window,
+        )
+        try:
+            self.assertFalse(dialog.automix_check.isChecked())
+            dialog.automix_check.setChecked(True)
+            self.assertTrue(dialog.app_settings.automix_enabled)
+        finally:
+            dialog.close()
+
+    def test_automix_setting_persists_and_reloads_backward_compatibly(self) -> None:
+        original = self.window.settings_service.current
+        try:
+            self.window.settings_service.save(replace(original, automix_enabled=True))
+            reloaded = AppSettingsService()
+            self.assertTrue(reloaded.current.automix_enabled)
+        finally:
+            self.window.settings_service.save(original)
 
     def test_export_notification_settings_are_individually_configurable(self) -> None:
         configured = replace(

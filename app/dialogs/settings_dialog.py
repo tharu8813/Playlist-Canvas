@@ -181,6 +181,17 @@ class SettingsDialog(QDialog):
         self.render_hint_label = QLabel()
         self.render_hint_label.setObjectName("mutedLabel")
         self.render_hint_label.setWordWrap(True)
+        self.automix_check = QCheckBox()
+        self.automix_check.setChecked(settings.automix_enabled)
+        self.automix_hint = QLabel()
+        self.automix_hint.setObjectName("mutedLabel")
+        self.automix_hint.setWordWrap(True)
+        automix_panel = QWidget()
+        automix_layout = QVBoxLayout(automix_panel)
+        automix_layout.setContentsMargins(0, 0, 0, 0)
+        automix_layout.setSpacing(4)
+        automix_layout.addWidget(self.automix_check)
+        automix_layout.addWidget(self.automix_hint)
 
         self.language_combo = QComboBox()
         self._populate_language_combo(language.value)
@@ -432,6 +443,8 @@ class SettingsDialog(QDialog):
         render_form.addRow(self.audio_bitrate_label, self.audio_bitrate_combo)
         render_form.addRow(self.work_mode_label, work_mode_panel)
         render_form.addRow("", self.render_hint_label)
+        self.automix_label = QLabel()
+        render_form.addRow(self.automix_label, automix_panel)
         app_group = QGroupBox()
         app_form = QFormLayout(app_group)
         self.language_label = QLabel()
@@ -639,6 +652,7 @@ class SettingsDialog(QDialog):
             preset=self.preset_combo.currentText(),
             audio_bitrate=self.audio_bitrate_combo.currentText(),
             work_mode=str(self.work_mode_combo.currentData() or WORK_MODE_AUTO),
+            automix_enabled=self.automix_check.isChecked(),
             smooth_scrolling=self.smooth_scroll_check.isChecked(),
             smooth_scroll_duration_ms=self.smooth_scroll_duration_slider.value(),
             preview_backend=str(
@@ -1028,6 +1042,18 @@ class SettingsDialog(QDialog):
         )
         self.work_mode_combo.setItemText(
             2, "최대 속도" if korean else "Maximum speed",
+        )
+        self.automix_label.setText("AutoMix" if korean else "AutoMix")
+        self.automix_check.setText(
+            "AutoMix 사용 (베타)" if korean else "Enable AutoMix (beta)"
+        )
+        self.automix_hint.setText(
+            "활성화하면 내보내기 시 곡 사이를 템포에 맞춰 자연스럽게 이어줍니다. "
+            "분석에 실패한 곡은 자동으로 일반 크로스페이드로 대체됩니다."
+            if korean else
+            "When enabled, export blends between tracks using tempo-aware "
+            "transitions. A track that cannot be analyzed automatically "
+            "falls back to a plain crossfade."
         )
         self.language_label.setText("언어" if korean else "Language")
         self.appearance_hint.setText(
