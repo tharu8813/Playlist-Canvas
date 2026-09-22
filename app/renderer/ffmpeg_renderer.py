@@ -1355,17 +1355,27 @@ class FFmpegRenderer:
         if cancel_event.is_set():
             raise RenderCancelledError("Rendering was cancelled.")
         try:
-            from app.automix.analysis.basic import BasicAnalysisProvider
+            from app.automix.analysis.registry import create_analysis_provider
             from app.automix.planner import compile_automix
             from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
             from app.automix.settings import AutoMixTransitionSettings
             from app.automix.workflow import AutoMixWorkflow
+            # "basic" for now -- Export/Preview rendering has no settings
+            # plumbing for provider selection yet (a future UI toggle has one
+            # place to route through: create_analysis_provider). The
+            # interactive playlist-badge analysis path
+            # (AutoMixAnalysisController.start) already accepts provider_id.
+            # Constructed here, inside the same try/except ImportError as
+            # the other lazy imports above, so a missing/broken analyzer
+            # dependency is reported exactly like before instead of raising
+            # from inside the AutoMixRenderError-only block below.
+            provider = create_analysis_provider("basic", self.executable)
         except ImportError as error:
             LOGGER.warning("AutoMix export skipped, a dependency is unavailable: %s", error)
             return None
         try:
             self._report(progress_callback, "Preparing audio", 0.05, "Analyzing tracks for AutoMix")
-            workflow = AutoMixWorkflow(BasicAnalysisProvider(self.executable))
+            workflow = AutoMixWorkflow(provider)
             analysis_result = workflow.analyze(active_tracks, cancel_event=cancel_event)
             plan = compile_automix(
                 active_tracks, analysis_result.analyses, AutoMixTransitionSettings(enabled=True),

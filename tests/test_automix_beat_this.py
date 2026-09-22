@@ -1,0 +1,268 @@
+"""Unit tests for BeatThisAnalysisProvider using a fake inference backend.
+
+Never imports/downloads the real torch/beat_this dependency or model (see
+roadmap "normal tests must not use the network/a model") -- _load_model is
+always patched here. A real-model integration test is opt-in and lives
+separately (see test_automix_beat_this_real_model.py), gated behind
+PLAYLIST_CANVAS_TEST_BEAT_THIS=1.
+"""
+
+from __future__ import annotations
+
+import threading
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import numpy as np
+
+from app.automix.analysis.basic import BasicAnalysisProvider
+from app.automix.analysis.beat_this import (
+    BeatThisAnalysisProvider,
+    _bpm_from_beats,
+    _meter_confidence,
+    _sanitize_timestamps,
+)
+from app.automix.analysis.provider import AnalysisCancelled
+from app.automix.analysis.registry import create_analysis_provider
+from app.automix.models import TrackAnalysis
+from app.models.playlist import PlaylistTrack
+
+
+def _track(name: str = "a.wav", duration_seconds: float = 30.0) -> PlaylistTrack:
+    return PlaylistTrack(file_path=name, title=name, duration_seconds=duration_seconds)
+
+
+def _basic_result(track: PlaylistTrack, *, bpm: float | None = 100.0) -> TrackAnalysis:
+    return TrackAnalysis(
+        track_id=track.id, source_path=track.file_path, duration_seconds=track.duration_seconds,
+        bpm=bpm, bpm_confidence=0.5 if bpm is not None else 0.0,
+        beats=(1.0, 1.6, 2.2) if bpm is not None else (),
+        downbeats=(1.0,) if bpm is not None else (),
+        meter_numerator=4 if bpm is not None else None,
+        meter_denominator=4 if bpm is not None else None,
+        meter_confidence=0.3 if bpm is not None else 0.0,
+        key="C major", key_confidence=0.4, energy=0.2,
+        analyzer_id="basic", analyzer_version="2",
+    )
+
+
+class _FakeFile2Beats:
+    """Stands in for beat_this.inference.File2Beats: a callable(path) -> (beats, downbeats)."""
+
+    def __init__(self, beats: np.ndarray, downbeats: np.ndarray, error: Exception | None = None) -> None:
+        self.beats = beats
+        self.downbeats = downbeats
+        self.error = error
+        self.calls: list[str] = []
+
+    def __call__(self, path: str) -> tuple[np.ndarray, np.ndarray]:
+        self.calls.append(path)
+        if self.error is not None:
+            raise self.error
+        return self.beats, self.downbeats
+
+
+class BeatThisAnalysisProviderTests(unittest.TestCase):
+    def test_provider_identity(self) -> None:
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        self.assertEqual(provider.provider_id, "beat_this")
+        self.assertTrue(provider.version)
+
+    def test_analyze_replaces_rhythm_fields_with_model_output(self) -> None:
+        track = _track(duration_seconds=10.0)
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        basic_result = _basic_result(track)
+        # A steady 120 BPM grid: 0.5s apart.
+        beats = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5])
+        downbeats = np.array([1.0, 3.0])
+        fake_model = _FakeFile2Beats(beats, downbeats)
+        with (
+            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            patch.object(provider, "_load_model", return_value=fake_model),
+        ):
+            result = provider.analyze(track, cancel_event=threading.Event())
+        self.assertEqual(result.analyzer_id, "beat_this")
+        self.assertEqual(result.beats, tuple(beats.tolist()))
+        self.assertEqual(result.downbeats, tuple(downbeats.tolist()))
+        self.assertAlmostEqual(result.bpm, 120.0, delta=0.5)
+        self.assertGreater(result.bpm_confidence, 0.9)  # a perfectly steady grid
+        self.assertGreater(result.meter_confidence, 0.5)  # unlocks "reliable" (>= 0.5)
+        # Fields the hybrid provider reuses verbatim from BasicAnalysisProvider.
+        self.assertEqual(result.key, basic_result.key)
+        self.assertEqual(result.energy, basic_result.energy)
+
+    def test_skips_inference_when_basic_analysis_found_no_signal(self) -> None:
+        """A too-short/silent track: BasicAnalysisProvider already gave up
+        (bpm=None); Beat This inference must not even be attempted."""
+        track = _track(duration_seconds=1.0)
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        basic_result = _basic_result(track, bpm=None)
+        with (
+            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            patch.object(provider, "_load_model") as load_model,
+        ):
+            result = provider.analyze(track, cancel_event=threading.Event())
+        load_model.assert_not_called()
+        self.assertIs(result, basic_result)
+
+    def test_falls_back_to_basic_when_beat_this_is_not_installed(self) -> None:
+        track = _track()
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        basic_result = _basic_result(track)
+        with (
+            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            patch.object(provider, "_load_model", side_effect=ImportError("No module named 'beat_this'")),
+        ):
+            result = provider.analyze(track, cancel_event=threading.Event())
+        self.assertIs(result, basic_result)
+
+    def test_falls_back_to_basic_when_inference_raises(self) -> None:
+        """A corrupted model / inference crash must degrade, not propagate."""
+        track = _track()
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        basic_result = _basic_result(track)
+        fake_model = _FakeFile2Beats(np.array([]), np.array([]), error=RuntimeError("corrupted checkpoint"))
+        with (
+            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            patch.object(provider, "_load_model", return_value=fake_model),
+        ):
+            result = provider.analyze(track, cancel_event=threading.Event())
+        self.assertIs(result, basic_result)
+
+    def test_falls_back_to_basic_downbeats_when_model_reports_no_downbeats(self) -> None:
+        """Beats found, but no downbeats: keep bpm from the model, but keep
+        the basic analyzer's own provisional bar guess rather than an empty one."""
+        track = _track()
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        basic_result = _basic_result(track)
+        beats = np.array([1.0, 1.5, 2.0, 2.5, 3.0])
+        fake_model = _FakeFile2Beats(beats, np.array([]))
+        with (
+            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            patch.object(provider, "_load_model", return_value=fake_model),
+        ):
+            result = provider.analyze(track, cancel_event=threading.Event())
+        self.assertAlmostEqual(result.bpm, 120.0, delta=0.5)
+        self.assertEqual(result.downbeats, basic_result.downbeats)
+        self.assertEqual(result.meter_confidence, basic_result.meter_confidence)
+
+    def test_cancellation_before_inference_raises_analysis_cancelled(self) -> None:
+        track = _track()
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        basic_result = _basic_result(track)
+        cancel_event = threading.Event()
+
+        def load_model_and_cancel():
+            cancel_event.set()
+            return _FakeFile2Beats(np.array([1.0, 1.5, 2.0]), np.array([1.0]))
+
+        with (
+            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            patch.object(provider, "_load_model", side_effect=load_model_and_cancel),
+        ):
+            with self.assertRaises(AnalysisCancelled):
+                provider.analyze(track, cancel_event=cancel_event)
+
+    def test_model_is_loaded_once_and_reused_across_tracks(self) -> None:
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        basic_result_a = _basic_result(_track("a.wav"))
+        basic_result_b = _basic_result(_track("b.wav"))
+        fake_model = _FakeFile2Beats(np.array([1.0, 1.5, 2.0, 2.5]), np.array([1.0]))
+        with (
+            patch.object(BasicAnalysisProvider, "analyze", side_effect=[basic_result_a, basic_result_b]),
+            patch.object(provider, "_load_model", return_value=fake_model) as load_model,
+        ):
+            provider.analyze(_track("a.wav"), cancel_event=threading.Event())
+            provider.analyze(_track("b.wav"), cancel_event=threading.Event())
+        # _load_model is called per analyze(); real caching is inside the
+        # unpatched _load_model itself (asserted separately below).
+        self.assertEqual(load_model.call_count, 2)
+
+    def test_load_model_caches_the_instance_across_calls(self) -> None:
+        """Also exercises the real (unmocked) _load_model() lazy-import path,
+        against fake torch/beat_this modules -- never the real dependency."""
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        calls: list[str] = []
+
+        def fake_file2beats(**kwargs):
+            calls.append(kwargs["device"])
+            return _FakeFile2Beats(np.array([]), np.array([]))
+
+        fake_torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+        fake_beat_this = SimpleNamespace()
+        fake_beat_this_inference = SimpleNamespace(File2Beats=fake_file2beats)
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "torch": fake_torch,
+                "beat_this": fake_beat_this,
+                "beat_this.inference": fake_beat_this_inference,
+            },
+        ):
+            first = provider._load_model()
+            second = provider._load_model()
+        self.assertIs(first, second)
+        self.assertEqual(calls, ["cpu"])  # loaded exactly once
+
+
+class BpmAndMeterConfidenceTests(unittest.TestCase):
+    def test_bpm_from_steady_beats_is_high_confidence(self) -> None:
+        beats = np.arange(0.0, 10.0, 0.5)  # 120 BPM, perfectly steady
+        bpm, confidence = _bpm_from_beats(beats)
+        self.assertAlmostEqual(bpm, 120.0, delta=0.5)
+        self.assertGreaterEqual(confidence, 0.9)
+
+    def test_bpm_confidence_is_bounded_and_drops_with_jitter(self) -> None:
+        rng = np.random.default_rng(0)
+        beats = np.cumsum(np.full(20, 0.5) + rng.uniform(-0.15, 0.15, 20))
+        bpm, confidence = _bpm_from_beats(beats)
+        self.assertIsNotNone(bpm)
+        self.assertGreaterEqual(confidence, 0.0)
+        self.assertLessEqual(confidence, 1.0)
+        self.assertLess(confidence, 0.9)
+
+    def test_too_few_beats_is_unusable(self) -> None:
+        bpm, confidence = _bpm_from_beats(np.array([1.0, 1.5]))
+        self.assertIsNone(bpm)
+        self.assertEqual(confidence, 0.0)
+
+    def test_meter_confidence_bounded_and_rewards_regular_bars(self) -> None:
+        beats = np.arange(0.0, 20.0, 0.5)
+        downbeats = np.arange(0.0, 20.0, 2.0)  # every 4th beat, perfectly regular
+        confidence = _meter_confidence(beats, downbeats)
+        self.assertGreaterEqual(confidence, 0.5)  # clears RELIABLE_METER_CONFIDENCE
+        self.assertLessEqual(confidence, 1.0)
+
+    def test_meter_confidence_is_zero_with_too_few_downbeats(self) -> None:
+        self.assertEqual(_meter_confidence(np.array([1.0, 2.0]), np.array([1.0])), 0.0)
+
+
+class SanitizeTimestampsTests(unittest.TestCase):
+    def test_sorts_dedupes_and_clips_to_duration(self) -> None:
+        values = np.array([5.0, 1.0, 1.0005, 20.0, -1.0, float("nan")])
+        cleaned = _sanitize_timestamps(values, duration_seconds=10.0)
+        self.assertEqual(cleaned, (1.0, 5.0, 10.0))
+
+
+class AnalysisProviderRegistryTests(unittest.TestCase):
+    def test_default_provider_id_is_basic(self) -> None:
+        provider = create_analysis_provider("basic", Path("ffmpeg"))
+        self.assertEqual(provider.provider_id, "basic")
+
+    def test_unknown_provider_id_falls_back_to_basic(self) -> None:
+        provider = create_analysis_provider("nonexistent", Path("ffmpeg"))
+        self.assertEqual(provider.provider_id, "basic")
+
+    def test_beat_this_provider_id_returns_a_beat_this_provider(self) -> None:
+        """Construction alone must not import torch/beat_this (lazy import
+        happens inside analyze()/_load_model(), not __init__)."""
+        provider = create_analysis_provider("beat_this", Path("ffmpeg"))
+        self.assertEqual(provider.provider_id, "beat_this")
+        self.assertIsInstance(provider, BeatThisAnalysisProvider)
+
+
+if __name__ == "__main__":
+    unittest.main()

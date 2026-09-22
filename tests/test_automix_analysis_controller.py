@@ -54,6 +54,28 @@ class AutoMixAnalysisWorkerTests(unittest.TestCase):
             worker.run()
         self.assertEqual(received, [])
 
+    def test_provider_id_selects_the_beat_this_provider(self) -> None:
+        track = _track("a.mp3")
+        with patch("app.automix.analysis.beat_this.BeatThisAnalysisProvider", _StubProvider):
+            worker = _AutoMixAnalysisWorker([track], Path("ffmpeg"), provider_id="beat_this")
+            received: list[dict] = []
+            worker.analyzed.connect(received.append)
+            worker.run()
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][track.id].analyzer_id, "stub")
+
+    def test_default_provider_id_is_basic(self) -> None:
+        track = _track("a.mp3")
+        worker = _AutoMixAnalysisWorker([track], Path("ffmpeg"))
+        self.assertEqual(worker._provider_id, "basic")
+
+    def test_pending_replacement_carries_the_requested_provider_id(self) -> None:
+        controller = AutoMixAnalysisController()
+        controller._worker = _AutoMixAnalysisWorker([_track("old.mp3")], Path("ffmpeg"), controller)
+        new_tracks = [_track("new.mp3")]
+        controller.start(new_tracks, Path("ffmpeg"), provider_id="beat_this")
+        self.assertEqual(controller._pending, (new_tracks, Path("ffmpeg"), "beat_this"))
+
     def test_missing_librosa_dependency_is_handled_without_crashing(self) -> None:
         # A module set to None in sys.modules makes Python's import system
         # raise ImportError for it -- simulating "librosa is not installed"

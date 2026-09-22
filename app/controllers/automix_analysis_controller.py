@@ -37,10 +37,12 @@ class _AutoMixAnalysisWorker(QThread):
 
     def __init__(
         self, tracks: list[PlaylistTrack], ffmpeg_executable: Path, parent: QObject | None = None,
+        *, provider_id: str = "basic",
     ) -> None:
         super().__init__(parent)
         self._tracks = tracks
         self._ffmpeg_executable = ffmpeg_executable
+        self._provider_id = provider_id
         self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -48,12 +50,13 @@ class _AutoMixAnalysisWorker(QThread):
 
     def run(self) -> None:
         try:
-            from app.automix.analysis.basic import BasicAnalysisProvider
+            from app.automix.analysis.registry import create_analysis_provider
             from app.automix.workflow import AutoMixWorkflow
+            provider = create_analysis_provider(self._provider_id, self._ffmpeg_executable)
         except ImportError as error:
             LOGGER.warning("AutoMix analysis is unavailable: %s", error)
             return
-        workflow = AutoMixWorkflow(BasicAnalysisProvider(self._ffmpeg_executable))
+        workflow = AutoMixWorkflow(provider)
         result = workflow.analyze(self._tracks, cancel_event=self._cancel_event)
         if not self._cancel_event.is_set():
             self.analyzed.emit(result.analyses)
@@ -71,17 +74,26 @@ class AutoMixAnalysisController(QObject):
         self._pending = None
         self._shutting_down = False
 
-    def start(self, tracks: list[PlaylistTrack], ffmpeg_executable: Path) -> None:
-        """Analyze ``tracks`` in the background, replacing any run already underway."""
+    def start(
+        self, tracks: list[PlaylistTrack], ffmpeg_executable: Path, *, provider_id: str = "basic",
+    ) -> None:
+        """Analyze ``tracks`` in the background, replacing any run already underway.
+
+        ``provider_id`` selects the AnalysisProvider (see
+        app/automix/analysis/registry.py) -- defaults to "basic" so existing
+        callers are unaffected; pass "beat_this" to use the optional Beat
+        This! engine when available, which falls back to "basic" per-track
+        on its own if the dependency/model is missing or inference fails.
+        """
         if self._shutting_down:
             return
         self.cancel()
         if not tracks:
             return
         if self._worker is not None:
-            self._pending = (tracks, ffmpeg_executable,)
+            self._pending = (tracks, ffmpeg_executable, provider_id)
             return
-        worker = _AutoMixAnalysisWorker(tracks, ffmpeg_executable, self)
+        worker = _AutoMixAnalysisWorker(tracks, ffmpeg_executable, self, provider_id=provider_id)
         worker.analyzed.connect(
             lambda result: self.analyses_updated.emit(result)
             if not worker._cancel_event.is_set() else None
@@ -111,7 +123,8 @@ class AutoMixAnalysisController(QObject):
         worker.deleteLater()
         pending, self._pending = self._pending, None
         if pending is not None:
-            self.start(*pending)
+            tracks, ffmpeg_executable, provider_id = pending
+            self.start(tracks, ffmpeg_executable, provider_id=provider_id)
 
     def cancel(self) -> None:
         """Request cancellation; retain ownership until finished is delivered."""

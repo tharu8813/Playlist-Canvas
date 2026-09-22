@@ -188,3 +188,65 @@ updated to `collect_all()` the new packages the same way it already does
 for `numpy`, but a packaged build should be run and AutoMix analysis
 exercised from it before this ships in a release.
 
+## AutoMix v3 outcome (Beat This! integration)
+
+The "optional downloadable engine" recommendation above was implemented as
+`app/automix/analysis/beat_this.py`'s `BeatThisAnalysisProvider`, selected
+via the new `app/automix/analysis/registry.py::create_analysis_provider("beat_this", ...)`
+instead of always constructing `BasicAnalysisProvider` directly. It is a
+**hybrid** provider: it delegates decode, silence handling, key, energy,
+and vocal-activity entirely to an owned `BasicAnalysisProvider` instance,
+and only replaces the rhythm fields (`bpm`, `bpm_confidence`, `beats`,
+`downbeats`, `meter_*`) with the model's own beat/downbeat output.
+
+- **Upstream**: `CPJKU/beat_this` on GitHub, published to PyPI as
+  `beat-this` (verified at integration time: `pip install beat-this`,
+  version 1.1.0). **License**: MIT for both the code and the released
+  pretrained checkpoint (confirmed directly from the upstream `LICENSE`
+  file and README, superseding this doc's earlier "needs separate
+  confirmation" note on the model weights). **Dependencies**: `torch>=2`,
+  `torchaudio`, `numpy>=1.20`, `einops`, `rotary-embedding-torch`, `soxr`
+  -- none pinned with an upper bound upstream. **Not added to
+  `requirements.txt`**: this remains a genuinely optional dependency, per
+  the original evaluation above and roadmap 1.4/1.5 -- torch alone is
+  commonly 500 MB+, so the app, its default install, and its test suite
+  must all keep working with it completely absent.
+- **API used**: `beat_this.inference.File2Beats(checkpoint_path="final0",
+  device=..., dbn=False)`, called as `beats, downbeats =
+  file2beats(path_str)`. The default checkpoint (`"final0"`, ~78 MB) is
+  downloaded and cached by the `beat_this` package's own inference code on
+  first use, in its own cache directory -- this integration does not
+  implement a separate download/checksum/staging pipeline for the model
+  weights (unlike `app/ffmpeg/managed_installer.py`'s FFmpeg download),
+  since `beat_this` already owns that; a corrupted/interrupted download or
+  any other inference-time failure surfaces as an ordinary exception from
+  the `file2beats(...)` call, which `BeatThisAnalysisProvider.analyze()`
+  catches and degrades to the basic analyzer's own result for that one
+  track.
+- **Device selection**: CUDA if `torch.cuda.is_available()`, else CPU --
+  never required, never forced.
+- **Lazy import**: `torch`/`beat_this` are imported only inside
+  `BeatThisAnalysisProvider._load_model()`, called on first use of an
+  instance, never at module or package import time -- constructing the
+  provider itself (`create_analysis_provider("beat_this", ...)`) does not
+  import either.
+- **Confidence calibration**: documented in
+  `app/automix/analysis/beat_this.py`'s `_bpm_from_beats`/`_meter_confidence`
+  docstrings -- both derive a 0.0-1.0 confidence from the median absolute
+  deviation of (bar-)interval consistency around the median interval,
+  `confidence = clamp(1 - 3 * MAD/median, 0, 1)`, with `_meter_confidence`
+  additionally discounted by downbeat coverage relative to the beat count.
+  No constant is hardcoded to force `TrackAnalysis.beat_alignment_quality()`
+  into `"reliable"` -- a track only reaches it by actually having a steady
+  model-detected beat/downbeat grid, exactly like
+  `RELIABLE_BPM_CONFIDENCE`/`RELIABLE_METER_CONFIDENCE` already require.
+- **Not implemented in this phase**: structure analysis (intro/outro/
+  section/energy-curve), planner v2 phrase/structure-aware candidate
+  generation, and effective-BPM propagation across chained transitions
+  remain future work (see the roadmap's P2/P3 tiers) -- this phase is
+  scoped to P0 (the analysis engine) plus wiring a provider-selection point
+  at both existing call sites
+  (`AutoMixAnalysisController.start(..., provider_id=...)` and
+  `FFmpegRenderer._render_automix_audio_segments`, the latter still
+  hardcoded to `"basic"` pending an actual settings UI toggle).
+
