@@ -66,7 +66,7 @@ from app.ffmpeg.managed_installer import (
 )
 from app.services.autosave_service import RecoverySnapshot
 from app.services.project_service import ProjectError, ProjectService
-from app.services.app_settings_service import AppSettings, AppSettingsService
+from app.services.app_settings_service import AppSettings
 from app.services.update_service import ReleaseInfo
 from app.services.theme_service import Theme
 from app.services.playlist_service import AudioImportCandidate, PlaylistService
@@ -3978,6 +3978,44 @@ class MainWindowSafetyTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_automix_toggle_is_a_per_project_setting(self) -> None:
+        self.assertFalse(self.window.project_settings.automix_enabled)
+        dialog = ProjectSettingsDialog(
+            self.window.project_settings, self.window.translator, QPixmap(),
+        )
+        try:
+            self.assertFalse(dialog.automix_check.isChecked())
+            dialog.automix_check.setChecked(True)
+            dialog._accept()
+            self.assertTrue(dialog.selected_settings.automix_enabled)
+        finally:
+            dialog.close()
+
+    def test_automix_analysis_is_skipped_when_project_setting_is_off(self) -> None:
+        self.window.playlist_service.replace([
+            PlaylistTrack("a.mp3", "A", duration_seconds=30.0),
+        ])
+        with patch.object(self.window.automix_analysis_controller, "start") as start:
+            self.window._maybe_start_automix_analysis()
+        start.assert_not_called()
+
+    def test_automix_analysis_starts_when_enabled_with_tracks_and_ffmpeg(self) -> None:
+        self.window.project_settings = replace(self.window.project_settings, automix_enabled=True)
+        self.window.playlist_service.replace([
+            PlaylistTrack("a.mp3", "A", duration_seconds=30.0),
+        ])
+        with TemporaryDirectory() as directory:
+            executable = Path(directory) / "ffmpeg.exe"
+            executable.touch()
+            self.window.settings_service.save(
+                replace(self.window.settings_service.current, ffmpeg_path=str(executable)),
+            )
+            with patch.object(self.window.automix_analysis_controller, "start") as start:
+                self.window._maybe_start_automix_analysis()
+            start.assert_called_once()
+            called_tracks = start.call_args[0][0]
+            self.assertEqual([track.title for track in called_tracks], ["A"])
+
     def test_export_resolutions_follow_project_canvas_ratio(self) -> None:
         dialog = ExportSettingsDialog(
             AppSettings(
@@ -5021,13 +5059,14 @@ class MainWindowSafetyTests(unittest.TestCase):
         try:
             self.assertEqual(
                 [label.text() for label in dialog.info_name_labels],
-                ["제목", "아티스트", "앨범", "파일", "재생 시간"],
+                ["제목", "아티스트", "앨범", "파일", "재생 시간", "AutoMix"],
             )
             self.assertEqual(
                 [label.text() for label in dialog.info_labels],
                 [
                     "Visible title", "Visible artist", "",
                     "C:/Music/long folder/song.m4a", "02:05",
+                    "분석되지 않음 (프로젝트 설정에서 AutoMix를 켜면 자동으로 분석됩니다)",
                 ],
             )
             self.assertEqual(dialog.album_edit.placeholderText(), "—")
@@ -5792,31 +5831,6 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.assertIn("미리보기 화면에서 변경할 수 없습니다", dialog.preview_backend_hint.text())
         finally:
             dialog.close()
-
-    def test_automix_setting_defaults_off_and_is_exposed_by_dialog(self) -> None:
-        self.assertFalse(AppSettings().automix_enabled)
-        dialog = SettingsDialog(
-            self.window.settings_service.current,
-            self.window.translator.language,
-            self.window.theme_service.preference,
-            self.window.translator,
-            self.window,
-        )
-        try:
-            self.assertFalse(dialog.automix_check.isChecked())
-            dialog.automix_check.setChecked(True)
-            self.assertTrue(dialog.app_settings.automix_enabled)
-        finally:
-            dialog.close()
-
-    def test_automix_setting_persists_and_reloads_backward_compatibly(self) -> None:
-        original = self.window.settings_service.current
-        try:
-            self.window.settings_service.save(replace(original, automix_enabled=True))
-            reloaded = AppSettingsService()
-            self.assertTrue(reloaded.current.automix_enabled)
-        finally:
-            self.window.settings_service.save(original)
 
     def test_export_notification_settings_are_individually_configurable(self) -> None:
         configured = replace(

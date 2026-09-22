@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.automix.models import TrackAnalysis
 from app.models.playlist import PlaylistTrack
 from app.preview.album_art import extract_track_cover
 from app.services.project_content_service import LYRICS_EXTENSIONS
@@ -291,7 +292,8 @@ class TrackRow(QWidget):
     """
 
     def __init__(self, number: int, track: PlaylistTrack, korean: bool = False,
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, *,
+                 analysis: TrackAnalysis | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("trackRow")
         self.track_id = track.id
@@ -337,6 +339,17 @@ class TrackRow(QWidget):
             )
             lyric_badge.setObjectName("mutedLabel")
             layout.addWidget(lyric_badge)
+        if analysis is not None and analysis.bpm is not None:
+            bpm_badge = QLabel(f"{round(analysis.bpm)} BPM")
+            bpm_badge.setObjectName("mutedLabel")
+            bpm_badge.setToolTip(
+                f"AutoMix 분석: {round(analysis.bpm)} BPM"
+                + (f" · {analysis.key}" if analysis.key else "")
+                if korean else
+                f"AutoMix analysis: {round(analysis.bpm)} BPM"
+                + (f" · {analysis.key}" if analysis.key else "")
+            )
+            layout.addWidget(bpm_badge)
         layout.addWidget(duration)
         # Excluded rows are dimmed via the #trackRow[trackDisabled] stylesheet,
         # never setEnabled(False): a disabled child label swallows the
@@ -378,6 +391,7 @@ class PlaylistEditor(QFrame):
         super().__init__(parent)
         self.setObjectName("playlistStrip")
         self.service = service
+        self._analyses: dict[str, TrackAnalysis] = {}
         self.translator = translator
         self._ignore_order_signal = False
         self._pending_order_ids: list[str] = []
@@ -475,6 +489,11 @@ class PlaylistEditor(QFrame):
         )
         self.refresh()
 
+    def set_analyses(self, analyses: dict[str, TrackAnalysis]) -> None:
+        """Display AutoMix BPM badges for the given track_id -> TrackAnalysis map."""
+        self._analyses = analyses
+        self.refresh()
+
     def refresh(self) -> None:
         """Rebuild rows from service order and update inclusion summary."""
         selected_ids = set(self._selected_ids())
@@ -505,7 +524,10 @@ class PlaylistEditor(QFrame):
                 number = track_numbers[track.id]
                 item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, track.id)
-                row = TrackRow(number, track, self.translator.language.value == "ko")
+                row = TrackRow(
+                    number, track, self.translator.language.value == "ko",
+                    analysis=self._analyses.get(track.id),
+                )
                 item.setSizeHint(row.sizeHint())
                 self.list_widget.addItem(item)
                 self.list_widget.setItemWidget(item, row)

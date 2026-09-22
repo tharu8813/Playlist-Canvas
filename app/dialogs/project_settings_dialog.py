@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
     QMessageBox, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
@@ -107,6 +107,17 @@ class ProjectSettingsDialog(QDialog):
         content_layout.addWidget(self.reference_help)
         (self.embed_radio if settings.content_mode == "embed" else self.reference_radio).setChecked(True)
         root.addWidget(self.content_group)
+
+        self.automix_group = QGroupBox()
+        automix_layout = QVBoxLayout(self.automix_group)
+        self.automix_check = QCheckBox()
+        self.automix_check.setChecked(settings.automix_enabled)
+        self.automix_help = QLabel()
+        self.automix_help.setObjectName("mutedLabel")
+        self.automix_help.setWordWrap(True)
+        automix_layout.addWidget(self.automix_check)
+        automix_layout.addWidget(self.automix_help)
+        root.addWidget(self.automix_group)
 
         self.thumbnail_group = QGroupBox()
         thumbnail_layout = QHBoxLayout(self.thumbnail_group)
@@ -219,6 +230,20 @@ class ProjectSettingsDialog(QDialog):
             "원본 파일 경로를 사용합니다. 프로젝트는 작지만 원본을 이동하면 다시 연결해야 합니다."
             if korean else "Keeps original file paths. The project stays small, but moved files must be relinked."
         )
+        self.automix_group.setTitle("AutoMix" if korean else "AutoMix")
+        self.automix_check.setText(
+            "이 프로젝트에서 AutoMix 사용 (베타)" if korean else "Enable AutoMix for this project (beta)"
+        )
+        self.automix_help.setText(
+            "활성화하면 내보내기와 미리보기에서 곡을 분석해 템포에 맞춰 자연스럽게 이어줍니다. "
+            "분석에 실패하거나 템포가 맞지 않는 곡은 자동으로 일반 크로스페이드로 대체됩니다. "
+            "이 설정은 프로젝트별로 저장됩니다."
+            if korean else
+            "When enabled, export and Preview analyze tracks and blend between them using "
+            "tempo-aware transitions. A track that cannot be analyzed, or whose tempo does not "
+            "match, automatically falls back to a plain crossfade. This setting is saved with "
+            "the project, not the application."
+        )
         self.thumbnail_group.setTitle("프로젝트 썸네일" if korean else "Project thumbnail")
         self.canvas_radio.setText("현재 캔버스를 자동 사용" if korean else "Use the current canvas")
         self.custom_radio.setText("사용자 이미지 사용" if korean else "Use a custom image")
@@ -283,4 +308,5 @@ class ProjectSettingsDialog(QDialog):
         self.selected_settings.description = self.description_edit.toPlainText().strip()
         self.selected_settings.content_mode = "embed" if self.embed_radio.isChecked() else "reference"
         self.selected_settings.thumbnail_mode = "custom" if self.custom_radio.isChecked() else "canvas"
+        self.selected_settings.automix_enabled = self.automix_check.isChecked()
         self.accept()

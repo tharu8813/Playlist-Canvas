@@ -4,7 +4,7 @@ import unittest
 
 from app import __version__
 from app.models.playlist import PlaylistTrack
-from app.models.project import CanvasSettings, ProjectDocument
+from app.models.project import CanvasSettings, ProjectDocument, ProjectSettings
 from app.models.source import Source, SourceType
 
 
@@ -41,6 +41,24 @@ class ProjectModelValidationTests(unittest.TestCase):
         payload.pop("app_version")
         restored = ProjectDocument.from_dict(payload)
         self.assertEqual(restored.app_version, "")
+
+    def test_automix_enabled_defaults_off_and_is_backward_compatible(self) -> None:
+        self.assertFalse(ProjectSettings().automix_enabled)
+        payload = ProjectDocument().to_dict()
+        del payload["settings"]["automix_enabled"]
+        restored = ProjectDocument.from_dict(payload)
+        self.assertFalse(restored.settings.automix_enabled)
+
+    def test_automix_enabled_round_trips(self) -> None:
+        document = ProjectDocument(settings=ProjectSettings(automix_enabled=True))
+        restored = ProjectDocument.from_dict(document.to_dict())
+        self.assertTrue(restored.settings.automix_enabled)
+
+    def test_automix_enabled_must_be_a_boolean(self) -> None:
+        payload = ProjectDocument().to_dict()
+        payload["settings"]["automix_enabled"] = "yes"
+        with self.assertRaises(ValueError):
+            ProjectDocument.from_dict(payload)
 
     def test_project_lyrics_decode_literal_lrc_line_breaks(self) -> None:
         payload = ProjectDocument(

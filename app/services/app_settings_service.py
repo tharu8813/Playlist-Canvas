@@ -57,13 +57,6 @@ class AppSettings:
     preset: str = "medium"
     audio_bitrate: str = "192k"
     work_mode: str = WORK_MODE_AUTO
-    # AutoMix (docs/06_PHASE6_PREVIEW_UI_WORKFLOW.md): off by default so
-    # existing exports and Preview stay byte-identical until a user opts
-    # in. Only the on/off intent is persisted here; transition length,
-    # tempo-change budget, and style still use AutoMixTransitionSettings'
-    # own conservative defaults (app/automix/settings.py) until a fuller
-    # settings UI exposes them.
-    automix_enabled: bool = False
     smooth_scrolling: bool = True
     smooth_scroll_duration_ms: int = 180
     preview_backend: str = "gpu_layers"
@@ -148,7 +141,6 @@ class AppSettingsService(QObject):
                 settings.work_mode if settings.work_mode in WORK_MODES
                 else WORK_MODE_AUTO
             ),
-            automix_enabled=bool(settings.automix_enabled),
             smooth_scrolling=bool(settings.smooth_scrolling),
             smooth_scroll_duration_ms=max(
                 80, min(420, int(settings.smooth_scroll_duration_ms))
@@ -188,7 +180,6 @@ class AppSettingsService(QObject):
         self._settings.setValue("preset", normalized.preset)
         self._settings.setValue("audio_bitrate", normalized.audio_bitrate)
         self._settings.setValue("work_mode", normalized.work_mode)
-        self._settings.setValue("automix_enabled", normalized.automix_enabled)
         self._settings.endGroup()
         self._settings.beginGroup("interface")
         self._settings.setValue("smooth_scrolling", normalized.smooth_scrolling)
@@ -237,7 +228,6 @@ class AppSettingsService(QObject):
             preset=str(self._settings.value("preset", "medium")),
             audio_bitrate=str(self._settings.value("audio_bitrate", "192k")),
             work_mode=str(self._settings.value("work_mode", WORK_MODE_AUTO)),
-            automix_enabled=self._bool_value("automix_enabled", False),
         )
         if values.fps not in EXPORT_FPS_OPTIONS:
             values = replace(values, fps=30)

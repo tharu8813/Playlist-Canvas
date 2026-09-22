@@ -37,6 +37,10 @@ class ProjectSettings:
     content_mode: str = "embed"
     thumbnail_mode: str = "canvas"
     thumbnail_path: str = ""
+    # Per-project, not per-user: whether export/Preview should analyze
+    # tracks and blend between them with AutoMix. Off by default so
+    # existing projects keep their exact legacy sequential audio.
+    automix_enabled: bool = False
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -158,6 +162,8 @@ class ProjectDocument:
             "title", "description", "author", "thumbnail_path", "created_at", "modified_at",
         )):
             raise ValueError("Project identity and timestamp fields must be strings.")
+        if not isinstance(settings_model.automix_enabled, bool):
+            raise ValueError("Project 'automix_enabled' must be a boolean.")
 
         source_models = [source_registry.deserialize(entry) for entry in sources]
         group_models = [LayerGroup.from_dict(entry) for entry in groups]

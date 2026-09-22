@@ -45,6 +45,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.canvas.live_canvas import LiveCanvas
+from app.automix.models import TrackAnalysis
+from app.controllers.automix_analysis_controller import AutoMixAnalysisController
 from app.controllers.autosave_controller import AutosaveController
 from app.controllers.export_controller import ExportOrchestrator
 from app.controllers.history_controller import HistoryController
@@ -347,6 +349,18 @@ class MainWindow(QMainWindow):
         self.autosave_controller = AutosaveController(self)
         self.export_orchestrator = ExportOrchestrator(self)
         self.preview_controller = PreviewController(self)
+        self.automix_analyses: dict[str, TrackAnalysis] = {}
+        self.automix_analysis_controller = AutoMixAnalysisController(self)
+        self.automix_analysis_controller.analyses_updated.connect(
+            self._automix_analyses_received
+        )
+        self._automix_analysis_timer = QTimer(self)
+        self._automix_analysis_timer.setSingleShot(True)
+        self._automix_analysis_timer.setInterval(500)
+        self._automix_analysis_timer.timeout.connect(self._maybe_start_automix_analysis)
+        self.playlist_service.playlist_changed.connect(
+            self._automix_analysis_timer.start
+        )
         recovery_directory = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppLocalDataLocation
         )
@@ -2283,6 +2297,32 @@ class MainWindow(QMainWindow):
             return
         self._add_source(source_type, position)
 
+    def _maybe_start_automix_analysis(self) -> None:
+        """Kick off background AutoMix analysis when it can produce something useful.
+
+        A no-op when AutoMix is off, the playlist is empty, or no FFmpeg is
+        configured yet -- silently, since this is a background convenience,
+        not a user-initiated action (roadmap Phase 6 section 13 reserves
+        the FFmpeg-missing UX for actual export/preview attempts).
+        """
+        if not self.project_settings.automix_enabled:
+            return
+        tracks = [track for track in self.playlist_service.tracks if track.enabled]
+        if not tracks:
+            return
+        try:
+            ffmpeg_executable = FFmpegRenderer(
+                self.settings_service.current.ffmpeg_path or None
+            ).executable
+        except FFmpegNotFoundError:
+            return
+        self.automix_analysis_controller.start(tracks, ffmpeg_executable)
+
+    def _automix_analyses_received(self, analyses: dict[str, TrackAnalysis]) -> None:
+        """Merge a completed background analysis pass into the session cache."""
+        self.automix_analyses.update(analyses)
+        self.playlist_editor.set_analyses(dict(self.automix_analyses))
+
     def _show_track_details(self, track_id: str) -> None:
         """Open track metadata and timed-lyrics editing for a playlist card."""
         track = next((entry for entry in self.playlist_service.tracks if entry.id == track_id), None)
@@ -2295,6 +2335,7 @@ class MainWindow(QMainWindow):
         ]
         dialog = TrackDetailsDialog(
             track, self.translator, self, content_lyrics=content_lyrics,
+            analysis=self.automix_analyses.get(track_id),
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.playlist_service.update_track(
@@ -4245,6 +4286,7 @@ class MainWindow(QMainWindow):
                 )
             self._schedule_history()
             self._update_project_status()
+            self._maybe_start_automix_analysis()
 
     def _resize_project_canvas(
         self, old_size: tuple[int, int], new_size: tuple[int, int],

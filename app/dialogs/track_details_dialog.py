@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.automix.models import TrackAnalysis
 from app.models.playlist import PlaylistTrack
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.services.lyrics_service import LyricsError, LyricsService
@@ -45,10 +46,12 @@ class TrackDetailsDialog(QDialog):
         self, track: PlaylistTrack, translator: Translator,
         parent: QWidget | None = None, *,
         content_lyrics: list[tuple[str, str]] | None = None,
+        analysis: TrackAnalysis | None = None,
     ) -> None:
         super().__init__(parent)
         self.track = track
         self.translator = translator
+        self.analysis = analysis
         # (display name, resolved path) for every lyrics/subtitle file already
         # in the project content library.
         self._content_lyrics = list(content_lyrics or [])
@@ -103,12 +106,17 @@ class TrackDetailsDialog(QDialog):
         self.file_label = QLabel(track.file_path.strip() or "—")
         self.file_label.setToolTip(track.file_path)
         self.duration_label = QLabel(track.duration_label)
+        self.automix_label = QLabel()
+        self.automix_label.setWordWrap(True)
         self.info_labels = [
             self.title_edit, self.artist_edit, self.album_edit,
-            self.file_label, self.duration_label,
+            self.file_label, self.duration_label, self.automix_label,
         ]
         for value, field in zip(
-            (track.title, track.artist, track.album, track.file_path, track.duration_label),
+            (
+                track.title, track.artist, track.album, track.file_path,
+                track.duration_label, "",
+            ),
             self.info_labels,
         ):
             name_label = QLabel()
@@ -385,6 +393,31 @@ class TrackDetailsDialog(QDialog):
         self._refresh_preview()
         self._playback_duration_changed(round(track.duration_seconds * 1000))
         self._update_track_video_ui()
+
+    def _automix_summary(self, korean: bool) -> str:
+        """One line summarizing this track's AutoMix analysis, if any."""
+        if self.analysis is None:
+            return (
+                "분석되지 않음 (프로젝트 설정에서 AutoMix를 켜면 자동으로 분석됩니다)"
+                if korean else
+                "Not analyzed yet (enable AutoMix in Project settings to analyze automatically)"
+            )
+        if self.analysis.bpm is None:
+            return "리듬을 인식할 수 없음 (무음이거나 너무 짧음)" if korean else "No detectable rhythm (silent or too short)"
+        parts = [f"{round(self.analysis.bpm)} BPM"]
+        if self.analysis.key is not None:
+            parts.append(self.analysis.key)
+        if self.analysis.energy is not None:
+            parts.append(
+                f"에너지 {self.analysis.energy:.2f}" if korean else f"energy {self.analysis.energy:.2f}"
+            )
+        quality = self.analysis.beat_alignment_quality()
+        quality_label = {
+            "reliable": "비트 정렬 신뢰도 높음" if korean else "beat-alignment ready",
+            "bpm_only": "템포만 확인됨" if korean else "tempo only",
+            "insufficient": "신뢰도 낮음" if korean else "low confidence",
+        }[quality]
+        return " · ".join(parts) + f" ({quality_label})"
 
     def _nudge_timing(self, delta: float) -> None:
         self.timing_offset_spin.setValue(self.timing_offset_spin.value() + delta)
@@ -843,11 +876,12 @@ class TrackDetailsDialog(QDialog):
             "Per-track artwork stored by the project. Source audio tags are not changed."
         )
         info_names = (
-            ("제목", "아티스트", "앨범", "파일", "재생 시간")
-            if korean else ("Title", "Artist", "Album", "File", "Duration")
+            ("제목", "아티스트", "앨범", "파일", "재생 시간", "AutoMix")
+            if korean else ("Title", "Artist", "Album", "File", "Duration", "AutoMix")
         )
         for label, name in zip(self.info_name_labels, info_names):
             label.setText(name)
+        self.automix_label.setText(self._automix_summary(korean))
         metadata_tip = (
             "프로젝트에 저장할 곡 정보를 직접 수정할 수 있습니다. 원본 오디오 파일의 태그는 변경되지 않습니다."
             if korean else
