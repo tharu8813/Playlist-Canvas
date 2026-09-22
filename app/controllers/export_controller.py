@@ -97,6 +97,41 @@ class ExportOrchestrator:
 
     def __init__(self, window: "MainWindow") -> None:
         self.window = window
+        # Blended audio must outlive frame-staging relocation. The export disk-
+        # space preflight intentionally tears down and recreates the frame temp
+        # directory, so storing AutoMix/crossfade audio there made its returned
+        # prepared_audio_path point at a deleted file before RenderWorker started.
+        self._audio_staging: TemporaryDirectory[str] | None = None
+
+    def clear_audio_staging(self) -> None:
+        """Release prepared transition audio after export completion/failure."""
+        staging, self._audio_staging = self._audio_staging, None
+        if staging is not None:
+            staging.cleanup()
+
+    def prepare_transition_audio(
+        self, renderer: "FFmpegRenderer", active_tracks: list,
+        render_settings: RenderSettings, cancel_event: threading.Event,
+        progress_callback=None,
+    ):
+        """Prepare AutoMix/crossfade audio independently from frame staging."""
+        window = self.window
+        mode = window.project_settings.transition_mode
+        if mode == "none":
+            self.clear_audio_staging()
+            return None, None
+
+        self.clear_audio_staging()
+        self._audio_staging = TemporaryDirectory(prefix="playlist-audio-")
+        try:
+            return prepare_audio_for_ui(
+                renderer, active_tracks, Path(self._audio_staging.name),
+                mode, window.project_settings.crossfade_seconds,
+                render_settings, cancel_event, progress_callback,
+            )
+        except Exception:
+            self.clear_audio_staging()
+            raise
 
     # -- frame staging -------------------------------------------------
 
@@ -952,6 +987,7 @@ class ExportOrchestrator:
         try:
             window._export_dialog.show()
             QApplication.processEvents()
+            self.clear_audio_staging()
             window._clear_export_frame_staging()
             window._export_frame_staging = TemporaryDirectory(
                 prefix="playlist-video-frames-"
@@ -959,6 +995,7 @@ class ExportOrchestrator:
             window._export_frame_index = 0
         except Exception as error:
             window._export_preparation_cancel = None
+            self.clear_audio_staging()
             window._clear_export_frame_staging()
             if window._export_dialog:
                 window._export_dialog.complete(False)
@@ -975,16 +1012,10 @@ class ExportOrchestrator:
             return
         window._active_export_session = None
         try:
-            compiled_plan = None
-            prepared_audio_path = None
-            if window.project_settings.transition_mode != "none":
-                prepared_audio_path, compiled_plan = prepare_audio_for_ui(
-                    renderer, active_tracks, Path(window._export_frame_staging.name),
-                    window.project_settings.transition_mode,
-                    window.project_settings.crossfade_seconds,
-                    render_settings, preparation_cancel,
-                    lambda stage, fraction, message: window._export_dialog.set_busy(stage, message),
-                )
+            prepared_audio_path, compiled_plan = self.prepare_transition_audio(
+                renderer, active_tracks, render_settings, preparation_cancel,
+                lambda stage, fraction, message: window._export_dialog.set_busy(stage, message),
+            )
             animation_fps = window._export_animation_sample_rate(render_settings.fps)
             playlist_duration = (compiled_plan.duration_seconds if compiled_plan is not None
                                  else window._playlist_duration(active_tracks))
@@ -1057,6 +1088,7 @@ class ExportOrchestrator:
         except RenderCancelledError:
             window._cancel_active_export_session()
             window._export_preparation_cancel = None
+            self.clear_audio_staging()
             window._clear_export_frame_staging()
             if window._export_dialog:
                 window._export_dialog.complete(False)
@@ -1075,6 +1107,7 @@ class ExportOrchestrator:
         except RenderError as error:
             window._cancel_active_export_session()
             window._export_preparation_cancel = None
+            self.clear_audio_staging()
             window._clear_export_frame_staging()
             if window._export_dialog:
                 window._export_dialog.complete(False)
@@ -1091,6 +1124,7 @@ class ExportOrchestrator:
         except Exception as error:
             window._cancel_active_export_session()
             window._export_preparation_cancel = None
+            self.clear_audio_staging()
             window._clear_export_frame_staging()
             if window._export_dialog:
                 window._export_dialog.complete(False)
@@ -1601,6 +1635,7 @@ class ExportOrchestrator:
         window.activity_progress.finish("export")
         window._unlock_main_form_after_export()
         window._clear_export_frame_staging()
+        self.clear_audio_staging()
         QTimer.singleShot(0, window._release_render_worker)
         window._resume_close_after_export_cancel()
         if completed_result is not None:
