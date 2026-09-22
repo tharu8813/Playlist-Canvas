@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.automix.models import TrackAnalysis
+from app.automix.structure.models import TrackStructureAnalysis
 from app.controllers.automix_analysis_controller import (
     AutoMixAnalysisController,
     _AutoMixAnalysisWorker,
@@ -74,7 +75,14 @@ class AutoMixAnalysisWorkerTests(unittest.TestCase):
         controller._worker = _AutoMixAnalysisWorker([_track("old.mp3")], Path("ffmpeg"), controller)
         new_tracks = [_track("new.mp3")]
         controller.start(new_tracks, Path("ffmpeg"), provider_id="beat_this")
-        self.assertEqual(controller._pending, (new_tracks, Path("ffmpeg"), "beat_this"))
+        self.assertEqual(controller._pending, (new_tracks, Path("ffmpeg"), "beat_this", False))
+
+    def test_pending_replacement_carries_enable_structure_analysis(self) -> None:
+        controller = AutoMixAnalysisController()
+        controller._worker = _AutoMixAnalysisWorker([_track("old.mp3")], Path("ffmpeg"), controller)
+        new_tracks = [_track("new.mp3")]
+        controller.start(new_tracks, Path("ffmpeg"), enable_structure_analysis=True)
+        self.assertEqual(controller._pending, (new_tracks, Path("ffmpeg"), "basic", True))
 
     def test_missing_librosa_dependency_is_handled_without_crashing(self) -> None:
         # A module set to None in sys.modules makes Python's import system
@@ -87,6 +95,63 @@ class AutoMixAnalysisWorkerTests(unittest.TestCase):
             worker.analyzed.connect(received.append)
             worker.run()  # must not raise
         self.assertEqual(received, [])
+
+    def test_structure_analysis_runs_after_rhythm_analysis_when_enabled_and_available(self) -> None:
+        track = _track("a.mp3")
+        with (
+            patch("app.automix.analysis.basic.BasicAnalysisProvider", _StubProvider),
+            patch("app.automix.structure.sonara.sonara_available", return_value=True),
+            patch("app.automix.structure.service.StructureAnalysisService.analyze_tracks") as analyze_tracks,
+        ):
+            from app.automix.structure.service import StructureAnalysisBatchResult
+            structure_result = TrackStructureAnalysis(
+                track_id=track.id, source_path=track.file_path, duration_seconds=30.0,
+                analyzer_id="sonara_structure", analyzer_version="1",
+            )
+            analyze_tracks.return_value = StructureAnalysisBatchResult(
+                analyses={track.id: structure_result}, failures={},
+            )
+            worker = _AutoMixAnalysisWorker(
+                [track], Path("ffmpeg"), enable_structure_analysis=True,
+            )
+            rhythm_received: list[dict] = []
+            structure_received: list[dict] = []
+            worker.analyzed.connect(rhythm_received.append)
+            worker.structures_analyzed.connect(structure_received.append)
+            worker.run()
+        self.assertEqual(len(rhythm_received), 1)  # rhythm analysis unaffected
+        self.assertEqual(len(structure_received), 1)
+        self.assertIs(structure_received[0][track.id], structure_result)
+
+    def test_structure_analysis_is_skipped_when_disabled(self) -> None:
+        track = _track("a.mp3")
+        with (
+            patch("app.automix.analysis.basic.BasicAnalysisProvider", _StubProvider),
+            patch("app.automix.structure.sonara.sonara_available") as sonara_available,
+        ):
+            worker = _AutoMixAnalysisWorker([track], Path("ffmpeg"), enable_structure_analysis=False)
+            structure_received: list[dict] = []
+            worker.structures_analyzed.connect(structure_received.append)
+            worker.run()
+        sonara_available.assert_not_called()  # never even probed when disabled
+        self.assertEqual(structure_received, [])
+
+    def test_structure_analysis_is_a_no_op_when_sonara_is_not_installed(self) -> None:
+        """Rhythm analysis must succeed and structure must silently no-op --
+        never a crash, never a failed-batch signal."""
+        track = _track("a.mp3")
+        with (
+            patch("app.automix.analysis.basic.BasicAnalysisProvider", _StubProvider),
+            patch("app.automix.structure.sonara.sonara_available", return_value=False),
+        ):
+            worker = _AutoMixAnalysisWorker([track], Path("ffmpeg"), enable_structure_analysis=True)
+            rhythm_received: list[dict] = []
+            structure_received: list[dict] = []
+            worker.analyzed.connect(rhythm_received.append)
+            worker.structures_analyzed.connect(structure_received.append)
+            worker.run()  # must not raise
+        self.assertEqual(len(rhythm_received), 1)
+        self.assertEqual(structure_received, [])
 
 
 class AutoMixAnalysisControllerTests(unittest.TestCase):

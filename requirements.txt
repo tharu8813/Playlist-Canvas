@@ -15,3 +15,12 @@ librosa>=1.0,<2.0
 # docs/automix-phase1-dependency-evaluation.md's "AutoMix v3 outcome"
 # section. The app, its default install, and its test suite all work fully
 # without it; AutoMix falls back to the basic analyzer above per track.
+
+# Sonara (app/automix/structure/sonara.py) is an OPTIONAL structure analyzer
+# (intro/outro/sections/energy curve), also deliberately NOT listed here --
+# unlike Beat This!, it is a tiny (~1.9 MB Windows wheel) Rust/PyO3 native
+# extension with no ML runtime dependency, but the app must still work fully
+# without it. Install separately if you want it -- `pip install sonara` --
+# see docs/automix-phase1-dependency-evaluation.md's "AutoMix v3 Commit B
+# outcome" section. A missing install simply means no structure data;
+# rhythm analysis (Beat This!/basic) and AutoMix are entirely unaffected.

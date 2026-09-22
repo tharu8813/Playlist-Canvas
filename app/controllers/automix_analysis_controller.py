@@ -34,15 +34,19 @@ LOGGER = logging.getLogger(__name__)
 class _AutoMixAnalysisWorker(QThread):
     analyzed = Signal(dict)
     """Emits track_id -> TrackAnalysis for every track that analyzed successfully."""
+    structures_analyzed = Signal(dict)
+    """Emits track_id -> TrackStructureAnalysis, only when enable_structure_analysis
+    was requested and the optional Sonara dependency is actually available."""
 
     def __init__(
         self, tracks: list[PlaylistTrack], ffmpeg_executable: Path, parent: QObject | None = None,
-        *, provider_id: str = "basic",
+        *, provider_id: str = "basic", enable_structure_analysis: bool = False,
     ) -> None:
         super().__init__(parent)
         self._tracks = tracks
         self._ffmpeg_executable = ffmpeg_executable
         self._provider_id = provider_id
+        self._enable_structure_analysis = enable_structure_analysis
         self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -64,8 +68,35 @@ class _AutoMixAnalysisWorker(QThread):
             return
         workflow = AutoMixWorkflow(provider)
         result = workflow.analyze(self._tracks, cancel_event=self._cancel_event)
+        if self._cancel_event.is_set():
+            return
+        self.analyzed.emit(result.analyses)
+        self._run_structure_analysis()
+
+    def _run_structure_analysis(self) -> None:
+        """Structure analysis runs sequentially, after rhythm analysis, still
+        entirely off the GUI thread -- this QThread does not return control
+        to Qt until both are done, so there is no separate UI-freeze risk to
+        manage versus running them concurrently, only a longer total
+        background run. Optional and independent: a missing Sonara install
+        (checked cheaply up front, never imported to find out) or a failure
+        here never invalidates the rhythm analysis already emitted above.
+        """
+        if not self._enable_structure_analysis or self._cancel_event.is_set():
+            return
+        try:
+            from app.automix.structure.sonara import SonaraStructureProvider, sonara_available
+            from app.automix.structure.service import StructureAnalysisService
+        except ImportError as error:
+            LOGGER.info("AutoMix structure analysis is unavailable: %s", error)
+            return
+        if not sonara_available():
+            LOGGER.info("AutoMix structure analysis skipped: Sonara is not installed.")
+            return
+        service = StructureAnalysisService(SonaraStructureProvider())
+        result = service.analyze_tracks(self._tracks, cancel_event=self._cancel_event)
         if not self._cancel_event.is_set():
-            self.analyzed.emit(result.analyses)
+            self.structures_analyzed.emit(result.analyses)
 
 
 class AutoMixAnalysisController(QObject):
@@ -73,6 +104,10 @@ class AutoMixAnalysisController(QObject):
 
     analyses_updated = Signal(dict)
     """track_id -> TrackAnalysis for the tracks that just finished analyzing."""
+    structures_updated = Signal(dict)
+    """track_id -> TrackStructureAnalysis for the tracks whose structure just
+    finished analyzing. Only emitted when enable_structure_analysis was
+    requested and the optional Sonara dependency is actually available."""
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -82,6 +117,7 @@ class AutoMixAnalysisController(QObject):
 
     def start(
         self, tracks: list[PlaylistTrack], ffmpeg_executable: Path, *, provider_id: str = "basic",
+        enable_structure_analysis: bool = False,
     ) -> None:
         """Analyze ``tracks`` in the background, replacing any run already underway.
 
@@ -90,6 +126,14 @@ class AutoMixAnalysisController(QObject):
         callers are unaffected; pass "beat_this" to use the optional Beat
         This! engine when available, which falls back to "basic" per-track
         on its own if the dependency/model is missing or inference fails.
+
+        ``enable_structure_analysis`` additionally runs the optional Sonara
+        structure analyzer (intro/outro/sections/energy curve) after rhythm
+        analysis completes, emitting ``structures_updated`` -- defaults to
+        False so existing callers are unaffected. A missing Sonara install
+        or a per-track structure-analysis failure never affects rhythm
+        analysis, which has already been emitted by the time structure
+        analysis even starts.
         """
         if self._shutting_down:
             return
@@ -97,11 +141,18 @@ class AutoMixAnalysisController(QObject):
         if not tracks:
             return
         if self._worker is not None:
-            self._pending = (tracks, ffmpeg_executable, provider_id)
+            self._pending = (tracks, ffmpeg_executable, provider_id, enable_structure_analysis)
             return
-        worker = _AutoMixAnalysisWorker(tracks, ffmpeg_executable, self, provider_id=provider_id)
+        worker = _AutoMixAnalysisWorker(
+            tracks, ffmpeg_executable, self,
+            provider_id=provider_id, enable_structure_analysis=enable_structure_analysis,
+        )
         worker.analyzed.connect(
             lambda result: self.analyses_updated.emit(result)
+            if not worker._cancel_event.is_set() else None
+        )
+        worker.structures_analyzed.connect(
+            lambda result: self.structures_updated.emit(result)
             if not worker._cancel_event.is_set() else None
         )
         # Clear our reference *before* scheduling deletion: a worker that
@@ -129,8 +180,11 @@ class AutoMixAnalysisController(QObject):
         worker.deleteLater()
         pending, self._pending = self._pending, None
         if pending is not None:
-            tracks, ffmpeg_executable, provider_id = pending
-            self.start(tracks, ffmpeg_executable, provider_id=provider_id)
+            tracks, ffmpeg_executable, provider_id, enable_structure_analysis = pending
+            self.start(
+                tracks, ffmpeg_executable, provider_id=provider_id,
+                enable_structure_analysis=enable_structure_analysis,
+            )
 
     def cancel(self) -> None:
         """Request cancellation; retain ownership until finished is delivered."""

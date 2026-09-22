@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from app.canvas.live_canvas import LiveCanvas
 from app.automix.models import TrackAnalysis
+from app.automix.structure.models import TrackStructureAnalysis
 from app.controllers.automix_analysis_controller import AutoMixAnalysisController
 from app.controllers.autosave_controller import AutosaveController
 from app.controllers.export_controller import ExportOrchestrator
@@ -350,9 +351,13 @@ class MainWindow(QMainWindow):
         self.export_orchestrator = ExportOrchestrator(self)
         self.preview_controller = PreviewController(self)
         self.automix_analyses: dict[str, TrackAnalysis] = {}
+        self.automix_structures: dict[str, TrackStructureAnalysis] = {}
         self.automix_analysis_controller = AutoMixAnalysisController(self)
         self.automix_analysis_controller.analyses_updated.connect(
             self._automix_analyses_received
+        )
+        self.automix_analysis_controller.structures_updated.connect(
+            self._automix_structures_received
         )
         self._automix_analysis_timer = QTimer(self)
         self._automix_analysis_timer.setSingleShot(True)
@@ -2321,12 +2326,30 @@ class MainWindow(QMainWindow):
         # FFmpegRenderer._render_automix_audio_segments uses for Preview/
         # Export, so this playlist-badge analysis and the render path can
         # never disagree on which analyzer produced a given result.
-        self.automix_analysis_controller.start(tracks, ffmpeg_executable, provider_id="auto")
+        # enable_structure_analysis=True: Sonara (optional, ~2 MB, no
+        # heavyweight ML runtime unlike Beat This!) runs after rhythm
+        # analysis in the same background worker when installed; when it
+        # is not, this is a no-op (see _AutoMixAnalysisWorker._run_structure_analysis) --
+        # this Commit B phase only collects structure data (intro/outro/
+        # sections/energy curve) for a future planner, it does not yet
+        # change AutoMix's actual transition choices.
+        self.automix_analysis_controller.start(
+            tracks, ffmpeg_executable, provider_id="auto", enable_structure_analysis=True,
+        )
 
     def _automix_analyses_received(self, analyses: dict[str, TrackAnalysis]) -> None:
         """Merge a completed background analysis pass into the session cache."""
         self.automix_analyses.update(analyses)
         self.playlist_editor.set_analyses(dict(self.automix_analyses))
+
+    def _automix_structures_received(self, structures: dict[str, TrackStructureAnalysis]) -> None:
+        """Merge a completed background structure-analysis pass into the session cache.
+
+        Session-only, in-memory data (same as automix_analyses) -- no UI
+        currently reads this; it exists so a future planner (Commit C) has
+        somewhere to find it without re-running analysis.
+        """
+        self.automix_structures.update(structures)
 
     def _show_track_details(self, track_id: str) -> None:
         """Open track metadata and timed-lyrics editing for a playlist card."""

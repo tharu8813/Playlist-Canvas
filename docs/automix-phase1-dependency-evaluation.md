@@ -513,3 +513,165 @@ installed on this machine, since normal tests never construct a working
 FFmpeg + `transition_mode="automix"` + enough real playback/analysis to
 reach the `"auto"` resolution with a functioning decode path.
 
+## AutoMix v3 Commit B outcome (optional structural analysis)
+
+Adds `app/automix/structure/` -- an independent, independently-optional
+data source alongside rhythm analysis (Beat This!/Basic). No changes to
+`app/automix/analysis/` (rhythm), `app/automix/planner.py`,
+`app/automix/candidates.py`, `CompiledRenderPlan`, or the FFmpeg renderer
+in this commit -- Preview/Export timing and behavior are unchanged; this
+commit only makes structure data collectible.
+
+- **Upstream**: `kkollsga/sonara` on GitHub, published to PyPI as
+  `sonara`. **Verified at integration time** (not just from README
+  examples): latest version **0.3.6** (PyPI JSON API), **MIT license**
+  (both the PyPI classifier and the package's own `LICENSE` file,
+  copyright "sonara contributors"), **Windows wheel available**
+  (`sonara-0.3.6-cp310-abi3-win_amd64.whl`, **1.88 MB** -- a Rust/PyO3
+  native extension, not a Python ML dependency chain), Python classifiers
+  3.10-3.13 (installed and ran cleanly on this project's actual Python
+  3.14 anyway: the wheel's `cp310-abi3` tag is CPython's stable ABI,
+  forward-compatible with newer interpreters). **Dependency**: only
+  `numpy>=1.23,<3` -- already a project dependency, no new transitive
+  weight at all. `pip install sonara` was actually run in this session
+  (not assumed): it installed cleanly with no build step.
+- **API used**: `sonara.analyze_file(path, features=["structure"])` ->
+  dict-like `sonara._result.TrackAnalysis` (an unfortunate but harmless
+  name collision with this project's own unrelated `TrackAnalysis` --
+  never imported by that name here). Verified directly against the
+  installed 0.3.6 package by running it on a synthetic energy-ramp .wav,
+  not only against the README: the real returned fields match the
+  roadmap's expected schema exactly -- `energy_level`, `energy_curve`
+  (list of floats), `energy_curve_hop_sec` (float), `intro_end_sec`,
+  `outro_start_sec`, `segments` (list of `{start_sec, end_sec, energy}`
+  dicts, **no label field** -- confirmed no section-naming capability
+  exists to accidentally rely on), and `provenance.schema_version` (6 for
+  this version), alongside a large set of other rhythm/spectral/timbre
+  fields this integration does not use (see item 16: Sonara's own
+  BPM/key/etc. output is not used to replace Beat This!/Basic here).
+- **`TrackStructureAnalysis` schema**
+  (`app/automix/structure/models.py`): `track_id`, `source_path`,
+  `duration_seconds`, `intro_end_seconds`, `outro_start_seconds`,
+  `sections: tuple[TrackSection, ...]` (`start_seconds`, `end_seconds`,
+  `energy`, `label` -- always `None` here, `confidence` -- always `None`
+  here, since Sonara's `segments` provide neither), `energy_curve:
+  tuple[float, ...]`, `energy_curve_hop_seconds`, `analyzer_id`,
+  `analyzer_version`, plus `energy_at(seconds)` (a pure helper clamping to
+  the curve's own span, for a future planner comparing local energy at a
+  candidate mix point) and `to_cache_fields()`/`from_cache_fields()`
+  mirroring `TrackAnalysis`'s. Validation
+  (`__post_init__`, mirrors `TrackAnalysis`'s strictness): intro/outro
+  within `[0, duration]`, sections sorted and non-overlapping with `end <=
+  duration`, energy values finite and non-negative, `energy_curve_hop_seconds
+  > 0` whenever `energy_curve` is non-empty. A malformed Sonara result
+  raises `ValueError` here rather than silently reaching a future planner.
+- **intro/outro mapping**: `result["intro_end_sec"]`/`result["outro_start_sec"]`
+  copied through as-is, only clamped into `[0, duration_seconds]` to
+  absorb floating-point overshoot right at the track's own end (e.g.
+  `60.0001` on a 60.0-second track) -- never used to drive any transition
+  decision in this phase (roadmap item 6/23), stored purely as future
+  planner input.
+- **segments mapping**: each `{start_sec, end_sec, energy}` dict becomes a
+  `TrackSection(start_seconds=..., end_seconds=..., energy=...)` with
+  `label=None`/`confidence=None` left at their defaults -- no label is
+  ever fabricated (roadmap item 7).
+- **energy curve mapping**: `energy_curve` copied through as a tuple of
+  floats; `energy_curve_hop_sec` becomes `energy_curve_hop_seconds`. The
+  relationship `time = i * energy_curve_hop_seconds` is not exposed as raw
+  arithmetic at every call site -- `TrackStructureAnalysis.energy_at(seconds)`
+  is the one pure helper for it (roadmap item 8).
+- **Cache identity** (`app/automix/structure/cache.py`, a separate cache
+  root, `automix-structure-cache`, from the rhythm cache's
+  `automix-cache`): `SonaraStructureProvider.__init__` sets `self.version`
+  to `"{implementation_version}+pkg{installed sonara package version}"`
+  (via `importlib.metadata.version("sonara")`, metadata-only, no import),
+  and each `analyze()` result additionally folds Sonara's own
+  `provenance.schema_version` into `analyzer_version` (e.g.
+  `"1+pkg0.3.6+schema6"`, confirmed against the real install) -- so a
+  Sonara package upgrade *or* a Sonara-side result-schema change both
+  invalidate previously cached entries, without needing a manual version
+  bump in this codebase for either.
+- **Failure/fallback behavior**: deliberately **no fallback result** for
+  structure analysis, unlike Beat This!'s hybrid Basic fallback -- a
+  missing/broken `sonara` install, or a per-track analysis failure (e.g. a
+  malformed result rejected by `TrackStructureAnalysis`'s own validation),
+  is reported as "no structure result" for that track and nothing else.
+  Because there is no fallback value to have been cached in the first
+  place, the exact fallback-cache-poisoning bug found and fixed for Beat
+  This! in P1.5 structurally cannot recur here: `StructureAnalysisService`
+  (mirroring `AnalysisService`'s own discipline) only ever calls
+  `cache.store(...)` after a genuine `provider.analyze()` success.
+  Regression test: `test_failure_is_never_cached_as_success` (fails once,
+  confirms nothing cached, "recovers", confirms the provider is actually
+  re-invoked rather than anything being replayed).
+  `app/automix/structure/sonara.py::sonara_available()` (an
+  `importlib.util.find_spec` probe, same pattern as
+  `beat_this_available()`) additionally lets the background worker skip
+  structure analysis entirely up front when Sonara is not installed,
+  rather than attempting and failing per track.
+- **Threading/integration** (`app/controllers/automix_analysis_controller.py`):
+  `_AutoMixAnalysisWorker` now runs structure analysis, sequentially,
+  after rhythm analysis, still entirely inside the same background
+  `QThread` -- no GUI-thread work, and no separate UI-freeze risk versus
+  running the two concurrently, only a longer total background run.
+  `AutoMixAnalysisController.start(..., enable_structure_analysis=True)`
+  (default `False`, so existing callers are unaffected) is what
+  `MainWindow._maybe_start_automix_analysis()` now passes; results land in
+  a new `MainWindow.automix_structures: dict[str, TrackStructureAnalysis]`
+  session cache (mirroring `automix_analyses`) via a new
+  `structures_updated` signal. Nothing currently reads this dict -- it
+  exists so a future planner (Commit C) has somewhere to find already-
+  computed structure data without re-running analysis. The Preview
+  preparation dialog's progress stages were deliberately **not** wired to
+  structure analysis in this commit, since structure analysis was
+  deliberately not added to the Preview/Export FFmpeg render path at all
+  (`FFmpegRenderer._render_automix_audio_segments` is untouched) --
+  wiring it into that dialog's progress would have implied it was, which
+  would contradict "Preview/Export timing에는 아직 변화가 없어야 한다."
+- **Real Sonara run, this session**: a 150s synthetic energy-ramp track
+  (quiet intro, loud middle, quiet outro -- not a flat/homogeneous signal,
+  learning from the Beat This! P1.5 fixture lesson) produced
+  `intro_end_sec=6.13`, `outro_start_sec=51.59` on a 60s take (matching
+  the ramp's own 8-second fades reasonably closely), 3 sections, and a
+  117-sample energy curve at a ~0.51s hop -- all in **0.05-0.14s**.
+  `tests/test_automix_structure_real_model.py` (opt-in,
+  `PLAYLIST_CANVAS_TEST_SONARA=1`) passed both tests.
+- **Combined CPU timing** (accented 4/4 fixture, 180s track, same track
+  through both analyzers): Beat This! rhythm analysis (warm model)
+  **11.37s**; Sonara structure analysis **0.19s**; total **11.57s**.
+  Structure analysis is essentially free next to Beat This! -- no
+  duplicate-decode optimization was attempted in this commit, per roadmap
+  item 17's own instruction not to change architecture for this unless the
+  cost is actually significant (it measured as roughly 1.6% of the
+  combined time).
+- **Real music**: not performed, same limitation as Beat This! P1.5 --
+  no licensed audio files were available in this sandboxed environment;
+  documented as not done, not assumed to work.
+- **Sonara limitations/API notes found**: (1) the result object's class is
+  itself named `TrackAnalysis` (`sonara._result.TrackAnalysis`), colliding
+  with this project's own `app.automix.models.TrackAnalysis` -- harmless
+  since it is only ever consumed as a dict-like return value here, never
+  imported by name, but worth flagging for anyone reading Sonara's own
+  docs/source alongside this codebase. (2) `segments` provide no semantic
+  label (verse/chorus/etc.) -- purely boundary + energy, exactly as the
+  roadmap anticipated and item 7 required not to fabricate one for. (3)
+  the package is comparatively young/small (confirmed via its ~1.9 MB
+  wheel and single-maintainer GitHub org) -- the optional-adapter boundary
+  in `app/automix/structure/sonara.py` is the intended blast-radius limit
+  if its API changes incompatibly in a future version; nothing outside
+  that one file imports `sonara` directly.
+- **Structure information available for a future Commit C planner**:
+  `intro_end_seconds`, `outro_start_seconds` (heuristic anchors, not
+  forced cut points), `sections` (contiguous, non-overlapping, each with
+  an `energy` value and boundary timestamps), `energy_curve` +
+  `energy_at(seconds)` (time-resolved local energy for comparing a
+  candidate mix-out/mix-in point's actual energy, not just a track-global
+  scalar), all keyed by `track_id` in `MainWindow.automix_structures` (or
+  directly via `StructureAnalysisService`/`SonaraStructureProvider` for a
+  non-UI caller). Explicitly *not* available: section labels
+  (verse/chorus/...), a validated time signature (see roadmap item 15 and
+  the P1.5 outcome above on `meter_denominator`'s limits -- unrelated to
+  Sonara, carried over from Beat This!), or any planner-facing
+  candidate/scoring logic -- none of that exists yet; it is Commit C's
+  job.
+
