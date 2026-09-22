@@ -465,6 +465,25 @@ class RealAutoMixRenderTests(unittest.TestCase):
         result = self._pipeline().render(plan, paths, self.directory / "out")
         self.assertAlmostEqual(result.duration_seconds, 53.0, delta=0.2)
 
+    def test_a_long_dsp_playlist_renders_with_its_dsp_despite_the_command_line_limit(self) -> None:
+        count = 40  # the band-DSP graph for this many tracks exceeds Windows' 32,767-character command line
+        paths, clips, transitions = {}, [], []
+        for index in range(count):
+            track_id = f"t{index}"
+            paths[track_id] = str(self.directory / f"{track_id}.wav")
+            _write_tone_wav(Path(paths[track_id]), 220.0 + 10 * index, 12.0)
+            clips.append(_clip(track_id, track_id, 8.0 * index, 12.0))
+            if index:
+                transitions.append(AudioRenderTransition(
+                    f"t{index - 1}", track_id, 8.0 * index, 4.0, TransitionType.BEAT_MATCH, dsp=TransitionDsp.BASS_SWAP,
+                ))
+        plan = AudioRenderPlan(clips=tuple(clips), transitions=tuple(transitions))
+        self.assertGreater(len(build_filter_graph(plan.clips, plan.transitions)[0]), 32767)
+        with self.assertNoLogs("app.automix.renderer", level="WARNING"):  # no legacy-crossfade fallback
+            result = self._pipeline().render(plan, paths, self.directory / "out")
+        self.assertAlmostEqual(result.duration_seconds, 8.0 * (count - 1) + 12.0, delta=0.2)
+        self.assertTrue((self.directory / "out" / "automix_graph.txt").is_file())
+
     def test_explicit_gap_produces_matching_total_duration(self) -> None:
         a = self.directory / "a.wav"
         b = self.directory / "b.wav"

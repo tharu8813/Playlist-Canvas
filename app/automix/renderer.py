@@ -122,6 +122,9 @@ DSP_PEAK_LIMIT = 0.97
 """Summing two enveloped tracks can overshoot full scale, and the pcm_s16le
 intermediate would hard-clip it irrecoverably. A lookahead limiter runs on
 the transition window only; below this level it is bit-transparent."""
+INLINE_FILTER_GRAPH_LIMIT = 16000
+"""Longer graphs go to FFmpeg as a file (``-/filter_complex``, FFmpeg 7+);
+shorter ones stay inline so typical playlists run exactly as before."""
 _DSP_REQUIRED_FILTERS = frozenset({"acrossover", "afade", "amix", "alimiter", "asplit", "acrossfade"})
 
 
@@ -409,11 +412,19 @@ class AutoMixAudioPipeline:
 
         def command(dsp: bool) -> list[str]:
             filter_complex, output_label = build_filter_graph(clips, plan.transitions, transition_dsp=dsp)
+            graph = ["-filter_complex", filter_complex]
+            if len(filter_complex) > INLINE_FILTER_GRAPH_LIMIT:
+                # Windows caps a command line at 32,767 characters; a band-DSP
+                # graph passes that around 33 tracks, and CreateProcess then
+                # failed outright, silently dropping every DSP transition.
+                script = output_directory / "automix_graph.txt"
+                script.write_text(filter_complex, encoding="utf-8")
+                graph = ["-/filter_complex", str(script)]
             arguments = [str(self.ffmpeg_executable), "-hide_banner", "-loglevel", "error", "-nostdin"]
             for clip in clips:
                 arguments.extend(["-i", str(Path(track_paths[clip.track_id]))])
             arguments.extend([
-                "-filter_complex", filter_complex,
+                *graph,
                 "-map", f"[{output_label}]",
                 *codec, "-ar", str(SAMPLE_RATE), "-ac", "2", "-f", container,
                 "-progress", "pipe:1", "-nostats", "-y", str(output_path),
