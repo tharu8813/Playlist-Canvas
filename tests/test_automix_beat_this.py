@@ -20,13 +20,16 @@ import numpy as np
 from app.automix.analysis.basic import BasicAnalysisProvider
 from app.automix.analysis.beat_this import (
     BeatThisAnalysisProvider,
+    _beats_per_bar_counts,
     _bpm_from_beats,
+    _downbeat_alignment_score,
+    _estimate_meter_numerator,
     _meter_confidence,
     _sanitize_timestamps,
 )
 from app.automix.analysis.provider import AnalysisCancelled
 from app.automix.analysis.registry import create_analysis_provider
-from app.automix.models import TrackAnalysis
+from app.automix.models import RELIABLE_METER_CONFIDENCE, TrackAnalysis
 from app.models.playlist import PlaylistTrack
 
 
@@ -101,9 +104,36 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         self.assertAlmostEqual(result.bpm, 120.0, delta=0.5)
         self.assertGreater(result.bpm_confidence, 0.9)  # a perfectly steady grid
         self.assertGreater(result.meter_confidence, 0.5)  # unlocks "reliable" (>= 0.5)
+        self.assertEqual(result.meter_numerator, 4)
+        self.assertEqual(result.beat_alignment_quality(), "reliable")
         # Fields the hybrid provider reuses verbatim from BasicAnalysisProvider.
         self.assertEqual(result.key, basic_result.key)
         self.assertEqual(result.energy, basic_result.energy)
+
+    def test_every_beat_reported_as_downbeat_is_kept_but_never_reliable(self) -> None:
+        """The exact P1 finding: a homogeneous synthetic click fixture made
+        the model report every beat as also a downbeat. This must not be
+        trusted as a meter -- but the model's own downbeats array must
+        still be reported unmodified (never quietly truncated to
+        downbeats[::4] to "fix" it, see module docstring)."""
+        track = _track(duration_seconds=60.0)
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        basic_result = _basic_result(track)
+        beats = np.arange(0.0, 30.0, 0.5)  # steady grid, 60 beats
+        downbeats = beats.copy()  # every beat also reported as a downbeat
+        fake_model = _FakeFile2Beats(beats, downbeats)
+        with (
+            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            patch.object(provider, "_load_model", return_value=fake_model),
+        ):
+            result = provider.analyze(track, cancel_event=threading.Event())
+        # The model's beats/downbeats are reported as-is, not discarded.
+        self.assertEqual(result.downbeats, tuple(beats.tolist()))
+        self.assertEqual(result.analyzer_id, "beat_this")
+        # But the implied meter is correctly distrusted.
+        self.assertIsNone(result.meter_numerator)
+        self.assertLess(result.meter_confidence, RELIABLE_METER_CONFIDENCE)
+        self.assertNotEqual(result.beat_alignment_quality(), "reliable")
 
     def test_skips_inference_when_basic_analysis_found_no_signal(self) -> None:
         """A genuinely too-short/silent track (BasicAnalysisProvider's own
@@ -273,6 +303,79 @@ class BpmAndMeterConfidenceTests(unittest.TestCase):
 
     def test_meter_confidence_is_zero_with_too_few_downbeats(self) -> None:
         self.assertEqual(_meter_confidence(np.array([1.0, 2.0]), np.array([1.0])), 0.0)
+
+    def test_every_beat_reported_as_a_downbeat_is_never_reliable(self) -> None:
+        """The exact bug report: a fully homogeneous/unaccented signal can
+        make the model report every beat as also a downbeat
+        (beats_per_bar ~= 1) -- this must never be trusted as a reliable
+        meter, regardless of how "regular" the (degenerate) bar spacing
+        trivially looks."""
+        beats = np.arange(0.0, 60.0, 0.5)  # perfectly steady beat grid
+        downbeats = beats.copy()  # every beat is also reported as a downbeat
+        confidence = _meter_confidence(beats, downbeats)
+        self.assertLess(confidence, RELIABLE_METER_CONFIDENCE)
+
+    def test_downbeat_overprediction_regression_100_beats_100_downbeats(self) -> None:
+        beats = np.arange(0.0, 50.0, 0.5)  # 100 beats
+        downbeats = beats.copy()  # 100 downbeats (every beat)
+        self.assertEqual(len(beats), 100)
+        self.assertEqual(len(downbeats), 100)
+        confidence = _meter_confidence(beats, downbeats)
+        self.assertLess(confidence, RELIABLE_METER_CONFIDENCE)
+
+    def test_correctly_spaced_downbeats_regression_100_beats_25_downbeats(self) -> None:
+        beats = np.arange(0.0, 50.0, 0.5)  # 100 beats
+        downbeats = beats[0::4]  # 25 downbeats, evenly every 4th beat (real 4/4)
+        self.assertEqual(len(beats), 100)
+        self.assertEqual(len(downbeats), 25)
+        confidence = _meter_confidence(beats, downbeats)
+        self.assertGreaterEqual(confidence, RELIABLE_METER_CONFIDENCE)
+
+
+class MeterNumeratorEstimationTests(unittest.TestCase):
+    def test_estimates_four_four_from_evenly_spaced_downbeats(self) -> None:
+        beats = np.arange(0.0, 20.0, 0.5)
+        downbeats = np.arange(0.0, 20.0, 2.0)  # every 4th beat
+        numerator, consistency = _estimate_meter_numerator(beats, downbeats)
+        self.assertEqual(numerator, 4)
+        self.assertGreaterEqual(consistency, 0.9)
+
+    def test_estimates_three_four_from_evenly_spaced_downbeats(self) -> None:
+        """roadmap example: a 3/4 fixture must be reported as 3, never
+        silently mislabeled as 4/4."""
+        beats = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
+        downbeats = np.array([0.0, 1.5, 3.0])
+        numerator, consistency = _estimate_meter_numerator(beats, downbeats)
+        self.assertEqual(numerator, 3)
+        self.assertGreaterEqual(consistency, 0.9)
+
+    def test_one_to_one_downbeats_are_not_a_plausible_bar_length(self) -> None:
+        beats = np.arange(0.0, 20.0, 0.5)
+        downbeats = beats.copy()
+        numerator, _consistency = _estimate_meter_numerator(beats, downbeats)
+        self.assertIsNone(numerator)
+
+    def test_inconsistent_bar_counts_yield_no_numerator(self) -> None:
+        """Per-bar beat counts disagreeing too much (not just implausible)
+        must also refuse to guess, per MINIMUM_BAR_COUNT_CONSISTENCY."""
+        # Downbeats spaced 4, 2, 7, 3, 5 beats apart -- no dominant count.
+        beats = np.arange(0.0, 21.0, 1.0)  # 21 beats, indices 0..20
+        downbeats = beats[[0, 4, 6, 13, 16, 21 - 1]]
+        numerator, _consistency = _estimate_meter_numerator(beats, downbeats)
+        self.assertIsNone(numerator)
+
+    def test_beats_per_bar_counts_uses_beat_index_span_between_downbeats(self) -> None:
+        beats = np.arange(0.0, 12.0, 1.0)
+        downbeats = np.array([0.0, 4.0, 8.0])
+        counts = _beats_per_bar_counts(beats, downbeats)
+        self.assertEqual(list(counts), [4, 4])
+
+    def test_downbeat_alignment_score_penalizes_off_grid_downbeats(self) -> None:
+        beats = np.arange(0.0, 10.0, 0.5)
+        on_grid = _downbeat_alignment_score(beats, np.array([0.0, 2.0, 4.0]))
+        off_grid = _downbeat_alignment_score(beats, np.array([0.2, 2.3, 4.35]))  # far from any beat
+        self.assertEqual(on_grid, 1.0)
+        self.assertLess(off_grid, 1.0)
 
 
 class SanitizeTimestampsTests(unittest.TestCase):

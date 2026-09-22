@@ -353,7 +353,141 @@ Both synthetic tracks converged to the same reported BPM (130.43) despite
 being generated at different target BPMs (128/132) -- plausible for this
 specific synthetic click+sine-tone stress signal (not real music), not
 investigated further; flagged here rather than silently reported as a
-clean result.
+clean result. **Root-caused in P1.5 below**: the fixture had no bar accent
+at all, so the model had no signal to distinguish downbeats from other
+beats and reported every beat as also a downbeat (`beats == downbeats`,
+`meter_confidence == 1.0`) -- the code accepted that uncritically.
+
+## AutoMix v3 P1.5 outcome (meter sanity validation)
+
+The P1 real-model run above (385/385 and 397/397 beats/downbeats,
+`meter_confidence == 1.000` for both) was re-examined: a 4/4 track should
+have roughly `beats/4` downbeats, not `beats/1`. Root cause was the
+fixture, not the model or the swap direction of `file2beats`'s return
+values (confirmed against the real API) -- every click in
+`_write_click_wav` was acoustically identical, so nothing in the signal
+distinguished a bar's first beat from the others, and the model (or its
+postprocessor) defaulted to marking every detected beat as a downbeat too.
+The real bug is that `BeatThisAnalysisProvider` accepted this uncritically:
+the old `_meter_confidence` only checked whether downbeat-to-downbeat
+*time* intervals were regular, which a degenerate 1:1 "every beat is a
+downbeat" prediction trivially passes (a perfectly regular beat grid is
+also a perfectly regular "1-beat bar" grid).
+
+**New meter validation** (`app/automix/analysis/beat_this.py`):
+
+- `_beats_per_bar_counts`: for each pair of consecutive downbeats, counts
+  how many detected beats fall in between via `np.searchsorted` -- the
+  same integer-counting idea Beat This! 1.1.0's own new
+  `beat_this.utils.infer_beat_numbers()` (added per its changelog; verified
+  directly against the installed 1.1.0 source, `beat_this/utils.py`) uses
+  to number beats within a bar. That upstream function itself was not
+  used directly: it requires all downbeats to already be a subset of
+  beats (raises `ValueError` otherwise) and uses `print()` for its warning
+  paths, neither of which fits a confidence-calibration call site that
+  must degrade to zero confidence instead of raising/printing on malformed
+  input -- but the core per-bar counting technique is the same.
+- `_estimate_meter_numerator`: takes the *mode* (most common) beats-per-bar
+  count across all bars and how consistent that count is
+  (`MINIMUM_BAR_COUNT_CONSISTENCY = 0.6`, i.e. at least 60% of bars must
+  agree). Returns `None` when the mode falls outside a plausible bar
+  length (`MINIMUM/MAXIMUM_PLAUSIBLE_BEATS_PER_BAR = 2..7`) or bars
+  disagree too much -- this is what rejects the degenerate "every beat is
+  a downbeat" case outright (every bar has exactly 1 beat, `1 < 2`).
+- `_downbeat_alignment_score`: a defensive check that each downbeat
+  actually sits within `_DOWNBEAT_ALIGNMENT_TOLERANCE_SECONDS = 0.08` of
+  some detected beat (Beat This!'s own postprocessing already snaps
+  downbeats onto beats, so this is expected to be a no-op on real model
+  output, not a load-bearing check).
+- `_meter_confidence` now combines all of the above (bar-length
+  plausibility gate first, then time-interval regularity, alignment, and
+  coverage) multiplicatively -- an implausible bar-length estimate forces
+  confidence straight to `0.0` regardless of how "regular" the raw
+  downbeat timing looks.
+- `meter_numerator`/`meter_denominator` are no longer hardcoded to `4, 4`
+  whenever any downbeats exist; they come from `_estimate_meter_numerator`,
+  and are `None, None` when no plausible bar length was found.
+  `meter_denominator` is always reported as `4` when a numerator is found
+  (simple-meter assumption; Beat This! doesn't distinguish e.g. 6/8 from
+  3/4 from beat spacing alone -- a known, documented limitation, not
+  addressed here).
+- Per roadmap "never postprocess model output to look plausible":
+  `beats`/`downbeats` are still reported exactly as the model predicted
+  them even when the implied meter is rejected -- there is no
+  `downbeats[::4]` truncation or similar "fix" anywhere in this code. An
+  implausible meter is communicated entirely through
+  `meter_numerator=None` and `meter_confidence`, which
+  `beat_alignment_quality()`/`candidates.py` already use to gate
+  `BEAT_MATCH` -- no planner change was needed for this to take effect.
+
+**Regression tests** (`tests/test_automix_beat_this.py`): the literal
+"every beat reported as a downbeat" case never reaching
+`RELIABLE_METER_CONFIDENCE`, the two `malformed`/`overprediction` cases
+from the roadmap (100 beats/100 downbeats -> low confidence; 100 beats/25
+correctly-spaced downbeats -> high confidence), a pure-function 3/4
+fixture correctly estimating numerator 3 (not silently mislabeled 4/4), an
+inconsistent-bar-count fixture correctly refusing to guess, and an
+end-to-end `BeatThisAnalysisProvider.analyze()` test confirming the
+model's downbeats array is reported unmodified even when the meter is
+rejected.
+
+**New accented real-model fixture**
+(`tests/test_automix_beat_this_real_model.py::_write_accented_click_wav`):
+beat 1 of every bar is a louder, low-frequency (130 Hz) thump; beats 2-4
+are quieter, higher-pitched (1400 Hz) clicks -- replacing the old fixture
+where every beat was acoustically identical.
+
+**Re-run against the real model (accented fixture, this session)**:
+
+```
+Track A, 128 BPM target, 60s:
+  bpm=~128-130 (within tolerance), beats=384, downbeats=97
+  beats_per_bar (actual) = 3.96, meter_numerator=4, meter_confidence=0.990
+  beat_alignment_quality() = 'reliable'
+```
+
+`tests/test_automix_beat_this_real_model.py`'s
+`test_accented_four_four_track_is_detected_as_a_reliable_meter` and
+`test_compiles_into_a_valid_automix_plan_and_selects_beat_match` (two 128
+BPM accented tracks) both passed: a real `BEAT_MATCH` transition was
+selected, with `meter_confidence` correctly high and `beat_alignment_quality()
+== "reliable"` for both tracks.
+
+**An honestly-reported new finding, not smoothed over**: re-running the
+same accented fixture at 132 BPM for longer synthetic tracks (180s)
+produced far fewer detected beats than the click pattern actually contains
+(256 detected vs. ~396 expected for one run; a shorter 45s take at the
+same BPM showed the same pattern, 56 vs. ~99). The *reported BPM* still
+landed close to correct (derived from whichever beats were detected, which
+remained evenly spaced), but beat *coverage* was degraded enough that
+`beats_per_bar` came out non-integer-ish (e.g. 2.56), and
+`_estimate_meter_numerator` correctly returned `None` for the 180s case
+instead of confidently reporting a wrong meter -- i.e. the P1.5 fix did
+its job on real model output, not just synthetic unit-test fixtures. This
+looks like a genuine model/fixture interaction specific to this synthetic
+click pattern at this tempo (a real music track would not have perfectly
+periodic clicks), not investigated further, and not something this session
+attempted to fixture-tune away -- flagged here as an open question rather
+than hidden. `test_two_tracks_at_different_bpm_are_both_measured_accurately`
+(45s duration, BPM-tolerance assertion only, matching the roadmap's
+specific ask) still passes, since BPM itself stayed within tolerance
+despite the reduced beat coverage.
+
+**CPU timing (accented fixture, 180s track)**: Basic-only 4.48s; Beat
+This! first call (model load+warmup) 8.97s; second call (warm model)
+5.70s; additional Beat This! cost over basic-only once warm: **~1.2s per
+3-minute track** on this run (down from the ~4.3s measured on the
+unaccented fixture in P1 -- both numbers are from the same class of
+synthetic audio and a small sample size; treat as an order-of-magnitude
+estimate, not a precise benchmark).
+
+**Real music**: not available in this sandboxed environment (no licensed
+audio files present, and none were downloaded or committed per roadmap
+"do not commit copyrighted audio") -- honestly reported as not done, not
+assumed to work. Recommended follow-up for whoever has local music files:
+run `BeatThisAnalysisProvider(ffmpeg).analyze(...)` on a few real tracks
+(pop/EDM, band/acoustic, syncopated) and compare
+`beat_alignment_quality()`/`meter_numerator` against ear/known tempo.
 
 **CUDA**: not available in this environment (`torch.cuda.is_available()`
 is `False`, CPU-only wheel installed) -- device selection

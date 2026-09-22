@@ -26,6 +26,18 @@ This is a hybrid provider (key/energy/vocal-activity/validation/silence
 handling are delegated to an owned BasicAnalysisProvider instance, not
 reimplemented) -- Beat This! only ever replaces the rhythm fields (bpm,
 bpm_confidence, beats, downbeats, meter_*).
+
+Beat This! predicts beat and downbeat *timestamps*, not a time signature --
+whether those downbeats actually imply a plausible, internally consistent
+bar structure (e.g. not "every beat is also a downbeat," a degenerate
+prediction a fully unaccented/homogeneous audio signal can produce) is
+sanity-checked here (_estimate_meter_numerator/_meter_confidence) before
+being reported as a usable meter. Model output itself is never
+postprocessed/truncated to look more plausible (no "just take every 4th
+downbeat"): an implausible or inconsistent bar structure is reported as
+low confidence and/or an unknown meter_numerator, and the existing
+degrade chain (candidates.py) is what falls back from there -- never a
+hardcoded meter forced on the data.
 """
 
 from __future__ import annotations
@@ -167,8 +179,17 @@ class BeatThisAnalysisProvider:
 
         downbeats = _sanitize_timestamps(raw_downbeats, basic_result.duration_seconds)
         if downbeats:
-            meter_confidence = _meter_confidence(np.array(beats), np.array(downbeats))
-            meter_numerator, meter_denominator = 4, 4
+            # `downbeats` stays the model's own, unmodified output even when
+            # the bar structure it implies is implausible (e.g. every beat
+            # also reported as a downbeat) -- meter_numerator=None and a low
+            # meter_confidence are how that is communicated to the planner,
+            # never by silently discarding/truncating what the model
+            # actually predicted (see module docstring, "never postprocess
+            # model output to look plausible").
+            beats_array, downbeats_array = np.array(beats), np.array(downbeats)
+            meter_confidence = _meter_confidence(beats_array, downbeats_array)
+            meter_numerator, _consistency = _estimate_meter_numerator(beats_array, downbeats_array)
+            meter_denominator = 4 if meter_numerator is not None else None
         else:
             # No real downbeats from the model for this track: keep the
             # basic analyzer's own provisional bar guess (already
@@ -289,18 +310,110 @@ def _bpm_from_beats(beats: np.ndarray) -> tuple[float | None, float]:
     return bpm, confidence
 
 
-def _meter_confidence(beats: np.ndarray, downbeats: np.ndarray) -> float:
-    """How consistent the downbeat-to-downbeat (bar) interval is, weighted by coverage.
+MINIMUM_PLAUSIBLE_BEATS_PER_BAR = 2
+MAXIMUM_PLAUSIBLE_BEATS_PER_BAR = 7
+"""A bar this short or this long is not a meter AutoMix's bar-length
+candidates (app/automix/candidates.py's BAR_LENGTHS, built on 4-beat bars)
+can make sense of -- treated as an implausible/degenerate meter estimate,
+same tier as the 1:1 "every beat is also a downbeat" case."""
 
-    Same calibration spirit as _bpm_from_beats, but over downbeats: a real
-    bar-tracking model should produce evenly spaced downbeats when the
-    track's meter is genuinely regular. ``coverage`` discounts a track
-    where the model found only a handful of bars relative to how many
-    4-beat bars the beat count implies, so a mostly-missing downbeat track
-    cannot still score "reliable" purely from the few bars it did find
-    being evenly spaced.
+MINIMUM_BAR_COUNT_CONSISTENCY = 0.6
+"""At least this fraction of inter-downbeat spans must agree on the same
+beat count for a meter estimate to be trusted at all (see
+_estimate_meter_numerator) -- below this, the downbeat predictions are
+too inconsistent to imply any single meter, plausible-looking or not."""
+
+_DOWNBEAT_ALIGNMENT_TOLERANCE_SECONDS = 0.08
+"""How far a downbeat may sit from its nearest reported beat and still
+count as "on the beat grid" -- generous relative to typical beat spacing
+(roughly 0.4-0.6s at 100-150 BPM) and Beat This!'s own frame resolution,
+so this only flags a downbeat that isn't actually near any detected beat,
+not one merely off by ordinary timestamp jitter."""
+
+
+def _beats_per_bar_counts(beats: np.ndarray, downbeats: np.ndarray) -> np.ndarray:
+    """How many beats fall within each inter-downbeat span.
+
+    The same integer-counting idea Beat This! 1.1's own
+    ``beat_this.utils.infer_beat_numbers`` uses to number beats within a
+    bar (counting beats between consecutive downbeats) -- reimplemented
+    narrowly here to get per-bar *counts* directly, and so a malformed
+    prediction (e.g. downbeats that are not a subset of beats) degrades to
+    an empty/low-confidence result instead of that function's
+    print()-based warnings or a raised ValueError.
+    """
+    if len(downbeats) < 2:
+        return np.array([], dtype=int)
+    sorted_beats = np.sort(beats)
+    sorted_downbeats = np.sort(downbeats)
+    indices = np.searchsorted(sorted_beats, sorted_downbeats)
+    return np.diff(indices)
+
+
+def _estimate_meter_numerator(beats: np.ndarray, downbeats: np.ndarray) -> tuple[int | None, float]:
+    """Estimate beats-per-bar from per-bar beat counts, plus how consistent that count is.
+
+    Returns ``(numerator, consistency)``. ``numerator`` is ``None`` when
+    the per-bar beat counts disagree too much
+    (``< MINIMUM_BAR_COUNT_CONSISTENCY``) or the most common count falls
+    outside a plausible bar length -- most notably the degenerate
+    "every beat is also reported as a downbeat" case, where every span is
+    exactly 1 beat wide and MINIMUM_PLAUSIBLE_BEATS_PER_BAR=2 rejects it
+    outright. A confidently wrong 4/4 is worse than an honest "unknown", so
+    this never guesses when it cannot clear both bars.
+    """
+    counts = _beats_per_bar_counts(beats, downbeats)
+    counts = counts[counts > 0]
+    if len(counts) == 0:
+        return None, 0.0
+    values, frequencies = np.unique(counts, return_counts=True)
+    mode_index = int(np.argmax(frequencies))
+    mode = int(values[mode_index])
+    consistency = float(frequencies[mode_index]) / len(counts)
+    if not (MINIMUM_PLAUSIBLE_BEATS_PER_BAR <= mode <= MAXIMUM_PLAUSIBLE_BEATS_PER_BAR):
+        return None, consistency
+    if consistency < MINIMUM_BAR_COUNT_CONSISTENCY:
+        return None, consistency
+    return mode, consistency
+
+
+def _downbeat_alignment_score(beats: np.ndarray, downbeats: np.ndarray) -> float:
+    """Fraction of downbeats that sit within tolerance of some reported beat.
+
+    Beat This!'s own postprocessing already snaps downbeats onto detected
+    beats, so this is a defensive sanity check (a provider-level one, not a
+    trust-the-model assumption) rather than something expected to matter
+    for real model output -- see module docstring on not silently
+    "fixing" model output.
+    """
+    if len(downbeats) == 0 or len(beats) == 0:
+        return 0.0
+    sorted_beats = np.sort(beats)
+    aligned = 0
+    for downbeat in downbeats:
+        index = np.searchsorted(sorted_beats, downbeat)
+        candidates = sorted_beats[max(0, index - 1):index + 1]
+        if len(candidates) and np.min(np.abs(candidates - downbeat)) <= _DOWNBEAT_ALIGNMENT_TOLERANCE_SECONDS:
+            aligned += 1
+    return aligned / len(downbeats)
+
+
+def _meter_confidence(beats: np.ndarray, downbeats: np.ndarray) -> float:
+    """Combine bar-length plausibility, bar-duration regularity, downbeat/beat
+    grid alignment, and coverage into one 0.0-1.0 confidence.
+
+    Unlike a plain "are the downbeats evenly spaced in time" check (which a
+    degenerate "every beat is also a downbeat" prediction can pass
+    trivially, since a perfectly regular beat grid is also a perfectly
+    regular "bar" grid of length 1), _estimate_meter_numerator's plausible-
+    bar-length gate runs first and is a hard requirement: an implausible or
+    inconsistent beats-per-bar count forces confidence to 0.0 regardless of
+    how evenly spaced the downbeats otherwise look.
     """
     if len(downbeats) < MINIMUM_DOWNBEATS_FOR_METER:
+        return 0.0
+    numerator, count_consistency = _estimate_meter_numerator(beats, downbeats)
+    if numerator is None:
         return 0.0
     bar_intervals = np.diff(np.sort(downbeats))
     bar_intervals = bar_intervals[bar_intervals > 0.0]
@@ -310,7 +423,8 @@ def _meter_confidence(beats: np.ndarray, downbeats: np.ndarray) -> float:
     if median_bar <= 0.0:
         return 0.0
     deviation = float(np.median(np.abs(bar_intervals - median_bar)))
-    consistency = max(0.0, min(1.0, 1.0 - (deviation / median_bar) * 3.0))
-    expected_bars = max(1.0, len(beats) / 4.0)
+    time_consistency = max(0.0, min(1.0, 1.0 - (deviation / median_bar) * 3.0))
+    alignment = _downbeat_alignment_score(beats, downbeats)
+    expected_bars = max(1.0, len(beats) / numerator)
     coverage = max(0.0, min(1.0, len(downbeats) / expected_bars))
-    return max(0.0, min(1.0, consistency * (0.7 + 0.3 * coverage)))
+    return max(0.0, min(1.0, count_consistency * time_consistency * alignment * (0.7 + 0.3 * coverage)))
