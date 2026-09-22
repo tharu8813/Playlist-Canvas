@@ -90,3 +90,26 @@ Planner geometry 재정의, DSP selector 재설계, stem separation, intermediat
 
 ## 최종 보고
 1. incremental architecture 2. partial plan 3. coalescing 4. safe swap 5. loudness 6. final parity 7. 10/20/50곡 수치 8. cache hit 9. cancellation 10. tests
+
+
+---
+
+## Outcome (2026-09-23)
+
+- **Implementation commit:** `789b73a feat: progressively apply AutoMix while preview analysis completes` (already on `main` when this roadmap started). This phase re-verified it against the spec above and added plan-update counting to the churn simulation.
+- **Architecture:** `app/automix/progressive.py` (pure policy: `ProgressiveAnalysis` frontier, `partial_plan`, `divergence_seconds`, `swap_is_safe`, `RenderScheduler`) + `app/controllers/progressive_automix_controller.py` (Qt threads). A partial plan is `compile_automix(all tracks, analyses of the analyzed prefix)`, so every transition it contains is already the final one; the unanalyzed tail stays sequential.
+- **Coalescing:** planning runs on every frontier move (a full 50-track compile costs ~3 ms); rendering runs only when an unrendered transition is within `URGENT_HORIZON_SECONDS` of the playhead, after a 0.5 s debounce (2 s max delay), never while another render runs.
+- **Safe swap:** `swap_is_safe` refuses a swap at/after the first divergent second and, while playing, inside or 2 s before any transition. Seeks apply the pending mix immediately (audio restarts anyway). The generation token / pending-seek handshake in `ExportPreviewDialog` is unchanged.
+- **Loudness:** partial mixes use a linear gain approximating the export loudnorm target (-16 LUFS / -1.5 dBFS ceiling) from per-track `ebur128` measurements, frozen for the run; the final mix is the unmodified export pipeline (2-pass loudnorm, one AAC encode).
+- **Parity:** once analysis completes the controller runs `FFmpegRenderer.prepare_playlist_audio` -- the export path -- so the final Preview plan *is* the Export plan (`test_fully_analyzed_partial_plan_is_exactly_the_full_compile`, `test_partial_mix_duration_final_parity_and_level_match` with real FFmpeg).
+- **Churn (simulated clock, real planner/scheduler/swap rule, 4 parallel analyses of 15 s each):**
+
+  | tracks | analysis events | plan updates | renders (partial + final) | swaps |
+  |---|---|---|---|---|
+  | 10 | 10 | 10 | 2 | 2 |
+  | 20 | 20 | 20 | 2 | 2 |
+  | 50 | 50 | 50 | 2 | 2 |
+  | 20, fully cached | 20 | 20 | 1 (final only) | 1 |
+
+- **Tests:** `tests/test_automix_progressive.py`, `tests/test_progressive_automix_controller.py`, progressive cases in `tests/test_main_window.py`; full suite 1024 passed / 1 pre-existing failure (`test_real_video_preview_performance`, Windows `WinError 32`, handled in Phase 09).
+- **Known limitations:** editing is locked during Preview, so reorder/remove cannot happen mid-run (a restart of Preview starts a new generation). Partial mixes are FLAC without the 2-pass loudnorm by design.

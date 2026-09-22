@@ -207,7 +207,7 @@ def simulate(count: int, *, analysis_seconds: float = 15.0, workers: int = 4,
     pending = None
     render_done_at = None
     render_plan = None
-    counts = {"analysis_events": 0, "renders": 0, "swaps": 0}
+    counts = {"analysis_events": 0, "plan_updates": 0, "renders": 0, "swaps": 0}
     frontier = 0
     now, step = 0.0, 0.25
     scheduler.playhead_changed(0.0, True)
@@ -218,6 +218,7 @@ def simulate(count: int, *, analysis_seconds: float = 15.0, workers: int = 4,
             counts["analysis_events"] += 1
             if state.frontier() != frontier:
                 frontier = state.frontier()
+                counts["plan_updates"] += 1
                 scheduler.plan_updated(partial_plan(tracks, state, ENABLED), frontier, now)
             scheduler.analysis_complete = state.complete()
         if render_done_at is not None and now >= render_done_at:
@@ -253,12 +254,13 @@ class ProgressiveChurnTests(unittest.TestCase):
             with self.subTest(count=count):
                 counts = simulate(count)
                 self.assertEqual(counts["analysis_events"], count)
+                self.assertLessEqual(counts["plan_updates"], count)  # planning is cheap; only renders are gated
                 self.assertLessEqual(counts["renders"], 4)
                 self.assertLessEqual(counts["swaps"], counts["renders"])
 
     def test_fully_cached_playlist_renders_only_the_final_mix(self) -> None:
         counts = simulate(20, analysis_seconds=0.0)
-        self.assertEqual(counts, {"analysis_events": 20, "renders": 1, "swaps": 1})
+        self.assertEqual(counts, {"analysis_events": 20, "plan_updates": 20, "renders": 1, "swaps": 1})
 
 
 if __name__ == "__main__":
