@@ -53,8 +53,13 @@ from app.services.export_storage_service import (
 )
 from app.dialogs.export_preview_dialog import (
     GPU_TEXTURE_SURFACE_AVAILABLE, TIMELINE_SCALE, ExportPreviewDialog, OverlayFrameWorker,
-    VideoDurationProbeWorker, _BLENDED_AUDIO_TRACK_INDEX,
+    PlaylistTimeline, VideoDurationProbeWorker, _BLENDED_AUDIO_TRACK_INDEX,
+    _transition_display_regions,
 )
+from app.dialogs.preview_preparation_dialog import PreviewPreparationDialog
+from app.controllers.preview_audio_controller import PreviewAudioController
+from app.timeline.render_plan import AudioRenderTransition
+from app.timeline.models import TransitionType
 from app.dialogs.ffmpeg_install_progress_dialog import FFmpegInstallProgressDialog
 from app.widgets.source_template_button import (
     SourceTemplateButton,
@@ -5709,6 +5714,225 @@ class MainWindowSafetyTests(unittest.TestCase):
         finally:
             preview._stop_preview()
             preview.deleteLater()
+
+    # -- AutoMix Preview preparation dialog + timeline ownership --------
+
+    @staticmethod
+    def _automix_plan(track_a: PlaylistTrack, track_b: PlaylistTrack):
+        """A CompiledRenderPlan shaped like a real AutoMix result: two audio
+        clips overlapping 0-100/90-180, but non-overlapping chapter
+        ownership 0-90/90-180 -- the exact shape the reported bug (timeline
+        ownership computed from overlapping clip/window ends) needs."""
+        from app.timeline.render_plan import (
+            AudioRenderClip, AudioRenderPlan, MetadataChapter, MetadataPlan,
+            PresentationPlan, PresentationWindow, CompiledRenderPlan,
+        )
+        clip_a = AudioRenderClip(
+            clip_id="a", track_id=track_a.id, timeline_start=0.0, source_in=0.0, source_out=100.0,
+        )
+        clip_b = AudioRenderClip(
+            clip_id="b", track_id=track_b.id, timeline_start=90.0, source_in=0.0, source_out=90.0,
+        )
+        transition = AudioRenderTransition(
+            clip_a="a", clip_b="b", timeline_start=90.0, duration=10.0, type=TransitionType.AUTOMIX,
+        )
+        windows = (
+            PresentationWindow(track_id=track_a.id, timeline_start=0.0, timeline_end=100.0),
+            PresentationWindow(track_id=track_b.id, timeline_start=90.0, timeline_end=180.0),
+        )
+        chapters = (
+            MetadataChapter(track_id=track_a.id, start=0.0, end=90.0),
+            MetadataChapter(track_id=track_b.id, start=90.0, end=180.0),
+        )
+        return CompiledRenderPlan(
+            audio=AudioRenderPlan(clips=(clip_a, clip_b), transitions=(transition,)),
+            presentation=PresentationPlan(windows=windows),
+            metadata=MetadataPlan(chapters=chapters),
+            duration_seconds=180.0,
+        )
+
+    def test_timeline_track_ownership_is_non_overlapping_despite_automix_audio_overlap(self) -> None:
+        """The bug report: AutoMix audio clips legitimately overlap (0-100 /
+        90-180), but the timeline's track *ownership* regions must not --
+        they must come from MetadataPlan.chapters (0-90 / 90-180), not the
+        raw PresentationWindow/AudioRenderClip end."""
+        track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
+        track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model, [track_a, track_b], self.window.translator,
+            parent=self.window, preferred_backend="cpu",
+        )
+        try:
+            preview._compiled_plan = self._automix_plan(track_a, track_b)
+            schedule = preview._build_track_schedule()
+            self.assertEqual(
+                [(track.id, start, end) for _index, track, start, end in schedule],
+                [(track_a.id, 0.0, 90.0), (track_b.id, 90.0, 180.0)],
+            )
+        finally:
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_transition_display_regions_computes_geometry_from_audio_render_plan(self) -> None:
+        transitions = (
+            AudioRenderTransition(
+                clip_a="a", clip_b="b", timeline_start=90.0, duration=10.0, type=TransitionType.AUTOMIX,
+            ),
+            AudioRenderTransition(
+                clip_a="b", clip_b="c", timeline_start=40.0, duration=3.0, type=TransitionType.CROSSFADE,
+            ),
+            AudioRenderTransition(clip_a="c", clip_b="d", timeline_start=10.0, duration=1.0),  # CUT
+        )
+        regions = _transition_display_regions(transitions)
+        # Sorted by start; the plain CUT transition (no real blend) is excluded.
+        self.assertEqual(
+            regions,
+            ((40.0, 43.0, TransitionType.CROSSFADE), (90.0, 100.0, TransitionType.AUTOMIX)),
+        )
+
+    def test_on_blended_audio_ready_updates_the_timeline_widgets_own_schedule(self) -> None:
+        """Regression: the slider widget caches its own copy of the schedule
+        for paintEvent; _on_blended_audio_ready must push the final,
+        non-overlapping schedule and transition overlay into it too, not
+        just onto the dialog's own _track_schedule attribute."""
+        track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
+        track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model, [track_a, track_b], self.window.translator,
+            parent=self.window, preferred_backend="cpu",
+        )
+        try:
+            plan = self._automix_plan(track_a, track_b)
+            with (
+                patch.object(preview.media_player, "setSource"),
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadingMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=False),
+            ):
+                preview._on_blended_audio_ready(str(Path("blended.m4a").resolve()), plan)
+            self.assertEqual(
+                [(track.id, start, end) for _index, track, start, end in preview.timeline.schedule],
+                [(track_a.id, 0.0, 90.0), (track_b.id, 90.0, 180.0)],
+            )
+            self.assertEqual(
+                preview.timeline._transition_regions,
+                ((90.0, 100.0, TransitionType.AUTOMIX),),
+            )
+        finally:
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_preparation_dialog_is_not_shown_for_sequential_transition_mode(self) -> None:
+        tracks = [PlaylistTrack("a.wav", "A", duration_seconds=3.0)]
+        self.window.playlist_service.replace(tracks)
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="none")
+        with patch.object(
+            self.window.preview_controller, "_prepare_blended_preview_audio",
+        ) as prepare:
+            self.window.preview_controller.show_export_preview(tracks)
+        prepare.assert_not_called()
+        try:
+            self.assertIsNone(self.window._inline_preview._blended_audio_controller)
+        finally:
+            self.window._finish_inline_preview()
+
+    def test_preparation_dialog_waits_then_opens_preview_already_on_the_final_plan(self) -> None:
+        """The default path: the preparation dialog runs to completion, and
+        Preview then opens with the final AutoMix plan/timeline from the
+        first frame -- no sequential-then-AutoMix jump."""
+        track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
+        track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)
+        tracks = [track_a, track_b]
+        self.window.playlist_service.replace(tracks)
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="automix")
+        with TemporaryDirectory(prefix="playlist-fake-ffmpeg-") as directory:
+            fake_ffmpeg = Path(directory) / "ffmpeg.exe"
+            fake_ffmpeg.touch()
+            self.window.settings_service.save(
+                replace(self.window.settings_service.current, ffmpeg_path=str(fake_ffmpeg)),
+            )
+            plan = self._automix_plan(track_a, track_b)
+            blended_path = Path(directory) / "blended.m4a"
+            blended_path.touch()
+
+            def fake_start(self, _tracks, _directory, _mode, _seconds):
+                self.audio_ready.emit(str(blended_path), plan)
+
+            with (
+                patch.object(PreviewAudioController, "start", fake_start),
+                patch.object(PreviewPreparationDialog, "exec", return_value=QDialog.DialogCode.Accepted),
+            ):
+                self.window.preview_controller.show_export_preview(tracks)
+            try:
+                preview = self.window._inline_preview
+                self.assertIsNotNone(preview)
+                self.assertEqual(preview._blended_audio_path, blended_path)
+                self.assertIsNone(preview._blended_audio_controller)
+                self.assertEqual(
+                    [(track.id, start, end) for _index, track, start, end in preview._track_schedule],
+                    [(track_a.id, 0.0, 90.0), (track_b.id, 90.0, 180.0)],
+                )
+                self.assertEqual(preview.timeline.maximum(), round(180.0 * TIMELINE_SCALE))
+            finally:
+                self.window._finish_inline_preview()
+
+    def test_start_without_waiting_adopts_the_running_controller_and_preserves_playhead(self) -> None:
+        """"Start Without Waiting": Preview opens immediately on the
+        sequential plan, using the SAME still-running PreviewAudioController
+        (no duplicate render). The previously-fixed hot-swap machinery then
+        takes over once that controller's render actually finishes, and the
+        user's playhead survives the swap."""
+        track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
+        track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)
+        tracks = [track_a, track_b]
+        self.window.playlist_service.replace(tracks)
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="automix")
+        with TemporaryDirectory(prefix="playlist-fake-ffmpeg-") as directory:
+            fake_ffmpeg = Path(directory) / "ffmpeg.exe"
+            fake_ffmpeg.touch()
+            self.window.settings_service.save(
+                replace(self.window.settings_service.current, ffmpeg_path=str(fake_ffmpeg)),
+            )
+
+            def fake_skip_exec(self) -> int:
+                self.skipped = True
+                return QDialog.DialogCode.Rejected
+
+            with (
+                patch.object(PreviewAudioController, "start") as start,
+                patch.object(PreviewPreparationDialog, "exec", fake_skip_exec),
+            ):
+                self.window.preview_controller.show_export_preview(tracks)
+                start.assert_called_once()
+            try:
+                preview = self.window._inline_preview
+                self.assertIsNotNone(preview)
+                self.assertIsNone(preview._blended_audio_path)
+                self.assertIsNotNone(preview._blended_audio_controller)
+                # The adopted controller was not restarted a second time.
+                start.assert_called_once()
+
+                # Seek near the end and start playing, then simulate the
+                # adopted controller's render finishing -- same regression
+                # as the near-end AutoMix transition hot-swap fix.
+                preview._playing = True
+                preview.timeline.setValue(round(85.0 * TIMELINE_SCALE))
+                plan = self._automix_plan(track_a, track_b)
+                blended_path = Path(directory) / "blended.m4a"
+                blended_path.touch()
+                with (
+                    patch.object(preview.media_player, "setSource"),
+                    patch.object(preview.media_player, "setPosition") as set_position,
+                    patch.object(preview.media_player, "play"),
+                    patch.object(preview.media_player, "mediaStatus",
+                                  return_value=QMediaPlayer.MediaStatus.LoadingMedia),
+                    patch.object(preview.media_player, "isSeekable", return_value=False),
+                ):
+                    preview._blended_audio_controller.audio_ready.emit(str(blended_path), plan)
+                set_position.assert_not_called()  # deferred until seekable, per the hot-swap fix
+                self.assertAlmostEqual(preview._playhead_seconds, 85.0, places=2)
+            finally:
+                self.window._finish_inline_preview()
 
     def test_track_lyrics_dialog_previews_audio_with_synchronized_lyrics(self) -> None:
         saved_volumes: list[int] = []

@@ -105,6 +105,8 @@ class PreviewAudioController(QObject):
     audio_ready = Signal(str, object)
     """Emits the rendered audio file's path."""
     audio_failed = Signal(str)
+    progress = Signal(str, float, str)
+    """Forwards the active worker's (stage, fraction, message) progress, if any."""
 
     def __init__(self, renderer: FFmpegRenderer, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -138,6 +140,7 @@ class PreviewAudioController(QObject):
             if not worker._cancel_event.is_set() else None
         )
         worker.finished.connect(lambda: self._forget(worker))
+        worker.progress.connect(self.progress.emit)
         self._worker = worker
         worker.start()
 

@@ -16,6 +16,8 @@ audit -- out of scope for this mechanical MainWindow decomposition.
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
@@ -109,13 +111,27 @@ class PreviewController:
             ).executable
         except FFmpegNotFoundError:
             pass
+        transition_mode = window.project_settings.transition_mode
+        crossfade_seconds = window.project_settings.crossfade_seconds
+        preloaded_blended_audio = None
+        blended_audio_controller = None
+        blended_audio_temp_dir = None
+        if transition_mode != "none" and executable is not None and tracks:
+            preloaded_blended_audio, blended_audio_controller, blended_audio_temp_dir = (
+                self._prepare_blended_preview_audio(
+                    tracks, executable, transition_mode, crossfade_seconds,
+                )
+            )
         preview = ExportPreviewDialog(
             window.canvas.scene_model, tracks, window.translator,
             window._export_visualizers(tracks), executable, window, source_store=window.store,
             embedded=True,
             preferred_backend=window._preview_backend_for_session,
-            transition_mode=window.project_settings.transition_mode,
-            crossfade_seconds=window.project_settings.crossfade_seconds,
+            transition_mode=transition_mode,
+            crossfade_seconds=crossfade_seconds,
+            preloaded_blended_audio=preloaded_blended_audio,
+            blended_audio_controller=blended_audio_controller,
+            blended_audio_temp_dir=blended_audio_temp_dir,
         )
         controls_page = preview.build_embedded_controls_page()
         window._inline_preview = preview
@@ -150,6 +166,73 @@ class PreviewController:
         )
         preview.show()
         preview.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _prepare_blended_preview_audio(
+        self, tracks: list, executable, transition_mode: str, crossfade_seconds: float,
+    ) -> tuple[tuple[Path, object] | None, object | None, TemporaryDirectory | None]:
+        """Render blended preview audio behind a preparation dialog before Preview opens.
+
+        Blocks this call (via QDialog.exec(), which keeps Qt's event loop --
+        and this dialog's own repaints and its "Start Without Waiting"
+        button -- alive) until either the render finishes or the user skips
+        the wait. Returns ``(preloaded, controller, temp_dir)``:
+
+        - ``preloaded`` is ``(path, plan)`` if the render finished before the
+          dialog closed, so the caller can open Preview already on the final
+          plan instead of the sequential one.
+        - ``controller`` is the still-running PreviewAudioController if the
+          user skipped while it was rendering, so the caller can hand it to
+          ExportPreviewDialog to adopt (same worker, no duplicate render)
+          instead of starting a second one.
+        - ``temp_dir`` backs whichever of the above is not None, and must
+          stay alive (owned by ExportPreviewDialog from here on) for as long
+          as the rendered file might still be read.
+
+        On failure, returns ``(None, None, None)`` -- the render is
+        abandoned entirely and ExportPreviewDialog falls back to its normal
+        best-effort background render, exactly as when a render fails
+        mid-preview.
+        """
+        from app.controllers.preview_audio_controller import PreviewAudioController
+        from app.dialogs.preview_preparation_dialog import PreviewPreparationDialog
+        from app.renderer.ffmpeg_renderer import FFmpegRenderer
+
+        window = self.window
+        temp_dir = TemporaryDirectory(prefix="playlist-preview-audio-")
+        controller = PreviewAudioController(FFmpegRenderer(executable), window)
+        dialog = PreviewPreparationDialog(window.translator, window)
+        result: dict[str, tuple[Path, object]] = {}
+
+        def on_ready(path_str: str, plan: object) -> None:
+            result["preloaded"] = (Path(path_str), plan)
+            dialog.accept()
+
+        def on_failed(_message: str) -> None:
+            dialog.accept()
+
+        controller.audio_ready.connect(on_ready)
+        controller.audio_failed.connect(on_failed)
+        controller.progress.connect(dialog.set_progress)
+        controller.start(tracks, Path(temp_dir.name), transition_mode, crossfade_seconds)
+        dialog.exec()
+        controller.audio_ready.disconnect(on_ready)
+        controller.audio_failed.disconnect(on_failed)
+        controller.progress.disconnect(dialog.set_progress)
+        dialog.deleteLater()
+
+        if "preloaded" in result:
+            # The render already finished and forgot its own worker; nothing
+            # further to adopt, so release the empty controller shell.
+            controller.deleteLater()
+            return result["preloaded"], None, temp_dir
+        if dialog.skipped:
+            return None, controller, temp_dir
+        # The render failed outright (audio_failed) or the dialog closed some
+        # other way: nothing to hand off, so let ExportPreviewDialog try its
+        # own normal background render from scratch.
+        controller.shutdown()
+        temp_dir.cleanup()
+        return None, None, None
 
     def lock_editor_for_inline_preview(self) -> None:
         """Lock project mutation while keeping bottom mode tabs interactive."""

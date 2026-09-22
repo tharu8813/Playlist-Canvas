@@ -57,6 +57,8 @@ from app.services.source_store import SourceStore
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.services.playlist_service import PlaylistService
 from app.timeline.compiler import compile_playlist
+from app.timeline.models import TransitionType
+from app.timeline.render_plan import AudioRenderTransition, CompiledRenderPlan
 from app.preview.album_art import extract_track_cover
 from app.video.timeline import resolve_video_position, source_video_paths
 from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
@@ -67,6 +69,33 @@ from app.utils.i18n import Language, Translator
 TIMELINE_SCALE = 100
 _BLENDED_AUDIO_TRACK_INDEX = -2
 """Sentinel for `_active_track_index` when playing the pre-rendered AutoMix/crossfade mix."""
+_TRANSITION_TYPE_LABELS = {
+    TransitionType.CROSSFADE: "Crossfade",
+    TransitionType.BEAT_MATCH: "Beat Match",
+    TransitionType.AUTOMIX: "AutoMix",
+}
+
+
+def _transition_display_regions(
+    transitions: tuple[AudioRenderTransition, ...],
+) -> tuple[tuple[float, float, TransitionType], ...]:
+    """(start_seconds, end_seconds, type) per transition, sorted by start.
+
+    Kept as a pure function of `AudioRenderPlan.transitions` -- the single
+    source of truth for transition timing -- separate from
+    ``PlaylistTimeline.paintEvent``'s pixel math, so the region computation
+    is testable without constructing a live QWidget.
+    """
+    return tuple(
+        sorted(
+            (
+                (transition.timeline_start, transition.timeline_start + transition.duration, transition.type)
+                for transition in transitions
+                if transition.type != TransitionType.CUT
+            ),
+            key=lambda region: region[0],
+        )
+    )
 LOGGER = logging.getLogger(__name__)
 OverlaySignature = tuple[int, ...]
 
@@ -113,18 +142,34 @@ class PlaylistTimeline(QSlider):
 
     ``schedule`` is the same (index, track, start, end) tuple
     ExportPreviewDialog derives once from CompiledRenderPlan's
-    PresentationPlan, so Preview and this ruler can never disagree on track
-    boundaries, and paintEvent (called every repaint) never recompiles it.
+    MetadataPlan.chapters (non-overlapping presentation ownership, not raw
+    AudioRenderClip/PresentationWindow end -- AutoMix audio clips overlap on
+    purpose, but track *ownership* must not), so Preview and this ruler can
+    never disagree on track boundaries, and paintEvent (called every
+    repaint) never recompiles it. ``set_schedule`` updates both this and the
+    transition overlay together when the fast-path AutoMix render replaces
+    the plan mid-preview.
     """
 
     def __init__(
         self, schedule: tuple[tuple[int, PlaylistTrack, float, float], ...],
+        transitions: tuple[AudioRenderTransition, ...] = (),
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.schedule = schedule
+        self._transition_regions = _transition_display_regions(transitions)
         self._dragging = False
         self.setMinimumHeight(42)
+
+    def set_schedule(
+        self, schedule: tuple[tuple[int, PlaylistTrack, float, float], ...],
+        transitions: tuple[AudioRenderTransition, ...] = (),
+    ) -> None:
+        """Replace track boundaries and the transition overlay, then repaint."""
+        self.schedule = schedule
+        self._transition_regions = _transition_display_regions(transitions)
+        self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         super().paintEvent(event)
@@ -134,8 +179,27 @@ class PlaylistTimeline(QSlider):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         usable_width = max(1, self.width() - 18)
         windows = self.schedule
+
+        def x_at(seconds: float) -> int:
+            return 9 + round(seconds / total * usable_width)
+
+        band_y = self.height() - 8
+        for start, end, transition_type in self._transition_regions:
+            x0, x1 = x_at(start), x_at(end)
+            if x1 <= x0:
+                continue
+            band_rect = QRect(x0, band_y, x1 - x0, 6)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 191, 92, 170))
+            painter.drawRoundedRect(band_rect, 3, 3)
+            if x1 - x0 >= 34:
+                painter.setPen(QColor("#4A330A"))
+                painter.drawText(
+                    band_rect, Qt.AlignmentFlag.AlignCenter,
+                    _TRANSITION_TYPE_LABELS.get(transition_type, "MIX"),
+                )
         for index, (_schedule_index, _track, start, end) in enumerate(windows, start=1):
-            x = 9 + round(start / total * usable_width)
+            x = x_at(start)
             active = start <= current_seconds < end or (
                 index == len(windows) and current_seconds >= start
             )
@@ -359,7 +423,10 @@ class ExportPreviewDialog(QDialog):
                  embedded: bool = False,
                  preferred_backend: str = "gpu_layers",
                  transition_mode: str = "none",
-                 crossfade_seconds: float = 3.0) -> None:
+                 crossfade_seconds: float = 3.0,
+                 preloaded_blended_audio: tuple[Path, CompiledRenderPlan] | None = None,
+                 blended_audio_controller: PreviewAudioController | None = None,
+                 blended_audio_temp_dir: TemporaryDirectory | None = None) -> None:
         super().__init__(parent)
         self.embedded = embedded
         self.preferred_backend = (
@@ -372,7 +439,15 @@ class ExportPreviewDialog(QDialog):
             self.setWindowFlags(Qt.WindowType.Widget)
         self.scene = scene
         self.tracks = tracks
-        self._compiled_plan = compile_playlist(tracks)
+        # A caller that already ran the AutoMix/crossfade preparation dialog
+        # to completion hands over the final plan directly, so the timeline
+        # and track boundaries below are final from the very first frame
+        # instead of starting sequential and jumping once blended audio
+        # arrives later.
+        self._compiled_plan = (
+            preloaded_blended_audio[1] if preloaded_blended_audio is not None
+            else compile_playlist(tracks)
+        )
         self._track_schedule = self._build_track_schedule()
         self._track_schedule_starts = tuple(
             start for _index, _track, start, _end in self._track_schedule
@@ -394,10 +469,26 @@ class ExportPreviewDialog(QDialog):
         )
         self._transition_mode = transition_mode
         self._crossfade_seconds = crossfade_seconds
-        self._blended_audio_path: Path | None = None
-        self._blended_audio_temp_dir: TemporaryDirectory | None = None
+        self._blended_audio_path: Path | None = (
+            preloaded_blended_audio[0] if preloaded_blended_audio is not None else None
+        )
+        self._blended_audio_temp_dir: TemporaryDirectory | None = blended_audio_temp_dir
         self._blended_audio_controller: PreviewAudioController | None = None
-        if self._transition_mode != "none" and self._preview_proxy_ffmpeg is not None and self.tracks:
+        if preloaded_blended_audio is not None:
+            # Already the final render (see above) -- nothing left to prepare.
+            pass
+        elif blended_audio_controller is not None:
+            # The caller's preparation dialog was skipped ("Start Without
+            # Waiting") while this controller's render was still in flight.
+            # Adopt the same running worker instead of starting a second,
+            # duplicate render: reparenting and reconnecting its signals
+            # here means _stop_preview()'s existing shutdown() call is the
+            # only lifecycle code this path needs.
+            self._blended_audio_controller = blended_audio_controller
+            blended_audio_controller.setParent(self)
+            blended_audio_controller.audio_ready.connect(self._on_blended_audio_ready)
+            blended_audio_controller.audio_failed.connect(self._on_blended_audio_failed)
+        elif self._transition_mode != "none" and self._preview_proxy_ffmpeg is not None and self.tracks:
             self._blended_audio_temp_dir = TemporaryDirectory(prefix="playlist-preview-audio-")
             self._blended_audio_controller = PreviewAudioController(
                 FFmpegRenderer(self._preview_proxy_ffmpeg), self,
@@ -607,7 +698,7 @@ class ExportPreviewDialog(QDialog):
         self._last_active_decoder_count = 0
         self._last_gpu_dropped_frames = 0
         self.play_timer.setInterval(max(8, round(1000 / self.preview_fps)))
-        self.timeline = PlaylistTimeline(self._track_schedule)
+        self.timeline = PlaylistTimeline(self._track_schedule, self._compiled_plan.audio.transitions)
         self.timeline.setObjectName("previewTimeline")
         self.timeline.setRange(0, max(1, ceil(self._playlist_duration() * TIMELINE_SCALE)))
         self.time_label = QLabel()
@@ -864,17 +955,24 @@ class ExportPreviewDialog(QDialog):
     def _build_track_schedule(
         self,
     ) -> tuple[tuple[int, PlaylistTrack, float, float], ...]:
-        """Build immutable sequential start/end boundaries for fast lookup.
+        """Build immutable, non-overlapping track-ownership boundaries for fast lookup.
 
-        Sourced from the same PresentationPlan Export reads, so Preview and
-        Export can never derive a different track boundary for the same
-        playlist. PresentationWindow only carries track_id, so the
-        PlaylistTrack object is resolved back by id.
+        Sourced from CompiledRenderPlan.metadata.chapters -- the same
+        chapter/timestamp boundaries Export and previous/next navigation
+        already use -- rather than PresentationWindow.timeline_end directly.
+        A window's own timeline_end is its clip's actual audio end, which
+        AutoMix deliberately extends past the next window's start so two
+        clips overlap during a transition; a chapter's end is instead
+        clamped to the next chapter's start (or the plan duration for the
+        last one), so track-ownership regions here never overlap even when
+        the underlying audio does. PresentationWindow only carries
+        track_id, so the PlaylistTrack object is resolved back by id.
         """
         track_by_id = {track.id: track for track in self.tracks}
+        plan = getattr(self, "_compiled_plan", None) or compile_playlist(self.tracks)
         return tuple(
-            (index, track_by_id[window.track_id], window.timeline_start, window.timeline_end)
-            for index, window in enumerate((getattr(self, "_compiled_plan", None) or compile_playlist(self.tracks)).presentation.windows)
+            (index, track_by_id[chapter.track_id], chapter.start, chapter.end)
+            for index, chapter in enumerate(plan.metadata.chapters)
         )
 
     def _track_at(self, playlist_seconds: float) -> tuple[int, PlaylistTrack, float, float] | None:
@@ -3207,11 +3305,18 @@ class ExportPreviewDialog(QDialog):
         self._track_schedule_starts = tuple(row[2] for row in self._track_schedule)
         self._playlist_duration_cache = plan.duration_seconds
         self._blended_audio_path = Path(path_str)
+        # Only ever shorten the playhead to fit a shorter final plan; never
+        # otherwise move it -- a fast-path plan replacement must not reset
+        # or jump the timeline the user is already watching.
         self._playhead_seconds = min(self._playhead_seconds, plan.duration_seconds)
         self.timeline.blockSignals(True)
         self.timeline.setRange(0, max(1, ceil(plan.duration_seconds * TIMELINE_SCALE)))
         self.timeline.setValue(round(self._playhead_seconds * TIMELINE_SCALE))
         self.timeline.blockSignals(False)
+        # The slider widget caches its own copy of the schedule/transition
+        # overlay for paintEvent; without this it kept drawing the initial
+        # sequential boundaries even after the final AutoMix plan arrived.
+        self.timeline.set_schedule(self._track_schedule, plan.audio.transitions)
         self._populate_track_list()
         self._base_track_id = ""
         self._force_video_seek = True

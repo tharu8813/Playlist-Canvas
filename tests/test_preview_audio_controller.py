@@ -92,6 +92,20 @@ class PreviewAudioControllerTests(unittest.TestCase):
         controller._forget(worker)
         self.assertIsNone(controller._worker)
 
+    def test_start_forwards_worker_progress_to_the_controllers_own_signal(self) -> None:
+        """The preparation dialog subscribes to PreviewAudioController.progress,
+        not to the internal worker directly, so start() must forward it."""
+        controller = PreviewAudioController(_renderer())
+        received: list[tuple[str, float, str]] = []
+        controller.progress.connect(lambda stage, fraction, message: received.append(
+            (stage, fraction, message),
+        ))
+        with patch.object(_PreviewAudioWorker, "start", lambda self: self.progress.emit(
+            "Preparing audio", 0.2, "Rendering AutoMix transitions",
+        )):
+            controller.start([_track("a.mp3")], Path("."), "automix", 3.0)
+        self.assertEqual(received, [("Preparing audio", 0.2, "Rendering AutoMix transitions")])
+
     def test_cancel_survives_an_already_deleted_qt_object(self) -> None:
         class _DeletedWorker:
             def isRunning(self) -> bool:
