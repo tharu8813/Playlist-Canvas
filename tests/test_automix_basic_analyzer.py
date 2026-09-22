@@ -159,7 +159,7 @@ class BasicAnalysisProviderTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             provider.analyze(track, cancel_event=threading.Event())
 
-    def test_key_energy_and_vocal_activity_are_populated_for_a_tonal_signal(self) -> None:
+    def test_key_and_energy_are_populated_for_a_tonal_signal(self) -> None:
         provider = BasicAnalysisProvider(Path("ffmpeg"))
         signal = _tone_signal(440.0, 10.0)
         result = self._analyze_signal(provider, signal, duration=10.0)
@@ -180,25 +180,12 @@ class BasicAnalysisProviderTests(unittest.TestCase):
         self.assertIsNone(result.energy)
         self.assertEqual(result.vocal_activity, ())
 
-    def test_tone_inside_the_vocal_band_is_detected_as_sustained_activity(self) -> None:
-        windows = BasicAnalysisProvider._vocal_activity_windows(_tone_signal(1000.0, 6.0), 6.0)
-        self.assertTrue(windows)
-        total_active = sum(end - start for start, end in windows)
-        self.assertGreater(total_active, 4.0)
-
-    def test_tone_outside_the_vocal_band_is_not_detected_as_activity(self) -> None:
-        windows = BasicAnalysisProvider._vocal_activity_windows(_tone_signal(9000.0, 6.0), 6.0)
-        self.assertEqual(windows, ())
-
-    def test_vocal_activity_windows_are_valid_track_analysis_spans(self) -> None:
+    def test_no_vocal_activity_is_guessed_from_the_voice_band(self) -> None:
+        # A 1 kHz tone sits squarely in the old 300-3400 Hz "voice band" heuristic,
+        # which real vocal stems showed to be inverted; vocals stay unknown.
         provider = BasicAnalysisProvider(Path("ffmpeg"))
-        signal = _tone_signal(1000.0, 8.0)
-        result = self._analyze_signal(provider, signal, duration=8.0)
-        for start, end in result.vocal_activity:
-            self.assertGreaterEqual(start, 0.0)
-            self.assertLess(start, end)
-            self.assertLessEqual(end, 8.0)
-
+        result = self._analyze_signal(provider, _tone_signal(1000.0, 8.0), duration=8.0)
+        self.assertEqual(result.vocal_activity, ())
 
 class AudibleBoundsTests(unittest.TestCase):
     def test_trailing_and_leading_silence_are_excluded_but_a_decay_is_not(self) -> None:

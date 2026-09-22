@@ -78,9 +78,9 @@ class SelectTransitionDspTests(unittest.TestCase):
         self.assertIs(self.select(outgoing=outgoing, incoming=incoming), TransitionDsp.BASS_SWAP)
 
     def test_incoming_vocal_window_uses_the_incoming_source_span(self) -> None:
-        # 8 s of timeline at 1.25x consumes 10 s of source: a vocal at 9 s is inside.
-        outgoing = _analysis("a", vocal_activity=((101.0, 104.0),))
-        incoming = _analysis("b", vocal_activity=((9.0, 12.0),))
+        # 8 s of timeline at 1.25x consumes 10 s of source: a vocal from 8 s is inside.
+        outgoing = _analysis("a", vocal_activity=((100.0, 108.0),))
+        incoming = _analysis("b", vocal_activity=((8.0, 12.0),))
         self.assertIs(self.select(_candidate(incoming_rate=1.25), outgoing=outgoing, incoming=incoming),
                       TransitionDsp.VOCAL_SAFE_EQ)
         self.assertIs(self.select(_candidate(incoming_rate=1.0), outgoing=outgoing, incoming=incoming),
@@ -115,7 +115,7 @@ class SelectTransitionDspTests(unittest.TestCase):
 
     def test_selection_is_deterministic(self) -> None:
         outgoing = _analysis("a", vocal_activity=((102.0, 106.0),), key="C major", energy=0.4)
-        incoming = _analysis("b", vocal_activity=((1.0, 2.0),), key="A minor", energy=0.5)
+        incoming = _analysis("b", vocal_activity=((1.0, 8.0),), key="A minor", energy=0.5)
         results = {self.select(outgoing=replace(outgoing), incoming=replace(incoming)) for _ in range(20)}
         self.assertEqual(results, {TransitionDsp.VOCAL_SAFE_EQ})
 
@@ -204,7 +204,7 @@ class DecisionReasonTests(unittest.TestCase):
         )
         self.assertEqual(decision.reasons[1:], (
             "+ beat_aligned_crossfade (own tempo)",
-            "- vocals active in both transition windows",
+            "- vocals overlap for 100% of the window (default handoff)",
             "+ keys compatible (C major -> G major)",
             "+ global energy delta 0.08",
             "  tempo delta 1.6%",
@@ -221,6 +221,49 @@ class DecisionReasonTests(unittest.TestCase):
         self.assertNotIn("\n", line)
         self.assertTrue(line.startswith("Song A -> Song B time=172.4s duration=8.0s type=beat_match dsp=bass_swap "))
         self.assertIn("reasons=[* bass_swap: clean reliable beat match; + beat_match (rate-matched); ", line)
+
+
+class LocalVocalTests(unittest.TestCase):
+    """Phase 05: where in the window each side sings, not just whether it does."""
+
+    def decide(self, outgoing_spans, incoming_spans, candidate=None):
+        return select_transition_dsp(
+            candidate or _candidate(), _compatibility(),
+            _analysis("a", vocal_activity=outgoing_spans), _analysis("b", vocal_activity=incoming_spans),
+        )
+
+    def test_a_line_that_ends_before_the_next_one_starts_is_no_clash(self) -> None:
+        decision = self.decide(((90.0, 103.0),), ((5.0, 30.0),))  # out: first 3/8, in: last 3/8
+        self.assertIs(decision.dsp, TransitionDsp.BASS_SWAP)
+        self.assertIn("+ vocals hand over without singing together", decision.reasons)
+        self.assertEqual(dict(decision.metrics)["vocal_overlap"], 0.0)
+
+    def test_one_sided_vocals_are_no_clash(self) -> None:
+        decision = self.decide(((90.0, 108.0),), ((40.0, 60.0),))  # incoming sings only after the window
+        self.assertIs(decision.dsp, TransitionDsp.BASS_SWAP)
+        self.assertIn("+ vocals on at most one side of the window", decision.reasons)
+
+    def test_unknown_vocals_are_never_read_as_no_vocals(self) -> None:
+        decision = self.decide((), ((0.0, 8.0),))
+        self.assertIn("? vocal activity unknown", decision.reasons)
+        self.assertIsNone(dict(decision.metrics)["vocal_overlap"])
+
+    def test_the_voice_hands_over_where_the_least_singing_is_cut(self) -> None:
+        late_clash = self.decide(((90.0, 120.0),), ((6.0, 30.0),))  # both sing only in the last quarter
+        self.assertIs(late_clash.dsp, TransitionDsp.VOCAL_SAFE_EQ)
+        self.assertEqual(late_clash.vocal_handoff, 0.75)
+        early_clash = self.decide(((90.0, 102.0),), ((0.0, 30.0),))  # outgoing stops a quarter in
+        self.assertEqual(early_clash.vocal_handoff, 0.25)
+        balanced = self.decide(((90.0, 120.0),), ((0.0, 30.0),))  # sung throughout: keep the default
+        self.assertIs(balanced.dsp, TransitionDsp.VOCAL_SAFE_EQ)
+        self.assertIsNone(balanced.vocal_handoff)
+
+    def test_key_clash_alone_keeps_the_default_handoff(self) -> None:
+        decision = select_transition_dsp(
+            _candidate(), _compatibility(), _analysis("a", key="C major"), _analysis("b", key="F# major"),
+        )
+        self.assertIs(decision.dsp, TransitionDsp.VOCAL_SAFE_EQ)
+        self.assertIsNone(decision.vocal_handoff)
 
 
 if __name__ == "__main__":

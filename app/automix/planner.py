@@ -331,7 +331,7 @@ def _plan_overlap(
     transition = AudioRenderTransition(
         clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
         timeline_start=timeline_start, duration=overlap, type=transition_type,
-        dsp=decision.dsp, dsp_reasons=decision.reasons, details=details,
+        dsp=decision.dsp, dsp_reasons=decision.reasons, details=details, vocal_handoff=decision.vocal_handoff,
     )
     # One line per transition in the app log, for tuning against real music.
     if log_diagnostics:

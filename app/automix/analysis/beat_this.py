@@ -105,7 +105,7 @@ class BeatThisAnalysisProvider:
     """
 
     provider_id = "beat_this"
-    version = "2"
+    version = "3"
     """This *implementation's* version: bump it if the confidence
     calibration or output mapping in this module changes in a way that
     should invalidate previously cached results, independent of the
@@ -116,7 +116,8 @@ class BeatThisAnalysisProvider:
     change or a package upgrade also invalidates old cache entries without
     a manual version bump here. "2": the model reads the FFmpeg-decoded
     signal (any format FFmpeg reads, e.g. AAC/M4A) instead of loading the file
-    itself, plus BasicAnalysisProvider "3"'s audible bounds."""
+    itself, plus BasicAnalysisProvider "3"'s audible bounds. "3": basic "4" (no
+    voice-band vocal guess)."""
 
     def __init__(
         self, ffmpeg_executable: Path, *,

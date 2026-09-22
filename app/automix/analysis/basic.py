@@ -22,12 +22,14 @@ this analyzer:
   modifier later, never a blocker or an automatic pitch-shift trigger.
 - energy: RMS relative to a documented reference level, not a loudness
   (LUFS) measurement -- see ENERGY_REFERENCE_RMS.
-- vocal_activity: a coarse heuristic (energy concentrated in the
-  ~300-3400 Hz "voice band" for a sustained window), not a real vocal
-  detector. It will false-positive on vocal-heavy instrumentation and
-  false-negative on sibilant or breathy vocals recorded outside that
-  band; it exists only to avoid the most obvious vocal-on-vocal clashes,
-  per roadmap Phase 7 section 5's "lightweight" tier.
+- vocal_activity: deliberately left empty (unknown). Version 2 guessed it
+  from the share of energy in the 300-3400 Hz "voice band"; checked against
+  real vocal stems (AutoMix roadmap Phase 02/05) that share was *higher* in
+  the songs' instrumental seconds than in their sung ones (median 0.53 vs
+  0.25 and 0.68 vs 0.13), recall was 0.06-0.36, and 10-12 % of pure
+  instrumentals were flagged -- no threshold fixes an inverted signal. An
+  unknown value never triggers or penalizes anything; a real detector (e.g.
+  a vocal stem) can fill the field later.
 """
 
 from __future__ import annotations
@@ -66,12 +68,6 @@ PROVISIONAL_METER_CONFIDENCE = 0.3
 ENERGY_REFERENCE_RMS = 0.3
 """RMS of a loud, modern pop/EDM master, used only as a normalization
 reference -- not a loudness standard. energy = min(1.0, rms / this)."""
-
-VOCAL_BAND_HZ = (300.0, 3400.0)
-"""The classic telephone-bandwidth approximation of where vocal
-fundamentals and formants concentrate; a coarse proxy, not a vocal model."""
-VOCAL_HOP_SECONDS = 1.0
-VOCAL_BAND_RATIO_THRESHOLD = 0.35
 
 AUDIBLE_BLOCK_SECONDS = 0.05
 AUDIBLE_FLOOR_DB = -40.0
@@ -130,11 +126,11 @@ class BasicAnalysisProvider:
     """The always-available default AnalysisProvider (see AnalysisProvider Protocol)."""
 
     provider_id = "basic"
-    version = "3"
+    version = "4"
     """Bumped from "1": Phase 7 added key/energy/vocal_activity to the
     output, which invalidates any cache entry from before those fields
     existed (see app/automix/cache.py -- analyzer_version is part of the
-    cache key). "3": audible start/end bounds."""
+    cache key). "3": audible start/end bounds. "4": no voice-band vocal guess."""
 
     def __init__(self, ffmpeg_executable: Path) -> None:
         self.ffmpeg_executable = Path(ffmpeg_executable)
@@ -193,7 +189,6 @@ class BasicAnalysisProvider:
         report(0.8, "Estimating key and energy")
         key, key_confidence = self._estimate_key(signal)
         energy = self._estimate_energy(signal)
-        vocal_activity = self._vocal_activity_windows(signal, duration_seconds)
         audible_start, audible_end = audible_bounds(signal, duration_seconds)
 
         report(0.9, "Validating result")
@@ -207,7 +202,7 @@ class BasicAnalysisProvider:
             meter_denominator=4 if len(downbeats) else None,
             meter_confidence=meter_confidence,
             key=key, key_confidence=key_confidence,
-            energy=energy, vocal_activity=vocal_activity,
+            energy=energy,
             audible_start_seconds=audible_start, audible_end_seconds=audible_end,
             analyzer_id=self.provider_id, analyzer_version=self.version,
         )
@@ -320,34 +315,3 @@ class BasicAnalysisProvider:
         """RMS relative to ENERGY_REFERENCE_RMS -- a documented heuristic, not LUFS."""
         rms = float(np.sqrt(np.mean(np.square(signal))))
         return max(0.0, min(1.0, rms / ENERGY_REFERENCE_RMS))
-
-    @staticmethod
-    def _vocal_activity_windows(
-        signal: np.ndarray, duration_seconds: float,
-    ) -> tuple[tuple[float, float], ...]:
-        """Coarse "voice band energy dominant" windows -- see module docstring."""
-        hop = int(VOCAL_HOP_SECONDS * SAMPLE_RATE)
-        if hop <= 0 or len(signal) < hop:
-            return ()
-        windows: list[tuple[float, float]] = []
-        active_start: float | None = None
-        low_hz, high_hz = VOCAL_BAND_HZ
-        for start in range(0, len(signal), hop):
-            segment = signal[start:start + hop]
-            if len(segment) == 0:
-                continue
-            spectrum = np.abs(np.fft.rfft(segment))
-            freqs = np.fft.rfftfreq(len(segment), 1.0 / SAMPLE_RATE)
-            band_mask = (freqs >= low_hz) & (freqs <= high_hz)
-            total_energy = float(np.sum(spectrum ** 2))
-            band_ratio = float(np.sum(spectrum[band_mask] ** 2)) / total_energy if total_energy > 0.0 else 0.0
-            timestamp = start / SAMPLE_RATE
-            if band_ratio >= VOCAL_BAND_RATIO_THRESHOLD:
-                if active_start is None:
-                    active_start = timestamp
-            elif active_start is not None:
-                windows.append((active_start, min(timestamp, duration_seconds)))
-                active_start = None
-        if active_start is not None and active_start < duration_seconds:
-            windows.append((active_start, duration_seconds))
-        return tuple(window for window in windows if window[1] > window[0])

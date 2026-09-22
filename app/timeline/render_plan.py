@@ -80,6 +80,9 @@ class AudioRenderTransition:
     dsp: TransitionDsp | None = None
     dsp_reasons: tuple[str, ...] = ()
     details: tuple[tuple[str, object], ...] = ()
+    vocal_handoff: float | None = None
+    """VOCAL_SAFE_EQ: where (0..1 of the window) the mid band hands over;
+    ``None`` is the style's default. Chosen by the planner, rendered as is."""
 
 
 @dataclass(frozen=True, slots=True)

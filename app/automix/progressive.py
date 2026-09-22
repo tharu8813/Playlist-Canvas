@@ -131,7 +131,7 @@ def divergence_seconds(old: CompiledRenderPlan, new: CompiledRenderPlan) -> floa
         break
 
     def windows(plan):
-        return {(t.timeline_start, t.duration, t.type, t.dsp) for t in plan.audio.transitions}
+        return {(t.timeline_start, t.duration, t.type, t.dsp, t.vocal_handoff) for t in plan.audio.transitions}
 
     points.extend(start for start, *_rest in windows(old) ^ windows(new))
     return min(points, default=math.inf)

@@ -179,13 +179,24 @@ class BassSwapGraphTests(unittest.TestCase):
     def test_fade_windows_scale_with_min_and_max_transition_lengths(self) -> None:
         for duration in (2.0, 20.0):
             with self.subTest(duration=duration):
-                low_in, = band_fade_windows("low", 60.0, (TransitionDsp.BASS_SWAP, duration), None)
+                low_in, = band_fade_windows("low", 60.0, (TransitionDsp.BASS_SWAP, duration, None), None)
                 self.assertEqual(low_in[0], "in")
                 self.assertAlmostEqual(low_in[1], 0.35 * duration)
                 self.assertAlmostEqual(low_in[2], 0.25 * duration)
                 self.assertGreater(low_in[2], 0.0)
-                mid_out, = band_fade_windows("mid", 60.0, None, (TransitionDsp.BASS_SWAP, duration))
+                mid_out, = band_fade_windows("mid", 60.0, None, (TransitionDsp.BASS_SWAP, duration, None))
                 self.assertEqual(mid_out, ("out", 60.0 - duration, duration))
+
+    def test_vocal_handoff_moves_only_the_vocal_safe_mid_swap(self) -> None:
+        side = (TransitionDsp.VOCAL_SAFE_EQ, 8.0, 0.75)
+        mid_in, = band_fade_windows("mid", 60.0, side, None)
+        self.assertEqual(mid_in, ("in", 5.0, 2.0))  # 0.625-0.875 of the window
+        mid_out, = band_fade_windows("mid", 60.0, None, side)
+        self.assertEqual(mid_out, ("out", 57.0, 2.0))
+        default_low, = band_fade_windows("low", 60.0, (TransitionDsp.VOCAL_SAFE_EQ, 8.0, None), None)
+        self.assertEqual(band_fade_windows("low", 60.0, side, None), [default_low])  # lows keep their swap
+        default_mid, = band_fade_windows("mid", 60.0, (TransitionDsp.VOCAL_SAFE_EQ, 8.0, None), None)
+        self.assertEqual(default_mid, ("in", 3.2, 2.0))  # unchanged 0.40-0.65 default
 
     def test_tempo_adjusted_clips_keep_timeline_domain_durations(self) -> None:
         # 63.6 s of source at 1.06x = 60 s of timeline; windows must use the latter.
@@ -483,6 +494,20 @@ class RealAutoMixRenderTests(unittest.TestCase):
             result = self._pipeline().render(plan, paths, self.directory / "out")
         self.assertAlmostEqual(result.duration_seconds, 8.0 * (count - 1) + 12.0, delta=0.2)
         self.assertTrue((self.directory / "out" / "automix_graph.txt").is_file())
+
+    def test_moved_vocal_handoff_keeps_exact_duration_and_headroom_at_a_changed_rate(self) -> None:
+        a, b = self.directory / "a.wav", self.directory / "b.wav"
+        _write_tone_wav(a, 440.0, 20.0)
+        _write_tone_wav(b, 660.0, 22.0)
+        clips = (_clip("a", "a", 0.0, 20.0), _clip("b", "b", 12.0, 22.0, rate=1.1))
+        transition = AudioRenderTransition("a", "b", 12.0, 8.0, TransitionType.BEAT_MATCH,
+                                           dsp=TransitionDsp.VOCAL_SAFE_EQ, vocal_handoff=0.75)
+        result = self._pipeline().render(AudioRenderPlan(clips, (transition,)), {"a": str(a), "b": str(b)},
+                                         self.directory / "out", container="flac")
+        self.assertAlmostEqual(result.duration_seconds, 12.0 + 22.0 / 1.1, delta=0.05)
+        raw = subprocess.run([str(self.executable), "-v", "error", "-i", str(result.path), "-f", "f32le", "pipe:1"],
+                             capture_output=True, check=True).stdout
+        self.assertLessEqual(float(np.max(np.abs(np.frombuffer(raw, dtype=np.float32)))), 0.98)
 
     def test_explicit_gap_produces_matching_total_duration(self) -> None:
         a = self.directory / "a.wav"

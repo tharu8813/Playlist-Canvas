@@ -116,6 +116,9 @@ BAND_ENVELOPES: Mapping[TransitionDsp, Mapping[str, tuple[tuple[float, float], t
 qsin fade as normalized transition progress. Outgoing holds unity until its
 start and is silent after its end; incoming is silent until its start and at
 unity after its end. SHORT_FADE is absent: it needs no band split."""
+VOCAL_MID_SWAP_WIDTH = 0.25
+"""VOCAL_SAFE_EQ's mid (voice) swap length when the planner moves it to a
+``vocal_handoff`` center; the default (0.40-0.65) is the same width."""
 _BANDS = ("low", "mid", "high")
 _BAND_FADE_CURVE = "qsin"
 
@@ -192,7 +195,7 @@ def build_filter_graph(
         if not 0 <= index < len(styles) or styles[index] not in BAND_ENVELOPES:
             return None
         transition = transition_by_pair[(clips[index].clip_id, clips[index + 1].clip_id)]
-        return styles[index], transition.duration
+        return styles[index], transition.duration, transition.vocal_handoff
 
     def sweep_side(index: int) -> float | None:
         if not 0 <= index < len(styles) or styles[index] is not TransitionDsp.FILTER_SWEEP:
@@ -279,8 +282,16 @@ def transition_dsp_style(transition: AudioRenderTransition) -> TransitionDsp | N
     return TransitionDsp.BASS_SWAP if transition.type == TransitionType.BEAT_MATCH else None
 
 
-BandSide = tuple[TransitionDsp, float]
-"""(band style, transition duration) for one side of a clip."""
+BandSide = tuple[TransitionDsp, float, float | None]
+"""(band style, transition duration, vocal handoff) for one side of a clip."""
+
+
+def _band_envelope(style: TransitionDsp, band: str, vocal_handoff: float | None):
+    """BAND_ENVELOPES entry, with VOCAL_SAFE_EQ's mid swap moved to the planned handoff."""
+    if style is TransitionDsp.VOCAL_SAFE_EQ and band == "mid" and vocal_handoff is not None:
+        window = (vocal_handoff - VOCAL_MID_SWAP_WIDTH / 2, vocal_handoff + VOCAL_MID_SWAP_WIDTH / 2)
+        return window, window
+    return BAND_ENVELOPES[style][band]
 
 
 def band_fade_windows(
@@ -296,12 +307,12 @@ def band_fade_windows(
     """
     windows: list[tuple[str, float, float]] = []
     if incoming is not None:
-        style, duration = incoming
-        start, end = BAND_ENVELOPES[style][band][1]
+        style, duration, handoff = incoming
+        start, end = _band_envelope(style, band, handoff)[1]
         windows.append(("in", duration * start, duration * (end - start)))
     if outgoing is not None:
-        style, duration = outgoing
-        start, end = BAND_ENVELOPES[style][band][0]
+        style, duration, handoff = outgoing
+        start, end = _band_envelope(style, band, handoff)[0]
         window_start = clip_duration - duration
         windows.append(("out", window_start + duration * start, duration * (end - start)))
     return windows

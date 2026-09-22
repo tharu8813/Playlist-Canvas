@@ -62,3 +62,35 @@ both/outgoing-only/incoming-only, early-end/late-start, unknown, rate != 1, exac
 
 ## 권장 commit
 `refine: make AutoMix vocal-safe transitions locally aware`
+
+
+---
+
+## Outcome (2026-09-23)
+
+### Schema and generation path (read first, as required)
+`TrackAnalysis.vocal_activity` is a tuple of sorted, non-overlapping `(start, end)` source-second spans; empty means "unknown". Before this phase the only producer was `BasicAnalysisProvider`'s voice-band heuristic (1 s hops, 300-3400 Hz energy share >= 0.35), reused unchanged by the Beat This hybrid. Nothing else (Sonara, Beat This) produces vocal data.
+
+### Finding: the heuristic signal is inverted on real music
+Against real vocal stems (local StemLab separations of two commercial songs, -20 dB gate on the stem as truth):
+
+| file | voice-band share, sung seconds (median) | non-sung seconds (median) | recall | precision |
+|---|---|---|---|---|
+| Attention | 0.25 | 0.53 | 0.36 | 0.89 |
+| REDRED | 0.13 | 0.68 | 0.06 | 0.50 |
+| Attention instrumental | -- | -- (10-12 % flagged as vocal) | -- | -- |
+
+Sung sections are dense full-band arrangements; the quiet intros/breaks between them are what concentrate energy in the voice band. No threshold can repair that, so **basic analyzer v4 no longer guesses vocals** (field stays unknown; Beat This cache version 3). Unknown is never read as "no vocals": it simply cannot trigger VOCAL_SAFE_EQ or the scoring penalty. Effect on the measured real pairs: Attention -> its instrumental, previously VOCAL_SAFE_EQ on a false positive, is now BASS_SWAP.
+
+### Local vocal awareness (active whenever a real detector fills the field)
+- `VocalMap`: per side, vocal coverage of each eighth of the window in that side's own source seconds (incoming span = duration x incoming rate).
+- Clash = both sides singing together for >= 1/8 of the window (`overlap_ratio`). A line that ends before the next begins ("outgoing vocal ending soon", "incoming vocal starts late") and one-sided vocals are **not** clashes and fall through to the normal rules.
+- On a clash VOCAL_SAFE_EQ's mid (voice) swap moves to the handoff point that cuts the least singing (`VocalMap.handoff`, choices 0.25/0.375/0.525/0.625/0.75 of the window, default 0.525 wins ties -> identical render to before). It travels as `AudioRenderTransition.vocal_handoff`; the renderer only shifts the 0.25-wide mid-band fades. Lows keep the bass-swap timing. No ducking: a gain dip under a still-sounding voice risks audible pumping, and nothing measured asked for it.
+- Key-clash-only VOCAL_SAFE_EQ keeps the default envelope.
+- Diagnostics: `vocal_overlap` is now the overlap ratio (None = unknown) plus `vocal_handoff`; reasons say "vocals overlap for 38% of the window (hand off at 75%)", "vocals hand over without singing together", "vocals on at most one side", or "vocal activity unknown".
+
+### Tests
+`LocalVocalTests` (handover, one-sided, unknown, late/early/balanced handoff, key-only) and updated rate-aware/determinism cases in `tests/test_automix_transition_style.py`; `test_vocal_handoff_moves_only_the_vocal_safe_mid_swap` and a real-FFmpeg render with a moved handoff at 1.1x (exact duration +-0.05 s, peak <= 0.98) in `tests/test_automix_renderer.py`; analyzer no longer emits vocal spans.
+
+### Known limitations
+Vocal-aware behavior is dormant until a real vocal detector exists -- see Phase 06. The candidate-scoring vocal penalty (`WEIGHT_VOCAL_OVERLAP_PENALTY`) still uses "any vocal on both sides"; it was left alone to keep planner geometry unchanged in this DSP phase and never fires without vocal data.
