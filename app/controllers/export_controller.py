@@ -123,7 +123,7 @@ class ExportOrchestrator:
             return None, None
 
         self.clear_audio_staging()
-        self._audio_staging = TemporaryDirectory(prefix="playlist-audio-")
+        self._audio_staging = TemporaryDirectory(prefix="playlist-audio-", ignore_cleanup_errors=True)
         try:
             return prepare_audio_for_ui(
                 renderer, active_tracks, Path(self._audio_staging.name),
@@ -1018,6 +1018,16 @@ class ExportOrchestrator:
                 renderer, active_tracks, render_settings, preparation_cancel,
                 lambda stage, fraction, message: window._export_dialog.set_busy(stage, message),
             )
+            if (compiled_plan is not None and not compiled_plan.audio.transitions
+                    and sum(track.enabled for track in active_tracks) > 1):
+                # The mix fell back to back-to-back audio (a failed AutoMix
+                # render, or no pair could be blended): say so instead of
+                # letting the export look like the chosen transitions.
+                window._export_dialog.log_output.add_detail(
+                    "곡 전환을 만들지 못해 곡을 순서대로 이어서 내보냅니다."
+                    if korean else
+                    "No transitions could be made; the tracks are exported back to back."
+                )
             animation_fps = window._export_animation_sample_rate(render_settings.fps)
             playlist_duration = (compiled_plan.duration_seconds if compiled_plan is not None
                                  else window._playlist_duration(active_tracks))

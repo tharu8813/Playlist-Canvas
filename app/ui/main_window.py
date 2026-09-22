@@ -3788,7 +3788,7 @@ class MainWindow(QMainWindow):
                 self._export_preparation_cancel = cancel
                 progress.show()
                 try:
-                    with TemporaryDirectory(prefix="playlist-timestamps-") as directory:
+                    with TemporaryDirectory(prefix="playlist-timestamps-", ignore_cleanup_errors=True) as directory:
                         _, compiled_plan = prepare_audio_for_ui(
                             renderer, tracks, Path(directory), self.project_settings.transition_mode,
                             self.project_settings.crossfade_seconds, RenderSettings(), cancel,

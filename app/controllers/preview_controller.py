@@ -211,7 +211,7 @@ class PreviewController:
         from app.renderer.ffmpeg_renderer import FFmpegRenderer
 
         window = self.window
-        temp_dir = TemporaryDirectory(prefix="playlist-preview-audio-")
+        temp_dir = TemporaryDirectory(prefix="playlist-preview-audio-", ignore_cleanup_errors=True)
         if transition_mode == "automix":
             # Analysis lands per track; once Preview is open it plays AutoMix
             # as far as it is analyzed, then the unchanged export mix.

@@ -16,6 +16,7 @@ import sys
 from tempfile import TemporaryDirectory
 from time import monotonic
 import unittest
+from unittest.mock import patch
 import wave
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -164,13 +165,24 @@ class RealVideoPreviewPerformanceTests(unittest.TestCase):
             str(audio_path), "Long preview fixture",
             duration_seconds=timeline_seconds,
         )
+        # Duration probing remains separately covered; this test isolates
+        # actual decode, scheduling and composition cost. The probe answers
+        # with the fixture's length from before the dialog exists: its first
+        # refresh queues a probe on a worker thread, and a real probe in this
+        # process (no app settings, so no configured FFprobe) returned 0.0 a
+        # few seconds in and switched the looping video off.
+        fixture_seconds = min(6.0, timeline_seconds)
+        probe = patch(
+            "app.dialogs.export_preview_dialog.PlaylistService._probe_duration",
+            return_value=fixture_seconds,
+        )
+        probe.start()
+        self.addCleanup(probe.stop)
         preview = ExportPreviewDialog(
             scene, [track], Translator(), source_store=store,
             preferred_backend=backend,
         )
-        # Duration probing remains separately covered. Seed only this metadata
-        # so this test isolates actual decode, scheduling and composition cost.
-        preview._video_duration_cache[str(video_path)] = min(6.0, timeline_seconds)
+        preview._video_duration_cache[str(video_path)] = fixture_seconds
         preview.show()
         self.application.processEvents()
         return preview, item
@@ -209,6 +221,20 @@ class RealVideoPreviewPerformanceTests(unittest.TestCase):
                 preview._stop_preview()
                 preview.close()
                 self.application.processEvents()
+                self._release_editor_item(item)
+
+    @staticmethod
+    def _release_editor_item(item: SourceItem) -> None:
+        """Drop the canvas element's decoder before its video file is deleted.
+
+        Closing Preview returns a video element to its editor poster frame,
+        which keeps its QMediaPlayer paused on the file for as long as the
+        element exists (by design). The app releases it when the element is
+        removed; the temporary fixture must do the same, or Windows refuses to
+        delete the still-open file (WinError 32).
+        """
+        item.release_video_decoder()
+        QApplication.processEvents()
 
     def test_long_real_mp4_preview_remains_bounded_and_responsive(self) -> None:
         if os.environ.get("PLAYLIST_CANVAS_RUN_PREVIEW_SOAK", "").strip() != "1":
@@ -294,6 +320,7 @@ class RealVideoPreviewPerformanceTests(unittest.TestCase):
                 preview._stop_preview()
                 preview.close()
                 self.application.processEvents()
+                self._release_editor_item(item)
 
 
 if __name__ == "__main__":
