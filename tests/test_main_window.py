@@ -5443,7 +5443,12 @@ class MainWindowSafetyTests(unittest.TestCase):
                 preview._stop_preview()
                 preview.deleteLater()
 
-    def test_blended_audio_ready_swaps_source_and_seeks_absolute_position(self) -> None:
+    def test_blended_audio_ready_swaps_source_and_defers_seek_until_seekable(self) -> None:
+        """A source swap must not seek/play until the new source is actually
+        ready -- QMediaPlayer.setSource() returns before loading finishes, so
+        an immediate setPosition()/play() can be silently dropped or reset to
+        0 once loading completes (see the near-end AutoMix transition
+        regression tests below)."""
         preview = ExportPreviewDialog(
             self.window.canvas.scene_model,
             [
@@ -5460,15 +5465,217 @@ class MainWindowSafetyTests(unittest.TestCase):
             with (
                 patch.object(preview.media_player, "setSource") as set_source,
                 patch.object(preview.media_player, "setPosition") as set_position,
-                patch.object(preview.media_player, "play"),
+                patch.object(preview.media_player, "play") as play,
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadingMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=False),
             ):
                 preview._on_blended_audio_ready(str(Path("blended.m4a").resolve()), preview._compiled_plan)
-            self.assertEqual(preview._blended_audio_path, Path("blended.m4a").resolve())
-            self.assertEqual(preview._active_track_index, _BLENDED_AUDIO_TRACK_INDEX)
-            set_source.assert_called_once_with(
-                QUrl.fromLocalFile(str(Path("blended.m4a").resolve()))
-            )
-            set_position.assert_called_once_with(4_000)
+                self.assertEqual(preview._blended_audio_path, Path("blended.m4a").resolve())
+                self.assertEqual(preview._active_track_index, _BLENDED_AUDIO_TRACK_INDEX)
+                set_source.assert_called_once_with(
+                    QUrl.fromLocalFile(str(Path("blended.m4a").resolve()))
+                )
+                # Not seekable yet: the seek/play must be deferred, not fired blind.
+                set_position.assert_not_called()
+                play.assert_not_called()
+        finally:
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_pending_media_seek_applies_once_source_becomes_seekable(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("a.wav", "A", duration_seconds=3.0),
+             PlaylistTrack("b.wav", "B", duration_seconds=3.0)],
+            self.window.translator,
+            parent=self.window,
+            preferred_backend="cpu",
+        )
+        try:
+            preview._playing = True
+            preview.timeline.setValue(round(2.7 * TIMELINE_SCALE))
+            with (
+                patch.object(preview.media_player, "setSource"),
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadingMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=False),
+            ):
+                preview._on_blended_audio_ready(str(Path("blended.m4a").resolve()), preview._compiled_plan)
+            self.assertEqual(preview._pending_media_seek_ms, 2_700)
+            with (
+                patch.object(preview.media_player, "setPosition") as set_position,
+                patch.object(preview.media_player, "play") as play,
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadedMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=True),
+            ):
+                preview._on_media_status_changed(QMediaPlayer.MediaStatus.LoadedMedia)
+            set_position.assert_called_once_with(2_700)
+            play.assert_called_once()
+            self.assertIsNone(preview._pending_media_seek_ms)
+        finally:
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_pending_media_seek_paused_does_not_auto_play(self) -> None:
+        """If the user paused while the new source was still loading, the
+        transport intent at the moment it becomes ready must be respected --
+        not the playing state captured back when the swap started."""
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("a.wav", "A", duration_seconds=3.0),
+             PlaylistTrack("b.wav", "B", duration_seconds=3.0)],
+            self.window.translator,
+            parent=self.window,
+            preferred_backend="cpu",
+        )
+        try:
+            preview._playing = True
+            preview.timeline.setValue(round(2.7 * TIMELINE_SCALE))
+            with (
+                patch.object(preview.media_player, "setSource"),
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadingMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=False),
+            ):
+                preview._on_blended_audio_ready(str(Path("blended.m4a").resolve()), preview._compiled_plan)
+            preview._playing = False  # user paused while the swap was still loading
+            with (
+                patch.object(preview.media_player, "setPosition") as set_position,
+                patch.object(preview.media_player, "play") as play,
+                patch.object(preview.media_player, "pause") as pause,
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadedMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=True),
+            ):
+                preview._on_media_status_changed(QMediaPlayer.MediaStatus.LoadedMedia)
+            set_position.assert_called_once_with(2_700)
+            play.assert_not_called()
+            pause.assert_called_once()
+        finally:
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_pending_media_seek_uses_latest_playhead_after_reseek_during_load(self) -> None:
+        """A seek that lands while the new source is still loading must not be
+        lost: the freshest global playhead at ready-time wins, not the
+        position captured when the swap first started."""
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("a.wav", "A", duration_seconds=3.0),
+             PlaylistTrack("b.wav", "B", duration_seconds=3.0)],
+            self.window.translator,
+            parent=self.window,
+            preferred_backend="cpu",
+        )
+        try:
+            preview._playing = True
+            with (
+                patch.object(preview.media_player, "setSource") as set_source,
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadingMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=False),
+            ):
+                preview.timeline.setValue(round(1.5 * TIMELINE_SCALE))
+                preview._on_blended_audio_ready(str(Path("blended.m4a").resolve()), preview._compiled_plan)
+                # The user seeks again while the blended source is still loading.
+                preview.timeline.setValue(round(1.7 * TIMELINE_SCALE))
+            self.assertEqual(preview._pending_media_seek_ms, 1_700)
+            # One setSource for the initial per-track load, one for the blended
+            # swap -- but no extra call for the reseek while it was loading,
+            # since the target source (the blended mix) hadn't changed.
+            self.assertEqual(set_source.call_count, 2)
+            with (
+                patch.object(preview.media_player, "setPosition") as set_position,
+                patch.object(preview.media_player, "play"),
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadedMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=True),
+            ):
+                preview._on_media_status_changed(QMediaPlayer.MediaStatus.LoadedMedia)
+            set_position.assert_called_once_with(1_700)
+        finally:
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_stale_source_callback_after_a_newer_swap_has_no_effect(self) -> None:
+        """A late mediaStatusChanged from a source that has since been
+        replaced (generation mismatch) must be ignored."""
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("a.wav", "A", duration_seconds=3.0),
+             PlaylistTrack("b.wav", "B", duration_seconds=3.0)],
+            self.window.translator,
+            parent=self.window,
+            preferred_backend="cpu",
+        )
+        try:
+            preview._playing = True
+            with (
+                patch.object(preview.media_player, "setSource"),
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadingMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=False),
+            ):
+                preview.timeline.setValue(round(0.5 * TIMELINE_SCALE))  # Source A begins loading.
+            stale_generation = preview._pending_media_generation
+            with patch.object(preview.media_player, "setSource"):
+                preview._skip_track(1)  # Source B replaces it before A finished.
+            self.assertNotEqual(preview._pending_media_generation, stale_generation)
+            with (
+                patch.object(preview.media_player, "setPosition") as set_position,
+                patch.object(preview.media_player, "play"),
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadedMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=True),
+            ):
+                # Source A's late callback fires with the stale generation.
+                preview._pending_media_generation = stale_generation
+                preview._on_media_status_changed(QMediaPlayer.MediaStatus.LoadedMedia)
+            set_position.assert_not_called()
+        finally:
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_near_end_automix_transition_does_not_jump_to_zero_when_blended_audio_becomes_ready(self) -> None:
+        """The exact bug report: seek near the end of a track/AutoMix
+        transition, then let the blended-audio background render finish --
+        the global timeline must stay at the seeked position, never jump to 0."""
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("a.wav", "A", duration_seconds=180.0),
+             PlaylistTrack("b.wav", "B", duration_seconds=180.0)],
+            self.window.translator,
+            parent=self.window,
+            preferred_backend="cpu",
+        )
+        try:
+            preview._playing = True
+            preview.timeline.setValue(round(165.4 * TIMELINE_SCALE))
+            with (
+                patch.object(preview.media_player, "setSource"),
+                patch.object(preview.media_player, "setPosition") as set_position,
+                patch.object(preview.media_player, "play"),
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadingMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=False),
+            ):
+                preview._on_blended_audio_ready(str(Path("blended.m4a").resolve()), preview._compiled_plan)
+            # Still loading: no premature seek to whatever QMediaPlayer's
+            # transient starting position is, and the global playhead is untouched.
+            set_position.assert_not_called()
+            self.assertAlmostEqual(preview._playhead_seconds, 165.4, places=2)
+            with (
+                patch.object(preview.media_player, "setPosition") as set_position,
+                patch.object(preview.media_player, "play"),
+                patch.object(preview.media_player, "mediaStatus",
+                              return_value=QMediaPlayer.MediaStatus.LoadedMedia),
+                patch.object(preview.media_player, "isSeekable", return_value=True),
+            ):
+                preview._on_media_status_changed(QMediaPlayer.MediaStatus.LoadedMedia)
+            set_position.assert_called_once_with(165_400)
+            self.assertAlmostEqual(preview._playhead_seconds, 165.4, places=2)
         finally:
             preview._stop_preview()
             preview.deleteLater()

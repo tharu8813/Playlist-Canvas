@@ -443,6 +443,10 @@ class ExportPreviewDialog(QDialog):
         self._playhead_seconds = 0.0
         self._active_track_index = -1
         self._last_media_position_ms = -1
+        self._media_source_ready = False
+        self._media_source_generation = 0
+        self._pending_media_seek_ms: int | None = None
+        self._pending_media_generation = -1
         self._preview_levels = None
         self._preview_levels_track_id = ""
         self._last_analysis_second = -1.0
@@ -485,6 +489,8 @@ class ExportPreviewDialog(QDialog):
         self.audio_output.setVolume(saved_volume / 100.0)
         self.media_player = QMediaPlayer(self)
         self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.mediaStatusChanged.connect(self._on_media_status_changed)
+        self.media_player.seekableChanged.connect(self._on_media_seekable_changed)
         self.play_timer = QTimer(self)
         self.play_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.play_timer.setInterval(33)
@@ -2730,6 +2736,17 @@ class ExportPreviewDialog(QDialog):
         self._gpu_watchdog.start()
 
     def _start_audio_at_playhead(self) -> None:
+        """Seek/play the active source at the current playhead, swapping sources safely.
+
+        ``QMediaPlayer.setSource()`` returns before the new source finishes
+        loading, so a ``setPosition()``/``play()`` issued right after it can be
+        silently dropped or reset to 0 once loading completes. When the target
+        source differs from what is already loaded, this defers the seek until
+        ``_on_media_status_changed``/``_on_media_seekable_changed`` confirm the
+        new source is actually seekable, always applying the freshest playhead
+        (not a value captured before the wait) and respecting whatever
+        play/pause state is current when it fires.
+        """
         playlist_seconds = self.timeline.value() / TIMELINE_SCALE
         selected = self._track_at(playlist_seconds)
         if selected is None:
@@ -2742,26 +2759,68 @@ class ExportPreviewDialog(QDialog):
             self.media_player.stop()
             self._active_track_index = -1
             self._last_media_position_ms = 0
+            self._pending_media_seek_ms = None
             return
         if self._blended_audio_path is not None:
             # One continuous, pre-rendered AutoMix/crossfade mix already has
             # correct silence baked in at gaps and the same total duration as
             # the legacy sequential timeline, so the playhead position IS the
             # source position -- no per-track source switching needed.
-            if self._active_track_index != _BLENDED_AUDIO_TRACK_INDEX:
-                self._active_track_index = _BLENDED_AUDIO_TRACK_INDEX
-                self.media_player.setSource(QUrl.fromLocalFile(str(self._blended_audio_path)))
-            self.media_player.setPosition(round(playlist_seconds * 1000))
-            self._last_media_position_ms = round(playlist_seconds * 1000)
-            self.media_player.play()
+            target_index = _BLENDED_AUDIO_TRACK_INDEX
+            url = QUrl.fromLocalFile(str(self._blended_audio_path))
+            target_ms = round(playlist_seconds * 1000)
+        else:
+            index, track, elapsed, _start = selected
+            target_index = index
+            url = QUrl.fromLocalFile(str(Path(track.file_path).resolve()))
+            target_ms = round(elapsed * 1000)
+
+        if target_index != self._active_track_index:
+            self._active_track_index = target_index
+            self._media_source_ready = False
+            self._media_source_generation += 1
+            self.media_player.setSource(url)
+
+        if not self._media_source_ready:
+            self._pending_media_seek_ms = target_ms
+            self._pending_media_generation = self._media_source_generation
             return
-        index, track, elapsed, _start = selected
-        if index != self._active_track_index:
-            self._active_track_index = index
-            self.media_player.setSource(QUrl.fromLocalFile(str(Path(track.file_path).resolve())))
-        self.media_player.setPosition(round(elapsed * 1000))
-        self._last_media_position_ms = round(elapsed * 1000)
-        self.media_player.play()
+
+        self._pending_media_seek_ms = None
+        self.media_player.setPosition(target_ms)
+        self._last_media_position_ms = target_ms
+        if self._playing:
+            self.media_player.play()
+        else:
+            self.media_player.pause()
+
+    def _on_media_status_changed(self, _status: QMediaPlayer.MediaStatus) -> None:
+        self._resume_pending_media_seek()
+
+    def _on_media_seekable_changed(self, _seekable: bool) -> None:
+        self._resume_pending_media_seek()
+
+    def _resume_pending_media_seek(self) -> None:
+        """Apply a deferred source-swap seek once the new source is actually seekable.
+
+        Different Qt backends reach ``LoadedMedia``/``BufferedMedia`` and
+        ``isSeekable() == True`` in different orders, so both signals funnel
+        here and both conditions are checked together. The generation check
+        discards a late callback from a source that has since been replaced
+        by another seek/track change.
+        """
+        if self._pending_media_seek_ms is None:
+            return
+        if self._pending_media_generation != self._media_source_generation:
+            return
+        ready_statuses = (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        )
+        if self.media_player.mediaStatus() not in ready_statuses or not self.media_player.isSeekable():
+            return
+        self._media_source_ready = True
+        self._start_audio_at_playhead()
 
     def _advance_playback(self) -> None:
         if not self._playing:
@@ -3109,6 +3168,8 @@ class ExportPreviewDialog(QDialog):
         self._gpu_health.cancel_wait()
         self._playing = False
         self.play_timer.stop()
+        self._pending_media_seek_ms = None
+        self._pending_media_generation = -1
         self.media_player.stop()
         self.media_player.setSource(QUrl())
         for item in self.scene.items():
