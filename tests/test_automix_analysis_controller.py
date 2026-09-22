@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 import unittest
 from pathlib import Path
@@ -34,9 +35,7 @@ def _track(name: str) -> PlaylistTrack:
 class AutoMixAnalysisWorkerTests(unittest.TestCase):
     def test_run_emits_analyzed_results(self) -> None:
         track = _track("a.mp3")
-        with patch(
-            "app.controllers.automix_analysis_controller.BasicAnalysisProvider", _StubProvider,
-        ):
+        with patch("app.automix.analysis.basic.BasicAnalysisProvider", _StubProvider):
             worker = _AutoMixAnalysisWorker([track], Path("ffmpeg"))
             received: list[dict] = []
             worker.analyzed.connect(received.append)
@@ -47,14 +46,24 @@ class AutoMixAnalysisWorkerTests(unittest.TestCase):
 
     def test_cancel_before_run_suppresses_the_signal(self) -> None:
         track = _track("a.mp3")
-        with patch(
-            "app.controllers.automix_analysis_controller.BasicAnalysisProvider", _StubProvider,
-        ):
+        with patch("app.automix.analysis.basic.BasicAnalysisProvider", _StubProvider):
             worker = _AutoMixAnalysisWorker([track], Path("ffmpeg"))
             worker.cancel()
             received: list[dict] = []
             worker.analyzed.connect(received.append)
             worker.run()
+        self.assertEqual(received, [])
+
+    def test_missing_librosa_dependency_is_handled_without_crashing(self) -> None:
+        # A module set to None in sys.modules makes Python's import system
+        # raise ImportError for it -- simulating "librosa is not installed"
+        # without needing to actually uninstall it for this test.
+        track = _track("a.mp3")
+        with patch.dict(sys.modules, {"app.automix.analysis.basic": None}):
+            worker = _AutoMixAnalysisWorker([track], Path("ffmpeg"))
+            received: list[dict] = []
+            worker.analyzed.connect(received.append)
+            worker.run()  # must not raise
         self.assertEqual(received, [])
 
 
@@ -67,6 +76,27 @@ class AutoMixAnalysisControllerTests(unittest.TestCase):
     def test_cancel_with_no_worker_is_a_no_op(self) -> None:
         controller = AutoMixAnalysisController()
         controller.cancel()  # must not raise
+
+    def test_a_worker_that_finishes_on_its_own_is_forgotten(self) -> None:
+        """Regression: cancel()/start() must not touch a worker's C++ object
+        after it finished naturally and was scheduled for deleteLater()."""
+        controller = AutoMixAnalysisController()
+        worker = _AutoMixAnalysisWorker([_track("a.mp3")], Path("ffmpeg"), controller)
+        controller._worker = worker
+        controller._forget(worker)
+        self.assertIsNone(controller._worker)
+
+    def test_cancel_survives_an_already_deleted_qt_object(self) -> None:
+        """isRunning() on a destroyed QThread raises RuntimeError in PySide6;
+        cancel() must treat that the same as "nothing to cancel", not crash."""
+        class _DeletedWorker:
+            def isRunning(self) -> bool:
+                raise RuntimeError("libshiboken: Internal C++ object already deleted.")
+
+        controller = AutoMixAnalysisController()
+        controller._worker = _DeletedWorker()
+        controller.cancel()  # must not raise
+        self.assertIsNone(controller._worker)
 
 
 if __name__ == "__main__":
