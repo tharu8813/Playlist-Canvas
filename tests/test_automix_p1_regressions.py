@@ -1,0 +1,194 @@
+"""Regressions for shared mix timing, source anchors and worker lifetime."""
+from __future__ import annotations
+
+import threading
+import time
+import unittest
+import os
+import json
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from PySide6.QtCore import QThread, QTimer
+from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QImage, QColor
+
+from app.automix.candidates import generate_candidates, select_best_candidate
+from app.automix.compatibility import evaluate_compatibility
+from app.automix.planner import compile_automix
+from app.automix.renderer import AutoMixRenderError, PreparedAudio, build_filter_graph
+from app.controllers.automix_analysis_controller import AutoMixAnalysisController
+from app.controllers.preview_audio_controller import PreviewAudioController
+from app.dialogs.export_preview_dialog import ExportPreviewDialog
+from app.models.source import Source, SourceType
+from app.renderer.export_timeline import ExportTimelinePlanner
+from app.renderer.ffmpeg_renderer import FFmpegRenderer, ExportMetadata, RenderSettings, RenderFrame
+from app.services.playlist_export_service import PlaylistExportService, TimestampFormat
+from app.timeline.render_plan import AudioRenderClip, AudioRenderPlan, CompiledRenderPlan, build_presentation_and_metadata
+from tests.test_automix_planner import _track, _analysis, ENABLED
+
+
+class MixTimingTests(unittest.TestCase):
+    def test_selected_outgoing_beat_is_used_even_when_track_end_is_off_grid(self):
+        tracks = [_track('a', 60.3), _track('b', 60)]
+        analyses = {t.id: _analysis(t.id, 120, t.duration_seconds, meter_confidence=.3) for t in tracks}
+        a, b = analyses.values()
+        candidate = select_best_candidate(generate_candidates(a, b, evaluate_compatibility(a, b, ENABLED), ENABLED))
+        plan = compile_automix(tracks, analyses, ENABLED)
+        self.assertAlmostEqual(candidate.outgoing_source_time, 44.5)
+        self.assertAlmostEqual(plan.audio.clips[1].timeline_start, candidate.outgoing_source_time)
+        self.assertAlmostEqual(plan.audio.transitions[0].duration, 15.8)
+
+    def test_frames_preview_and_chapters_use_the_same_source_time_and_duration(self):
+        tracks = [_track('a', 60), _track('b', 60)]
+        tracks[1].lyrics = [{'start': 12.0, 'end': 14.0, 'text': 'cue'}]
+        clips = (AudioRenderClip('a', 'a', 0, 0, 60), AudioRenderClip('b', 'b', 44, 2, 60, 1.25))
+        presentation, metadata, duration = build_presentation_and_metadata(clips)
+        plan = CompiledRenderPlan(AudioRenderPlan(clips), presentation, metadata, duration)
+        lyrics = Source(source_type=SourceType.LYRICS, name='Lyrics')
+        samples = ExportTimelinePlanner.build(tracks, [lyrics], 30, plan)
+        self.assertAlmostEqual(sum(s.duration_seconds for s in samples), duration)
+        elapsed = 0.0
+        starts = {}
+        for sample in samples:
+            starts.setdefault(sample.track.id, elapsed)
+            self.assertAlmostEqual(sample.elapsed_seconds, presentation.local_time(sample.timeline_seconds))
+            elapsed += sample.duration_seconds
+        self.assertAlmostEqual(starts['b'], 44)
+        self.assertTrue(any(s.track.id == 'b' and abs(s.timeline_seconds - 52) < .001 for s in samples))
+        preview = SimpleNamespace(tracks=tracks, _compiled_plan=plan)
+        self.assertAlmostEqual(ExportPreviewDialog._track_at(preview, 52)[2], 12)
+        self.assertEqual(metadata.chapters[1].start, starts['b'])
+        self.assertIn('00:44', PlaylistExportService().description_text(tracks, TimestampFormat.STANDARD, plan))
+        renderer = FFmpegRenderer.__new__(FFmpegRenderer)
+        with TemporaryDirectory() as directory:
+            metadata_path = renderer._write_export_ffmetadata(Path(directory), tracks, ExportMetadata(), Path('out.mp4'), plan)
+            self.assertIn('START=44000', metadata_path.read_text(encoding='utf-8'))
+
+    def test_preview_does_not_mute_at_the_old_sequential_gap(self):
+        tracks = [_track('a', 60), _track('b', 60), _track('c', 60, start=125)]
+        analyses = {t.id: _analysis(t.id, 120, 60, meter_confidence=.3) for t in tracks}
+        plan = compile_automix(tracks, analyses, ENABLED)
+        preview = SimpleNamespace(tracks=tracks, _compiled_plan=plan)
+        selected = ExportPreviewDialog._track_at(preview, 122)
+        self.assertEqual(selected[1].id, 'c')
+        self.assertTrue(ExportPreviewDialog._has_audio(preview, selected, 122))
+        self.assertFalse(ExportPreviewDialog._has_audio(preview, selected, 106))
+        samples = ExportTimelinePlanner.build(tracks, [], 30, plan)
+        self.assertAlmostEqual(sum(s.duration_seconds for s in samples), plan.duration_seconds)
+
+    def test_leading_silence_is_present_in_the_audio_graph(self):
+        plan = compile_automix([_track('a', 10, start=5)], {}, ENABLED)
+        graph, output = build_filter_graph(plan.audio.clips, ())
+        self.assertIn('anullsrc=r=48000:cl=stereo:d=5.000000', graph)
+        self.assertEqual(output, 'leading')
+
+    def test_prepared_mix_reports_shortened_plan_and_fallback_reports_sequential(self):
+        tracks = [_track('a', 10), _track('b', 10)]
+        renderer = FFmpegRenderer.__new__(FFmpegRenderer)
+        renderer.executable = Path('ffmpeg')
+        with TemporaryDirectory() as directory, patch.object(renderer, '_run'), patch.object(renderer, '_measure_loudness_filter', return_value=None):
+            directory = Path(directory)
+            plans = []
+            with patch('app.automix.renderer.AutoMixAudioPipeline.render', return_value=PreparedAudio(directory/'mix.m4a', 17)):
+                renderer.prepare_playlist_audio(tracks, directory, RenderSettings(), 'crossfade', plan_callback=plans.append)
+            self.assertEqual(plans[-1].duration_seconds, 17)
+            self.assertEqual(plans[-1].metadata.chapters[1].start, 7)
+            with patch('app.automix.renderer.AutoMixAudioPipeline.render', side_effect=AutoMixRenderError('bad mix')), patch.object(renderer, '_normalize_audio', return_value=[directory/'a', directory/'b']), patch.object(renderer, '_insert_silence_for_gaps', return_value=[10, 10]):
+                renderer.prepare_playlist_audio(tracks, directory, RenderSettings(), 'crossfade', plan_callback=plans.append)
+            self.assertEqual(plans[-1].duration_seconds, 20)
+            self.assertEqual(plans[-1].metadata.chapters[1].start, 10)
+
+
+class WorkerLifetimeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_cancel_retains_worker_and_shutdown_waits_without_stopping_qt_events(self):
+        class SlowWorker(QThread):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.release = threading.Event()
+                self._cancel_event = threading.Event()
+            def run(self):
+                self.release.wait(5)
+            def cancel(self):
+                self._cancel_event.set()
+
+        renderer = FFmpegRenderer.__new__(FFmpegRenderer)
+        for controller in (AutoMixAnalysisController(), PreviewAudioController(renderer)):
+            worker = SlowWorker(controller)
+            controller._worker = worker
+            worker.finished.connect(lambda w=worker, c=controller: c._forget(w))
+            worker.start()
+            start = time.monotonic()
+            controller.cancel()
+            self.assertLess(time.monotonic() - start, .2)
+            self.assertIs(controller._worker, worker)
+            self.assertTrue(worker.isRunning())
+            heartbeat = []
+            QTimer.singleShot(30, lambda: heartbeat.append(True))
+            QTimer.singleShot(60, worker.release.set)
+            controller.shutdown()
+            self.assertTrue(heartbeat)
+            self.assertIsNone(controller._worker)
+
+    def test_replacement_waits_for_cancelled_analysis_to_finish(self):
+        from app.controllers.automix_analysis_controller import _AutoMixAnalysisWorker
+        release = threading.Event()
+        controller = AutoMixAnalysisController()
+        def slow_run(worker):
+            release.wait(5)
+        with patch.object(_AutoMixAnalysisWorker, 'run', slow_run):
+            controller.start([_track('old', 10)], Path('ffmpeg'))
+            old = controller._worker
+            controller.start([_track('new', 10)], Path('ffmpeg'))
+            self.assertIs(controller._worker, old)
+            self.assertEqual(controller._pending[0][0].id, 'new')
+            QTimer.singleShot(10, release.set)
+            controller.shutdown()
+            self.assertIsNone(controller._pending)
+
+
+@unittest.skipUnless(os.environ.get('PLAYLIST_CANVAS_TEST_FFMPEG'), 'Real FFmpeg is opt-in')
+class RealSharedPlanTests(unittest.TestCase):
+    def test_prepared_mix_canvas_switch_chapters_and_video_duration_agree(self):
+        from tests.test_automix_ffmpeg_integration import _write_tone_wav
+        from app.automix.analysis.service import AnalysisBatchResult
+        executable = Path(os.environ['PLAYLIST_CANVAS_TEST_FFMPEG'])
+        with TemporaryDirectory() as directory:
+            directory = Path(directory)
+            tracks = [_track('a', 20.3), _track('b', 20.3)]
+            for index, track in enumerate(tracks):
+                track.file_path = str(directory / f'{track.id}.wav')
+                _write_tone_wav(Path(track.file_path), 220 + index * 220, track.duration_seconds)
+            analyses = {t.id: _analysis(t.id, 120, t.duration_seconds, meter_confidence=.3) for t in tracks}
+            renderer = FFmpegRenderer(executable)
+            settings = RenderSettings(fps=10, video_codec='libx264', crf=18, preset='ultrafast', output_width=32, output_height=32)
+            plans = []
+            with patch('app.automix.workflow.AutoMixWorkflow.analyze', return_value=AnalysisBatchResult(analyses, {})):
+                audio = renderer.prepare_playlist_audio(tracks, directory, settings, 'automix', plan_callback=plans.append)
+            plan = plans[0]
+            self.assertAlmostEqual(plan.audio.clips[1].timeline_start, 4.5)
+            frames = []
+            for sample in ExportTimelinePlanner.build(tracks, [], 10, plan):
+                image = QImage(32, 32, QImage.Format.Format_RGB32)
+                image.fill(QColor('red' if sample.track.id == 'a' else 'blue'))
+                frames.append(RenderFrame(image, sample.duration_seconds))
+            result = renderer.render(frames, tracks, directory/'out.mp4', settings,
+                                     compiled_plan=plan, prepared_audio_path=audio)
+            self.assertAlmostEqual(result.validation.duration_seconds, plan.duration_seconds, delta=.2)
+            info = subprocess.run([str(executable.with_name('ffprobe.exe')), '-v', 'error', '-show_chapters', '-of', 'json', str(result.output_path)], capture_output=True, check=True, text=True)
+            self.assertAlmostEqual(float(json.loads(info.stdout)['chapters'][1]['start_time']), 4.5)
+            for second, channel in [(4.2, 0), (4.8, 2)]:
+                pixels = subprocess.run([str(executable), '-v', 'error', '-ss', str(second), '-i', str(result.output_path), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], capture_output=True, check=True).stdout
+                self.assertGreater(pixels[channel], 200)
+                self.assertLess(pixels[2 if channel == 0 else 0], 40)
+
+
+if __name__ == '__main__':
+    unittest.main()

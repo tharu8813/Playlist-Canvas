@@ -23,7 +23,7 @@ import logging
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, QEventLoop
 
 from app.automix.models import TrackAnalysis
 from app.models.playlist import PlaylistTrack
@@ -68,14 +68,24 @@ class AutoMixAnalysisController(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._worker: _AutoMixAnalysisWorker | None = None
+        self._pending = None
+        self._shutting_down = False
 
     def start(self, tracks: list[PlaylistTrack], ffmpeg_executable: Path) -> None:
         """Analyze ``tracks`` in the background, replacing any run already underway."""
+        if self._shutting_down:
+            return
         self.cancel()
         if not tracks:
             return
+        if self._worker is not None:
+            self._pending = (tracks, ffmpeg_executable,)
+            return
         worker = _AutoMixAnalysisWorker(tracks, ffmpeg_executable, self)
-        worker.analyzed.connect(self.analyses_updated)
+        worker.analyzed.connect(
+            lambda result: self.analyses_updated.emit(result)
+            if not worker._cancel_event.is_set() else None
+        )
         # Clear our reference *before* scheduling deletion: a worker that
         # finishes on its own (not via cancel()) would otherwise leave
         # self._worker pointing at a QThread whose C++ object deleteLater()
@@ -89,18 +99,32 @@ class AutoMixAnalysisController(QObject):
         if self._worker is worker:
             self._worker = None
         worker.deleteLater()
+        pending, self._pending = self._pending, None
+        if pending is not None and not self._shutting_down:
+            self.start(*pending)
 
     def cancel(self) -> None:
-        """Stop the in-flight analysis, if any, and wait for its thread to exit."""
-        worker, self._worker = self._worker, None
+        """Request cancellation; retain ownership until finished is delivered."""
+        self._pending = None
+        worker = self._worker
         if worker is None:
             return
         try:
-            running = worker.isRunning()
+            worker.isRunning()  # Detect an already-deleted Qt wrapper.
+            worker.cancel()  # Suppress even results already queued for delivery.
         except RuntimeError:
-            # The underlying C++ QThread was already destroyed (it finished
-            # and was deleted between us reading self._worker and now).
-            return
-        if running:
-            worker.cancel()
-            worker.wait(5000)
+            self._worker = None
+
+    def shutdown(self) -> None:
+        """Finish cancellation before the owner or its temporary files are deleted."""
+        self._shutting_down = True
+        self.cancel()
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            loop = QEventLoop()
+            worker.finished.connect(loop.quit)
+            # Paint and queued completion signals keep flowing during shutdown.
+            # New user actions must not reenter the owner's destruction path.
+            if worker.isRunning():
+                loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            worker.wait()

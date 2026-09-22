@@ -5462,7 +5462,7 @@ class MainWindowSafetyTests(unittest.TestCase):
                 patch.object(preview.media_player, "setPosition") as set_position,
                 patch.object(preview.media_player, "play"),
             ):
-                preview._on_blended_audio_ready(str(Path("blended.m4a").resolve()))
+                preview._on_blended_audio_ready(str(Path("blended.m4a").resolve()), preview._compiled_plan)
             self.assertEqual(preview._blended_audio_path, Path("blended.m4a").resolve())
             self.assertEqual(preview._active_track_index, _BLENDED_AUDIO_TRACK_INDEX)
             set_source.assert_called_once_with(

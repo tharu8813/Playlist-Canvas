@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from math import ceil
 from typing import Sequence
 
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
 from app.timeline.compiler import compile_playlist
+from app.timeline.render_plan import CompiledRenderPlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +38,7 @@ class ExportTimelinePlanner:
         dynamic_source_ids: set[str],
         z_bands: Sequence[tuple[float | None, float | None]],
         animation_fps: int,
+        compiled_plan: CompiledRenderPlan | None = None,
     ) -> dict[str, list[ExportFrameSample]]:
         """Build an independent sample schedule for each Canvas Z band.
 
@@ -56,7 +59,7 @@ class ExportTimelinePlanner:
                 and (z_max is None or source.z_index <= z_max)
             ]
             timelines[stream_key] = ExportTimelinePlanner.build(
-                tracks, band_sources, animation_fps,
+                tracks, band_sources, animation_fps, compiled_plan,
             )
         return timelines
 
@@ -65,7 +68,11 @@ class ExportTimelinePlanner:
         tracks: Sequence[PlaylistTrack],
         sources: Sequence[Source],
         animation_fps: int,
+        compiled_plan: CompiledRenderPlan | None = None,
+        *, track_number_offset: int = 0,
     ) -> list[ExportFrameSample]:
+        if compiled_plan is not None and compiled_plan != compile_playlist(tracks):
+            return ExportTimelinePlanner._build_compiled(tracks, sources, animation_fps, compiled_plan)
         samples: list[ExportFrameSample] = []
         previous_track: PlaylistTrack | None = None
         previous_start = 0.0
@@ -77,7 +84,7 @@ class ExportTimelinePlanner:
         track_by_id = {track.id: track for track in tracks}
         windows = compile_playlist(tracks).presentation.windows
         cursor = 0.0
-        for number, window in enumerate(windows, start=1):
+        for number, window in enumerate(windows, start=1 + track_number_offset):
             track = track_by_id[window.track_id]
             start = window.timeline_start
             intro, outro = ExportTimelinePlanner._animation_durations(track, sources)
@@ -179,6 +186,59 @@ class ExportTimelinePlanner:
             previous_start = start
             previous_number = number
         return samples
+
+    @staticmethod
+    def _build_compiled(tracks, sources, animation_fps, plan) -> list[ExportFrameSample]:
+        """Reuse the source-time sample schedule, clipped to each visual owner's span."""
+        track_by_id = {track.id: track for track in tracks}
+        result: list[ExportFrameSample] = []
+        cursor = 0.0
+        for number, (window, chapter) in enumerate(
+            zip(plan.presentation.windows, plan.metadata.chapters, strict=True), start=1,
+        ):
+            track = track_by_id[window.track_id]
+            start = window.timeline_start
+            end = min(window.timeline_end, chapter.end)
+            rate, source_in = window.playback_rate, window.source_time_at_start
+            if start > cursor:
+                # Gaps keep the last owner visible while global clocks/animations advance.
+                # ponytail: dense gap samples; use sparse boundaries if long gaps dominate.
+                steps = max(1, ceil((start - cursor) * animation_fps)) if sources else 1
+                for step in range(steps):
+                    point = cursor + (start - cursor) * step / steps
+                    next_point = cursor + (start - cursor) * (step + 1) / steps
+                    previous = result[-1] if result else ExportFrameSample(
+                        track, number, start, 0.0, source_in, point,
+                    )
+                    result.append(replace(previous, timeline_seconds=point,
+                                          elapsed_seconds=plan.presentation.local_time(point),
+                                          duration_seconds=next_point - point))
+            translated_sources = [replace(
+                source,
+                timeline_start=(source.timeline_start - start) * rate + source_in,
+                timeline_duration=source.timeline_duration * rate,
+            ) for source in sources]
+            local_samples = ExportTimelinePlanner.build(
+                [replace(track, start_time_seconds=None)], translated_sources,
+                max(1, ceil(animation_fps / rate)),
+                track_number_offset=number - 1,
+            )
+            source_cursor = 0.0
+            source_end = source_in + (end - start) * rate
+            for sample in local_samples:
+                left = max(source_in, source_cursor)
+                source_cursor += sample.duration_seconds
+                right = min(source_end, source_cursor)
+                if right <= left:
+                    continue
+                elapsed = min(right, max(left, sample.elapsed_seconds))
+                result.append(replace(
+                    sample, track=track, track_number=number, track_start_seconds=start,
+                    duration_seconds=(right - left) / rate, elapsed_seconds=elapsed,
+                    timeline_seconds=start + (elapsed - source_in) / rate,
+                ))
+            cursor = end
+        return result
 
     @staticmethod
     def _animation_durations(

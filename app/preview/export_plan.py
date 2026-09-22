@@ -11,6 +11,7 @@ from app.models.source import Source, SourceType
 from app.preview.canvas_snapshot import CanvasSnapshot
 from app.renderer.export_timeline import ExportFrameSample, ExportTimelinePlanner
 from app.renderer.ffmpeg_renderer import RenderError, RenderSettings
+from app.timeline.render_plan import CompiledRenderPlan
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ def build_export_plan(
     video_clips: Sequence[object],
     renderer: object,
     animation_fps: int,
+    compiled_plan: CompiledRenderPlan | None = None,
 ) -> ExportPlan:
     """Resolve Z bands, the lossless-streaming decision, and the sample schedule.
 
@@ -115,6 +117,7 @@ def build_export_plan(
 
     stream_timeline_samples = ExportTimelinePlanner.build_by_z_band(
         active_tracks, sources, dynamic_visualizer_ids, z_bands, animation_fps,
+        compiled_plan,
     )
     if (
         not stream_timeline_samples

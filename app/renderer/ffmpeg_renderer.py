@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import shutil
 import subprocess
 import sys
@@ -19,6 +21,7 @@ from PySide6.QtGui import QImage, QImageReader
 
 from app.models.playlist import PlaylistTrack
 from app.timeline.compiler import compile_playlist
+from app.timeline.render_plan import CompiledRenderPlan, build_presentation_and_metadata
 from app.renderer.ffmpeg import filter_graph
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
 from app.utils.subprocess_utils import hidden_process_kwargs
@@ -264,20 +267,17 @@ class FFmpegRenderer:
                storage_path_callback: Callable[[str, Path | None], None] | None = None,
                transition_mode: str = "none",
                crossfade_seconds: float = 3.0,
+               compiled_plan: CompiledRenderPlan | None = None,
+               prepared_audio_path: Path | None = None,
                ) -> RenderResult:
         """Create a static Canvas video whose audio is the ordered enabled playlist.
 
-        ``transition_mode`` ("none" | "crossfade" | "automix") swaps only
-        the audio content -- for "crossfade", a plain fixed-length overlap
-        between every adjacent pair; for "automix", an AutoMix-blended mix
-        (app/automix/). Video/Canvas timing, chapters, and the exported
-        duration are always the legacy sequential values, unchanged (see
-        _render_fixed_crossfade_audio_segments / _render_automix_audio_segments).
-        A failed or unavailable render for either mode falls back to the
-        normal sequential audio path automatically -- neither mode can turn
-        a working export into a failed one.
+        Audio, Canvas duration and chapters consume the same resolved plan.
+        UI exports supply the prepared audio and plan before capturing frames.
         """
         cancel_event = cancel_event or threading.Event()
+        if (compiled_plan is None) != (prepared_audio_path is None):
+            raise RenderError("Prepared audio and its compiled plan must be supplied together.")
         if cancel_event.is_set():
             raise RenderCancelledError("Rendering was cancelled.")
         active_tracks = [track for track in tracks if track.enabled]
@@ -400,8 +400,20 @@ class FFmpegRenderer:
             temporary = Path(temporary_directory)
             if storage_path_callback:
                 storage_path_callback("render", temporary)
+            resolved_plans = []
+            if prepared_audio_path is None and transition_mode != "none":
+                prepared_audio_path = self.prepare_playlist_audio(
+                    active_tracks, temporary, selected_settings,
+                    transition_mode=transition_mode, crossfade_seconds=crossfade_seconds,
+                    progress_callback=progress_callback, cancel_event=cancel_event,
+                    plan_callback=resolved_plans.append,
+                )
+                compiled_plan = resolved_plans[0]
+            compiled_plan = compiled_plan or compile_playlist(active_tracks)
+            if prepared_audio_path is not None and not prepared_audio_path.is_file():
+                raise RenderError("The prepared playlist audio is missing.")
             metadata_path = self._write_export_ffmetadata(
-                temporary, active_tracks, metadata or ExportMetadata(), target,
+                temporary, active_tracks, metadata or ExportMetadata(), target, compiled_plan,
             )
             if prepared_video is not None:
                 prepared_path = prepared_video.path.resolve()
@@ -437,14 +449,14 @@ class FFmpegRenderer:
                 visual_sequence = (
                     list(zip(frame_paths, durations, strict=True))
                     if explicit_frames
-                    else self._visual_sequence(active_tracks, frame_paths)
+                    else self._visual_sequence(active_tracks, frame_paths, compiled_plan)
                 )
                 base_input_arguments = []
-            total_duration = self._timeline_duration(active_tracks)
+            total_duration = compiled_plan.duration_seconds
             self._validate_visual_timeline(
                 visual_sequence, static_layers, total_duration, selected_settings.fps,
             )
-            audio_path = self.prepare_playlist_audio(
+            audio_path = prepared_audio_path or self.prepare_playlist_audio(
                 active_tracks, temporary, selected_settings,
                 transition_mode=transition_mode, crossfade_seconds=crossfade_seconds,
                 progress_callback=progress_callback, cancel_event=cancel_event,
@@ -461,7 +473,7 @@ class FFmpegRenderer:
                 try:
                     track_windows = [
                         (clip.timeline_start, clip.duration)
-                        for clip in compile_playlist(active_tracks).audio.clips
+                        for clip in compiled_plan.audio.clips
                     ]
                     visualizer_paths = PythonVisualizerRenderer(self.executable).render_layers(
                         audio_path, visualizers, selected_settings.fps, temporary, cancel_event,
@@ -774,22 +786,24 @@ class FFmpegRenderer:
         return RenderResult(target, len(active_tracks), validation)
 
     @staticmethod
-    def _visual_sequence(tracks: list[PlaylistTrack], frame_paths: list[Path]) -> list[tuple[Path, float]]:
+    def _visual_sequence(tracks: list[PlaylistTrack], frame_paths: list[Path],
+                         compiled_plan: CompiledRenderPlan | None = None) -> list[tuple[Path, float]]:
         """Pair per-track Canvas frames with durations, including manual silent gaps."""
         sequence: list[tuple[Path, float]] = []
         last_frame = frame_paths[0]
         track_by_id = {track.id: track for track in tracks}
         cursor = 0.0
-        for window, frame_path in zip(
-            compile_playlist(tracks).presentation.windows, frame_paths, strict=True,
+        plan = compiled_plan or compile_playlist(tracks)
+        for window, chapter, frame_path in zip(
+            plan.presentation.windows, plan.metadata.chapters, frame_paths, strict=True,
         ):
             track = track_by_id[window.track_id]
             gap = window.timeline_start - cursor
             if gap > 0.001:
                 sequence.append((last_frame, gap))
-            sequence.append((frame_path, max(0.001, track.duration_seconds)))
+            sequence.append((frame_path, max(0.001, min(window.timeline_end, chapter.end) - window.timeline_start)))
             last_frame = frame_path
-            cursor = window.timeline_end
+            cursor = min(window.timeline_end, chapter.end)
         return sequence
 
     @staticmethod
@@ -1163,29 +1177,26 @@ class FFmpegRenderer:
         transition_mode: str = "none", crossfade_seconds: float = 3.0,
         progress_callback: Callable[[str, float, str], None] | None = None,
         cancel_event: threading.Event | None = None,
+        plan_callback: Callable[[CompiledRenderPlan], None] | None = None,
     ) -> Path:
-        """Render one continuous AAC file for the ordered enabled playlist.
-
-        Shared by render() (final export) and ExportPreviewDialog, so
-        Preview can hear the exact same AutoMix/crossfade blend Export
-        would produce without re-deriving any of this timing or fallback
-        logic itself -- the same "Preview never independently re-plans"
-        rule the rest of this architecture already follows. The returned
-        file's duration always exactly equals
-        ``_timeline_duration(active_tracks)``, regardless of
-        ``transition_mode``.
-        """
+        """Prepare audio and report the exact plan actually rendered, including fallback."""
         cancel_event = cancel_event or threading.Event()
-        total_duration = self._timeline_duration(active_tracks)
+        resolved_plan = compile_playlist(active_tracks)
+
+        def accept_plan(plan: CompiledRenderPlan) -> None:
+            nonlocal resolved_plan
+            resolved_plan = plan
+
+        total_duration = resolved_plan.duration_seconds
         blended_segments = None
         if transition_mode == "automix":
             blended_segments = self._render_automix_audio_segments(
-                active_tracks, output_directory, total_duration, progress_callback, cancel_event,
+                active_tracks, output_directory, total_duration, progress_callback, cancel_event, accept_plan,
             )
         elif transition_mode == "crossfade":
             blended_segments = self._render_fixed_crossfade_audio_segments(
                 active_tracks, output_directory, total_duration, crossfade_seconds,
-                progress_callback, cancel_event,
+                progress_callback, cancel_event, accept_plan,
             )
         if blended_segments is not None:
             segments, segment_durations = blended_segments
@@ -1196,6 +1207,7 @@ class FFmpegRenderer:
             segment_durations = self._insert_silence_for_gaps(
                 active_tracks, segments, output_directory, settings, progress_callback, cancel_event
             )
+        total_duration = resolved_plan.duration_seconds
         concat_path = output_directory / "playlist.ffconcat"
         self._write_concat_file(concat_path, segments, segment_durations)
         audio_path = output_directory / "playlist_audio.m4a"
@@ -1217,42 +1229,123 @@ class FFmpegRenderer:
                 ),
             )
 
-        self._run([
-            "-f", "concat", "-safe", "0", "-i", str(concat_path),
+        combining_input_args = ["-f", "concat", "-safe", "0", "-i", str(concat_path)]
+        combining_output_args = [
             "-c:a", "aac", "-ar", "48000", "-ac", "2",
             "-b:a", settings.audio_bitrate,
             "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
             "-y", str(audio_path),
-        ], progress_parser=combining_audio_progress, cancel_event=cancel_event)
+        ]
+        # Two-pass EBU R128 loudness normalization applied once here, after
+        # concatenation/blending, so every transition_mode (legacy sequential,
+        # AutoMix, crossfade) gets a consistent, accurately-measured playback
+        # loudness without needing its own normalization step. Pass 1 measures
+        # this exact combined audio; pass 2 applies the measured gain
+        # (linear=true), which -- unlike single-pass loudnorm's on-the-fly
+        # estimate -- does not risk audible pumping on wildly different
+        # source mastering.
+        loudness_filter = self._measure_loudness_filter(combining_input_args, cancel_event)
+        if loudness_filter is not None:
+            try:
+                self._run(
+                    combining_input_args + ["-af", loudness_filter] + combining_output_args,
+                    progress_parser=combining_audio_progress, cancel_event=cancel_event,
+                )
+            except RenderCancelledError:
+                raise
+            except RenderError as error:
+                # Never let a best-effort loudness pass break an export that
+                # would otherwise have worked fine -- fall back to the plain
+                # combine, same discipline as every other optional audio
+                # enhancement in this file.
+                LOGGER.warning("Loudness normalization failed, exporting without it: %s", error)
+                loudness_filter = None
+        if loudness_filter is None:
+            self._run(
+                combining_input_args + combining_output_args,
+                progress_parser=combining_audio_progress, cancel_event=cancel_event,
+            )
         self._report(
             progress_callback, "Combining audio", 0.64,
             self._timed_progress_message(
                 "Combining audio", total_duration, total_duration, 1.0,
             ),
         )
+        if cancel_event.is_set():
+            raise RenderCancelledError("Rendering was cancelled.")
+        if plan_callback is not None:
+            plan_callback(resolved_plan)
         return audio_path
+
+    def _measure_loudness_filter(
+        self, combining_input_args: list[str], cancel_event: threading.Event,
+    ) -> str | None:
+        """Measure this exact combined audio and build an exact-gain loudnorm filter.
+
+        Returns ``None`` (never raises, except on cancellation) whenever a
+        usable measurement can't be produced -- a failed measurement pass,
+        unparseable stats, or a near-silent input that measures at -inf
+        LUFS (linear-mode loudnorm cannot correct for that without
+        producing NaN/Inf samples). The caller falls back to combining
+        audio with no loudness filter at all in every such case.
+        """
+        stderr_lines: list[str] = []
+        try:
+            self._run(
+                combining_input_args + [
+                    "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+                    "-f", "null", "-",
+                ],
+                cancel_event=cancel_event, capture_stderr=stderr_lines,
+            )
+        except RenderCancelledError:
+            raise
+        except RenderError as error:
+            LOGGER.warning(
+                "Loudness measurement pass failed, exporting without loudness normalization: %s", error,
+            )
+            return None
+        text = "".join(stderr_lines)
+        start, end = text.rfind("{"), text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            LOGGER.warning(
+                "Loudness measurement pass produced no stats, exporting without loudness normalization",
+            )
+            return None
+        try:
+            stats = json.loads(text[start:end + 1])
+            measured_i = float(stats["input_i"])
+            measured_tp = float(stats["input_tp"])
+            measured_lra = float(stats["input_lra"])
+            measured_thresh = float(stats["input_thresh"])
+            target_offset = float(stats["target_offset"])
+        except (KeyError, ValueError, json.JSONDecodeError) as error:
+            LOGGER.warning(
+                "Loudness measurement pass returned unusable stats, exporting without "
+                "loudness normalization: %s", error,
+            )
+            return None
+        if not math.isfinite(measured_i) or not math.isfinite(measured_tp):
+            LOGGER.info(
+                "Input measured %.1f LUFS (near-silent); skipping loudness normalization", measured_i,
+            )
+            return None
+        return (
+            "loudnorm=I=-16:TP=-1.5:LRA=11:"
+            f"measured_I={measured_i}:measured_TP={measured_tp}:"
+            f"measured_LRA={measured_lra}:measured_thresh={measured_thresh}:"
+            f"offset={target_offset}:linear=true"
+        )
 
     def _render_automix_audio_segments(
         self, active_tracks: list[PlaylistTrack], temporary: Path, sequential_duration: float,
         progress_callback: Callable[[str, float, str], None] | None,
         cancel_event: threading.Event,
+        plan_callback: Callable[[CompiledRenderPlan], None] | None = None,
     ) -> tuple[list[Path], list[float]] | None:
-        """Render AutoMix-blended audio, padded with silence to ``sequential_duration``.
-
-        Only the audio *content* changes here -- the returned segments'
-        total duration always equals ``sequential_duration`` exactly, so
-        video timing, chapters, and the exported duration stay the legacy
-        sequential values downstream (roadmap Phase 8: AutoMix's visual
-        timing integration is intentionally out of scope for this pass;
-        see docs/automix-phase1-dependency-evaluation.md's final section).
-
-        Returns ``None`` -- meaning "use the normal sequential audio path
-        instead" -- whenever AutoMix's dependencies are unavailable or
-        analysis/rendering fails for any reason. A bad AutoMix attempt
-        must degrade the export, never corrupt or abort it. Returns
-        ``None`` (never raises) unless the export itself was cancelled,
-        in which case cancellation propagates like any other stage.
-        """
+        """Render the mix and expose its plan only after successful validation."""
+        if cancel_event.is_set():
+            raise RenderCancelledError("Rendering was cancelled.")
         try:
             from app.automix.analysis.basic import BasicAnalysisProvider
             from app.automix.planner import compile_automix
@@ -1286,26 +1379,20 @@ class FFmpegRenderer:
                 raise RenderCancelledError("Rendering was cancelled.") from error
             LOGGER.warning("AutoMix export failed, falling back to sequential audio: %s", error)
             return None
-        return self._pad_prepared_audio_to_duration(
-            prepared, sequential_duration, temporary, "automix_pad_silence.nut", cancel_event,
-        )
+        if plan_callback is not None:
+            plan_callback(plan)
+        return [prepared.path], [plan.duration_seconds]
 
     def _render_fixed_crossfade_audio_segments(
         self, active_tracks: list[PlaylistTrack], temporary: Path, sequential_duration: float,
         crossfade_seconds: float,
         progress_callback: Callable[[str, float, str], None] | None,
         cancel_event: threading.Event,
+        plan_callback: Callable[[CompiledRenderPlan], None] | None = None,
     ) -> tuple[list[Path], list[float]] | None:
-        """Render a plain, analysis-free crossfade between every adjacent pair.
-
-        Unlike AutoMix, this needs no BPM/beat analysis and no ``librosa`` --
-        it reuses AutoMixAudioPipeline purely as an FFmpeg filter-graph
-        renderer for a trivially-built AudioRenderPlan (linear "tri"
-        crossfades of a fixed length). An explicit user gap
-        (``start_time_seconds``) is preserved rather than bridged, the same
-        policy AutoMix uses. Padded to ``sequential_duration`` and falls
-        back to ``None`` on any failure, exactly like the AutoMix path.
-        """
+        """Render the mix and expose its plan only after successful validation."""
+        if cancel_event.is_set():
+            raise RenderCancelledError("Rendering was cancelled.")
         try:
             from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
             from app.timeline.models import TransitionType
@@ -1330,8 +1417,8 @@ class FFmpegRenderer:
                 previous_clip = clips[-1]
                 overlap = max(0.0, min(
                     crossfade_seconds,
-                    previous_clip.timeline_end - previous_clip.timeline_start,
-                    track.duration_seconds,
+                    (previous_clip.timeline_end - previous_clip.timeline_start) / 2,
+                    track.duration_seconds / 2,
                 ))
                 timeline_start = actual_cursor - overlap
                 if overlap > 1e-6:
@@ -1363,27 +1450,10 @@ class FFmpegRenderer:
                 raise RenderCancelledError("Rendering was cancelled.") from error
             LOGGER.warning("Crossfade export failed, falling back to sequential audio: %s", error)
             return None
-        return self._pad_prepared_audio_to_duration(
-            prepared, sequential_duration, temporary, "crossfade_pad_silence.nut", cancel_event,
-        )
-
-    def _pad_prepared_audio_to_duration(
-        self, prepared: "PreparedAudio", sequential_duration: float, temporary: Path,
-        silence_filename: str, cancel_event: threading.Event,
-    ) -> tuple[list[Path], list[float]]:
-        """Append silence so the returned segments sum to exactly ``sequential_duration``."""
-        segments = [prepared.path]
-        segment_durations = [prepared.duration_seconds]
-        pad_seconds = sequential_duration - prepared.duration_seconds
-        if pad_seconds > 0.05:
-            silence_path = temporary / silence_filename
-            self._run([
-                "-f", "lavfi", "-t", f"{pad_seconds:.6f}", "-i", "anullsrc=r=48000:cl=stereo",
-                "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "nut", "-y", str(silence_path),
-            ], cancel_event=cancel_event)
-            segments.append(silence_path)
-            segment_durations.append(pad_seconds)
-        return segments, segment_durations
+        presentation, metadata, duration = build_presentation_and_metadata(plan.clips)
+        if plan_callback is not None:
+            plan_callback(CompiledRenderPlan(plan, presentation, metadata, duration))
+        return [prepared.path], [duration]
 
     def _normalize_audio(self, tracks: list[PlaylistTrack], directory: Path,
                          settings: RenderSettings,
@@ -1572,7 +1642,8 @@ class FFmpegRenderer:
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _run(self, arguments: list[str], progress_parser: Callable[[str], None] | None = None,
-             cancel_event: threading.Event | None = None) -> None:
+             cancel_event: threading.Event | None = None,
+             capture_stderr: list[str] | None = None) -> None:
         """Run FFmpeg, forward machine progress, and terminate safely on cancellation."""
         command = [str(self.executable), "-hide_banner", "-loglevel", "error", *arguments]
         try:
@@ -1636,6 +1707,8 @@ class FFmpegRenderer:
             stdout_thread.join(timeout=1.0)
         if stderr_thread.is_alive():
             stderr_thread.join(timeout=1.0)
+        if capture_stderr is not None:
+            capture_stderr.extend(stderr_lines)
         if cancelled:
             raise RenderCancelledError("Rendering was cancelled.")
         if process.returncode != 0:
@@ -1664,6 +1737,7 @@ class FFmpegRenderer:
         tracks: list[PlaylistTrack],
         metadata: "ExportMetadata",
         target: Path,
+        compiled_plan: CompiledRenderPlan | None = None,
     ) -> Path | None:
         """Write an FFmetadata file with container tags and per-track chapters.
 
@@ -1682,7 +1756,7 @@ class FFmpegRenderer:
         chapters = metadata.include_chapters and len(tracks) > 1
         if chapters:
             track_by_id = {track.id: track for track in tracks}
-            plan_chapters = compile_playlist(tracks, enabled_only=True).metadata.chapters
+            plan_chapters = (compiled_plan or compile_playlist(tracks, enabled_only=True)).metadata.chapters
             for index, chapter in enumerate(plan_chapters):
                 track = track_by_id[chapter.track_id]
                 start_ms = max(0, round(chapter.start * 1000))

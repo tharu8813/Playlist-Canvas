@@ -33,9 +33,10 @@ class PreviewAudioWorkerTests(unittest.TestCase):
             )
             with patch.object(renderer, "prepare_playlist_audio", return_value=Path(directory) / "out.m4a"):
                 received: list[str] = []
-                worker.ready.connect(received.append)
+                worker.ready.connect(lambda path, plan: received.append((path, plan)))
                 worker.run()
-            self.assertEqual(received, [str(Path(directory) / "out.m4a")])
+            self.assertEqual(received[0][0], str(Path(directory) / "out.m4a"))
+            self.assertEqual(received[0][1].duration_seconds, 30.0)
 
     def test_render_failure_emits_failed_not_an_exception(self) -> None:
         with TemporaryDirectory(prefix="preview-audio-") as directory:
@@ -58,7 +59,7 @@ class PreviewAudioWorkerTests(unittest.TestCase):
             with patch.object(renderer, "prepare_playlist_audio", side_effect=RenderCancelledError("cancelled")):
                 ready: list[str] = []
                 failures: list[str] = []
-                worker.ready.connect(ready.append)
+                worker.ready.connect(lambda path, plan: ready.append((path, plan)))
                 worker.failed.connect(failures.append)
                 worker.run()
             self.assertEqual(ready, [])

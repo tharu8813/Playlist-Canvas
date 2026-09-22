@@ -372,6 +372,7 @@ class ExportPreviewDialog(QDialog):
             self.setWindowFlags(Qt.WindowType.Widget)
         self.scene = scene
         self.tracks = tracks
+        self._compiled_plan = compile_playlist(tracks)
         self._track_schedule = self._build_track_schedule()
         self._track_schedule_starts = tuple(
             start for _index, _track, start, _end in self._track_schedule
@@ -867,11 +868,16 @@ class ExportPreviewDialog(QDialog):
         track_by_id = {track.id: track for track in self.tracks}
         return tuple(
             (index, track_by_id[window.track_id], window.timeline_start, window.timeline_end)
-            for index, window in enumerate(compile_playlist(self.tracks).presentation.windows)
+            for index, window in enumerate((getattr(self, "_compiled_plan", None) or compile_playlist(self.tracks)).presentation.windows)
         )
 
     def _track_at(self, playlist_seconds: float) -> tuple[int, PlaylistTrack, float, float] | None:
         """Return the active track plus local time and global start position."""
+        plan = getattr(self, "_compiled_plan", None)
+        if plan is not None and plan.presentation.windows:
+            window = plan.presentation._window_at(playlist_seconds)
+            index = next(i for i, track in enumerate(self.tracks) if track.id == window.track_id)
+            return index, self.tracks[index], plan.presentation.local_time(playlist_seconds), window.timeline_start
         schedule = getattr(self, "_track_schedule", None)
         starts = getattr(self, "_track_schedule_starts", None)
         if schedule is None or starts is None:
@@ -974,6 +980,13 @@ class ExportPreviewDialog(QDialog):
         _index, track, _elapsed, start = selected
         return start <= playlist_seconds < start + track.duration_seconds
 
+    def _has_audio(self, selected, playlist_seconds: float) -> bool:
+        plan = getattr(self, "_compiled_plan", None)
+        if plan is not None:
+            return any(clip.timeline_start <= playlist_seconds < clip.timeline_end
+                       for clip in plan.audio.clips)
+        return self._selection_has_audio(selected, playlist_seconds)
+
     def _on_seeked(self, _value: int) -> None:
         if not self._advancing_playhead:
             self._playhead_seconds = self.timeline.value() / TIMELINE_SCALE
@@ -1019,7 +1032,7 @@ class ExportPreviewDialog(QDialog):
         self._sync_video_sources(
             track, elapsed,
             track_start=start,
-            track_active=self._selection_has_audio(selected, playlist_seconds),
+            track_active=ExportPreviewDialog._has_audio(self, selected, playlist_seconds),
             force_seek=self._force_video_seek,
         )
         self._force_video_seek = False
@@ -2722,7 +2735,7 @@ class ExportPreviewDialog(QDialog):
         if selected is None:
             return
         self._playhead_seconds = playlist_seconds
-        if not self._selection_has_audio(selected, playlist_seconds):
+        if not ExportPreviewDialog._has_audio(self, selected, playlist_seconds):
             # `_track_at` intentionally retains the nearest track so Canvas text
             # and artwork remain meaningful in a silent gap. Audio transport must
             # nevertheless remain stopped until the real start boundary.
@@ -2756,7 +2769,7 @@ class ExportPreviewDialog(QDialog):
         elapsed_milliseconds = max(1, self.play_clock.restart())
         previous_seconds = self._playhead_seconds
         selected_before = self._track_at(previous_seconds)
-        audio_was_active = self._selection_has_audio(
+        audio_was_active = ExportPreviewDialog._has_audio(self,
             selected_before, previous_seconds
         )
         predicted_seconds = self._playhead_seconds + elapsed_milliseconds / 1000.0
@@ -2791,7 +2804,7 @@ class ExportPreviewDialog(QDialog):
         finally:
             self._advancing_playhead = False
         new_index = self._track_at(next_value / TIMELINE_SCALE)
-        audio_is_active = self._selection_has_audio(
+        audio_is_active = ExportPreviewDialog._has_audio(self,
             new_index, next_value / TIMELINE_SCALE
         )
         if (
@@ -2848,6 +2861,9 @@ class ExportPreviewDialog(QDialog):
         return None, 1.0, 0.0
 
     def _playlist_duration(self) -> float:
+        plan = getattr(self, "_compiled_plan", None)
+        if plan is not None:
+            return plan.duration_seconds
         if self._playlist_duration_cache is not None:
             return self._playlist_duration_cache
         if self._track_schedule:
@@ -3094,6 +3110,7 @@ class ExportPreviewDialog(QDialog):
         self._playing = False
         self.play_timer.stop()
         self.media_player.stop()
+        self.media_player.setSource(QUrl())
         for item in self.scene.items():
             if isinstance(item, SourceItem):
                 item.reset_video_preview()
@@ -3116,13 +3133,28 @@ class ExportPreviewDialog(QDialog):
             self._finish_or_detach_worker(self._video_proxy_worker)
         self._video_proxy_worker = None
         if self._blended_audio_controller is not None:
-            self._blended_audio_controller.cancel()
+            self._blended_audio_controller.shutdown()
         if self._blended_audio_temp_dir is not None:
             self._blended_audio_temp_dir.cleanup()
             self._blended_audio_temp_dir = None
 
-    def _on_blended_audio_ready(self, path_str: str) -> None:
+    def _on_blended_audio_ready(self, path_str: str, plan) -> None:
+        if self._closing:
+            return
+        self._compiled_plan = plan
+        self._track_schedule = self._build_track_schedule()
+        self._track_schedule_starts = tuple(row[2] for row in self._track_schedule)
+        self._playlist_duration_cache = plan.duration_seconds
         self._blended_audio_path = Path(path_str)
+        self._playhead_seconds = min(self._playhead_seconds, plan.duration_seconds)
+        self.timeline.blockSignals(True)
+        self.timeline.setRange(0, max(1, ceil(plan.duration_seconds * TIMELINE_SCALE)))
+        self.timeline.setValue(round(self._playhead_seconds * TIMELINE_SCALE))
+        self.timeline.blockSignals(False)
+        self._populate_track_list()
+        self._base_track_id = ""
+        self._force_video_seek = True
+        self._schedule_refresh()
         # Swap the already-playing per-track source for the blended mix at
         # the current playhead so a render that finishes mid-preview takes
         # over without an audible restart-from-zero.

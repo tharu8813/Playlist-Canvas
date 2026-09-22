@@ -48,11 +48,14 @@ class RenderWorker(QThread):
                  video_clips: list[VideoClipOverlay] | None = None,
                  metadata: ExportMetadata | None = None,
                  transition_mode: str = "none",
-                 crossfade_seconds: float = 3.0) -> None:
+                 crossfade_seconds: float = 3.0,
+                 compiled_plan=None, prepared_audio_path: Path | None = None) -> None:
         super().__init__()
         self.renderer = renderer
         self.transition_mode = transition_mode
         self.crossfade_seconds = crossfade_seconds
+        self.compiled_plan = compiled_plan
+        self.prepared_audio_path = prepared_audio_path
         if isinstance(image, PreparedVideoInput):
             self.image = image
         elif isinstance(image, list):
@@ -90,6 +93,8 @@ class RenderWorker(QThread):
                 storage_path_callback=self.storage_path_changed.emit,
                 transition_mode=self.transition_mode,
                 crossfade_seconds=self.crossfade_seconds,
+                compiled_plan=self.compiled_plan,
+                prepared_audio_path=self.prepared_audio_path,
             )
         except RenderCancelledError:
             self.cancelled.emit()

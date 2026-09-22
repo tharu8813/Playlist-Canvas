@@ -129,7 +129,7 @@ class RenderFixedCrossfadeAudioSegmentsUnitTests(unittest.TestCase):
     "Set PLAYLIST_CANVAS_TEST_FFMPEG to run real FFmpeg AutoMix export checks.",
 )
 class RealAutomixExportIntegrationTests(unittest.TestCase):
-    def test_automix_export_matches_the_legacy_sequential_duration(self) -> None:
+    def test_automix_export_uses_the_actual_mix_duration(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
         with TemporaryDirectory(prefix="automix-export-") as raw_directory:
             directory = Path(raw_directory)
@@ -150,11 +150,11 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             )
             self.assertIsNotNone(segments)
             segment_paths, segment_durations = segments
-            self.assertAlmostEqual(sum(segment_durations), sequential_duration, delta=0.05)
+            self.assertAlmostEqual(sum(segment_durations), 37.0, delta=0.05)
             for path in segment_paths:
                 self.assertTrue(path.is_file())
 
-    def test_full_render_with_automix_enabled_matches_legacy_duration(self) -> None:
+    def test_full_render_with_automix_enabled_uses_mix_duration(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
         with TemporaryDirectory(prefix="automix-export-full-") as raw_directory:
             directory = Path(raw_directory)
@@ -178,9 +178,9 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
                 [image, image], tracks, output_path, settings, transition_mode="automix",
             )
             self.assertTrue(output_path.is_file())
-            self.assertAlmostEqual(result.validation.duration_seconds, 20.0, delta=0.5)
+            self.assertAlmostEqual(result.validation.duration_seconds, 17.0, delta=0.5)
 
-    def test_crossfade_export_matches_the_legacy_sequential_duration(self) -> None:
+    def test_crossfade_export_uses_the_actual_mix_duration(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
         with TemporaryDirectory(prefix="crossfade-export-") as raw_directory:
             directory = Path(raw_directory)
@@ -201,7 +201,7 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             )
             self.assertIsNotNone(segments)
             segment_paths, segment_durations = segments
-            self.assertAlmostEqual(sum(segment_durations), sequential_duration, delta=0.05)
+            self.assertAlmostEqual(sum(segment_durations), 37.0, delta=0.05)
             # A 3s crossfade shortens the mix by 3s versus plain concatenation.
             self.assertAlmostEqual(segment_durations[0], 37.0, delta=0.1)
 
@@ -229,7 +229,7 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             # No overlap should have been applied across the explicit gap.
             self.assertAlmostEqual(sum(segment_durations), 25.0, delta=0.05)
 
-    def test_full_render_with_crossfade_mode_matches_legacy_duration(self) -> None:
+    def test_full_render_with_crossfade_mode_uses_mix_duration(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
         with TemporaryDirectory(prefix="crossfade-export-full-") as raw_directory:
             directory = Path(raw_directory)
@@ -254,7 +254,7 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
                 transition_mode="crossfade", crossfade_seconds=2.0,
             )
             self.assertTrue(output_path.is_file())
-            self.assertAlmostEqual(result.validation.duration_seconds, 20.0, delta=0.5)
+            self.assertAlmostEqual(result.validation.duration_seconds, 18.0, delta=0.5)
 
 
 if __name__ == "__main__":

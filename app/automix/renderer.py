@@ -92,6 +92,10 @@ def build_filter_graph(
         filters.append(_clip_filter_chain(index, clip, labels[index]))
 
     running_label = labels[0]
+    if clips[0].timeline_start > _GAP_EPSILON:
+        filters.append(f"anullsrc=r={SAMPLE_RATE}:cl=stereo:d={clips[0].timeline_start:.6f}[lead]")
+        filters.append(f"[lead][{running_label}]concat=n=2:v=0:a=1[leading]")
+        running_label = "leading"
     silence_count = 0
     for index in range(1, len(clips)):
         previous_clip, clip = clips[index - 1], clips[index]

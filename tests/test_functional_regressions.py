@@ -708,6 +708,108 @@ class FunctionalRegressionTests(unittest.TestCase):
             for message in messages
         ))
 
+    _LOUDNORM_STATS_JSON = (
+        '{"input_i" : "-23.10", "input_tp" : "-4.20", "input_lra" : "6.30", '
+        '"input_thresh" : "-33.50", "output_i" : "-16.00", "output_tp" : "-1.50", '
+        '"output_lra" : "5.90", "output_thresh" : "-26.10", '
+        '"normalization_type" : "linear", "target_offset" : "0.40"}'
+    )
+
+    def test_prepare_playlist_audio_applies_two_pass_loudness_normalization(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        commands: list[list[str]] = []
+
+        def fake_run(arguments: list[str], **kwargs: object) -> None:
+            commands.append(arguments)
+            capture_stderr = kwargs.get("capture_stderr")
+            if capture_stderr is not None:
+                capture_stderr.append(self._LOUDNORM_STATS_JSON)
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        track = PlaylistTrack("song.mp3", "Song", duration_seconds=2.0)
+        with TemporaryDirectory() as directory:
+            renderer.prepare_playlist_audio(
+                [track], Path(directory), RenderSettings(),
+            )
+        measure_pass, combine_pass = commands[-2], commands[-1]
+        self.assertIn("print_format=json", " ".join(measure_pass))
+        self.assertIn("-f", measure_pass)
+        self.assertIn("null", measure_pass)
+        self.assertIn("-af", combine_pass)
+        combine_filter = combine_pass[combine_pass.index("-af") + 1]
+        self.assertIn("measured_I=-23.1", combine_filter)
+        self.assertIn("offset=0.4", combine_filter)
+        self.assertIn("linear=true", combine_filter)
+
+    def test_prepare_playlist_audio_skips_normalization_for_near_silent_input(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        commands: list[list[str]] = []
+        silent_stats = self._LOUDNORM_STATS_JSON.replace('"-23.10"', '"-inf"')
+
+        def fake_run(arguments: list[str], **kwargs: object) -> None:
+            commands.append(arguments)
+            capture_stderr = kwargs.get("capture_stderr")
+            if capture_stderr is not None:
+                capture_stderr.append(silent_stats)
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        track = PlaylistTrack("silence.mp3", "Silence", duration_seconds=2.0)
+        with TemporaryDirectory() as directory:
+            result = renderer.prepare_playlist_audio(
+                [track], Path(directory), RenderSettings(),
+            )
+        self.assertEqual(result, Path(directory) / "playlist_audio.m4a")
+        final_combine = commands[-1]
+        self.assertNotIn("-af", final_combine)
+
+    def test_prepare_playlist_audio_falls_back_when_measurement_pass_fails(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        commands: list[list[str]] = []
+
+        def fake_run(arguments: list[str], **kwargs: object) -> None:
+            commands.append(arguments)
+            if "print_format=json" in " ".join(arguments):
+                raise RenderError("FFmpeg returned an unknown error.")
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        track = PlaylistTrack("song.mp3", "Song", duration_seconds=2.0)
+        with TemporaryDirectory() as directory:
+            result = renderer.prepare_playlist_audio(
+                [track], Path(directory), RenderSettings(),
+            )
+        self.assertEqual(result, Path(directory) / "playlist_audio.m4a")
+        final_combine = commands[-1]
+        self.assertNotIn("-af", final_combine)
+
+    def test_prepare_playlist_audio_falls_back_when_normalized_combine_fails(self) -> None:
+        renderer = object.__new__(FFmpegRenderer)
+        commands: list[list[str]] = []
+
+        def fake_run(arguments: list[str], **kwargs: object) -> None:
+            commands.append(arguments)
+            capture_stderr = kwargs.get("capture_stderr")
+            if capture_stderr is not None:
+                capture_stderr.append(self._LOUDNORM_STATS_JSON)
+                return
+            if "measured_I=" in " ".join(arguments):
+                raise RenderError("[aac] Input contains (near) NaN/+-Inf")
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        track = PlaylistTrack("song.mp3", "Song", duration_seconds=2.0)
+        with TemporaryDirectory() as directory:
+            result = renderer.prepare_playlist_audio(
+                [track], Path(directory), RenderSettings(),
+            )
+        self.assertEqual(result, Path(directory) / "playlist_audio.m4a")
+        # Measurement, the failed normalized combine, then a plain retry.
+        audio_path = str(Path(directory) / "playlist_audio.m4a")
+        combining_attempts = [
+            command for command in commands if audio_path in command
+        ]
+        self.assertEqual(len(combining_attempts), 2)
+        self.assertIn("-af", combining_attempts[0])
+        self.assertNotIn("-af", combining_attempts[1])
+
     def test_timed_progress_message_includes_time_and_percent(self) -> None:
         self.assertEqual(
             FFmpegRenderer._timed_progress_message(

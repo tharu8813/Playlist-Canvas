@@ -32,7 +32,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 from app.automix.candidates import (
-    TransitionCandidate,
     TransitionStrategy,
     generate_candidates,
     select_best_candidate,
@@ -170,22 +169,23 @@ def _plan_overlap(
     if best is None or best.strategy is TransitionStrategy.CUT or best.duration_seconds <= 0.0:
         return fallback
 
-    # The previous clip may already be shorter than its own analyzed
-    # duration (it could have been trimmed by *its* incoming transition),
-    # so cap the overlap at what is actually left of it, not at the raw
-    # analysis duration Phase 3 checked against.
-    previous_available = previous_clip.timeline_end - previous_clip.timeline_start
-    overlap = min(best.duration_seconds, previous_available)
-    if overlap <= 0.0:
-        return fallback
-
-    timeline_start = actual_cursor - overlap
     source_in = best.incoming_source_time
     playback_rate = 1.0
     if best.strategy is TransitionStrategy.BEAT_MATCH and compatibility.incoming_effective_bpm:
         # See module docstring: "favor outgoing" -- only the incoming clip's
         # rate ever moves, matching the outgoing track's own analyzed BPM.
         playback_rate = outgoing_analysis.bpm / compatibility.incoming_effective_bpm
+
+    # Anchor timestamps are in the original media, not the playlist clock.
+    # Keep the outgoing tail intact and fade over what remains after the anchor.
+    timeline_start = previous_clip.timeline_start + (
+        best.outgoing_source_time - previous_clip.source_in
+    ) / previous_clip.playback_rate
+    overlap = previous_clip.timeline_end - timeline_start
+    incoming_available = (track.duration_seconds - source_in) / playback_rate
+    if (timeline_start <= previous_clip.timeline_start or overlap <= 0.0
+            or overlap > incoming_available):
+        return fallback
 
     transition_type = _STRATEGY_TRANSITION_TYPES[best.strategy]
     transition = AudioRenderTransition(

@@ -74,6 +74,7 @@ from app.services.export_controller import ExportController
 from app.services.export_storage_service import ExportStorageMonitor, estimate_export_storage
 from app.services.playlist_service import PlaylistService
 from app.timeline.compiler import compile_playlist
+from app.controllers.preview_audio_controller import prepare_audio_for_ui
 from app.services.video_encoder_service import (
     AUTO_VIDEO_ENCODER,
     CPU_H264_ENCODER,
@@ -974,17 +975,34 @@ class ExportOrchestrator:
             return
         window._active_export_session = None
         try:
+            compiled_plan = None
+            prepared_audio_path = None
+            if window.project_settings.transition_mode != "none":
+                prepared_audio_path, compiled_plan = prepare_audio_for_ui(
+                    renderer, active_tracks, Path(window._export_frame_staging.name),
+                    window.project_settings.transition_mode,
+                    window.project_settings.crossfade_seconds,
+                    render_settings, preparation_cancel,
+                    lambda stage, fraction, message: window._export_dialog.set_busy(stage, message),
+                )
             animation_fps = window._export_animation_sample_rate(render_settings.fps)
-            playlist_duration = window._playlist_duration(active_tracks)
+            playlist_duration = (compiled_plan.duration_seconds if compiled_plan is not None
+                                 else window._playlist_duration(active_tracks))
+            window._export_dialog.set_export_details(
+                len(active_tracks), playlist_duration, settings_summary, output,
+            )
             visualizers = window._export_visualizers(active_tracks, render_scale)
-            video_clips = window._export_video_clips(
-                active_tracks, playlist_duration, render_settings.work_mode,
-                render_scale,
+            video_clips = (
+                self.video_clips(active_tracks, playlist_duration, render_settings.work_mode,
+                                render_scale, compiled_plan)
+                if compiled_plan is not None else
+                window._export_video_clips(active_tracks, playlist_duration,
+                                           render_settings.work_mode, render_scale)
             )
             plan = build_export_plan(
                 window.canvas.scene_model, active_tracks, window.store.sources(),
                 render_settings, playlist_duration, visualizers, video_clips,
-                renderer, animation_fps,
+                renderer, animation_fps, compiled_plan,
             )
             if not window._prepare_export_staging_space(
                 render_settings, playlist_duration, len(plan.z_bands),
@@ -1117,6 +1135,8 @@ class ExportOrchestrator:
             export_metadata,
             transition_mode=window.project_settings.transition_mode,
             crossfade_seconds=window.project_settings.crossfade_seconds,
+            compiled_plan=compiled_plan,
+            prepared_audio_path=prepared_audio_path,
         )
         export_dialog = window._export_dialog
         window._render_worker.progress.connect(
@@ -1413,6 +1433,7 @@ class ExportOrchestrator:
     def video_clips(
         self, tracks: list, playlist_duration: float,
         work_mode: str = WORK_MODE_AUTO, render_scale: float = 1.0,
+        compiled_plan=None,
     ) -> list[VideoClipOverlay]:
         """Expand visible video elements into deterministic FFmpeg clip intervals.
 
@@ -1424,9 +1445,11 @@ class ExportOrchestrator:
         duration_cache: dict[str, float] = {}
 
         track_by_id = {track.id: track for track in tracks}
+        plan = compiled_plan or compile_playlist(tracks)
         track_windows = [
-            (track_by_id[presentation_window.track_id], presentation_window.timeline_start)
-            for presentation_window in compile_playlist(tracks).presentation.windows
+            (track_by_id[item.track_id], item.timeline_start,
+             min(item.timeline_end, chapter.end) - item.timeline_start)
+            for item, chapter in zip(plan.presentation.windows, plan.metadata.chapters, strict=True)
         ]
 
         planned_sources: list[tuple[Source, list[tuple[list[str], float, float]]]] = []
@@ -1438,8 +1461,8 @@ class ExportOrchestrator:
             raw_schedules: list[tuple[list[str], float, float]] = []
             if source.video_timing_mode == "track":
                 raw_schedules.extend(
-                    (list(track.video_paths), start, track.duration_seconds)
-                    for track, start in track_windows if track.video_paths
+                    (list(track.video_paths), start, duration)
+                    for track, start, duration in track_windows if track.video_paths
                 )
             else:
                 start = min(playlist_duration, max(0.0, source.timeline_start))

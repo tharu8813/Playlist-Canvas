@@ -3701,7 +3701,7 @@ class MainWindow(QMainWindow):
         self._ffmpeg_install_worker = None
 
     def _export_playlist_files(self) -> None:
-        """Create YouTube description and CSV files without requiring FFmpeg."""
+        """Create companion timestamps using the same timing as the selected mix."""
         default_directory = (
             self.current_project_path.parent
             if self.current_project_path is not None
@@ -3732,13 +3732,47 @@ class MainWindow(QMainWindow):
                 return
             overwrite = True
         try:
+            compiled_plan = None
+            if self.project_settings.transition_mode != "none":
+                from PySide6.QtWidgets import QProgressDialog
+                from app.controllers.preview_audio_controller import prepare_audio_for_ui
+                from app.renderer.ffmpeg_renderer import RenderCancelledError
+
+                tracks = [track for track in self.playlist_service.tracks if track.enabled]
+                if not tracks:
+                    raise PlaylistExportError("Select at least one playlist track before creating files.")
+                renderer = FFmpegRenderer(self.settings_service.current.ffmpeg_path or None)
+                cancel = threading.Event()
+                progress = QProgressDialog(
+                    "믹스 시간 확인 중…" if korean else "Preparing mix timestamps…",
+                    "취소" if korean else "Cancel", 0, 0, self,
+                )
+                progress.setWindowModality(Qt.WindowModality.WindowModal)
+                progress.canceled.connect(cancel.set)
+                self._export_preparation_cancel = cancel
+                progress.show()
+                try:
+                    with TemporaryDirectory(prefix="playlist-timestamps-") as directory:
+                        _, compiled_plan = prepare_audio_for_ui(
+                            renderer, tracks, Path(directory), self.project_settings.transition_mode,
+                            self.project_settings.crossfade_seconds, RenderSettings(), cancel,
+                            lambda stage, fraction, message: progress.setLabelText(message),
+                        )
+                except RenderCancelledError:
+                    return
+                finally:
+                    progress.close()
+                    progress.deleteLater()
+                    self._export_preparation_cancel = None
+                    self._resume_close_after_export_cancel()
             result = self.playlist_export_service.export(
                 self.playlist_service.tracks,
                 dialog.output_directory,
                 dialog.timestamp_format,
                 overwrite=overwrite,
+                **({"compiled_plan": compiled_plan} if compiled_plan is not None else {}),
             )
-        except PlaylistExportError as error:
+        except (PlaylistExportError, RenderError) as error:
             QMessageBox.warning(
                 self,
                 "파일 만들기 오류" if korean else "File creation error",
@@ -4754,6 +4788,8 @@ class MainWindow(QMainWindow):
                 # the unsaved workspace open. Only explicit Discard may exit.
                 event.ignore()
                 return
+        self._automix_analysis_timer.stop()
+        self.automix_analysis_controller.shutdown()
         if self._workspace_settings_timer.isActive():
             self._workspace_settings_timer.stop()
         self._autosave_timer.stop()

@@ -10,6 +10,7 @@ from typing import Iterable
 
 from app.models.playlist import PlaylistTrack
 from app.timeline.compiler import compile_playlist
+from app.timeline.render_plan import CompiledRenderPlan
 
 
 class TimestampFormat(str, Enum):
@@ -38,7 +39,8 @@ class PlaylistExportService:
 
     def export(self, tracks: Iterable[PlaylistTrack], output_directory: str | Path,
                timestamp_format: TimestampFormat = TimestampFormat.STANDARD,
-               overwrite: bool = False) -> PlaylistExportResult:
+               overwrite: bool = False,
+               compiled_plan: CompiledRenderPlan | None = None) -> PlaylistExportResult:
         """Write ``description.txt`` and ``playlist.csv`` and return their details."""
         selected_tracks = [track for track in tracks if track.enabled]
         if not selected_tracks:
@@ -52,7 +54,7 @@ class PlaylistExportService:
         if not directory.is_dir():
             raise PlaylistExportError(f"The output path is not a folder: {directory}")
 
-        description_text = self.description_text(selected_tracks, timestamp_format)
+        description_text = self.description_text(selected_tracks, timestamp_format, compiled_plan)
         description_path = directory / "description.txt"
         csv_path = directory / "playlist.csv"
         existing = [path.name for path in (description_path, csv_path) if path.exists()]
@@ -84,11 +86,12 @@ class PlaylistExportService:
         )
 
     def description_text(self, tracks: Iterable[PlaylistTrack],
-                         timestamp_format: TimestampFormat) -> str:
+                         timestamp_format: TimestampFormat,
+                         compiled_plan: CompiledRenderPlan | None = None) -> str:
         """Build timestamp lines from enabled track order and explicit timeline gaps."""
         track_list = list(tracks)
         track_by_id = {track.id: track for track in track_list}
-        chapters = compile_playlist(track_list, enabled_only=True).metadata.chapters
+        chapters = (compiled_plan or compile_playlist(track_list, enabled_only=True)).metadata.chapters
         lines: list[str] = []
         for chapter in chapters:
             track = track_by_id[chapter.track_id]
