@@ -444,58 +444,10 @@ class FFmpegRenderer:
             self._validate_visual_timeline(
                 visual_sequence, static_layers, total_duration, selected_settings.fps,
             )
-            blended_segments = None
-            if transition_mode == "automix":
-                blended_segments = self._render_automix_audio_segments(
-                    active_tracks, temporary, total_duration, progress_callback, cancel_event,
-                )
-            elif transition_mode == "crossfade":
-                blended_segments = self._render_fixed_crossfade_audio_segments(
-                    active_tracks, temporary, total_duration, crossfade_seconds,
-                    progress_callback, cancel_event,
-                )
-            if blended_segments is not None:
-                segments, segment_durations = blended_segments
-            else:
-                segments = self._normalize_audio(
-                    active_tracks, temporary, selected_settings, progress_callback, cancel_event
-                )
-                segment_durations = self._insert_silence_for_gaps(
-                    active_tracks, segments, temporary, selected_settings, progress_callback, cancel_event
-                )
-            concat_path = temporary / "playlist.ffconcat"
-            self._write_concat_file(concat_path, segments, segment_durations)
-            audio_path = temporary / "playlist_audio.m4a"
-            self._report(
-                progress_callback, "Combining audio", 0.56,
-                f"Combining audio 0.0s / {total_duration:.1f}s · 0%",
-            )
-
-            def combining_audio_progress(line: str) -> None:
-                seconds = self._parse_progress_seconds(line)
-                if seconds is None or total_duration <= 0.0:
-                    return
-                bounded = min(total_duration, max(0.0, seconds))
-                fraction = bounded / total_duration
-                self._report(
-                    progress_callback, "Combining audio", 0.56 + fraction * 0.08,
-                    self._timed_progress_message(
-                        "Combining audio", bounded, total_duration, fraction,
-                    ),
-                )
-
-            self._run([
-                "-f", "concat", "-safe", "0", "-i", str(concat_path),
-                "-c:a", "aac", "-ar", "48000", "-ac", "2",
-                "-b:a", selected_settings.audio_bitrate,
-                "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
-                "-y", str(audio_path),
-            ], progress_parser=combining_audio_progress, cancel_event=cancel_event)
-            self._report(
-                progress_callback, "Combining audio", 0.64,
-                self._timed_progress_message(
-                    "Combining audio", total_duration, total_duration, 1.0,
-                ),
+            audio_path = self.prepare_playlist_audio(
+                active_tracks, temporary, selected_settings,
+                transition_mode=transition_mode, crossfade_seconds=crossfade_seconds,
+                progress_callback=progress_callback, cancel_event=cancel_event,
             )
             visualizer_paths: list[Path] = []
             if visualizers:
@@ -507,9 +459,13 @@ class FFmpegRenderer:
                                  message)
 
                 try:
+                    track_windows = [
+                        (clip.timeline_start, clip.duration)
+                        for clip in compile_playlist(active_tracks).audio.clips
+                    ]
                     visualizer_paths = PythonVisualizerRenderer(self.executable).render_layers(
                         audio_path, visualizers, selected_settings.fps, temporary, cancel_event,
-                        visualizer_progress, self._track_windows(active_tracks),
+                        visualizer_progress, track_windows,
                     )
                 except PythonVisualizerError as error:
                     if cancel_event.is_set():
@@ -1200,6 +1156,81 @@ class FFmpegRenderer:
         else:
             cap = max(1, min(4, cpu_count // 2))
         return min(track_count, cap)
+
+    def prepare_playlist_audio(
+        self, active_tracks: list[PlaylistTrack], output_directory: Path,
+        settings: RenderSettings,
+        transition_mode: str = "none", crossfade_seconds: float = 3.0,
+        progress_callback: Callable[[str, float, str], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Path:
+        """Render one continuous AAC file for the ordered enabled playlist.
+
+        Shared by render() (final export) and ExportPreviewDialog, so
+        Preview can hear the exact same AutoMix/crossfade blend Export
+        would produce without re-deriving any of this timing or fallback
+        logic itself -- the same "Preview never independently re-plans"
+        rule the rest of this architecture already follows. The returned
+        file's duration always exactly equals
+        ``_timeline_duration(active_tracks)``, regardless of
+        ``transition_mode``.
+        """
+        cancel_event = cancel_event or threading.Event()
+        total_duration = self._timeline_duration(active_tracks)
+        blended_segments = None
+        if transition_mode == "automix":
+            blended_segments = self._render_automix_audio_segments(
+                active_tracks, output_directory, total_duration, progress_callback, cancel_event,
+            )
+        elif transition_mode == "crossfade":
+            blended_segments = self._render_fixed_crossfade_audio_segments(
+                active_tracks, output_directory, total_duration, crossfade_seconds,
+                progress_callback, cancel_event,
+            )
+        if blended_segments is not None:
+            segments, segment_durations = blended_segments
+        else:
+            segments = self._normalize_audio(
+                active_tracks, output_directory, settings, progress_callback, cancel_event
+            )
+            segment_durations = self._insert_silence_for_gaps(
+                active_tracks, segments, output_directory, settings, progress_callback, cancel_event
+            )
+        concat_path = output_directory / "playlist.ffconcat"
+        self._write_concat_file(concat_path, segments, segment_durations)
+        audio_path = output_directory / "playlist_audio.m4a"
+        self._report(
+            progress_callback, "Combining audio", 0.56,
+            f"Combining audio 0.0s / {total_duration:.1f}s · 0%",
+        )
+
+        def combining_audio_progress(line: str) -> None:
+            seconds = self._parse_progress_seconds(line)
+            if seconds is None or total_duration <= 0.0:
+                return
+            bounded = min(total_duration, max(0.0, seconds))
+            fraction = bounded / total_duration
+            self._report(
+                progress_callback, "Combining audio", 0.56 + fraction * 0.08,
+                self._timed_progress_message(
+                    "Combining audio", bounded, total_duration, fraction,
+                ),
+            )
+
+        self._run([
+            "-f", "concat", "-safe", "0", "-i", str(concat_path),
+            "-c:a", "aac", "-ar", "48000", "-ac", "2",
+            "-b:a", settings.audio_bitrate,
+            "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
+            "-y", str(audio_path),
+        ], progress_parser=combining_audio_progress, cancel_event=cancel_event)
+        self._report(
+            progress_callback, "Combining audio", 0.64,
+            self._timed_progress_message(
+                "Combining audio", total_duration, total_duration, 1.0,
+            ),
+        )
+        return audio_path
 
     def _render_automix_audio_segments(
         self, active_tracks: list[PlaylistTrack], temporary: Path, sequential_duration: float,
