@@ -44,6 +44,9 @@ class TransitionDspDecision:
 
     dsp: TransitionDsp | None
     reasons: tuple[str, ...]
+    metrics: tuple[tuple[str, object], ...] = ()
+    """The same facts as ``reasons``, as (name, value) pairs for diagnostics;
+    ``None`` values mean unknown."""
 
 
 def select_transition_dsp(
@@ -65,26 +68,35 @@ def select_transition_dsp(
     strategy = candidate.strategy
     duration = candidate.duration_seconds
     facts = [f"+ {strategy.value} ({'rate-matched' if strategy is TransitionStrategy.BEAT_MATCH else 'own tempo'})"]
-    if strategy not in (TransitionStrategy.BEAT_MATCH, TransitionStrategy.BEAT_ALIGNED_CROSSFADE):
-        return TransitionDspDecision(None, (f"* legacy crossfade: {strategy.value} has no reliable rhythm to style on",))
-
     vocals = _vocals_overlap(candidate, outgoing, incoming)
+    keys = _keys_clash(outgoing, incoming)
+    energy, energy_source = _energy_jump(candidate, outgoing, incoming, outgoing_structure, incoming_structure)
+    drift = 0.0
+    if strategy is TransitionStrategy.BEAT_ALIGNED_CROSSFADE:
+        drift = duration * compatibility.tempo_shift_percent / 100.0
+    metrics = (
+        ("vocal_overlap", vocals), ("key_clash", keys),
+        ("energy_delta", energy), ("energy_source", energy_source or None),
+        ("kick_drift_ms", drift * 1000.0 if strategy is TransitionStrategy.BEAT_ALIGNED_CROSSFADE else None),
+    )
+    if strategy not in (TransitionStrategy.BEAT_MATCH, TransitionStrategy.BEAT_ALIGNED_CROSSFADE):
+        return TransitionDspDecision(
+            None, (f"* legacy crossfade: {strategy.value} has no reliable rhythm to style on",), metrics,
+        )
+
+
     facts.append({True: "- vocals active in both transition windows",
                   False: "+ vocals not active in both transition windows",
                   None: "? vocal activity unknown"}[vocals])
-    keys = _keys_clash(outgoing, incoming)
     facts.append({True: f"- keys clash ({outgoing.key} -> {incoming.key})",
                   False: f"+ keys compatible ({outgoing.key} -> {incoming.key})",
                   None: "? key unknown"}[keys])
-    energy, energy_source = _energy_jump(candidate, outgoing, incoming, outgoing_structure, incoming_structure)
     if energy is None:
         facts.append("? energy unknown")
     else:
         facts.append(f"{'-' if energy >= ENERGY_JUMP_THRESHOLD else '+'} {energy_source} energy delta {energy:.2f}")
     facts.append(f"  tempo delta {compatibility.tempo_shift_percent:.1f}%")
-    drift = 0.0
     if strategy is TransitionStrategy.BEAT_ALIGNED_CROSSFADE:
-        drift = duration * compatibility.tempo_shift_percent / 100.0
         facts.append(f"{'-' if drift > MAX_BEAT_DRIFT_SECONDS else '+'} expected kick drift {drift * 1000:.0f}ms")
 
     if duration < SHORT_FADE_MAX_SECONDS:
@@ -99,7 +111,7 @@ def select_transition_dsp(
         dsp, rule = TransitionDsp.BASS_SWAP, "clean reliable beat match"
     else:
         dsp, rule = None, "aligned crossfade with no conflicts: legacy equal-power"
-    return TransitionDspDecision(dsp, (f"* {dsp.value if dsp else 'legacy'}: {rule}", *facts))
+    return TransitionDspDecision(dsp, (f"* {dsp.value if dsp else 'legacy'}: {rule}", *facts), metrics)
 
 
 def describe_transition(transition: AudioRenderTransition, outgoing_name: str, incoming_name: str) -> str:

@@ -66,6 +66,9 @@ class AudioRenderTransition:
     ``dsp_reasons`` is runtime diagnostics from whoever chose ``dsp`` (the
     AutoMix selector): why that style, for tuning. Never read by the
     renderer, never persisted -- compiled plans are rebuilt, not saved.
+    ``details`` is the same kind of diagnostics as (name, value) pairs --
+    the planner's numbers (BPMs, rate, cues, score, energy/vocal/key facts)
+    for Preview's AutoMix details and the diagnostics export.
     """
 
     clip_a: str
@@ -75,6 +78,7 @@ class AudioRenderTransition:
     type: TransitionType = TransitionType.CUT
     dsp: TransitionDsp | None = None
     dsp_reasons: tuple[str, ...] = ()
+    details: tuple[tuple[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

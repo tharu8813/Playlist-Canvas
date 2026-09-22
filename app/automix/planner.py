@@ -70,6 +70,8 @@ from dataclasses import replace
 
 from app.automix.candidates import (
     TransitionStrategy,
+    _structure_incoming_anchor,
+    _structure_outgoing_anchor,
     generate_candidates,
     select_best_candidate,
 )
@@ -300,10 +302,36 @@ def _plan_overlap(
         best, compatibility, effective_outgoing_analysis, incoming_analysis,
         structures.get(previous_track.id), structures.get(track.id),
     )
+    outgoing_structure = structures.get(previous_track.id)
+    incoming_structure = structures.get(track.id)
+    details = (
+        ("strategy", best.strategy.value),
+        ("bars", best.bars),
+        ("score", best.score),
+        ("outgoing_bpm", effective_outgoing_analysis.bpm),
+        ("incoming_bpm", incoming_analysis.bpm),
+        ("target_bpm", best.target_bpm),
+        ("incoming_rate", best.incoming_rate),
+        ("tempo_delta_percent", compatibility.tempo_shift_percent),
+        ("half_double_tempo", compatibility.used_half_double),
+        ("outgoing_beat_confidence", outgoing_analysis.bpm_confidence),
+        ("incoming_beat_confidence", incoming_analysis.bpm_confidence),
+        ("outgoing_downbeat_confidence", outgoing_analysis.meter_confidence),
+        ("incoming_downbeat_confidence", incoming_analysis.meter_confidence),
+        ("outgoing_cue", best.outgoing_source_time),
+        ("outgoing_cut", best.outgoing_source_out),
+        ("incoming_cue", best.incoming_source_time),
+        ("outgoing_tail_trimmed", outgoing_analysis.duration_seconds - best.outgoing_source_out),
+        ("outgoing_structure_anchor", _structure_outgoing_anchor(outgoing_structure)),
+        ("incoming_structure_anchor", _structure_incoming_anchor(incoming_structure)),
+        ("outgoing_key", outgoing_analysis.key),
+        ("incoming_key", incoming_analysis.key),
+        *decision.metrics,
+    )
     transition = AudioRenderTransition(
         clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
         timeline_start=timeline_start, duration=overlap, type=transition_type,
-        dsp=decision.dsp, dsp_reasons=decision.reasons,
+        dsp=decision.dsp, dsp_reasons=decision.reasons, details=details,
     )
     # One line per transition in the app log, for tuning against real music.
     if log_diagnostics:

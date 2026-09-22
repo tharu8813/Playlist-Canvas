@@ -69,6 +69,13 @@ class TrackAnalysis:
     energy: float | None = None
     vocal_activity: tuple[tuple[float, float], ...] = ()
 
+    audible_start_seconds: float | None = None
+    audible_end_seconds: float | None = None
+    """Where sound starts/stops, excluding digital silence at either end
+    (``None``: unknown, treat the whole file as audible). Real masters
+    commonly carry 1-4 s of silence after the last decay; a transition
+    overlapping only that would be a gap, not a mix."""
+
     analyzer_id: str = ""
     analyzer_version: str = ""
 
@@ -111,6 +118,13 @@ class TrackAnalysis:
             if start < previous_end:
                 raise ValueError("TrackAnalysis.vocal_activity spans must be sorted and non-overlapping.")
             previous_end = end
+        for name in ("audible_start_seconds", "audible_end_seconds"):
+            value = getattr(self, name)
+            if value is not None and (not _is_finite_number(value) or not 0.0 <= value <= self.duration_seconds):
+                raise ValueError(f"TrackAnalysis.{name} must lie within the track when known.")
+        if (self.audible_start_seconds is not None and self.audible_end_seconds is not None
+                and self.audible_end_seconds < self.audible_start_seconds):
+            raise ValueError("TrackAnalysis audible end must not precede its start.")
         if not isinstance(self.analyzer_id, str) or not isinstance(self.analyzer_version, str):
             raise ValueError("TrackAnalysis analyzer_id/analyzer_version must be strings.")
 
@@ -152,6 +166,8 @@ class TrackAnalysis:
             "key_confidence": self.key_confidence,
             "energy": self.energy,
             "vocal_activity": [list(span) for span in self.vocal_activity],
+            "audible_start_seconds": self.audible_start_seconds,
+            "audible_end_seconds": self.audible_end_seconds,
             "analyzer_id": self.analyzer_id,
             "analyzer_version": self.analyzer_version,
         }
@@ -174,6 +190,8 @@ class TrackAnalysis:
             key_confidence=fields.get("key_confidence", 0.0),
             energy=fields.get("energy"),
             vocal_activity=tuple(tuple(span) for span in fields.get("vocal_activity", ())),
+            audible_start_seconds=fields.get("audible_start_seconds"),
+            audible_end_seconds=fields.get("audible_end_seconds"),
             analyzer_id=fields.get("analyzer_id", ""),
             analyzer_version=fields.get("analyzer_version", ""),
         )

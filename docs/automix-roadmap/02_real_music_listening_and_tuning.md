@@ -73,3 +73,34 @@ from/to, timeline_start, duration, strategy, dsp, effective BPM, tempo delta, be
 
 ## 최종 보고
 사용 음악 수/장르, 평가법, 실패 유형, threshold 전후, DSP 전후, 개선/미해결 사례, regressions, 다음 필요 기능.
+
+
+---
+
+## Outcome (2026-09-23)
+
+### What could and could not be done
+- **No human listening was possible** in this run (autonomous agent, no audio output). The only legally held local music was two full songs (`REDRED`, `Attention`, from the user's own StemLab separations -- `Attention` rebuilt by summing its six stems) plus their instrumental/vocal stems. Nothing was committed. The 20-50 song, multi-genre listening panel below remains **TODO for a human**.
+- Built instead: an objective, repeatable diagnostic framework that runs the real Export analysis/planning/rendering path and measures each transition window on the rendered mix.
+
+### Diagnostic framework
+- `AudioRenderTransition.details` -- the planner now records, per transition, strategy, bars, score, effective/incoming/target BPM, rate, tempo delta, half/double, beat/downbeat confidences, cues, trim, structure anchors, keys and the DSP selector's vocal/key/energy/drift facts (runtime only, never persisted, never read by the renderer).
+- `app/automix/diagnostics.py` -- `transition_rows` (one row per junction incl. sequential/gap), `rows_to_csv`/`rows_to_json`, and `window_metrics` (level dip/peak/mean and <150 Hz excess in the window vs 8 s of solo context each side).
+- `tools/automix_listening_report.py OUT SONG...  [--ab]` -- analyze (Beat This + Sonara + caches, like Export) -> plan -> render -> `report.csv/json`; `--ab` renders each transition once per DSP style with identical geometry for side-by-side listening and metrics.
+
+### Failures found on real music, and fixes
+| # | failure | evidence | change |
+|---|---|---|---|
+| 1 | **Beat This never ran on AAC/M4A** -- its own file loader (torchaudio/soundfile) cannot decode it, so every such track silently used the basic librosa beats | `REDRED.m4a`: "Could not load audio"; BPM 123.05 (basic) vs 120.0 (Beat This after fix), downbeat confidence 0.30 -> 0.61 | Beat This now receives the FFmpeg-decoded signal (`Audio2Beats`), one decode shared with the basic analyzer (`BasicAnalysisProvider.analyze_signal`). Beat This cache version 1 -> 2. |
+| 2 | **Transitions mixed against trailing silence** -- both masters end with 1.5-4 s of digital silence (-45..-67 dB); the 3 s fixed crossfade overlapped only that | window mean level vs context: -13.9 dB before -> -3.4 dB after (Attention -> REDRED); dip -32.5 -> -12.0 dB | `TrackAnalysis.audible_start/end_seconds` (basic analyzer v3, -40 dB below the 90th-percentile 50 ms block; decays measured -18..-33 dB are kept). Tail cues, the bounded downbeat snap and the fixed crossfade use the audible end; incoming cues start at the audible start. Unknown bounds (old data) keep the file edges. Exact geometry (C.1) unchanged: the outgoing clip is trimmed to the candidate's `outgoing_source_out` as before. |
+| 3 | **Vocal-activity heuristic is weak on real pop** (not changed here -> Phase 05) | vs vocal stems: recall 0.36 / 0.06, precision 0.89 / 0.50; 10-12 % of seconds of the *instrumentals* flagged as vocal, which picked VOCAL_SAFE_EQ for Attention -> Attention (instrumental) | none yet; recorded for Phase 05/06 |
+
+### Thresholds / envelopes
+Not changed: SHORT_FADE 4 s, energy jump 0.30, kick drift 50 ms, all band envelopes, structure/vocal weights. Real beat-matched pairs (REDRED -> instrumental, 16 s BASS_SWAP; Attention -> instrumental, 19.2 s) showed no low-end build-up (low band -0.7..-1.9 dB vs context) and no level spike (+0.5..+3.4 dB peak), i.e. no measured failure to tune against; changing them on two songs would be guessing.
+
+### Remaining TODO (needs a human listener)
+- 20-50 legally owned songs across K-pop/EDM/hip-hop/rock/ballad/acoustic, including half/double tempo and long intros/outros; rate timing, bass/vocal clash, energy holes, style choice per transition using `tools/automix_listening_report.py --ab`.
+- Whether the 3 s fixed crossfade for incompatible tempos should be longer/shorter, and whether a quiet intro after a decaying outro (REDRED -> Attention: -24 dB dip even after fix #2) should start the incoming track earlier.
+
+### Tests
+`tests/test_automix_diagnostics.py` (rows/CSV/JSON/metrics), audible-bound cases in `tests/test_automix_candidates.py` and `tests/test_automix_basic_analyzer.py`, Beat This tests moved to the signal API.

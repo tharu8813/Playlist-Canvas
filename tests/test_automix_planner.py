@@ -489,8 +489,8 @@ class TransitionDspSelectionTests(unittest.TestCase):
         plain_plan = compile_automix(tracks, plain, ENABLED)
         vocal_plan = compile_automix(tracks, vocal, ENABLED)
         self.assertIs(vocal_plan.audio.transitions[0].dsp, TransitionDsp.VOCAL_SAFE_EQ)
-        self.assertEqual(replace(vocal_plan.audio.transitions[0], dsp=None, dsp_reasons=()),
-                         replace(plain_plan.audio.transitions[0], dsp=None, dsp_reasons=()))
+        self.assertEqual(replace(vocal_plan.audio.transitions[0], dsp=None, dsp_reasons=(), details=()),
+                         replace(plain_plan.audio.transitions[0], dsp=None, dsp_reasons=(), details=()))
         self.assertEqual(vocal_plan.audio.clips, plain_plan.audio.clips)
 
     def test_fixed_crossfade_fallback_keeps_the_legacy_mix(self) -> None:

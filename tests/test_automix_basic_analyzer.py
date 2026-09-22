@@ -14,6 +14,7 @@ import numpy as np
 from app.automix.analysis.basic import (
     SAMPLE_RATE,
     BasicAnalysisProvider,
+    audible_bounds,
     normalize_tempo_octave,
 )
 from app.automix.analysis.provider import AnalysisCancelled
@@ -197,6 +198,20 @@ class BasicAnalysisProviderTests(unittest.TestCase):
             self.assertGreaterEqual(start, 0.0)
             self.assertLess(start, end)
             self.assertLessEqual(end, 8.0)
+
+
+class AudibleBoundsTests(unittest.TestCase):
+    def test_trailing_and_leading_silence_are_excluded_but_a_decay_is_not(self) -> None:
+        rate = SAMPLE_RATE
+        body = 0.5 * np.sin(2 * np.pi * 220 * np.arange(10 * rate) / rate)
+        decay = body[:2 * rate] * 10 ** (-30 / 20)  # a -30 dB reverb tail is still sound
+        signal = np.concatenate([np.zeros(rate), body, decay, np.zeros(3 * rate)]).astype(np.float32)
+        start, end = audible_bounds(signal, len(signal) / rate)
+        self.assertAlmostEqual(start, 1.0, delta=0.06)
+        self.assertAlmostEqual(end, 13.0, delta=0.06)
+
+    def test_silence_has_no_bounds(self) -> None:
+        self.assertEqual(audible_bounds(np.zeros(SAMPLE_RATE, dtype=np.float32), 1.0), (None, None))
 
 
 @unittest.skipUnless(

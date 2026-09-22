@@ -73,6 +73,28 @@ fundamentals and formants concentrate; a coarse proxy, not a vocal model."""
 VOCAL_HOP_SECONDS = 1.0
 VOCAL_BAND_RATIO_THRESHOLD = 0.35
 
+AUDIBLE_BLOCK_SECONDS = 0.05
+AUDIBLE_FLOOR_DB = -40.0
+"""Below this, relative to the track's 90th-percentile 50 ms block power, a
+block counts as silence. Real masters measured -45..-67 dB in their trailing
+silence and stayed above -33 dB through a natural decay (Phase 02 real-music
+check), so this trims dead air but never a fade or reverb tail."""
+
+
+def audible_bounds(signal: np.ndarray, duration_seconds: float) -> tuple[float | None, float | None]:
+    """(first, last) audible second of a mono SAMPLE_RATE signal; (None, None) if unmeasurable."""
+    block = int(AUDIBLE_BLOCK_SECONDS * SAMPLE_RATE)
+    count = len(signal) // block
+    if count == 0:
+        return None, None
+    power = np.mean(np.square(signal[:count * block].reshape(count, block), dtype=np.float64), axis=1)
+    reference = float(np.percentile(power, 90))
+    audible = np.flatnonzero(power >= reference * 10 ** (AUDIBLE_FLOOR_DB / 10)) if reference > 0.0 else ()
+    if len(audible) == 0:
+        return None, None
+    end = min(duration_seconds, (int(audible[-1]) + 1) * AUDIBLE_BLOCK_SECONDS)
+    return min(int(audible[0]) * AUDIBLE_BLOCK_SECONDS, end), end
+
 
 def normalize_tempo_octave(
     bpm: float, tempo_range: tuple[float, float] = DEFAULT_TEMPO_RANGE,
@@ -95,15 +117,24 @@ def normalize_tempo_octave(
     return bpm
 
 
+def _report(
+    progress: Callable[[float, str], None] | None, cancel_event: threading.Event, fraction: float, message: str,
+) -> None:
+    if progress is not None:
+        progress(fraction, message)
+    if cancel_event.is_set():
+        raise AnalysisCancelled(f"AutoMix analysis cancelled: {message}")
+
+
 class BasicAnalysisProvider:
     """The always-available default AnalysisProvider (see AnalysisProvider Protocol)."""
 
     provider_id = "basic"
-    version = "2"
+    version = "3"
     """Bumped from "1": Phase 7 added key/energy/vocal_activity to the
     output, which invalidates any cache entry from before those fields
     existed (see app/automix/cache.py -- analyzer_version is part of the
-    cache key)."""
+    cache key). "3": audible start/end bounds."""
 
     def __init__(self, ffmpeg_executable: Path) -> None:
         self.ffmpeg_executable = Path(ffmpeg_executable)
@@ -115,16 +146,23 @@ class BasicAnalysisProvider:
         cancel_event: threading.Event,
         progress: Callable[[float, str], None] | None = None,
     ) -> TrackAnalysis:
+        _report(progress, cancel_event, 0.0, "Decoding audio")
+        signal = self._decode_mono_pcm(Path(track.file_path), cancel_event)
+        return self.analyze_signal(track, signal, cancel_event=cancel_event, progress=progress)
+
+    def analyze_signal(
+        self,
+        track: PlaylistTrack,
+        signal: np.ndarray,
+        *,
+        cancel_event: threading.Event,
+        progress: Callable[[float, str], None] | None = None,
+    ) -> TrackAnalysis:
+        """``analyze`` on an already decoded mono SAMPLE_RATE signal (shared with Beat This)."""
         def report(fraction: float, message: str) -> None:
-            if progress is not None:
-                progress(fraction, message)
-            if cancel_event.is_set():
-                raise AnalysisCancelled(f"AutoMix analysis cancelled: {message}")
+            _report(progress, cancel_event, fraction, message)
 
         duration_seconds = max(0.0, float(track.duration_seconds))
-
-        report(0.0, "Decoding audio")
-        signal = self._decode_mono_pcm(Path(track.file_path), cancel_event)
 
         if len(signal) < int(MINIMUM_ANALYZABLE_SECONDS * SAMPLE_RATE) or (
             len(signal) == 0 or float(np.max(np.abs(signal))) < SILENCE_PEAK_THRESHOLD
@@ -156,6 +194,7 @@ class BasicAnalysisProvider:
         key, key_confidence = self._estimate_key(signal)
         energy = self._estimate_energy(signal)
         vocal_activity = self._vocal_activity_windows(signal, duration_seconds)
+        audible_start, audible_end = audible_bounds(signal, duration_seconds)
 
         report(0.9, "Validating result")
         result = TrackAnalysis(
@@ -169,6 +208,7 @@ class BasicAnalysisProvider:
             meter_confidence=meter_confidence,
             key=key, key_confidence=key_confidence,
             energy=energy, vocal_activity=vocal_activity,
+            audible_start_seconds=audible_start, audible_end_seconds=audible_end,
             analyzer_id=self.provider_id, analyzer_version=self.version,
         )
         report(1.0, "AutoMix analysis completed")

@@ -475,5 +475,33 @@ def _score_with_local_energy(outgoing, incoming, compatibility, settings, outgoi
     return score
 
 
+class AudibleBoundsTests(unittest.TestCase):
+    """Real masters end in seconds of digital silence (Phase 02 real-music check)."""
+
+    def _best(self, outgoing: TrackAnalysis, incoming: TrackAnalysis):
+        settings = AutoMixTransitionSettings(enabled=True)
+        compatibility = evaluate_compatibility(outgoing, incoming, settings)
+        return select_best_candidate(generate_candidates(outgoing, incoming, compatibility, settings))
+
+    def test_fixed_crossfade_overlaps_the_audible_tail_and_head_not_the_silence(self) -> None:
+        outgoing = replace(_analysis("a", 100.0, 200.0), audible_end_seconds=196.0)
+        incoming = replace(_analysis("b", 130.0, 200.0), audible_start_seconds=1.5)
+        best = self._best(outgoing, incoming)  # 30% apart: fixed crossfade
+        self.assertIs(best.strategy, TransitionStrategy.FIXED_CROSSFADE)
+        self.assertEqual((best.outgoing_source_time, best.outgoing_source_out), (193.0, 196.0))
+        self.assertEqual(best.incoming_source_time, 1.5)
+
+    def test_beat_match_window_ends_at_or_before_the_audible_end(self) -> None:
+        outgoing = replace(_analysis("a", 120.0, 200.0), audible_end_seconds=195.0)
+        best = self._best(outgoing, _analysis("b", 120.0, 200.0))
+        self.assertIs(best.strategy, TransitionStrategy.BEAT_MATCH)
+        self.assertLessEqual(best.outgoing_source_out, 195.0 + 1e-6)
+        self.assertIn(best.outgoing_source_time, outgoing.downbeats)
+
+    def test_unknown_bounds_keep_the_file_edges(self) -> None:
+        best = self._best(_analysis("a", 100.0, 200.0), _analysis("b", 130.0, 200.0))
+        self.assertEqual((best.outgoing_source_out, best.incoming_source_time), (200.0, 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()

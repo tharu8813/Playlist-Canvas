@@ -358,22 +358,28 @@ def _beat_based_candidate(
             or incoming_source_span > incoming.duration_seconds):
         return None
 
+    # The tail ends where the sound does, not where the file does: a window
+    # over trailing digital silence would mix against nothing (Phase 02).
+    outgoing_end = audible_end(outgoing)
     naive_outgoing_time = (
         outgoing_naive_override if outgoing_naive_override is not None
-        else max(0.0, outgoing.duration_seconds - outgoing_source_span)
+        else max(0.0, outgoing_end - outgoing_source_span)
     )
     naive_outgoing_time = max(0.0, min(naive_outgoing_time, outgoing.duration_seconds))
     outgoing_anchors = outgoing.downbeats if strategy is TransitionStrategy.BEAT_MATCH else outgoing.beats
     # Bounded so the source window this candidate actually needs
     # (outgoing_source_span, fixed by duration_seconds) never overruns the
-    # track regardless of which side of the naive position the nearest
-    # anchor happens to fall on -- see _nearest_bounded_anchor.
+    # track -- nor its audible end, when there is room before it --
+    # regardless of which side of the naive position the nearest anchor
+    # happens to fall on -- see _nearest_bounded_anchor.
     outgoing_source_time, outgoing_snap = _nearest_bounded_anchor(
-        outgoing_anchors, naive_outgoing_time, outgoing.duration_seconds - outgoing_source_span,
+        outgoing_anchors, naive_outgoing_time, max(0.0, outgoing_end - outgoing_source_span),
     )
     outgoing_source_out = min(outgoing_source_time + outgoing_source_span, outgoing.duration_seconds)
 
-    naive_incoming_time = incoming_naive_override if incoming_naive_override is not None else 0.0
+    naive_incoming_time = (
+        incoming_naive_override if incoming_naive_override is not None else audible_start(incoming)
+    )
     naive_incoming_time = max(0.0, min(naive_incoming_time, incoming.duration_seconds))
     incoming_anchors = incoming.downbeats if strategy is TransitionStrategy.BEAT_MATCH else incoming.beats
     incoming_source_time, incoming_snap = _nearest_bounded_anchor(
@@ -551,7 +557,7 @@ def _score_beat_candidate(
         score -= WEIGHT_INCOMING_TRIM_PENALTY * trim_severity
         reasons.append(f"- incoming cue trims {incoming_source_time:.1f}s off the start of the track")
 
-    outgoing_tail_unused = outgoing.duration_seconds - outgoing_source_time
+    outgoing_tail_unused = audible_end(outgoing) - outgoing_source_time
     if outgoing_tail_unused > MAXIMUM_OUTGOING_TAIL_TRIM_SECONDS:
         trim_severity = (outgoing_tail_unused - MAXIMUM_OUTGOING_TAIL_TRIM_SECONDS) / MAXIMUM_OUTGOING_TAIL_TRIM_SECONDS
         score -= WEIGHT_OUTGOING_TAIL_TRIM_PENALTY * trim_severity
@@ -569,6 +575,17 @@ def _score_beat_candidate(
     return max(0.0, score), tuple(reasons)
 
 
+def audible_end(analysis: TrackAnalysis) -> float:
+    """Where the track's sound ends (its duration when unknown)."""
+    end = analysis.audible_end_seconds
+    return analysis.duration_seconds if end is None else min(end, analysis.duration_seconds)
+
+
+def audible_start(analysis: TrackAnalysis) -> float:
+    """Where the track's sound starts (0 when unknown)."""
+    return analysis.audible_start_seconds or 0.0
+
+
 def _has_activity_in_range(spans: tuple[tuple[float, float], ...], start: float, end: float) -> bool:
     return any(span_start < end and span_end > start for span_start, span_end in spans)
 
@@ -577,8 +594,14 @@ def _fallback_candidates(
     outgoing: TrackAnalysis, incoming: TrackAnalysis, settings: AutoMixTransitionSettings,
     reasons: tuple[str, ...],
 ) -> list[TransitionCandidate]:
-    """FIXED_CROSSFADE if both tracks have room for one, otherwise CUT."""
-    available = min(outgoing.duration_seconds, incoming.duration_seconds)
+    """FIXED_CROSSFADE if both tracks have room for one, otherwise CUT.
+
+    The crossfade spans the outgoing track's last *audible* seconds and the
+    incoming one's first (trailing/leading silence is trimmed): on real
+    masters a fixed fade over the file's very end overlapped only silence.
+    """
+    outgoing_end, incoming_start = audible_end(outgoing), audible_start(incoming)
+    available = min(outgoing_end, incoming.duration_seconds - incoming_start)
     duration_seconds = min(settings.fallback_crossfade_seconds, available)
     if duration_seconds < settings.min_transition_seconds:
         return [TransitionCandidate(
@@ -593,13 +616,13 @@ def _fallback_candidates(
         )]
     # rate is always 1.0 for a fixed crossfade, so the source span equals
     # duration_seconds and outgoing_source_out lands exactly at the
-    # track's own end -- consistent with the exact-duration invariant
+    # track's audible end -- consistent with the exact-duration invariant
     # without needing separate span bookkeeping for this simple case.
     return [TransitionCandidate(
         from_track_id=outgoing.track_id, to_track_id=incoming.track_id,
-        outgoing_source_time=max(0.0, outgoing.duration_seconds - duration_seconds),
-        outgoing_source_out=outgoing.duration_seconds,
-        incoming_source_time=0.0,
+        outgoing_source_time=max(0.0, outgoing_end - duration_seconds),
+        outgoing_source_out=outgoing_end,
+        incoming_source_time=incoming_start,
         bars=0, duration_seconds=duration_seconds,
         outgoing_bpm=outgoing.bpm, incoming_bpm=incoming.bpm, target_bpm=None,
         outgoing_rate=1.0, incoming_rate=1.0,

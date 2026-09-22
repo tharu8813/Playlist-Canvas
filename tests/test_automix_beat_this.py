@@ -10,6 +10,7 @@ PLAYLIST_CANVAS_TEST_BEAT_THIS=1.
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,17 +64,30 @@ def _basic_result(
     )
 
 
+_SIGNAL = np.zeros(22050, dtype=np.float32)
+
+
+@contextmanager
+def _basic(return_value=None, side_effect=None):
+    """Stub BasicAnalysisProvider's decode + signal analysis (what the hybrid provider calls)."""
+    with (
+        patch.object(BasicAnalysisProvider, "_decode_mono_pcm", return_value=_SIGNAL),
+        patch.object(BasicAnalysisProvider, "analyze_signal", return_value=return_value, side_effect=side_effect),
+    ):
+        yield
+
+
 class _FakeFile2Beats:
-    """Stands in for beat_this.inference.File2Beats: a callable(path) -> (beats, downbeats)."""
+    """Stands in for beat_this.inference.Audio2Beats: a callable(signal, sr) -> (beats, downbeats)."""
 
     def __init__(self, beats: np.ndarray, downbeats: np.ndarray, error: Exception | None = None) -> None:
         self.beats = beats
         self.downbeats = downbeats
         self.error = error
-        self.calls: list[str] = []
+        self.calls: list[int] = []
 
-    def __call__(self, path: str) -> tuple[np.ndarray, np.ndarray]:
-        self.calls.append(path)
+    def __call__(self, signal: np.ndarray, sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
+        self.calls.append(sample_rate)
         if self.error is not None:
             raise self.error
         return self.beats, self.downbeats
@@ -94,7 +108,7 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         downbeats = np.array([1.0, 3.0])
         fake_model = _FakeFile2Beats(beats, downbeats)
         with (
-            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            _basic(basic_result),
             patch.object(provider, "_load_model", return_value=fake_model),
         ):
             result = provider.analyze(track, cancel_event=threading.Event())
@@ -123,7 +137,7 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         downbeats = beats.copy()  # every beat also reported as a downbeat
         fake_model = _FakeFile2Beats(beats, downbeats)
         with (
-            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            _basic(basic_result),
             patch.object(provider, "_load_model", return_value=fake_model),
         ):
             result = provider.analyze(track, cancel_event=threading.Event())
@@ -143,7 +157,7 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         provider = BeatThisAnalysisProvider(Path("ffmpeg"))
         basic_result = _basic_result(track, silent=True)
         with (
-            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            _basic(basic_result),
             patch.object(provider, "_load_model") as load_model,
         ):
             result = provider.analyze(track, cancel_event=threading.Event())
@@ -162,12 +176,12 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         downbeats = np.array([1.0, 3.0])
         fake_model = _FakeFile2Beats(beats, downbeats)
         with (
-            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            _basic(basic_result),
             patch.object(provider, "_load_model", return_value=fake_model) as load_model,
         ):
             result = provider.analyze(track, cancel_event=threading.Event())
         load_model.assert_called_once()
-        self.assertEqual(fake_model.calls, [track.file_path])
+        self.assertEqual(fake_model.calls, [22050])  # the FFmpeg-decoded analysis signal
         self.assertEqual(result.analyzer_id, "beat_this")
         self.assertAlmostEqual(result.bpm, 120.0, delta=0.5)
         self.assertEqual(result.beats, tuple(beats.tolist()))
@@ -177,7 +191,7 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         provider = BeatThisAnalysisProvider(Path("ffmpeg"))
         basic_result = _basic_result(track)
         with (
-            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            _basic(basic_result),
             patch.object(provider, "_load_model", side_effect=ImportError("No module named 'beat_this'")),
         ):
             result = provider.analyze(track, cancel_event=threading.Event())
@@ -190,7 +204,7 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         basic_result = _basic_result(track)
         fake_model = _FakeFile2Beats(np.array([]), np.array([]), error=RuntimeError("corrupted checkpoint"))
         with (
-            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            _basic(basic_result),
             patch.object(provider, "_load_model", return_value=fake_model),
         ):
             result = provider.analyze(track, cancel_event=threading.Event())
@@ -205,7 +219,7 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         beats = np.array([1.0, 1.5, 2.0, 2.5, 3.0])
         fake_model = _FakeFile2Beats(beats, np.array([]))
         with (
-            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            _basic(basic_result),
             patch.object(provider, "_load_model", return_value=fake_model),
         ):
             result = provider.analyze(track, cancel_event=threading.Event())
@@ -224,7 +238,7 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
             return _FakeFile2Beats(np.array([1.0, 1.5, 2.0]), np.array([1.0]))
 
         with (
-            patch.object(BasicAnalysisProvider, "analyze", return_value=basic_result),
+            _basic(basic_result),
             patch.object(provider, "_load_model", side_effect=load_model_and_cancel),
         ):
             with self.assertRaises(AnalysisCancelled):
@@ -236,7 +250,7 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         basic_result_b = _basic_result(_track("b.wav"))
         fake_model = _FakeFile2Beats(np.array([1.0, 1.5, 2.0, 2.5]), np.array([1.0]))
         with (
-            patch.object(BasicAnalysisProvider, "analyze", side_effect=[basic_result_a, basic_result_b]),
+            _basic(side_effect=[basic_result_a, basic_result_b]),
             patch.object(provider, "_load_model", return_value=fake_model) as load_model,
         ):
             provider.analyze(_track("a.wav"), cancel_event=threading.Event())
@@ -257,7 +271,7 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
 
         fake_torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
         fake_beat_this = SimpleNamespace()
-        fake_beat_this_inference = SimpleNamespace(File2Beats=fake_file2beats)
+        fake_beat_this_inference = SimpleNamespace(Audio2Beats=fake_file2beats)
 
         with patch.dict(
             "sys.modules",

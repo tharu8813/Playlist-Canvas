@@ -50,6 +50,7 @@ from typing import Callable
 
 import numpy as np
 
+from app.automix.analysis.basic import SAMPLE_RATE as BASIC_SAMPLE_RATE
 from app.automix.analysis.basic import BasicAnalysisProvider, normalize_tempo_octave
 from app.automix.analysis.provider import AnalysisCancelled
 from app.automix.models import TrackAnalysis
@@ -104,7 +105,7 @@ class BeatThisAnalysisProvider:
     """
 
     provider_id = "beat_this"
-    version = "1"
+    version = "2"
     """This *implementation's* version: bump it if the confidence
     calibration or output mapping in this module changes in a way that
     should invalidate previously cached results, independent of the
@@ -113,7 +114,9 @@ class BeatThisAnalysisProvider:
     checkpoint name and the installed ``beat-this`` package version into
     the actual per-instance cache identity (self.version), so a checkpoint
     change or a package upgrade also invalidates old cache entries without
-    a manual version bump here."""
+    a manual version bump here. "2": the model reads the FFmpeg-decoded
+    signal (any format FFmpeg reads, e.g. AAC/M4A) instead of loading the file
+    itself, plus BasicAnalysisProvider "3"'s audible bounds."""
 
     def __init__(
         self, ffmpeg_executable: Path, *,
@@ -140,7 +143,13 @@ class BeatThisAnalysisProvider:
         # too-short handling, key/energy/vocal-activity estimation, and
         # TrackAnalysis validation -- only the rhythm fields below are ever
         # replaced (see module docstring).
-        basic_result = self._basic.analyze(track, cancel_event=cancel_event, progress=progress)
+        # One FFmpeg decode feeds both: Beat This's own file loader
+        # (torchaudio/soundfile) cannot read AAC/M4A, which real libraries are
+        # full of -- every such track silently fell back to the basic beats.
+        if progress is not None:
+            progress(0.0, "Decoding audio")
+        signal = self._basic._decode_mono_pcm(Path(track.file_path), cancel_event)
+        basic_result = self._basic.analyze_signal(track, signal, cancel_event=cancel_event, progress=progress)
         if cancel_event.is_set():
             raise AnalysisCancelled("AutoMix analysis cancelled before Beat This inference.")
         if basic_result.energy is None:
@@ -158,7 +167,7 @@ class BeatThisAnalysisProvider:
             # short-circuit, never a proxy for "basic found no BPM".
             return basic_result
         try:
-            raw_beats, raw_downbeats = self._run_inference(track, cancel_event, progress)
+            raw_beats, raw_downbeats = self._run_inference(signal, cancel_event, progress)
         except AnalysisCancelled:
             raise
         except Exception as error:  # noqa: BLE001 - the ML engine must never break AutoMix
@@ -214,18 +223,12 @@ class BeatThisAnalysisProvider:
         )
 
     def _run_inference(
-        self, track: PlaylistTrack, cancel_event: threading.Event,
+        self, signal: np.ndarray, cancel_event: threading.Event,
         progress: Callable[[float, str], None] | None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        path = Path(track.file_path)
-        # No separate existence check here: BasicAnalysisProvider.analyze()
-        # (called first, see analyze() above) already decoded this exact
-        # file successfully, and File2Beats raises its own error for a
-        # missing/unreadable file otherwise -- caught below like any other
-        # inference failure.
         if progress is not None:
             progress(0.92, "Loading Beat This model")
-        file2beats = self._load_model()
+        audio2beats = self._load_model()
         if cancel_event.is_set():
             # PyTorch inference itself cannot be interrupted mid-forward-pass;
             # this is the latest point cancellation can still be honored
@@ -240,7 +243,7 @@ class BeatThisAnalysisProvider:
             # rather than speeding anything up, and risks CUDA OOM on
             # constrained GPUs. Decoding/Basic analysis above stays
             # parallel; only the model call itself is serialized.
-            beats, downbeats = file2beats(str(path))
+            beats, downbeats = audio2beats(signal, BASIC_SAMPLE_RATE)
         return np.asarray(beats, dtype=float), np.asarray(downbeats, dtype=float)
 
     def _load_model(self):
@@ -250,11 +253,11 @@ class BeatThisAnalysisProvider:
             if self._model is not None:  # re-check: lost a race to load
                 return self._model
             import torch
-            from beat_this.inference import File2Beats
+            from beat_this.inference import Audio2Beats
 
             device = self._requested_device or ("cuda" if torch.cuda.is_available() else "cpu")
             LOGGER.info("Loading Beat This model %r on %s", self._checkpoint, device)
-            self._model = File2Beats(checkpoint_path=self._checkpoint, device=device, dbn=False)
+            self._model = Audio2Beats(checkpoint_path=self._checkpoint, device=device, dbn=False)
             return self._model
 
 
