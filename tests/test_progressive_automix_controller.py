@@ -35,7 +35,7 @@ class ProgressiveControllerTests(unittest.TestCase):
             (patch.object(module._PartialRenderWorker, "start",
                           lambda worker: self.partials.append(worker)), None),
             (patch.object(PreviewAudioController, "start",
-                          lambda controller, *args: self.finals.append((controller, args))), None),
+                          lambda controller, *args, **kwargs: self.finals.append((controller, args, kwargs))), None),
             (patch("app.automix.structure.sonara.sonara_available", return_value=False), None),
         ):
             target.start()
@@ -118,6 +118,19 @@ class ProgressiveControllerTests(unittest.TestCase):
         self.analyze("t4", "t5")
         self.assertEqual(len(self.finals), 1)
 
+    def test_the_preset_plans_the_partial_mixes_and_reaches_the_final_export_pipeline(self) -> None:
+        from app.automix.settings import resolve_automix_settings
+
+        energetic = resolve_automix_settings("energetic")
+        self.controller.start(self.tracks, Path("unused"), "automix", 3.0, automix_settings=energetic)
+        self.controller.report_playhead(0.0, True)
+        self.analyze("t0", "t1")
+        self.settle()
+        transition = self.partials[-1]._plan.audio.transitions[0]
+        self.assertEqual(transition.duration, 8.0)  # 4 bars at 120 BPM, Auto would pick 8 bars
+        self.analyze(*(t.id for t in self.tracks[2:]))
+        self.partials[-1].ready.emit(self.partials[-1]._generation, "mix.flac", self.partials[-1]._plan, 1.0, 1.0)
+        self.assertIs(self.finals[-1][2]["automix_settings"], energetic)  # Preview final == Export settings
 
 def _loudness(executable: Path, path: Path, seconds: float) -> float:
     """Integrated LUFS of the first ``seconds`` of ``path``."""

@@ -269,6 +269,7 @@ class FFmpegRenderer:
                crossfade_seconds: float = 3.0,
                compiled_plan: CompiledRenderPlan | None = None,
                prepared_audio_path: Path | None = None,
+               automix_settings: "AutoMixTransitionSettings | None" = None,
                ) -> RenderResult:
         """Create a static Canvas video whose audio is the ordered enabled playlist.
 
@@ -406,7 +407,7 @@ class FFmpegRenderer:
                     active_tracks, temporary, selected_settings,
                     transition_mode=transition_mode, crossfade_seconds=crossfade_seconds,
                     progress_callback=progress_callback, cancel_event=cancel_event,
-                    plan_callback=resolved_plans.append,
+                    plan_callback=resolved_plans.append, automix_settings=automix_settings,
                 )
                 compiled_plan = resolved_plans[0]
             compiled_plan = compiled_plan or compile_playlist(active_tracks)
@@ -460,6 +461,7 @@ class FFmpegRenderer:
                 active_tracks, temporary, selected_settings,
                 transition_mode=transition_mode, crossfade_seconds=crossfade_seconds,
                 progress_callback=progress_callback, cancel_event=cancel_event,
+                automix_settings=automix_settings,
             )
             visualizer_paths: list[Path] = []
             if visualizers:
@@ -1178,8 +1180,13 @@ class FFmpegRenderer:
         progress_callback: Callable[[str, float, str], None] | None = None,
         cancel_event: threading.Event | None = None,
         plan_callback: Callable[[CompiledRenderPlan], None] | None = None,
+        automix_settings: "AutoMixTransitionSettings | None" = None,
     ) -> Path:
-        """Prepare audio and report the exact plan actually rendered, including fallback."""
+        """Prepare audio and report the exact plan actually rendered, including fallback.
+
+        ``automix_settings`` is the project's resolved AutoMix preset
+        (``app.automix.settings.resolve_automix_settings``); ``None`` is "auto".
+        """
         cancel_event = cancel_event or threading.Event()
         resolved_plan = compile_playlist(active_tracks)
 
@@ -1192,6 +1199,7 @@ class FFmpegRenderer:
         if transition_mode == "automix":
             blended_segments = self._render_automix_audio_segments(
                 active_tracks, output_directory, total_duration, progress_callback, cancel_event, accept_plan,
+                automix_settings,
             )
         elif transition_mode == "crossfade":
             blended_segments = self._render_fixed_crossfade_audio_segments(
@@ -1350,6 +1358,7 @@ class FFmpegRenderer:
         progress_callback: Callable[[str, float, str], None] | None,
         cancel_event: threading.Event,
         plan_callback: Callable[[CompiledRenderPlan], None] | None = None,
+        automix_settings: "AutoMixTransitionSettings | None" = None,
     ) -> tuple[list[Path], list[float]] | None:
         """Render the mix and expose its plan only after successful validation."""
         if cancel_event.is_set():
@@ -1401,7 +1410,7 @@ class FFmpegRenderer:
                 structures = structure_result.analyses
 
             plan = compile_automix(
-                active_tracks, analysis_result.analyses, AutoMixTransitionSettings(enabled=True),
+                active_tracks, analysis_result.analyses, automix_settings or AutoMixTransitionSettings(enabled=True),
                 structures=structures,
             )
             if not plan.audio.clips:

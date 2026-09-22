@@ -428,7 +428,8 @@ class ExportPreviewDialog(QDialog):
                  crossfade_seconds: float = 3.0,
                  preloaded_blended_audio: tuple[Path, CompiledRenderPlan] | None = None,
                  blended_audio_controller: PreviewAudioController | None = None,
-                 blended_audio_temp_dir: TemporaryDirectory | None = None) -> None:
+                 blended_audio_temp_dir: TemporaryDirectory | None = None,
+                 automix_settings=None) -> None:
         super().__init__(parent)
         self.embedded = embedded
         self.preferred_backend = (
@@ -515,7 +516,7 @@ class ExportPreviewDialog(QDialog):
             self._blended_audio_controller.audio_failed.connect(self._on_blended_audio_failed)
             self._blended_audio_controller.start(
                 self.tracks, Path(self._blended_audio_temp_dir.name),
-                self._transition_mode, self._crossfade_seconds,
+                self._transition_mode, self._crossfade_seconds, automix_settings=automix_settings,
             )
         self._image = QImage()
         self._base_image = QImage()

@@ -28,10 +28,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 def prepare_audio_for_ui(renderer, tracks, directory, mode, crossfade_seconds,
-                         settings, cancel_event, progress=None):
+                         settings, cancel_event, progress=None, automix_settings=None):
     """Resolve audio and timing together while the caller's modal UI stays responsive."""
     worker = _PreviewAudioWorker(renderer, tracks, directory, mode, crossfade_seconds,
-                                 settings=settings, cancel_event=cancel_event)
+                                 settings=settings, cancel_event=cancel_event,
+                                 automix_settings=automix_settings)
     results, errors = [], []
     worker.ready.connect(lambda path, plan: results.append((Path(path), plan)))
     worker.failed.connect(errors.append)
@@ -59,9 +60,10 @@ class _PreviewAudioWorker(QThread):
     def __init__(
         self, renderer: FFmpegRenderer, tracks: list[PlaylistTrack], output_directory: Path,
         transition_mode: str, crossfade_seconds: float, parent: QObject | None = None,
-        *, settings=None, cancel_event: threading.Event | None = None,
+        *, settings=None, cancel_event: threading.Event | None = None, automix_settings=None,
     ) -> None:
         super().__init__(parent)
+        self._automix_settings = automix_settings
         self._renderer = renderer
         self._tracks = tracks
         self._output_directory = output_directory
@@ -88,6 +90,7 @@ class _PreviewAudioWorker(QThread):
                 cancel_event=self._cancel_event,
                 plan_callback=self._accept_plan,
                 progress_callback=self.progress.emit,
+                automix_settings=self._automix_settings,
             )
         except RenderCancelledError:
             return
@@ -117,7 +120,7 @@ class PreviewAudioController(QObject):
 
     def start(
         self, tracks: list[PlaylistTrack], output_directory: Path,
-        transition_mode: str, crossfade_seconds: float,
+        transition_mode: str, crossfade_seconds: float, automix_settings=None,
     ) -> None:
         """Render blended preview audio in the background, replacing any run underway."""
         if self._shutting_down:
@@ -126,10 +129,11 @@ class PreviewAudioController(QObject):
         if not tracks or transition_mode == "none":
             return
         if self._worker is not None:
-            self._pending = (tracks, output_directory, transition_mode, crossfade_seconds,)
+            self._pending = (tracks, output_directory, transition_mode, crossfade_seconds, automix_settings)
             return
         worker = _PreviewAudioWorker(
             self._renderer, tracks, output_directory, transition_mode, crossfade_seconds, self,
+            automix_settings=automix_settings,
         )
         worker.ready.connect(
             lambda path, plan: self.audio_ready.emit(path, plan)

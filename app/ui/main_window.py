@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from app.canvas.live_canvas import LiveCanvas
 from app.automix.models import TrackAnalysis
+from app.automix.settings import resolve_automix_settings
 from app.automix.structure.models import TrackStructureAnalysis
 from app.controllers.automix_analysis_controller import AutoMixAnalysisController
 from app.controllers.autosave_controller import AutosaveController
@@ -3792,6 +3793,7 @@ class MainWindow(QMainWindow):
                             renderer, tracks, Path(directory), self.project_settings.transition_mode,
                             self.project_settings.crossfade_seconds, RenderSettings(), cancel,
                             lambda stage, fraction, message: progress.setLabelText(message),
+                            automix_settings=resolve_automix_settings(self.project_settings.automix_preset),
                         )
                 except RenderCancelledError:
                     return

@@ -4005,13 +4005,46 @@ class MainWindowSafetyTests(unittest.TestCase):
                 dialog.selected_settings, self.window.translator, QPixmap(),
             )
             try:
+                self.assertFalse(dialog2.automix_preset_combo.isEnabled())
                 dialog2.transition_automix_radio.setChecked(True)
+                self.assertTrue(dialog2.automix_preset_combo.isEnabled())
+                self.assertEqual(dialog2.automix_preset_combo.currentData(), "auto")
+                dialog2.automix_preset_combo.setCurrentIndex(dialog2.automix_preset_combo.findData("smooth"))
+                self.assertTrue(dialog2.automix_preset_help.text())
                 dialog2._accept()
                 self.assertEqual(dialog2.selected_settings.transition_mode, "automix")
+                self.assertEqual(dialog2.selected_settings.automix_preset, "smooth")
             finally:
                 dialog2.close()
         finally:
             dialog.close()
+
+    def test_preview_hands_the_projects_resolved_automix_preset_to_the_mix(self) -> None:
+        from app.automix.settings import resolve_automix_settings
+
+        tracks = [PlaylistTrack("a.wav", "A", duration_seconds=100.0), PlaylistTrack("b.wav", "B", duration_seconds=90.0)]
+        self.window.playlist_service.replace(tracks)
+        self.window.project_settings = replace(
+            self.window.project_settings, transition_mode="automix", automix_preset="energetic",
+        )
+        received = {}
+
+        def fake_prepare(_tracks, _executable, _mode, _seconds, automix_settings=None):
+            received["settings"] = automix_settings
+            return None, None, None
+
+        with TemporaryDirectory(prefix="playlist-fake-ffmpeg-") as directory:
+            fake_ffmpeg = Path(directory) / "ffmpeg.exe"
+            fake_ffmpeg.touch()
+            self.window.settings_service.save(replace(self.window.settings_service.current, ffmpeg_path=str(fake_ffmpeg)))
+            with (
+                patch.object(self.window.preview_controller, "_prepare_blended_preview_audio", fake_prepare),
+                patch.object(PreviewAudioController, "start") as fallback_start,
+            ):
+                self.window.preview_controller.show_export_preview(tracks)
+            self.addCleanup(self.window._finish_inline_preview)
+        self.assertIs(received["settings"], resolve_automix_settings("energetic"))
+        self.assertIs(fallback_start.call_args.kwargs["automix_settings"], resolve_automix_settings("energetic"))
 
     def test_automix_analysis_is_skipped_when_project_setting_is_off(self) -> None:
         self.window.playlist_service.replace([
@@ -5862,7 +5895,7 @@ class MainWindowSafetyTests(unittest.TestCase):
             blended_path = Path(directory) / "blended.m4a"
             blended_path.touch()
 
-            def fake_start(self, _tracks, _directory, _mode, _seconds):
+            def fake_start(self, _tracks, _directory, _mode, _seconds, **_options):
                 self.audio_ready.emit(str(blended_path), plan)
 
             with (

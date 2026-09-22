@@ -61,3 +61,23 @@ serialization/default, old migration, deterministic plan, running preview에서 
 
 ## 권장 commit
 `feat: add AutoMix listening presets`
+
+
+---
+
+## Outcome (2026-09-23)
+
+- **Presets:** `auto` (default), `smooth`, `energetic`, `dj` -- `app.automix.settings.AUTOMIX_PRESETS`, resolved by `resolve_automix_settings(name)` into a frozen `AutoMixTransitionSettings` (unknown/missing -> `auto`). Each preset is only a different set of the planner's existing user-level numbers; there is one planner, and no internal weight, threshold or FFmpeg option is exposed:
+
+  | preset | preferred bars | max tempo change | max transition | fixed-crossfade fallback | effect (measured in tests at 120 BPM) |
+  |---|---|---|---|---|---|
+  | auto | 8 | 8 % | 20 s | 3 s | 16 s blends (unchanged behavior) |
+  | smooth | 16 | 6 % | 32 s | 5 s | 32 s blends, fewer tempo shifts |
+  | energetic | 4 | 8 % | 12 s | 2 s | 8 s blends |
+  | dj | 16 | 12 % | 32 s | 3 s | beat-matches a 10 % tempo gap that auto/smooth only crossfade |
+
+  Values come from musical conventions (phrase lengths, a DJ's +-8..16 % pitch range), not from listening -- Phase 02 could not run a panel; retune them together with the other listening TODOs.
+- **Persistence:** `ProjectSettings.automix_preset` (default `"auto"`); projects saved before presets load as `auto`; an invalid value is normalized to `auto`. Project settings dialog: an "AutoMix style" combo with a one-line description, enabled only while AutoMix is selected.
+- **One resolved config, everywhere:** the UI resolves the preset once and passes the `AutoMixTransitionSettings` object down as `automix_settings` -- Preview (`PreviewController` -> `ProgressiveAutoMixController` partial plans and its final `PreviewAudioController`/`prepare_playlist_audio`, and `ExportPreviewDialog`'s own fallback render) and Export (`ExportOrchestrator.prepare_transition_audio`, `RenderWorker` -> `FFmpegRenderer.render`, and the timestamp preparation in `MainWindow`). `None` means `auto`, so every existing caller keeps its behavior.
+- **Switching:** editing (including project settings) is locked while Preview runs, so a preset change always takes effect on the next Preview start, which is a new progressive generation (`start()` cancels the previous one; stale results are dropped by the generation token). Analysis caches are preset-independent: switching presets re-plans from cached analyses without re-analyzing.
+- **Tests:** `tests/test_automix_presets.py` (resolution, immutability, unknown fallback, deterministic and distinct plans, DJ tempo range, serialization/migration), `test_the_preset_plans_the_partial_mixes_and_reaches_the_final_export_pipeline` (progressive partial plan uses the preset; the final export-pipeline render receives the same object), dialog and Preview wiring in `tests/test_main_window.py`.

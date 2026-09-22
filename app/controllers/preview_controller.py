@@ -114,13 +114,16 @@ class PreviewController:
             pass
         transition_mode = window.project_settings.transition_mode
         crossfade_seconds = window.project_settings.crossfade_seconds
+        from app.automix.settings import resolve_automix_settings
+
+        automix_settings = resolve_automix_settings(window.project_settings.automix_preset)
         preloaded_blended_audio = None
         blended_audio_controller = None
         blended_audio_temp_dir = None
         if transition_mode != "none" and executable is not None and tracks:
             preloaded_blended_audio, blended_audio_controller, blended_audio_temp_dir = (
                 self._prepare_blended_preview_audio(
-                    tracks, executable, transition_mode, crossfade_seconds,
+                    tracks, executable, transition_mode, crossfade_seconds, automix_settings,
                 )
             )
         preview = ExportPreviewDialog(
@@ -133,6 +136,7 @@ class PreviewController:
             preloaded_blended_audio=preloaded_blended_audio,
             blended_audio_controller=blended_audio_controller,
             blended_audio_temp_dir=blended_audio_temp_dir,
+            automix_settings=automix_settings,
         )
         controls_page = preview.build_embedded_controls_page()
         window._inline_preview = preview
@@ -171,6 +175,7 @@ class PreviewController:
 
     def _prepare_blended_preview_audio(
         self, tracks: list, executable, transition_mode: str, crossfade_seconds: float,
+        automix_settings=None,
     ) -> tuple[tuple[Path, object] | None, object | None, TemporaryDirectory | None]:
         """Render blended preview audio behind a preparation dialog before Preview opens.
 
@@ -225,7 +230,8 @@ class PreviewController:
         controller.audio_ready.connect(on_ready)
         controller.audio_failed.connect(on_failed)
         controller.progress.connect(dialog.set_progress)
-        controller.start(tracks, Path(temp_dir.name), transition_mode, crossfade_seconds)
+        controller.start(tracks, Path(temp_dir.name), transition_mode, crossfade_seconds,
+                         automix_settings=automix_settings)
         dialog.exec()
         controller.audio_ready.disconnect(on_ready)
         controller.audio_failed.disconnect(on_failed)

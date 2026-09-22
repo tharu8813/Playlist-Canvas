@@ -15,6 +15,7 @@ class _Window:
         self.project_settings = SimpleNamespace(
             transition_mode="crossfade",
             crossfade_seconds=2.0,
+            automix_preset="auto",
         )
         self._export_frame_staging = TemporaryDirectory(
             prefix="playlist-test-frames-before-"
@@ -60,7 +61,7 @@ class ExportAudioStagingRegressionTests(unittest.TestCase):
 
         def fake_prepare(
             _renderer, _tracks, directory, mode, seconds,
-            _settings, _cancel_event, _progress,
+            _settings, _cancel_event, _progress, automix_settings=None,
         ):
             self.assertEqual(mode, "crossfade")
             self.assertEqual(seconds, 2.0)

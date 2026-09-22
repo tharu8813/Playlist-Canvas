@@ -224,7 +224,9 @@ class ProgressiveAutoMixController(QObject):
     # -- public API (PreviewAudioController-compatible) ----------------------
 
     def start(self, tracks: list[PlaylistTrack], output_directory: Path,
-              transition_mode: str, crossfade_seconds: float) -> None:
+              transition_mode: str, crossfade_seconds: float,
+              automix_settings: AutoMixTransitionSettings | None = None) -> None:
+        """A new generation: any running one (e.g. another preset's) is cancelled first."""
         if self._shutting_down or not tracks:
             return
         self.cancel()
@@ -235,7 +237,9 @@ class ProgressiveAutoMixController(QObject):
         self._tracks = list(tracks)
         self._directory = Path(output_directory)
         self._crossfade_seconds = crossfade_seconds
-        self._settings = AutoMixTransitionSettings(enabled=True)
+        # The same resolved preset plans the partial mixes and the final
+        # (export-pipeline) mix, so the final Preview plan is the Export plan.
+        self._settings = automix_settings or AutoMixTransitionSettings(enabled=True)
         self._state = ProgressiveAnalysis(self._tracks, structure_enabled=sonara_available())
         self._scheduler = RenderScheduler()
         self._frontier = -1
@@ -376,7 +380,8 @@ class ProgressiveAutoMixController(QObject):
             self._message("AutoMix 마무리 중… ", "Finalizing AutoMix… ") + (message or ""),
         ))
         self._final = final
-        final.start(self._tracks, self._directory / "final", "automix", self._crossfade_seconds)
+        final.start(self._tracks, self._directory / "final", "automix", self._crossfade_seconds,
+                    automix_settings=self._settings)
 
     def _on_final_ready(self, path: str, plan) -> None:
         self._scheduler.render_finished()

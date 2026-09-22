@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from app import __version__
+from app.automix.settings import AUTOMIX_PRESETS
 from app.models.playlist import PlaylistTrack
 from app.models.layer import LayerGroup
 from app.models.source import Source
@@ -50,6 +51,10 @@ class ProjectSettings:
     # Only meaningful when transition_mode == "crossfade": how many seconds
     # before each track ends the next one starts fading in.
     crossfade_seconds: float = DEFAULT_CROSSFADE_SECONDS
+    # Only meaningful when transition_mode == "automix": a listening preset
+    # name from app.automix.settings.AUTOMIX_PRESETS. Projects saved before
+    # presets existed load as "auto", the previous behavior.
+    automix_preset: str = "auto"
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -64,6 +69,8 @@ class ProjectSettings:
             self.thumbnail_mode = "canvas"
         if self.transition_mode not in TRANSITION_MODES:
             self.transition_mode = "none"
+        if self.automix_preset not in AUTOMIX_PRESETS:
+            self.automix_preset = "auto"
         if (not isinstance(self.crossfade_seconds, (int, float))
                 or isinstance(self.crossfade_seconds, bool)
                 or not isfinite(float(self.crossfade_seconds))):

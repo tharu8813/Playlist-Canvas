@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
+from app.automix.settings import AUTOMIX_PRESETS
 from app.models.project import (
     MAX_CROSSFADE_SECONDS,
     MIN_CROSSFADE_SECONDS,
@@ -21,6 +22,19 @@ from app.models.project import (
 )
 from app.dialogs.new_project_dialog import CANVAS_PRESETS
 from app.utils.i18n import Language, Translator
+
+
+_PRESET_TEXT = {
+    # preset: ((Korean name, help), (English name, help))
+    "auto": (("자동 (권장)", "분석 결과에 맞춰 균형 잡힌 길이와 방식으로 전환합니다."),
+             ("Auto (recommended)", "Balanced blends chosen from each pair's analysis.")),
+    "smooth": (("부드럽게", "길고 잔잔하게 겹치며, 템포는 비슷한 곡끼리만 맞춥니다."),
+               ("Smooth", "Long, gentle blends; tempo is matched only for tracks that are already close.")),
+    "energetic": (("에너지 있게", "짧고 빠르게 넘어가 흐름이 늘어지지 않게 합니다."),
+                  ("Energetic", "Short, quick changes that keep the energy moving.")),
+    "dj": (("DJ", "템포 차이가 큰 곡도 박자를 맞춰 길게 섞습니다."),
+           ("DJ", "Beat-matches wider tempo gaps over long blends.")),
+}
 
 
 class ProjectSettingsDialog(QDialog):
@@ -138,10 +152,27 @@ class ProjectSettingsDialog(QDialog):
         self.automix_help = QLabel()
         self.automix_help.setObjectName("mutedLabel")
         self.automix_help.setWordWrap(True)
+        automix_row = QWidget()
+        automix_row_layout = QHBoxLayout(automix_row)
+        automix_row_layout.setContentsMargins(24, 0, 0, 0)
+        self.automix_preset_label = QLabel()
+        self.automix_preset_combo = QComboBox()
+        for preset in AUTOMIX_PRESETS:
+            self.automix_preset_combo.addItem("", preset)
+        self.automix_preset_combo.setCurrentIndex(AUTOMIX_PRESETS.index(settings.automix_preset))
+        automix_row_layout.addWidget(self.automix_preset_label)
+        automix_row_layout.addWidget(self.automix_preset_combo)
+        automix_row_layout.addStretch(1)
+        self.automix_preset_help = QLabel()
+        self.automix_preset_help.setObjectName("mutedLabel")
+        self.automix_preset_help.setWordWrap(True)
+        self.automix_preset_help.setContentsMargins(24, 0, 0, 4)
         transition_layout.addWidget(self.transition_none_radio)
         transition_layout.addWidget(self.transition_crossfade_radio)
         transition_layout.addWidget(crossfade_row)
         transition_layout.addWidget(self.transition_automix_radio)
+        transition_layout.addWidget(automix_row)
+        transition_layout.addWidget(self.automix_preset_help)
         transition_layout.addWidget(self.automix_help)
         {
             "none": self.transition_none_radio,
@@ -152,6 +183,9 @@ class ProjectSettingsDialog(QDialog):
             self.crossfade_seconds_spin.setEnabled
         )
         self.crossfade_seconds_spin.setEnabled(self.transition_crossfade_radio.isChecked())
+        self.transition_automix_radio.toggled.connect(self.automix_preset_combo.setEnabled)
+        self.automix_preset_combo.setEnabled(self.transition_automix_radio.isChecked())
+        self.automix_preset_combo.currentIndexChanged.connect(lambda _index: self._update_automix_preset_help())
         root.addWidget(self.transition_group)
 
         self.thumbnail_group = QGroupBox()
@@ -272,6 +306,10 @@ class ProjectSettingsDialog(QDialog):
         )
         self.crossfade_seconds_label.setText("전환 길이" if korean else "Crossfade length")
         self.transition_automix_radio.setText("AutoMix (베타, 템포 인식 자동 전환)" if korean else "AutoMix (beta, tempo-aware)")
+        self.automix_preset_label.setText("AutoMix 스타일" if korean else "AutoMix style")
+        for index, preset in enumerate(AUTOMIX_PRESETS):
+            self.automix_preset_combo.setItemText(index, _PRESET_TEXT[preset][0 if korean else 1][0])
+        self._update_automix_preset_help()
         self.automix_help.setText(
             "크로스페이드는 각 곡이 끝나기 지정한 초 전부터 다음 곡이 서서히 겹쳐 재생됩니다(분석 없음).\n\n"
             "AutoMix는 곡을 분석해 템포에 맞춰 자연스럽게 이어줍니다. 분석에 실패하거나 템포가 맞지 않는 "
@@ -361,4 +399,10 @@ class ProjectSettingsDialog(QDialog):
         else:
             self.selected_settings.transition_mode = "none"
         self.selected_settings.crossfade_seconds = self.crossfade_seconds_spin.value()
+        self.selected_settings.automix_preset = self.automix_preset_combo.currentData()
         self.accept()
+
+    def _update_automix_preset_help(self) -> None:
+        korean = self.translator.language is Language.KOREAN
+        preset = self.automix_preset_combo.currentData()
+        self.automix_preset_help.setText(_PRESET_TEXT[preset][0 if korean else 1][1])

@@ -49,11 +49,13 @@ class RenderWorker(QThread):
                  metadata: ExportMetadata | None = None,
                  transition_mode: str = "none",
                  crossfade_seconds: float = 3.0,
-                 compiled_plan=None, prepared_audio_path: Path | None = None) -> None:
+                 compiled_plan=None, prepared_audio_path: Path | None = None,
+                 automix_settings=None) -> None:
         super().__init__()
         self.renderer = renderer
         self.transition_mode = transition_mode
         self.crossfade_seconds = crossfade_seconds
+        self.automix_settings = automix_settings
         self.compiled_plan = compiled_plan
         self.prepared_audio_path = prepared_audio_path
         if isinstance(image, PreparedVideoInput):
@@ -95,6 +97,7 @@ class RenderWorker(QThread):
                 crossfade_seconds=self.crossfade_seconds,
                 compiled_plan=self.compiled_plan,
                 prepared_audio_path=self.prepared_audio_path,
+                automix_settings=self.automix_settings,
             )
         except RenderCancelledError:
             self.cancelled.emit()
