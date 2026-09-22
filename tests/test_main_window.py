@@ -991,6 +991,25 @@ class MainWindowSafetyTests(unittest.TestCase):
         self.assertEqual(Path(imported.lyrics_path).name, "Golden Hour.lrc")
         self.assertEqual(len(notes), 1)
 
+    def test_settings_dialog_shows_and_clears_the_automix_analysis_cache(self) -> None:
+        with TemporaryDirectory(prefix="automix-cache-ui-") as directory:
+            root = Path(directory)
+            (root / "entry.json").write_text("{}" * 600)
+            with patch("app.automix.cache.cache_directories", return_value=(root,)):
+                dialog = SettingsDialog(
+                    self.window.settings_service.current, self.window.translator.language,
+                    self.window.theme_service.preference, self.window.translator, self.window,
+                )
+                try:
+                    self.assertTrue(dialog.automix_cache_clear_button.isEnabled())
+                    self.assertIn("1", dialog.automix_cache_usage_label.text())
+                    dialog.automix_cache_clear_button.click()
+                    self.assertFalse((root / "entry.json").exists())
+                    self.assertFalse(dialog.automix_cache_clear_button.isEnabled())
+                    self.assertIn("0.0 MB", dialog.automix_cache_usage_label.text())
+                finally:
+                    dialog.close()
+
     def test_settings_dialog_round_trips_the_lyrics_auto_attach_mode(self) -> None:
         dialog = SettingsDialog(
             replace(
@@ -4018,6 +4037,22 @@ class MainWindowSafetyTests(unittest.TestCase):
                 dialog2.close()
         finally:
             dialog.close()
+
+    def test_automix_preview_takes_over_from_background_analysis_and_hands_it_back(self) -> None:
+        tracks = [PlaylistTrack("a.wav", "A", duration_seconds=100.0)]
+        self.window.playlist_service.replace(tracks)
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="automix")
+        controller = self.window.automix_analysis_controller
+        with (
+            patch.object(self.window.preview_controller, "_prepare_blended_preview_audio",
+                         return_value=(None, None, None)),
+            patch.object(controller, "cancel") as cancel,
+        ):
+            self.window.preview_controller.show_export_preview(tracks)
+        cancel.assert_called_once()
+        self.assertFalse(self.window._automix_analysis_timer.isActive())  # no restart mid-preview
+        self.window._finish_inline_preview()
+        self.assertTrue(self.window._automix_analysis_timer.isActive())  # background resumes
 
     def test_preview_hands_the_projects_resolved_automix_preset_to_the_mix(self) -> None:
         from app.automix.settings import resolve_automix_settings

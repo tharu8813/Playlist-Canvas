@@ -65,6 +65,24 @@ class AutoMixAnalysisWorkerTests(unittest.TestCase):
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0][track.id].analyzer_id, "stub")
 
+    def test_background_analysis_uses_a_reduced_worker_pool(self) -> None:
+        from app.automix.workflow import AutoMixWorkflow
+        from app.controllers.automix_analysis_controller import BACKGROUND_ANALYSIS_WORKERS
+
+        created = []
+
+        def spy(provider, **kwargs):
+            created.append(kwargs["analysis_settings"].max_workers)
+            return AutoMixWorkflow(provider, **kwargs)
+
+        with (
+            patch("app.automix.analysis.basic.BasicAnalysisProvider", _StubProvider),
+            patch("app.automix.workflow.AutoMixWorkflow", spy),
+        ):
+            _AutoMixAnalysisWorker([_track("a.mp3")], Path("ffmpeg")).run()
+        self.assertEqual(created, [BACKGROUND_ANALYSIS_WORKERS])
+        self.assertLess(BACKGROUND_ANALYSIS_WORKERS, 4)  # below the foreground pool
+
     def test_default_provider_id_is_basic(self) -> None:
         track = _track("a.mp3")
         worker = _AutoMixAnalysisWorker([track], Path("ffmpeg"))

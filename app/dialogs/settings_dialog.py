@@ -451,6 +451,17 @@ class SettingsDialog(QDialog):
         content_form.addRow(
             self.lyrics_auto_attach_label, lyrics_auto_attach_panel,
         )
+        # AutoMix analysis results are cached per file and never pruned on
+        # their own (a changed file or analyzer version just stops matching).
+        self.automix_cache_label = QLabel()
+        self.automix_cache_usage_label = QLabel()
+        self.automix_cache_usage_label.setObjectName("mutedLabel")
+        self.automix_cache_clear_button = QPushButton()
+        self.automix_cache_clear_button.clicked.connect(self._clear_automix_cache)
+        automix_cache_row = QHBoxLayout()
+        automix_cache_row.addWidget(self.automix_cache_usage_label, 1)
+        automix_cache_row.addWidget(self.automix_cache_clear_button)
+        content_form.addRow(self.automix_cache_label, automix_cache_row)
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("settingsTabs")
@@ -980,6 +991,14 @@ class SettingsDialog(QDialog):
         )
         self.app_group.setTitle("앱" if korean else "Application")
         self.content_group.setTitle("콘텐츠 추가" if korean else "Adding content")
+        self.automix_cache_label.setText("AutoMix 분석 캐시" if korean else "AutoMix analysis cache")
+        self.automix_cache_clear_button.setText("비우기" if korean else "Clear")
+        self.automix_cache_clear_button.setToolTip(
+            "저장된 곡 분석 결과를 지웁니다. 다음 AutoMix 때 다시 분석합니다."
+            if korean else
+            "Delete saved track analyses; AutoMix analyzes them again next time."
+        )
+        self._refresh_automix_cache_usage()
         self.lyrics_auto_attach_label.setText(
             "가사·자막 파일 자동 연결" if korean else "Auto-attach lyric files"
         )
@@ -1245,6 +1264,23 @@ class SettingsDialog(QDialog):
             != self._active_preview_backend
         )
         self.preview_backend_restart_hint.setVisible(changed)
+
+    def _refresh_automix_cache_usage(self) -> None:
+        from app.automix.cache import cache_usage
+
+        korean = self.translator.language is Language.KOREAN
+        entries, size = cache_usage()
+        megabytes = size / (1024 * 1024)
+        self.automix_cache_usage_label.setText(
+            f"분석 {entries}개 · {megabytes:.1f} MB" if korean else f"{entries} analyses · {megabytes:.1f} MB"
+        )
+        self.automix_cache_clear_button.setEnabled(size > 0)
+
+    def _clear_automix_cache(self) -> None:
+        from app.automix.cache import clear_caches
+
+        clear_caches()
+        self._refresh_automix_cache_usage()
 
     def _ffmpeg_browse_title(self) -> str:
         return "FFmpeg 실행 파일 선택" if self.translator.language is Language.KOREAN else "Choose FFmpeg executable"

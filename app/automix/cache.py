@@ -24,6 +24,55 @@ LOGGER = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 
 
+_CACHE_FILE_PATTERNS = ("*.json", "*.tmp")
+"""Entries, plus temp files an interrupted atomic write can leave behind."""
+
+
+def cache_directories() -> tuple[Path, ...]:
+    """Every on-disk AutoMix analysis cache (rhythm, structure)."""
+    from app.automix.structure.cache import StructureAnalysisCache
+
+    return AnalysisCache.default_root(), StructureAnalysisCache.default_root()
+
+
+def _cache_files(directories: tuple[Path, ...]) -> list[Path]:
+    return [path for directory in directories if directory.is_dir()
+            for pattern in _CACHE_FILE_PATTERNS for path in directory.glob(pattern)]
+
+
+def cache_usage(directories: tuple[Path, ...] | None = None) -> tuple[int, int]:
+    """(entry count, total bytes) of the AutoMix analysis caches.
+
+    Entries are never pruned on their own: a changed file or analyzer version
+    just stops matching, so old entries accumulate until cleared.
+    """
+    entries = total = 0
+    for path in _cache_files(directories or cache_directories()):
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+        if path.suffix == ".json":
+            entries += 1
+    return entries, total
+
+
+def clear_caches(directories: tuple[Path, ...] | None = None) -> int:
+    """Delete every cached analysis; returns how many files went.
+
+    Safe at any time: results are recomputed on demand, and a write racing
+    this simply lands as a fresh entry (writes are atomic replaces).
+    """
+    removed = 0
+    for path in _cache_files(directories or cache_directories()):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as error:  # in use by a concurrent reader on Windows: leave it
+            LOGGER.info("AutoMix cache file not removed (%s): %s", error, path)
+    return removed
+
+
 def canonical_media_path(path: str) -> str:
     """Normalize a media path so the same file always hashes identically."""
     return os.path.normcase(str(Path(path).expanduser().resolve()))

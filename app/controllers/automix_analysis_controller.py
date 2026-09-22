@@ -30,6 +30,10 @@ from app.models.playlist import PlaylistTrack
 
 LOGGER = logging.getLogger(__name__)
 
+BACKGROUND_ANALYSIS_WORKERS = 2
+"""Files analyzed at once while the user edits: half of Preview/Export's
+foreground pool, so warming the cache never takes over the machine."""
+
 
 class _AutoMixAnalysisWorker(QThread):
     analyzed = Signal(dict)
@@ -55,6 +59,7 @@ class _AutoMixAnalysisWorker(QThread):
     def run(self) -> None:
         try:
             from app.automix.analysis.registry import create_analysis_provider
+            from app.automix.settings import AutoMixAnalysisSettings
             from app.automix.workflow import AutoMixWorkflow
             provider = create_analysis_provider(self._provider_id, self._ffmpeg_executable)
         except ImportError as error:
@@ -66,7 +71,9 @@ class _AutoMixAnalysisWorker(QThread):
             # never crash the background worker over it.
             LOGGER.error("AutoMix analysis misconfigured: %s", error)
             return
-        workflow = AutoMixWorkflow(provider)
+        workflow = AutoMixWorkflow(
+            provider, analysis_settings=AutoMixAnalysisSettings(max_workers=BACKGROUND_ANALYSIS_WORKERS),
+        )
         result = workflow.analyze(self._tracks, cancel_event=self._cancel_event)
         if self._cancel_event.is_set():
             return
@@ -93,7 +100,7 @@ class _AutoMixAnalysisWorker(QThread):
         if not sonara_available():
             LOGGER.info("AutoMix structure analysis skipped: Sonara is not installed.")
             return
-        service = StructureAnalysisService(SonaraStructureProvider())
+        service = StructureAnalysisService(SonaraStructureProvider(), max_workers=BACKGROUND_ANALYSIS_WORKERS)
         result = service.analyze_tracks(self._tracks, cancel_event=self._cancel_event)
         if not self._cancel_event.is_set():
             self.structures_analyzed.emit(result.analyses)

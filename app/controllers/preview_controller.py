@@ -117,6 +117,12 @@ class PreviewController:
         from app.automix.settings import resolve_automix_settings
 
         automix_settings = resolve_automix_settings(window.project_settings.automix_preset)
+        if transition_mode == "automix":
+            # Preview analyzes the same files into the same caches at full
+            # speed; a background pass still running would only duplicate
+            # uncached work and compete for the CPU. It resumes on close.
+            window._automix_analysis_timer.stop()
+            window.automix_analysis_controller.cancel()
         preloaded_blended_audio = None
         blended_audio_controller = None
         blended_audio_temp_dir = None
@@ -375,6 +381,9 @@ class PreviewController:
             2500,
         )
         window.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+        # Background analysis stood down for Preview; pick it up again (the
+        # tracks Preview analyzed are cache hits now, so this mostly refreshes badges).
+        window._automix_analysis_timer.start()
         # The left workspace expands for 190 ms when Preview releases its UI
         # lock. Fit against the final layout, not the transient narrow Canvas.
         window._schedule_canvas_fit(230)

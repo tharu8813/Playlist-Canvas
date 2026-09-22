@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from app.automix.cache import SCHEMA_VERSION, AnalysisCache, canonical_media_path
+from app.automix.cache import SCHEMA_VERSION, AnalysisCache, cache_usage, canonical_media_path, clear_caches
 from app.automix.models import TrackAnalysis
 
 
@@ -135,6 +136,61 @@ class AnalysisCacheTests(unittest.TestCase):
             self.assertEqual(
                 canonical_media_path(str(source)), canonical_media_path(str(source).upper()),
             )
+
+
+class CacheMaintenanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = TemporaryDirectory(prefix="automix-cache-maintenance-")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.media = self.root / "song.wav"
+        self.media.write_bytes(b"audio")
+        self.rhythm, self.structure = self.root / "rhythm", self.root / "structure"
+
+    def _analysis(self) -> TrackAnalysis:
+        return TrackAnalysis(track_id="t", source_path=str(self.media), duration_seconds=10.0, bpm=120.0)
+
+    def test_usage_and_clear_cover_entries_and_orphaned_temp_files_only(self) -> None:
+        AnalysisCache(self.rhythm, analyzer_id="a", analyzer_version="1").store(str(self.media), self._analysis())
+        AnalysisCache(self.rhythm, analyzer_id="a", analyzer_version="2").store(str(self.media), self._analysis())
+        self.structure.mkdir()
+        (self.structure / "interrupted.tmp").write_text("{")
+        unrelated = self.rhythm / "notes.txt"
+        unrelated.write_text("keep me")
+        entries, size = cache_usage((self.rhythm, self.structure))
+        self.assertEqual(entries, 2)  # the stale version-1 entry counts until cleared
+        self.assertGreater(size, 0)
+        self.assertEqual(clear_caches((self.rhythm, self.structure)), 3)
+        self.assertEqual(cache_usage((self.rhythm, self.structure)), (0, 0))
+        self.assertTrue(unrelated.is_file())
+        self.assertIsNone(AnalysisCache(self.rhythm, analyzer_id="a", analyzer_version="2").load(str(self.media)))
+
+    def test_missing_cache_folders_are_empty_not_errors(self) -> None:
+        self.assertEqual(cache_usage((self.root / "never-created",)), (0, 0))
+        self.assertEqual(clear_caches((self.root / "never-created",)), 0)
+
+    def test_concurrent_writers_and_readers_never_see_a_partial_entry(self) -> None:
+        cache = AnalysisCache(self.rhythm, analyzer_id="a", analyzer_version="1")
+        failures: list[Exception] = []
+
+        def write() -> None:
+            for _ in range(20):
+                try:
+                    cache.store(str(self.media), self._analysis())
+                except OSError:
+                    pass  # a Windows replace racing a reader; the service logs and moves on
+                loaded = cache.load(str(self.media))
+                if loaded is not None and loaded.get("bpm") != 120.0:
+                    failures.append(AssertionError(loaded))
+
+        threads = [threading.Thread(target=write) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(failures, [])
+        self.assertEqual(cache.load(str(self.media))["bpm"], 120.0)
+        self.assertEqual(list(self.rhythm.glob("*.tmp")), [])
 
 
 if __name__ == "__main__":
