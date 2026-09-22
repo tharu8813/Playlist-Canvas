@@ -5,14 +5,18 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 import shutil
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSettings, QStandardPaths, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from app import LEGACY_PRODUCT_NAME, PRODUCT_NAME, __version__
-from app.ui.main_window import MainWindow
+from app.ui.launch_splash import LaunchSplash
 from app.utils.logging_setup import configure_logging, install_exception_hook
+
+if TYPE_CHECKING:
+    from app.ui.main_window import MainWindow
 
 
 def project_path_from_arguments(arguments: list[str]) -> Path | None:
@@ -37,7 +41,7 @@ def project_path_from_arguments(arguments: list[str]) -> Path | None:
 
 
 def open_initial_workspace(
-    window: MainWindow, launch_project: Path | None,
+    window: "MainWindow", launch_project: Path | None,
 ) -> bool:
     """Open an Explorer target directly or fall back to the startup chooser."""
     if launch_project is not None:
@@ -96,11 +100,21 @@ def main() -> int:
     application.setApplicationVersion(__version__)
     resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     icon_path = resource_root / "app" / "resources" / "app_icon.ico"
-    if icon_path.is_file():
-        application.setWindowIcon(QIcon(str(icon_path)))
+    icon = QIcon(str(icon_path)) if icon_path.is_file() else None
+    if icon is not None:
+        application.setWindowIcon(icon)
+    # Paint a loading window before the heavy UI modules are even imported,
+    # so launching gives immediate feedback; it closes once the editor is up.
+    splash = LaunchSplash(PRODUCT_NAME, __version__, icon)
+    splash.show()
+    splash.set_status("프로그램을 불러오는 중…", "Loading…")
     install_exception_hook()
+    from app.ui.main_window import MainWindow
+
+    splash.set_status("작업 공간을 준비하는 중…", "Preparing the workspace…")
     window = MainWindow()
     window.show()
+    splash.finish(window)
     if "--smoke-test" in sys.argv:
         QTimer.singleShot(0, application.quit)
         return application.exec()
