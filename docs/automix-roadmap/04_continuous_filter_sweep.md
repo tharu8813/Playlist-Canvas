@@ -58,3 +58,37 @@ stem separation, planner geometry 변경, selector 전체 재작성.
 
 ## 권장 commit
 `feat: add continuous filter-sweep AutoMix transitions`
+
+
+---
+
+## Outcome (2026-09-23)
+
+### Decision
+Implemented as a new, fully rendered and tested DSP style **`TransitionDsp.FILTER_SWEEP`**, but the selector keeps choosing **FILTER_BLEND** for energy-jump / kick-drift windows. This roadmap step is gated on "real listening confirmed a need", and no human listening happened in this run; switching the default is a one-line change in `app/automix/transition_style.py` once someone prefers the sweep in A/B. Rationale (priority order): no regression of an existing, measured-safe style; Preview/Export parity untouched (both render whatever the plan says); the A/B path the spec asks for now exists.
+
+### FFmpeg investigation (bundled n9.0.1, real executable)
+- `lowpass`/`highpass`/`biquad` expose `frequency` as a runtime command (`T` flag); `asendcmd` delivers timed commands. Commands must target the full instance name (`highpass@name`); a class name silently did nothing.
+- Coefficients update per audio frame, so frames are cut to 10 ms (`asetnsamples=n=480:p=0`; `p=0` so the last frame is never padded -- exact duration).
+- Zipper noise, 440 Hz tone swept 20 Hz -> 8 kHz over 8 s, energy above 2 kHz relative to the tone (analysis floor -79.0 dB):
+
+  | transform | 20 ms steps | 5 ms | 1 ms |
+  |---|---|---|---|
+  | di (default) | -77.8 | -78.9 | -79.0 |
+  | tdii / svf | -65.1 | -76.8 | -78.9 |
+  | latt | -50.7 | -64.6 | -71.1 |
+  | zdf | -73.1 | -78.3 | -78.9 |
+
+  -> direct form I at 10 ms steps (inaudible residual).
+- `-filter_complex_script` no longer exists in FFmpeg 9; `-/filter_complex <file>` works. Sweep graphs carry ~1,100 timed commands per side, so they always take the file path added in `c8ab25f` (which also fixed band-DSP graphs over ~33 tracks exceeding the Windows command line).
+
+### Shape
+Outgoing: highpass 10 Hz -> 4 kHz over 20-90 % of the window (lows leave first), qsin fade-out over 60-100 %. Incoming: highpass 4 kHz -> 10 Hz over 10-80 % (arrives highs-first), qsin fade-in over 0-40 %. Bass crossover points land at 48 % (incoming arrives) / 52 % (outgoing leaves) -- a short handoff like BASS_SWAP, no bass hole. Overlap summed with the same window limiter as the band styles; clips outside the window are untouched (10 Hz resting cutoff: -0.02 dB at 40 Hz).
+
+### Verification
+- Real FFmpeg: A->B->C chain with a 1.05x clip renders to the exact planned duration (+-0.05 s), stereo, peak <= 0.98; the outgoing side's <150 Hz content falls > 30 dB by the end of its sweep; deterministic graph; `transition_dsp=False` fallback renders the plain crossfade.
+- Real music A/B (`tools/automix_listening_report.py --ab`, same geometry per style): level/low-end metrics of FILTER_SWEEP within ~0.5 dB of FILTER_BLEND on all four measured windows (e.g. REDRED -> instrumental, 16 s: mean -2.1 vs -2.1 dB, low -2.6 vs -2.2 dB) -- no hole, spike or build-up. Timbre is not measurable this way: **listening TODO**.
+- Tests: `tests/test_automix_filter_sweep.py`.
+
+### Known limitations
+Needs FFmpeg 7+ (`-/filter_complex`); an older build fails the sweep render and the existing retry renders plain crossfades with identical timing.

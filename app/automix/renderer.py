@@ -118,6 +118,25 @@ start and is silent after its end; incoming is silent until its start and at
 unity after its end. SHORT_FADE is absent: it needs no band split."""
 _BANDS = ("low", "mid", "high")
 _BAND_FADE_CURVE = "qsin"
+
+# FILTER_SWEEP: a continuous, DJ-style highpass swap instead of FILTER_BLEND's
+# three fixed bands. One 2-pole highpass per clip, its cutoff moved every
+# SWEEP_STEP_SECONDS by asendcmd (exponential in frequency), plus qsin level
+# fades; the overlap is summed and limited like the band styles. Measured on
+# the bundled FFmpeg 9 (Phase 04): direct-form-I biquad updated every 10 ms
+# leaves < -78 dB of zipper residual on a 440 Hz tone (floor -79 dB); the
+# svf/tdii/lattice forms were worse at the same step. The outgoing track loses
+# its lows first and its highs last; the incoming one arrives highs-first
+# (same intent as FILTER_BLEND's envelopes, without the band steps).
+SWEEP_FLOOR_HZ = 10.0
+"""Resting cutoff: -0.02 dB at 40 Hz, i.e. transparent."""
+SWEEP_CEILING_HZ = 4000.0
+SWEEP_STEP_SECONDS = 0.01
+SWEEP_SHAPES = {
+    # side: ((sweep start, end), (level fade start, end)) as normalized transition progress
+    "out": ((0.2, 0.9), (0.6, 1.0)),
+    "in": ((0.1, 0.8), (0.0, 0.4)),
+}
 DSP_PEAK_LIMIT = 0.97
 """Summing two enveloped tracks can overshoot full scale, and the pcm_s16le
 intermediate would hard-clip it irrecoverably. A lookahead limiter runs on
@@ -126,6 +145,8 @@ INLINE_FILTER_GRAPH_LIMIT = 16000
 """Longer graphs go to FFmpeg as a file (``-/filter_complex``, FFmpeg 7+);
 shorter ones stay inline so typical playlists run exactly as before."""
 _DSP_REQUIRED_FILTERS = frozenset({"acrossover", "afade", "amix", "alimiter", "asplit", "acrossfade"})
+"""FILTER_SWEEP's asendcmd/asetnsamples/highpass are not required here: a build
+lacking them fails that render, which retries with legacy crossfades."""
 
 
 class AutoMixRenderError(RuntimeError):
@@ -173,15 +194,29 @@ def build_filter_graph(
         transition = transition_by_pair[(clips[index].clip_id, clips[index + 1].clip_id)]
         return styles[index], transition.duration
 
+    def sweep_side(index: int) -> float | None:
+        if not 0 <= index < len(styles) or styles[index] is not TransitionDsp.FILTER_SWEEP:
+            return None
+        return transition_by_pair[(clips[index].clip_id, clips[index + 1].clip_id)].duration
+
     filters: list[str] = []
     labels = [f"c{index}" for index in range(len(clips))]
     for index, clip in enumerate(clips):
         incoming, outgoing = band_side(index - 1), band_side(index)
-        if incoming is None and outgoing is None:
+        sweep_in, sweep_out = sweep_side(index - 1), sweep_side(index)
+        if incoming is None and outgoing is None and sweep_in is None and sweep_out is None:
             filters.append(_clip_filter_chain(index, clip, labels[index]))
+            continue
+        current = f"{labels[index]}pre"
+        filters.append(_clip_filter_chain(index, clip, current))
+        if sweep_in is not None or sweep_out is not None:
+            swept = f"{labels[index]}swept"
+            filters.append(_sweep_filter(index, current, swept, clip.duration, sweep_in, sweep_out))
+            current = swept
+        if incoming is None and outgoing is None:
+            filters.append(f"[{current}]anull[{labels[index]}]")
         else:
-            filters.append(_clip_filter_chain(index, clip, f"{labels[index]}pre"))
-            filters.extend(_band_filters(f"{labels[index]}pre", labels[index], clip.duration, incoming, outgoing))
+            filters.extend(_band_filters(current, labels[index], clip.duration, incoming, outgoing))
 
     running_label = labels[0]
     if clips[0].timeline_start > _GAP_EPSILON:
@@ -195,7 +230,8 @@ def build_filter_graph(
         next_label = f"m{index}"
         style = styles[index - 1]
         if style is not None:
-            curve = "nofade" if style in BAND_ENVELOPES else "qsin"  # SHORT_FADE: full-band qsin
+            # Band styles and the sweep carry their own fades; SHORT_FADE is a full-band qsin.
+            curve = "nofade" if style in BAND_ENVELOPES or style is TransitionDsp.FILTER_SWEEP else "qsin"
             filters.extend(_limited_overlap_filters(running_label, labels[index], next_label, transition, curve))
         elif transition is not None and transition.duration > 0.0:
             curve = _CURVE_BY_TRANSITION_TYPE.get(transition.type, "tri")
@@ -269,6 +305,56 @@ def band_fade_windows(
         window_start = clip_duration - duration
         windows.append(("out", window_start + duration * start, duration * (end - start)))
     return windows
+
+
+def sweep_cutoffs(
+    clip_duration: float, incoming: float | None, outgoing: float | None,
+) -> tuple[float, list[tuple[float, float]]]:
+    """(initial cutoff Hz, [(clip-local second, cutoff Hz)]) for one clip's sweep highpass.
+
+    ``incoming``/``outgoing`` are that side's FILTER_SWEEP transition
+    duration, ``None`` when that side has no sweep. Deterministic.
+    """
+    points: list[tuple[float, float]] = []
+
+    def sweep(window_start: float, duration: float, side: str, start_hz: float, end_hz: float) -> None:
+        (begin, end), _fade = SWEEP_SHAPES[side]
+        first, last = window_start + duration * begin, window_start + duration * end
+        steps = max(1, round((last - first) / SWEEP_STEP_SECONDS))
+        points.extend(
+            (first + (last - first) * step / steps, start_hz * (end_hz / start_hz) ** (step / steps))
+            for step in range(steps + 1)
+        )
+
+    if incoming is not None:
+        sweep(0.0, incoming, "in", SWEEP_CEILING_HZ, SWEEP_FLOOR_HZ)
+    if outgoing is not None:
+        sweep(clip_duration - outgoing, outgoing, "out", SWEEP_FLOOR_HZ, SWEEP_CEILING_HZ)
+    points.sort()  # asendcmd wants time order; only a clip shorter than both windows interleaves
+    return (SWEEP_CEILING_HZ if incoming is not None else SWEEP_FLOOR_HZ), points
+
+
+def _sweep_filter(
+    index: int, source: str, output: str, clip_duration: float, incoming: float | None, outgoing: float | None,
+) -> str:
+    """One clip's sweep: moving highpass (asendcmd) plus the sides' qsin level fades."""
+    name = f"highpass@sweep{index}"
+    initial, points = sweep_cutoffs(clip_duration, incoming, outgoing)
+    commands = ";".join(f"{seconds:.4f} {name} f {cutoff:.2f}" for seconds, cutoff in points)
+    parts = [
+        # Small frames: a biquad takes new coefficients per frame. p=0: never pad (exact duration).
+        f"asetnsamples=n={round(SWEEP_STEP_SECONDS * SAMPLE_RATE)}:p=0",
+        f"asendcmd=c='{commands}'",
+        f"{name}=f={initial:.2f}:r=f64",
+    ]
+    if incoming is not None:
+        (_sweep, (begin, end)) = SWEEP_SHAPES["in"]
+        parts.append(f"afade=t=in:st={incoming * begin:.6f}:d={incoming * (end - begin):.6f}:curve=qsin")
+    if outgoing is not None:
+        (_sweep, (begin, end)) = SWEEP_SHAPES["out"]
+        start = clip_duration - outgoing + outgoing * begin
+        parts.append(f"afade=t=out:st={start:.6f}:d={outgoing * (end - begin):.6f}:curve=qsin")
+    return f"[{source}]" + ",".join(parts) + f"[{output}]"
 
 
 def _band_filters(

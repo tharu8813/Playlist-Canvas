@@ -55,6 +55,7 @@ class TransitionDsp(str, Enum):
     VOCAL_SAFE_EQ = "vocal_safe_eq"
     FILTER_BLEND = "filter_blend"
     SHORT_FADE = "short_fade"
+    FILTER_SWEEP = "filter_sweep"
 
 
 @dataclass(frozen=True, slots=True)
