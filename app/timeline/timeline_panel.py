@@ -127,12 +127,20 @@ class TimelinePanel(QFrame):
         source_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.track_page = self._table_page(self.track_table)
         self.source_page = self._table_page(self.source_table)
+        # No tracks yet: say where they come from instead of showing a bare header row.
+        self.track_empty_label = QLabel()
+        self.track_empty_label.setObjectName("mutedLabel")
+        self.track_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.track_empty_label.setWordWrap(True)
+        self.track_page.layout().addWidget(self.track_empty_label, 1)
         self.tabs.addTab(self.track_page, "")
         self.tabs.addTab(self.source_page, "")
         layout.addWidget(self.tabs, 1)
         self.up_button.clicked.connect(lambda: self._move_selected_track(-1))
         self.down_button.clicked.connect(lambda: self._move_selected_track(1))
         self.source_table.itemSelectionChanged.connect(self._select_source_on_canvas)
+        self.track_table.itemSelectionChanged.connect(self._update_move_buttons)
+        self.tabs.currentChanged.connect(lambda _index: self._update_move_buttons())
         playlist.playlist_changed.connect(self.schedule_refresh)
         sources.source_added.connect(lambda _source: self.schedule_refresh())
         sources.source_removed.connect(lambda _source_id: self.schedule_refresh())
@@ -183,6 +191,11 @@ class TimelinePanel(QFrame):
         self.tabs.setTabText(1, "소스 타이밍" if korean else "Source timing")
         self.up_button.setToolTip("위로 이동" if korean else "Move up")
         self.down_button.setToolTip("아래로 이동" if korean else "Move down")
+        self.track_empty_label.setText(
+            "플레이리스트 탭에서 음악을 추가하면 곡별 시작 시간과 길이가 여기에 표시됩니다."
+            if korean else
+            "Add music in the Playlist tab to see and edit each track's start time here."
+        )
         self.refresh()
 
     def refresh(self) -> None:
@@ -208,6 +221,8 @@ class TimelinePanel(QFrame):
                 start_editor.setMinimum(minimum_start)
                 start_editor.setValue(max(start, minimum_start))
                 start_editor.setToolTip(
+                    f"최소 시작 {TimelineSpinBox.format_timecode(minimum_start)}"
+                    if self.translator.language.value == "ko" else
                     f"Minimum {TimelineSpinBox.format_timecode(minimum_start)}"
                 )
                 start_editor.valueChanged.connect(
@@ -255,6 +270,9 @@ class TimelinePanel(QFrame):
             self._restore_row_selection(
                 self.source_table, 0, selected_source_id,
             )
+            self.track_table.setVisible(bool(timeline_tracks))
+            self.track_empty_label.setVisible(not timeline_tracks)
+            self._update_move_buttons()
             QTimer.singleShot(
                 0,
                 lambda value=track_scroll:
@@ -304,6 +322,16 @@ class TimelinePanel(QFrame):
                 table.selectRow(row)
                 table.setCurrentCell(row, id_column)
                 return
+
+    def _update_move_buttons(self) -> None:
+        """Reordering needs a selected track with room to move, on the music tab."""
+        on_tracks = self.tabs.currentIndex() == 0
+        row = self.track_table.currentRow() if self.track_table.selectedItems() else -1
+        count = self.track_table.rowCount()
+        self.up_button.setVisible(on_tracks)
+        self.down_button.setVisible(on_tracks)
+        self.up_button.setEnabled(on_tracks and row > 0)
+        self.down_button.setEnabled(on_tracks and 0 <= row < count - 1)
 
     def _move_selected_track(self, direction: int) -> None:
         track_id = self._selected_track_id()

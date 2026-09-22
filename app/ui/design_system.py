@@ -15,6 +15,8 @@ COLORS = {
     "window": "#191B1D", "panel": "#212426", "field": "#191C1E",
     "button": "#2C3033", "hover": "#373D40", "text": "#E6E8E7",
     "muted": "#A3AAA9", "border": "#393E40", "disabled": "#25292B",
+    # Clearly dimmer than @muted: a disabled button must not read as clickable.
+    "disabled_text": "#6C7472",
     "alternate": "#272B2D", "shadow": "#111314", "accent": "#79C7B4",
     "accent_hover": "#96D7C7",
 }

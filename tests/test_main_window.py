@@ -6115,6 +6115,77 @@ class MainWindowSafetyTests(unittest.TestCase):
                 self.assertEqual(preview._blended_audio_path, files["final"])
                 self.assertEqual(preview._blended_audio_until, math.inf)
 
+    def test_every_source_type_has_its_own_palette_glyph(self) -> None:
+        from app.ui.studio_icons import source_icon
+
+        for source_type in SourceType:
+            with self.subTest(source_type):
+                icon = source_icon(source_type.value)
+                self.assertIsNotNone(icon)
+                self.assertFalse(icon.isNull())
+
+    def test_default_project_title_and_source_kind_read_in_the_ui_language(self) -> None:
+        self.window.project_settings = replace(self.window.project_settings, title="Untitled Project")
+        self.window.project_controller.update_status()
+        self.assertTrue(self.window.project_status_label.text().startswith("새 프로젝트"))
+        source = next(iter(self.window.store.sources()))
+        self.window.store.select(source.id)
+        QApplication.processEvents()
+        self.assertEqual(self.window.inspector.subtitle.text(), self.window._source_type_label(source.source_type))
+        self.assertNotIn("_", self.window.inspector.subtitle.text())
+
+    def test_reset_panel_sizes_restores_the_default_workspace(self) -> None:
+        self.window.show()
+        QApplication.processEvents()
+        self.window._reset_workspace_layout()
+        left, _center, right = self.window.main_splitter.sizes()
+        self.assertEqual((left, right), (MainWindow._DEFAULT_LEFT_PANEL_WIDTH, MainWindow._DEFAULT_RIGHT_PANEL_WIDTH))
+        self.assertIn(self.window.reset_layout_action, self.window.view_menu.actions())
+
+    def test_empty_playlist_offers_the_add_action_and_rows_hide_placeholder_metadata(self) -> None:
+        editor = self.window.playlist_editor
+        self.window.playlist_service.replace([])
+        self.assertFalse(editor.empty_state.isHidden())
+        self.assertFalse(editor.empty_add_button.isHidden())
+        requested: list[bool] = []
+        editor.request_files.disconnect(self.window._choose_audio_files)  # no real file dialog
+        self.addCleanup(editor.request_files.connect, self.window._choose_audio_files)
+        editor.request_files.connect(lambda: requested.append(True))
+        editor.empty_add_button.click()
+        self.assertEqual(requested, [True])
+        track = PlaylistTrack("C:/music/song.mp3", "Song", duration_seconds=10.0)  # Unknown Artist/Album
+        self.window.playlist_service.replace([track])
+        self.assertTrue(editor.empty_state.isHidden())
+        row = editor.list_widget.itemWidget(editor.list_widget.item(0))
+        from PySide6.QtWidgets import QLabel
+
+        text = row.findChild(QLabel, "trackMetadata").text()
+        self.assertNotIn("Unknown", text)
+        self.assertIn("song.mp3", text)
+        editor.search_edit.setText("zzz")
+        editor.refresh()
+        self.assertFalse(editor.empty_state.isHidden())
+        self.assertTrue(editor.empty_add_button.isHidden())  # "no results" is not "add music"
+
+    def test_timeline_move_buttons_follow_the_selection_and_empty_state_explains(self) -> None:
+        panel = self.window.timeline_panel
+        self.window.playlist_service.replace([])
+        panel.refresh()
+        self.assertFalse(panel.track_empty_label.isHidden())
+        self.assertFalse(panel.up_button.isEnabled())
+        tracks = [PlaylistTrack(f"{name}.wav", name, duration_seconds=10.0) for name in "abc"]
+        self.window.playlist_service.replace(tracks)
+        panel.refresh()
+        self.assertTrue(panel.track_empty_label.isHidden())
+        self.assertFalse(panel.up_button.isEnabled())
+        self.assertFalse(panel.down_button.isEnabled())
+        panel.track_table.selectRow(0)
+        self.assertFalse(panel.up_button.isEnabled())
+        self.assertTrue(panel.down_button.isEnabled())
+        panel.track_table.selectRow(2)
+        self.assertTrue(panel.up_button.isEnabled())
+        self.assertFalse(panel.down_button.isEnabled())
+
     def test_background_mix_progress_clears_on_failure_or_when_preview_closes(self) -> None:
         track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
         track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)

@@ -2176,7 +2176,11 @@ class SourceInspector(QScrollArea):
             source = sources[0]
             self._clear_mixed_visuals()
             self.title.setText(source.name)
-            self.subtitle.setText(source.source_type.value.replace("_", " ").title())
+            try:  # the same localized type name the element palette shows
+                kind = self.translator.text(source.source_type.value)
+            except KeyError:
+                kind = source.source_type.value.replace("_", " ").title()
+            self.subtitle.setText(kind)
             self.animation_preview_button.setVisible(True)
             self._fill(source)
             return

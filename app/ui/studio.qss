@@ -23,10 +23,13 @@ QMenu::separator { height: 1px; background: @border; margin: 4px 8px; }
 QToolBar { background: @window; border: 0; border-bottom: 1px solid @border; spacing: 4px; padding: 6px 12px; }
 QToolBar QToolButton { background: transparent; border-color: transparent; padding: 6px 8px; min-height: 28px; }
 QToolBar QToolButton:hover { background: @hover; border-color: @border; }
-QToolBar QToolButton:disabled { background: transparent; border-color: transparent; color: #707977; }
+QToolBar QToolButton:disabled { background: transparent; border-color: transparent; color: @disabled_text; }
 QToolBar::separator { background: @border; width: 1px; margin: 7px 8px; }
 QStatusBar { background: @window; color: @muted; border-top: 1px solid @border; font-size: 11px; padding: 2px 6px; }
 QLabel#activityProgressLabel { color: @text; font-weight: 600; }
+/* Status-bar controls (zoom stepper) stay slim: they are readouts, not primary actions. */
+QStatusBar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 1px 8px; min-height: 18px; color: @muted; }
+QStatusBar QToolButton:hover { background: @hover; border-color: @border; color: @text; }
 QProgressBar#activityProgressBar { background: @field; color: @text; border: 1px solid @border; border-radius: 4px; text-align: center; font-size: 10px; }
 QProgressBar#activityProgressBar::chunk { background: @accent; border-radius: 4px; }
 
@@ -50,14 +53,14 @@ QPushButton:default { background: @button; color: @text; border-color: @border; 
 QPushButton:default:hover { background: @hover; border-color: @accent; }
 QPushButton:disabled, QPushButton:default:disabled,
 QToolButton:disabled, QToolButton#exportButton:disabled {
-    background: @disabled; color: @muted; border-color: @border;
+    background: @disabled; color: @disabled_text; border-color: @disabled;
 }
 QToolButton:checked, QPushButton:checked { background: #304B44; color: @text; border-color: @accent; }
 QPushButton:flat { background: transparent; border-color: transparent; color: @muted; }
 QPushButton:flat:hover { color: @text; background: @hover; }
 QPushButton#primaryButton { background: @accent; color: @window; border-color: @accent; font-weight: 600; }
 QPushButton#primaryButton:hover { background: @accent_hover; border-color: @accent_hover; }
-QPushButton#primaryButton:disabled { color: @muted; background: @disabled; border-color: @border; }
+QPushButton#primaryButton:disabled { color: @disabled_text; background: @disabled; border-color: @disabled; }
 
 QToolTip { background: @panel; color: @text; border: 1px solid @border; border-radius: 3px; padding: 8px; }
 

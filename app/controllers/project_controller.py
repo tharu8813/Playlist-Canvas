@@ -113,7 +113,9 @@ class ProjectController:
         if not hasattr(window, "project_status_label"):
             return
         korean = window.translator.language is Language.KOREAN
-        name = window.project_settings.title or (
+        title = window.project_settings.title
+        # "Untitled Project" is the model's stored default, not a name the user chose.
+        name = title if title and title != "Untitled Project" else (
             "새 프로젝트" if korean else "New project"
         )
         saving = (

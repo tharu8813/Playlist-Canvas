@@ -317,7 +317,12 @@ class TrackRow(QWidget):
             cover_label.setText("♪")
             cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title = escape(track.title)
-        subtitle = f"{escape(track.artist)} · {escape(track.album)}"
+        # The "Unknown ..." placeholders are stored defaults, not information:
+        # show only what the file actually told us.
+        known = [value for value, placeholder in (
+            (track.artist, "Unknown Artist"), (track.album, "Unknown Album"),
+        ) if value and value != placeholder]
+        subtitle = " · ".join(escape(value) for value in known) or Path(track.file_path).name
         if not track.enabled:
             title = f'<span style="text-decoration:line-through">{title}</span>'
         metadata = QLabel(f"<b>{title}</b><br><span>{subtitle}</span>")
@@ -355,8 +360,8 @@ class TrackRow(QWidget):
         # never setEnabled(False): a disabled child label swallows the
         # right-click so the export include/exclude menu could not be reached.
         self.setToolTip(
-            f"{track.title}\n{track.artist} · {track.album}\n"
-            f"{Path(track.file_path)}"
+            f"{track.title}\n" + (" · ".join(known) + "\n" if known else "")
+            + f"{Path(track.file_path)}"
             + ("" if track.enabled else
                ("\n\n내보내기에서 제외됨 (우클릭 → 포함)" if korean
                 else "\n\nExcluded from export (right-click to include)"))
@@ -435,10 +440,21 @@ class PlaylistEditor(QFrame):
         self.list_widget = PlaylistList()
         self.list_widget.setMinimumHeight(150)
         layout.addWidget(self.list_widget)
+        # Empty playlist: the hint plus the one action that fixes it, right where the eye lands.
+        self.empty_state = QWidget()
+        empty_layout = QVBoxLayout(self.empty_state)
+        empty_layout.setSpacing(10)
+        empty_layout.addStretch()
         self.empty_label = QLabel()
         self.empty_label.setObjectName("mutedLabel")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.empty_label)
+        empty_layout.addWidget(self.empty_label)
+        self.empty_add_button = QPushButton()
+        self.empty_add_button.setProperty("primary", True)
+        self.empty_add_button.clicked.connect(self.request_files)
+        empty_layout.addWidget(self.empty_add_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_layout.addStretch()
+        layout.addWidget(self.empty_state)
         self.add_button.clicked.connect(self.request_files)
         self.order_editor_button.clicked.connect(self._open_order_editor)
         self.up_button.clicked.connect(lambda: self._move_selected(-1))
@@ -470,6 +486,7 @@ class PlaylistEditor(QFrame):
             else "Search title, artist, or album…"
         )
         self.add_button.setText("+ 음악 추가" if korean else "+ Add music")
+        self.empty_add_button.setText("음악 파일 선택…" if korean else "Choose music files…")
         self.order_editor_button.setText("순서 편집" if korean else "Reorder")
         self.order_editor_button.setToolTip(
             "커버·정보와 미리듣기가 있는 창에서 트랙 순서를 편집합니다."
@@ -536,7 +553,8 @@ class PlaylistEditor(QFrame):
                 if track.id == current_id:
                     self.list_widget.setCurrentItem(item)
             self.list_widget.setVisible(bool(tracks))
-            self.empty_label.setVisible(not tracks)
+            self.empty_state.setVisible(not tracks)
+            self.empty_add_button.setVisible(not query)  # "no search results" needs no add button
             enabled = sum(track.enabled for track in all_tracks)
             korean = self.translator.language.value == "ko"
             filtered = f" · {len(tracks)}곡 표시" if korean and query else (

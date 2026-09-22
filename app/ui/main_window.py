@@ -151,6 +151,7 @@ from app.utils.logging_setup import log_directory, report_unexpected_error
 from app.widgets.playlist_editor import PlaylistEditor
 from app.widgets.content_library_panel import ContentLibraryPanel
 from app.widgets.activity_progress import ActivityProgressWidget
+from app.ui.studio_icons import source_icon
 from app import __version__
 
 
@@ -297,6 +298,10 @@ class CanvasCenteredSplitter(QSplitter):
 class MainWindow(QMainWindow):
     """The runnable Phase 1A desktop workspace."""
 
+    _DEFAULT_LEFT_PANEL_WIDTH = 300
+    _DEFAULT_RIGHT_PANEL_WIDTH = 380  # every property tab fits without scroll arrows
+    _DEFAULT_BOTTOM_PANEL_HEIGHT = 240
+
     def __init__(self) -> None:
         super().__init__()
         from app.ui.design_system import apply_studio_style
@@ -398,9 +403,9 @@ class MainWindow(QMainWindow):
         # preferences or participate in project dirty/history state.
         self._project_theme_metadata = self.current_theme
         self._project_language_metadata = self.translator.language.value
-        self._sidebar_open_width = 272
-        self._inspector_open_width = 316
-        self._bottom_open_height = 240
+        self._sidebar_open_width = self._DEFAULT_LEFT_PANEL_WIDTH
+        self._inspector_open_width = self._DEFAULT_RIGHT_PANEL_WIDTH
+        self._bottom_open_height = self._DEFAULT_BOTTOM_PANEL_HEIGHT
         self._sidebar_transition = False
         self._panel_transition_serial = {"left": 0, "right": 0, "bottom": 0}
         self._render_worker: RenderWorker | None = None
@@ -1356,6 +1361,9 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(self.panels_action)
         self.view_menu.addAction(self.inspector_panel_action)
         self.view_menu.addAction(self.bottom_panel_action)
+        self.reset_layout_action = QAction(self)
+        self.reset_layout_action.triggered.connect(self._reset_workspace_layout)
+        self.view_menu.addAction(self.reset_layout_action)
         self.view_menu.addSeparator()
         self.show_playlist_action = QAction(self)
         self.show_playlist_action.setShortcut(QKeySequence("Ctrl+Alt+1"))
@@ -1675,6 +1683,25 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self._restore_workspace_panel_visibility()
 
+    def _reset_workspace_layout(self) -> None:
+        """Put every panel back to its first-launch size (dragging them wide is sticky)."""
+        self._sidebar_open_width = self._DEFAULT_LEFT_PANEL_WIDTH
+        self._inspector_open_width = self._DEFAULT_RIGHT_PANEL_WIDTH
+        self._bottom_open_height = self._DEFAULT_BOTTOM_PANEL_HEIGHT
+        horizontal = self.main_splitter.sizes()
+        if len(horizontal) == 3:
+            left = 0 if self.left_workspace.isHidden() else self._sidebar_open_width
+            right = 0 if self.inspector_stack.isHidden() else self._inspector_open_width
+            self.main_splitter.setSizes([left, max(1, sum(horizontal) - left - right), right])
+            self.main_splitter.lock_edge_sizes({0: left, 2: right})
+        vertical = self.workspace_splitter.sizes()
+        if len(vertical) == 2 and not self.bottom_workspace_stack.isHidden():
+            bottom = self._bottom_open_height
+            self.workspace_splitter.setSizes([max(1, sum(vertical) - bottom), bottom])
+            self.workspace_splitter.lock_edge_sizes({1: bottom})
+        self._save_workspace_layout()
+        self._schedule_canvas_fit(50)
+
     def _save_workspace_layout(self) -> None:
         """Persist each panel's last useful open size after resizing settles."""
         horizontal = self.main_splitter.sizes()
@@ -1922,29 +1949,9 @@ class MainWindow(QMainWindow):
         section_layout.addWidget(group)
 
     def _source_palette_icon(self, source_type: SourceType) -> QIcon:
-        """Return a familiar, theme-aware icon for a source palette card."""
-        icon_types = {
-            SourceType.IMAGE: QStyle.StandardPixmap.SP_FileIcon,
-            SourceType.LOGO: QStyle.StandardPixmap.SP_FileIcon,
-            SourceType.WATERMARK: QStyle.StandardPixmap.SP_FileIcon,
-            SourceType.VIDEO: QStyle.StandardPixmap.SP_MediaPlay,
-            SourceType.TEXT: QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            SourceType.TIME: QStyle.StandardPixmap.SP_BrowserReload,
-            SourceType.SHAPE: QStyle.StandardPixmap.SP_DialogResetButton,
-            SourceType.PROGRESS_BAR: QStyle.StandardPixmap.SP_MediaSeekForward,
-            SourceType.ALBUM_COVER: QStyle.StandardPixmap.SP_DirIcon,
-            SourceType.BACKGROUND: QStyle.StandardPixmap.SP_DesktopIcon,
-            SourceType.AUDIO_VISUALIZER: QStyle.StandardPixmap.SP_MediaVolume,
-            SourceType.AUDIO_WAVEFORM: QStyle.StandardPixmap.SP_MediaVolume,
-            SourceType.AUDIO_LEVEL_METER: QStyle.StandardPixmap.SP_MediaVolume,
-            SourceType.LYRICS: QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            SourceType.TRACK_LIST: QStyle.StandardPixmap.SP_FileDialogListView,
-            SourceType.NOW_PLAYING: QStyle.StandardPixmap.SP_MediaPlay,
-            SourceType.PARTICLE_OVERLAY: QStyle.StandardPixmap.SP_ComputerIcon,
-        }
-        return self.style().standardIcon(
-            icon_types.get(source_type, QStyle.StandardPixmap.SP_FileIcon)
-        )
+        """Return a glyph that depicts what the source is (T for text, a clock for time, ...)."""
+        icon = source_icon(source_type.value)
+        return icon if icon is not None else self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
 
     def _filter_source_cards(self, query: str) -> None:
         """Show palette sources matching the search and the active category tab."""
@@ -4565,6 +4572,14 @@ class MainWindow(QMainWindow):
         )
         self.bottom_panel_action.setText(
             "하단 작업 패널 표시" if korean else "Show bottom workspace"
+        )
+        self.reset_layout_action.setText(
+            "패널 크기 초기화" if korean else "Reset panel sizes"
+        )
+        self.reset_layout_action.setToolTip(
+            "왼쪽·오른쪽·하단 패널을 기본 크기로 되돌려 캔버스를 넓게 만듭니다."
+            if korean else
+            "Return the side and bottom panels to their default sizes, giving the Canvas room."
         )
         self.panels_action.setToolTip(
             "요소·프로젝트 콘텐츠·레이어 패널을 표시하거나 숨깁니다."

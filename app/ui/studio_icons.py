@@ -6,6 +6,46 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QProxyStyle, QStyle
 
 
+def _render(shape: str) -> QIcon:
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+           '<g fill="none" stroke="#B7C2BF" stroke-width="1.6" '
+           f'stroke-linecap="round" stroke-linejoin="round">{shape}</g></svg>')
+    pixmap = QPixmap(48, 48)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    QSvgRenderer(QByteArray(svg.encode())).render(painter)
+    painter.end()
+    pixmap.setDevicePixelRatio(2)
+    return QIcon(pixmap)
+
+
+_SOURCE_SHAPES = {
+    "text": '<path d="M5 5h14 M12 5v14 M9 19h6"/>',
+    "shape": '<rect x="3" y="10" width="10" height="10" rx="1"/><circle cx="16" cy="8" r="5"/>',
+    "image": '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m21 16-5-5-9 9"/>',
+    "logo": '<path d="m12 3 2.6 5.3 5.9.9-4.3 4.2 1 5.9L12 16.5l-5.2 2.8 1-5.9-4.3-4.2 5.9-.9z"/>',
+    "watermark": '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>',
+    "video": '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/>',
+    "time": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>',
+    "progress_bar": '<rect x="3" y="10" width="18" height="4" rx="2"/><path d="M5 12h8"/>',
+    "album_cover": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/>',
+    "background": '<path d="m12 3 9 5-9 5-9-5z M3 13l9 5 9-5"/>',
+    "audio_visualizer": '<path d="M4 15v-3 M8 18V8 M12 20V4 M16 17V9 M20 14v-3"/>',
+    "audio_waveform": '<path d="M2 12h3l2-6 3 12 3-9 2 6 2-3h5"/>',
+    "audio_level_meter": '<rect x="5" y="3" width="5" height="18" rx="1"/><rect x="14" y="9" width="5" height="12" rx="1"/>',
+    "lyrics": '<path d="M4 5h16v11H9l-5 4z M8 9h8 M8 12h5"/>',
+    "track_list": '<path d="M9 5h12 M9 12h12 M9 19h12 M3 5h1 M3 12h1 M3 19h1"/>',
+    "now_playing": '<path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>',
+    "particle_overlay": '<path d="M12 3v4 M12 17v4 M3 12h4 M17 12h4 M6 6l2 2 M16 16l2 2 M18 6l-2 2 M8 16l-2 2"/>',
+}
+
+
+def source_icon(source_type: str) -> QIcon | None:
+    """A glyph depicting one Canvas source type (``SourceType.value``), or None if unknown."""
+    shape = _SOURCE_SHAPES.get(source_type)
+    return _render(shape) if shape is not None else None
+
+
 class StudioIconStyle(QProxyStyle):
     def standardIcon(self, standard_icon, option=None, widget=None):
         sp = QStyle.StandardPixmap
@@ -44,13 +84,4 @@ class StudioIconStyle(QProxyStyle):
         shape = paths.get(standard_icon)
         if shape is None:
             return super().standardIcon(standard_icon, option, widget)
-        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
-               '<g fill="none" stroke="#B7C2BF" stroke-width="1.6" '
-               f'stroke-linecap="round" stroke-linejoin="round">{shape}</g></svg>')
-        pixmap = QPixmap(48, 48)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        QSvgRenderer(QByteArray(svg.encode())).render(painter)
-        painter.end()
-        pixmap.setDevicePixelRatio(2)
-        return QIcon(pixmap)
+        return _render(shape)
