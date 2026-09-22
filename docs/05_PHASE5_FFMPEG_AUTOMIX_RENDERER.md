@@ -361,3 +361,27 @@ Report:
 ```
 
 Then stop.
+
+---
+
+## Addendum: DSP Phase 1 -- BEAT_MATCH bass swap (implemented)
+
+`TransitionType.BEAT_MATCH` no longer renders as a plain `acrossfade qsin`.
+Every clip that takes part in a BEAT_MATCH transition is split by
+`acrossover` (200 Hz / 2500 Hz, 4th-order Linkwitz-Riley) into low/mid/high,
+each band gets its own `afade` envelope (low hands off between 35% and 60%
+of the transition, mid/high use a full-window qsin), and the bands are summed
+back with `amix normalize=0`. The fold then overlap-sums the two clips with
+`acrossfade ... curve=nofade` (same exact-duration semantics as every other
+transition) and runs `alimiter` on the transition window only.
+EQUAL_POWER, CROSSFADE, CUT and gaps are unchanged. If the managed FFmpeg lacks
+the filters, or the bass-swap render fails, BEAT_MATCH falls back to the
+previous qsin acrossfade with identical timing.
+
+**Known trade-off (intentional for Phase 1):** the crossover runs over the
+*whole* clip, not just the transition window. A clip that is BEAT_MATCH on one
+side and CROSSFADE/CUT on the other therefore uses the crossover-recombined
+signal for its entire length, including across the non-BEAT_MATCH junction.
+The recombined magnitude response is flat (within +/-0.5 dB), but phase is
+altered. Limiting the crossover to the window would splice raw audio against
+its phase-shifted recombination and produce a click at the window edges.

@@ -18,7 +18,9 @@ from app.automix.renderer import (
     AutoMixRenderCancelled,
     AutoMixRenderError,
     _atempo_filters,
+    bass_swap_fade_windows,
     build_filter_graph,
+    ffmpeg_supports_bass_swap,
 )
 from app.timeline.models import TransitionType
 from app.timeline.render_plan import AudioRenderClip, AudioRenderPlan, AudioRenderTransition
@@ -104,13 +106,14 @@ class BuildFilterGraphTests(unittest.TestCase):
         graph, _label = build_filter_graph(clips, transitions)
         self.assertIn("curve1=tri:curve2=tri", graph)
 
-    def test_beat_match_uses_equal_power_style_curve(self) -> None:
+    def test_beat_match_fallback_uses_equal_power_style_curve(self) -> None:
         clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 52.0, 60.0)]
         transitions = [AudioRenderTransition(
             clip_a="a", clip_b="b", timeline_start=52.0, duration=8.0, type=TransitionType.BEAT_MATCH,
         )]
-        graph, _label = build_filter_graph(clips, transitions)
-        self.assertIn("curve1=qsin:curve2=qsin", graph)
+        graph, _label = build_filter_graph(clips, transitions, bass_swap=False)
+        self.assertIn("acrossfade=d=8.000000:curve1=qsin:curve2=qsin", graph)
+        self.assertNotIn("acrossover", graph)
 
     def test_rate_and_gain_are_applied_per_clip(self) -> None:
         clips = [_clip("a", "a", 0.0, 60.0, rate=1.2, gain=0.5)]
@@ -131,6 +134,168 @@ class BuildFilterGraphTests(unittest.TestCase):
         graph, label = build_filter_graph(clips, transitions)
         self.assertEqual(graph.count("acrossfade"), 2)
         self.assertEqual(label, "m2")
+
+
+def _beat_match(clip_a: str, clip_b: str, start: float, duration: float) -> AudioRenderTransition:
+    return AudioRenderTransition(clip_a, clip_b, start, duration, TransitionType.BEAT_MATCH)
+
+
+class BassSwapGraphTests(unittest.TestCase):
+    def test_beat_match_uses_band_split_dsp_not_plain_qsin(self) -> None:
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 52.0, 60.0)]
+        graph, label = build_filter_graph(clips, [_beat_match("a", "b", 52.0, 8.0)])
+        self.assertEqual(graph.count("acrossover=split=200 2500"), 2)
+        self.assertNotIn("qsin:curve2=qsin", graph)
+        self.assertIn("acrossfade=d=8.000000:curve1=nofade:curve2=nofade", graph)
+        self.assertIn("alimiter=", graph)
+        self.assertEqual(label, "m1")
+
+    def test_equal_power_and_crossfade_graphs_are_unchanged(self) -> None:
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 52.0, 60.0), _clip("c", "c", 108.0, 60.0)]
+        transitions = [
+            AudioRenderTransition("a", "b", 52.0, 8.0, TransitionType.EQUAL_POWER),
+            AudioRenderTransition("b", "c", 108.0, 4.0, TransitionType.CROSSFADE),
+        ]
+        graph, _label = build_filter_graph(clips, transitions)
+        chain = "atrim=start=0.000000:end=60.000000,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo"
+        self.assertEqual(graph, ";".join([
+            f"[0:a]{chain}[c0]", f"[1:a]{chain}[c1]", f"[2:a]{chain}[c2]",
+            "[c0][c1]acrossfade=d=8.000000:curve1=qsin:curve2=qsin[m1]",
+            "[m1][c2]acrossfade=d=4.000000:curve1=tri:curve2=tri[m2]",
+        ]))
+
+    def test_envelopes_and_limiter_window_use_the_transition_geometry(self) -> None:
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 52.0, 60.0)]
+        graph, _label = build_filter_graph(clips, [_beat_match("a", "b", 52.0, 8.0)])
+        # Outgoing: mid/high fade across the whole last 8 s; low hands off at 35%-60%.
+        self.assertIn("[c0mid]afade=t=out:st=52.000000:d=8.000000:curve=qsin", graph)
+        self.assertIn("[c0low]afade=t=out:st=54.800000:d=2.000000:curve=qsin", graph)
+        self.assertIn("[c1mid]afade=t=in:st=0.000000:d=8.000000:curve=qsin", graph)
+        self.assertIn("[c1low]afade=t=in:st=2.800000:d=2.000000:curve=qsin", graph)
+        self.assertIn("[m1a]atrim=end=52.000000[m1pre]", graph)
+        self.assertIn("[m1b]atrim=start=52.000000:end=60.000000", graph)
+        self.assertIn("[m1c]atrim=start=60.000000", graph)
+
+    def test_fade_windows_scale_with_min_and_max_transition_lengths(self) -> None:
+        for duration in (2.0, 20.0):
+            with self.subTest(duration=duration):
+                low_in, = bass_swap_fade_windows("low", 60.0, duration, 0.0)
+                self.assertEqual(low_in[0], "in")
+                self.assertAlmostEqual(low_in[1], 0.35 * duration)
+                self.assertAlmostEqual(low_in[2], 0.25 * duration)
+                self.assertGreater(low_in[2], 0.0)
+                mid_out, = bass_swap_fade_windows("mid", 60.0, 0.0, duration)
+                self.assertEqual(mid_out, ("out", 60.0 - duration, duration))
+
+    def test_tempo_adjusted_clips_keep_timeline_domain_durations(self) -> None:
+        # 63.6 s of source at 1.06x = 60 s of timeline; windows must use the latter.
+        clips = [_clip("a", "a", 0.0, 63.6, rate=1.06), _clip("b", "b", 52.0, 56.4, rate=0.94)]
+        graph, _label = build_filter_graph(clips, [_beat_match("a", "b", 52.0, 8.0)])
+        self.assertIn("[c0mid]afade=t=out:st=52.000000:d=8.000000", graph)
+        self.assertIn("acrossfade=d=8.000000:curve1=nofade", graph)
+        self.assertLess(graph.index("atempo=1.060000"), graph.index("[c0pre]acrossover"))
+
+    def test_leading_silence_shifts_the_limiter_window_but_not_the_clip_envelopes(self) -> None:
+        clips = [_clip("a", "a", 3.0, 60.0), _clip("b", "b", 55.0, 60.0)]
+        graph, _label = build_filter_graph(clips, [_beat_match("a", "b", 55.0, 8.0)])
+        self.assertIn("anullsrc=r=48000:cl=stereo:d=3.000000[lead]", graph)
+        self.assertIn("[c0mid]afade=t=out:st=52.000000:d=8.000000", graph)  # clip-local
+        self.assertIn("[leading][c1]acrossfade=d=8.000000:curve1=nofade", graph)
+        self.assertIn("[m1b]atrim=start=55.000000:end=63.000000", graph)  # global timeline
+
+    def test_chained_beat_matches_envelope_the_middle_clip_on_both_ends(self) -> None:
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 52.0, 60.0), _clip("c", "c", 106.0, 60.0)]
+        transitions = [_beat_match("a", "b", 52.0, 8.0), _beat_match("b", "c", 106.0, 6.0)]
+        graph, label = build_filter_graph(clips, transitions)
+        self.assertIn("[c1mid]afade=t=in:st=0.000000:d=8.000000:curve=qsin,"
+                      "afade=t=out:st=54.000000:d=6.000000:curve=qsin[c1mide]", graph)
+        self.assertIn("[m1][c2]acrossfade=d=6.000000:curve1=nofade", graph)
+        self.assertIn("[m2a]atrim=end=106.000000[m2pre]", graph)
+        self.assertIn("[m2b]atrim=start=106.000000:end=112.000000", graph)
+        self.assertEqual(label, "m2")
+
+    def test_beat_match_next_to_a_cut_only_processes_the_participating_clips(self) -> None:
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 60.0, 60.0), _clip("c", "c", 112.0, 60.0)]
+        graph, _label = build_filter_graph(clips, [_beat_match("b", "c", 112.0, 8.0)])
+        self.assertNotIn("[c0pre]", graph)
+        self.assertIn("[c0][c1]concat=n=2:v=0:a=1[m1]", graph)
+        self.assertIn("[c1low]afade=t=out:st=54.800000:d=2.000000:curve=qsin[c1lowe]", graph)
+        self.assertIn("[m1][c2]acrossfade=d=8.000000:curve1=nofade", graph)
+
+
+class BassSwapFallbackTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._directory = TemporaryDirectory(prefix="automix-fallback-")
+        self.addCleanup(self._directory.cleanup)
+        self.directory = Path(self._directory.name)
+        for name in ("a", "b"):
+            (self.directory / f"{name}.wav").write_bytes(b"\x00")  # never read; _run is mocked
+        self.paths = {name: str(self.directory / f"{name}.wav") for name in ("a", "b")}
+        self.plan = AudioRenderPlan(
+            clips=(_clip("a", "a", 0.0, 20.0), _clip("b", "b", 12.0, 20.0)),
+            transitions=(_beat_match("a", "b", 12.0, 8.0),),
+        )
+
+    def _render(self, pipeline: AutoMixAudioPipeline, fake_run, *, supported: bool = True) -> None:
+        with (
+            patch("app.automix.renderer.ffmpeg_supports_bass_swap", return_value=supported),
+            patch.object(pipeline, "_run", fake_run),
+            patch.object(pipeline, "_probe_duration", return_value=32.0),
+        ):
+            pipeline.render(self.plan, self.paths, self.directory / "out")
+
+    def test_missing_filters_render_beat_match_as_qsin(self) -> None:
+        pipeline = AutoMixAudioPipeline(Path("ffmpeg"))
+        graphs: list[str] = []
+        self._render(pipeline, lambda args, *_: graphs.append(args[args.index("-filter_complex") + 1]),
+                     supported=False)
+        self.assertEqual(len(graphs), 1)
+        self.assertNotIn("acrossover", graphs[0])
+        self.assertIn("acrossfade=d=8.000000:curve1=qsin:curve2=qsin", graphs[0])
+
+    def test_dsp_render_failure_retries_once_with_qsin_and_same_timing(self) -> None:
+        pipeline = AutoMixAudioPipeline(Path("ffmpeg"))
+        graphs: list[str] = []
+        output_path =self.directory / "out" / "automix_mix.nut"
+
+        def fake_run(args, *_):
+            graphs.append(args[args.index("-filter_complex") + 1])
+            if len(graphs) == 1:
+                output_path.write_bytes(b"partial")
+                raise AutoMixRenderError("No such filter: 'acrossover'")
+            self.assertFalse(output_path.exists())  # partial DSP output removed before retry
+
+        self._render(pipeline, fake_run)
+        self.assertEqual(len(graphs), 2)
+        self.assertIn("acrossover", graphs[0])
+        self.assertNotIn("acrossover", graphs[1])
+        self.assertIn("acrossfade=d=8.000000:curve1=qsin", graphs[1])
+
+    def test_cancellation_is_not_retried(self) -> None:
+        pipeline = AutoMixAudioPipeline(Path("ffmpeg"))
+        calls: list[int] = []
+
+        def fake_run(*_):
+            calls.append(1)
+            raise AutoMixRenderCancelled("cancelled")
+
+        with self.assertRaises(AutoMixRenderCancelled):
+            self._render(pipeline, fake_run)
+        self.assertEqual(len(calls), 1)
+
+    def test_capability_probe_reads_the_filter_list(self) -> None:
+        listing = "\n".join(f" .. {name}  A->A  x" for name in ("acrossover", "afade", "amix", "alimiter",
+                                                               "asplit", "acrossfade"))
+        ffmpeg_supports_bass_swap.cache_clear()
+        self.addCleanup(ffmpeg_supports_bass_swap.cache_clear)
+        with patch("app.automix.renderer.subprocess.run",
+                   return_value=subprocess.CompletedProcess([], 0, stdout=listing)):
+            self.assertTrue(ffmpeg_supports_bass_swap("ffmpeg-full"))
+        with patch("app.automix.renderer.subprocess.run",
+                   return_value=subprocess.CompletedProcess([], 0, stdout=listing.replace("acrossover", "x"))):
+            self.assertFalse(ffmpeg_supports_bass_swap("ffmpeg-no-crossover"))
+        with patch("app.automix.renderer.subprocess.run", side_effect=OSError("missing")):
+            self.assertFalse(ffmpeg_supports_bass_swap("ffmpeg-missing"))
 
 
 class AutoMixMixIntermediateCodecTests(unittest.TestCase):
@@ -284,6 +449,226 @@ class RealAutoMixRenderTests(unittest.TestCase):
         # A true volume hole would sound like a dip toward silence at the
         # crossfade center; equal-power curves keep it close to full level.
         self.assertGreater(midpoint, steady_state * 0.6)
+
+
+def _write_stereo_wav(path: Path, signal: np.ndarray) -> None:
+    """``signal`` is (samples, 2) float in [-1, 1]."""
+    pcm16 = (np.clip(signal, -1.0, 1.0) * 32767.0).astype("<i2")
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(2)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.writeframes(pcm16.tobytes())
+
+
+def _tones(components: list[tuple[float, float]], duration: float) -> np.ndarray:
+    t = np.arange(int(duration * SAMPLE_RATE)) / SAMPLE_RATE
+    mono = sum(amplitude * np.sin(2 * np.pi * frequency * t) for frequency, amplitude in components)
+    return np.stack([mono, 0.8 * mono], axis=1)  # unequal channels: stereo must survive
+
+
+def _spectrum_level(segment: np.ndarray, frequency: float) -> float:
+    spectrum = np.abs(np.fft.rfft(segment * np.hanning(len(segment))))
+    frequencies = np.fft.rfftfreq(len(segment), 1.0 / SAMPLE_RATE)
+    return float(spectrum[np.argmin(np.abs(frequencies - frequency))])
+
+
+@unittest.skipUnless(
+    os.environ.get("PLAYLIST_CANVAS_TEST_FFMPEG", "").strip(),
+    "Set PLAYLIST_CANVAS_TEST_FFMPEG to run real FFmpeg bass-swap checks.",
+)
+class RealBassSwapRenderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
+        self._directory = TemporaryDirectory(prefix="automix-bass-swap-")
+        self.directory = Path(self._directory.name)
+        self.addCleanup(self._directory.cleanup)
+        self.assertTrue(ffmpeg_supports_bass_swap(str(self.executable)))
+
+    def _source(self, name: str, signal: np.ndarray) -> str:
+        path = self.directory / f"{name}.wav"
+        _write_stereo_wav(path, signal)
+        return str(path)
+
+    def _render(self, clips, transitions, paths) -> np.ndarray:
+        plan = AudioRenderPlan(clips=tuple(clips), transitions=tuple(transitions))
+        result = AutoMixAudioPipeline(self.executable).render(plan, paths, self.directory / "out")
+        decoded = subprocess.run(
+            [str(self.executable), "-hide_banner", "-loglevel", "error", "-i", str(result.path),
+             "-f", "f32le", "-ac", "2", "-ar", str(SAMPLE_RATE), "-"],
+            capture_output=True, check=True, **hidden_process_kwargs(),
+        )
+        return np.frombuffer(decoded.stdout, dtype=np.float32).reshape(-1, 2)
+
+    def _assert_exact_length(self, audio: np.ndarray, seconds: float) -> None:
+        # Sample count, not container duration: NUT's format duration omits
+        # the final packet's length (a probe artifact shared with qsin).
+        self.assertLessEqual(abs(len(audio) - seconds * SAMPLE_RATE), 2, len(audio) / SAMPLE_RATE)
+
+    def _pair(self, rate_b: float = 1.0) -> tuple[list, list, dict]:
+        paths = {
+            "a": self._source("a", _tones([(100.0, 0.5), (2000.0, 0.2)], 30.0)),
+            "b": self._source("b", _tones([(120.0, 0.5), (3000.0, 0.2)], 32.0)),
+        }
+        clips = [_clip("a", "a", 0.0, 30.0), _clip("b", "b", 22.0, 30.0 * rate_b, rate=rate_b)]
+        return clips, [_beat_match("a", "b", 22.0, 8.0)], paths
+
+    def test_two_track_bass_swap_has_exact_duration_and_band_handoff(self) -> None:
+        clips, transitions, paths = self._pair()
+        audio = self._render(clips, transitions, paths)
+        self._assert_exact_length(audio, 52.0)
+
+        def levels(start: float, end: float) -> dict[float, float]:
+            segment = audio[int(start * SAMPLE_RATE):int(end * SAMPLE_RATE), 0]
+            return {f: _spectrum_level(segment, f) for f in (100.0, 120.0, 2000.0, 3000.0)}
+
+        early, middle, late = levels(22.2, 24.6), levels(25.0, 26.6), levels(27.6, 29.8)
+        self.assertGreater(early[100.0], 10 * early[120.0])  # outgoing bass only
+        self.assertGreater(late[120.0], 10 * late[100.0])    # incoming bass only
+        self.assertGreater(middle[100.0], 0.2 * early[100.0])  # a handoff, not a hole
+        self.assertGreater(middle[120.0], 0.2 * late[120.0])
+        # Mid/high is a full-window crossfade: both present mid-transition.
+        self.assertGreater(middle[2000.0], 0.3 * early[2000.0])
+        self.assertGreater(middle[3000.0], 0.3 * late[3000.0])
+        self.assertGreater(early[3000.0], 0.1 * late[3000.0])  # incoming highs already fading in
+        # Stereo image survives (sources are L = 1.25 x R).
+        steady = audio[2 * SAMPLE_RATE:10 * SAMPLE_RATE]
+        ratio = np.sqrt(np.mean(steady[:, 0] ** 2) / np.mean(steady[:, 1] ** 2))
+        self.assertAlmostEqual(float(ratio), 1.25, delta=0.02)
+
+    def test_failed_bass_swap_with_partial_output_retries_as_valid_qsin(self) -> None:
+        clips, transitions, paths = self._pair()
+        pipeline = AutoMixAudioPipeline(self.executable)
+        real_run = pipeline._run
+        graphs: list[str] = []
+
+        def failing_first_run(arguments, cancel_event, on_progress):
+            graphs.append(arguments[arguments.index("-filter_complex") + 1])
+            real_run(arguments, cancel_event, on_progress)
+            if len(graphs) == 1:
+                # A real bass-swap mix, truncated mid-file, then reported as a failure.
+                output = Path(arguments[-1])
+                output.write_bytes(output.read_bytes()[:output.stat().st_size // 2])
+                raise AutoMixRenderError("simulated bass-swap failure after partial output")
+
+        plan = AudioRenderPlan(clips=tuple(clips), transitions=tuple(transitions))
+        with patch.object(pipeline, "_run", failing_first_run):
+            result = pipeline.render(plan, paths, self.directory / "out")
+
+        self.assertEqual(len(graphs), 2)
+        self.assertIn("acrossover", graphs[0])
+        self.assertNotIn("acrossover", graphs[1])
+        self.assertAlmostEqual(result.duration_seconds, 52.0, delta=0.15)
+        decoded = subprocess.run(
+            [str(self.executable), "-hide_banner", "-loglevel", "error", "-i", str(result.path),
+             "-f", "f32le", "-ac", "2", "-"], capture_output=True, check=True, **hidden_process_kwargs(),
+        )
+        audio = np.frombuffer(decoded.stdout, dtype=np.float32).reshape(-1, 2)
+        self._assert_exact_length(audio, 52.0)
+        self.assertTrue(np.isfinite(audio).all())
+        # qsin overlaps the bass lines from the start -- proof the retry's
+        # graph, not the truncated DSP file, is what survived.
+        early = audio[int(22.2 * SAMPLE_RATE):int(24.6 * SAMPLE_RATE), 0]
+        self.assertGreater(_spectrum_level(early, 120.0), 0.05 * _spectrum_level(early, 100.0))
+
+    def test_window_edges_are_click_free(self) -> None:
+        clips, transitions, paths = self._pair()
+        audio = self._render(clips, transitions, paths)[:, 0]
+        steps = np.abs(np.diff(audio))
+        typical = float(steps[5 * SAMPLE_RATE:15 * SAMPLE_RATE].max())
+        for edge in (22.0, 30.0):
+            around = steps[int((edge - 0.01) * SAMPLE_RATE):int((edge + 0.01) * SAMPLE_RATE)]
+            self.assertLess(float(around.max()), 1.5 * typical, edge)
+
+    def test_tempo_adjusted_incoming_keeps_the_planned_duration(self) -> None:
+        for rate in (0.94, 1.06):
+            with self.subTest(rate=rate):
+                clips, transitions, paths = self._pair(rate_b=rate)
+                bass_swap = self._render(clips, transitions, paths)
+                with patch("app.automix.renderer.ffmpeg_supports_bass_swap", return_value=False):
+                    qsin = self._render(clips, transitions, paths)
+                # atempo itself may round a few ms off a stretched clip's end
+                # (identically on both paths); the DSP must add nothing to that.
+                self.assertEqual(len(bass_swap), len(qsin))
+                self.assertLess(abs(len(bass_swap) / SAMPLE_RATE - 52.0), 0.02)
+
+    def test_three_track_chain_with_leading_silence(self) -> None:
+        paths = {
+            "a": self._source("a", _tones([(100.0, 0.5), (2000.0, 0.2)], 30.0)),
+            "b": self._source("b", _tones([(120.0, 0.5), (3000.0, 0.2)], 32.0)),
+            "c": self._source("c", _tones([(80.0, 0.5), (1500.0, 0.2)], 30.0)),
+        }
+        clips = [
+            _clip("a", "a", 2.0, 30.0),
+            _clip("b", "b", 24.0, 31.8, rate=1.06),  # 30 s of timeline
+            _clip("c", "c", 48.0, 30.0),
+        ]
+        transitions = [_beat_match("a", "b", 24.0, 8.0), _beat_match("b", "c", 48.0, 6.0)]
+        audio = self._render(clips, transitions, paths)
+        self._assert_exact_length(audio, 78.0)
+        self.assertLess(float(np.abs(audio[:int(1.9 * SAMPLE_RATE)]).max()), 1e-4)  # leading silence intact
+        early = audio[int(48.2 * SAMPLE_RATE):int(50.0 * SAMPLE_RATE), 0]
+        late = audio[int(52.0 * SAMPLE_RATE):int(53.8 * SAMPLE_RATE), 0]
+        self.assertGreater(_spectrum_level(early, 120.0), 10 * _spectrum_level(early, 80.0))
+        self.assertGreater(_spectrum_level(late, 80.0), 10 * _spectrum_level(late, 120.0))
+
+    def test_constant_energy_material_has_no_hole_or_spike(self) -> None:
+        rng = np.random.default_rng(7)
+
+        def music_like(seed_offset: float) -> np.ndarray:
+            noise = rng.standard_normal((30 * SAMPLE_RATE, 2)) * 0.08
+            return noise + _tones([(90.0 + seed_offset, 0.3)], 30.0)
+
+        paths = {"a": self._source("a", music_like(0.0)), "b": self._source("b", music_like(17.0))}
+        audio = self._render([_clip("a", "a", 0.0, 30.0), _clip("b", "b", 22.0, 30.0)],
+                             [_beat_match("a", "b", 22.0, 8.0)], paths)[:, 0]
+
+        def rms(start: float) -> float:
+            segment = audio[int(start * SAMPLE_RATE):int((start + 0.1) * SAMPLE_RATE)]
+            return float(np.sqrt(np.mean(segment ** 2)))
+
+        steady = np.mean([rms(t) for t in np.arange(5.0, 15.0, 0.1)])
+        for t in np.arange(22.0, 29.9, 0.1):
+            self.assertGreater(rms(t), 0.7 * steady, t)   # > -3.1 dB
+            self.assertLess(rms(t), 1.42 * steady, t)     # < +3 dB
+
+    def test_near_full_scale_inputs_do_not_clip(self) -> None:
+        rng = np.random.default_rng(3)
+        shared = rng.standard_normal((30 * SAMPLE_RATE, 2))
+        shared *= 0.98 / np.abs(shared).max()
+        # Identical (fully correlated) mid/high on both sides is the worst case
+        # for the equal-power overlap: unlimited, it would peak near +3 dB.
+        rotated = np.concatenate([shared[22 * SAMPLE_RATE:], shared[:22 * SAMPLE_RATE]])  # B head == A tail
+        paths = {"a": self._source("a", shared), "b": self._source("b", rotated)}
+        audio = self._render([_clip("a", "a", 0.0, 30.0), _clip("b", "b", 22.0, 30.0)],
+                             [_beat_match("a", "b", 22.0, 8.0)], paths)
+        self.assertTrue(np.isfinite(audio).all())
+        window = audio[22 * SAMPLE_RATE:30 * SAMPLE_RATE]
+        self.assertLessEqual(float(np.abs(window).max()), 0.98)
+        self.assertLess(int(np.sum(np.abs(audio) >= 32767 / 32768)), 1)
+
+    def test_unity_band_recombination_is_flat(self) -> None:
+        from app.automix.renderer import _bass_swap_band_filters
+
+        rng = np.random.default_rng(1)
+        noise = rng.standard_normal((10 * SAMPLE_RATE, 2)) * 0.2
+        source = self._source("noise", noise)
+        graph = ";".join(["[0:a]aformat=sample_rates=48000:channel_layouts=stereo[x]",
+                          *_bass_swap_band_filters("x", "y", 10.0, 0.0, 0.0)])
+        processed = subprocess.run(
+            [str(self.executable), "-hide_banner", "-loglevel", "error", "-i", source,
+             "-filter_complex", graph, "-map", "[y]", "-f", "f32le", "-"],
+            capture_output=True, check=True, **hidden_process_kwargs(),
+        )
+        output = np.frombuffer(processed.stdout, dtype=np.float32).reshape(-1, 2)[:, 0]
+        original = np.clip(noise[:, 0], -1.0, 1.0)
+        frequencies = np.fft.rfftfreq(len(original), 1.0 / SAMPLE_RATE)
+        power_in = np.abs(np.fft.rfft(original)) ** 2
+        power_out = np.abs(np.fft.rfft(output[:len(original)])) ** 2
+        for low, high in ((30, 150), (150, 260), (260, 2000), (2000, 3000), (3000, 16000)):
+            band = (frequencies >= low) & (frequencies < high)
+            gain_db = 10 * np.log10(power_out[band].sum() / power_in[band].sum())
+            self.assertLess(abs(gain_db), 0.5, (low, high))
 
 
 if __name__ == "__main__":
