@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from app.automix.candidates import (
     BAR_LENGTHS,
@@ -143,6 +144,72 @@ class GenerateCandidatesTests(unittest.TestCase):
         incoming = _analysis("b", 128.0, duration=200.0)
         for candidate in self._generate(outgoing, incoming):
             self.assertTrue(candidate.reasons)
+
+
+class AdvancedScoringTests(unittest.TestCase):
+    """Phase 7: key/energy/vocal awareness as additive score modifiers."""
+
+    def _best_score(self, outgoing: TrackAnalysis, incoming: TrackAnalysis) -> float:
+        settings = AutoMixTransitionSettings(enabled=True)
+        compatibility = evaluate_compatibility(outgoing, incoming, settings)
+        best = select_best_candidate(generate_candidates(outgoing, incoming, compatibility, settings))
+        assert best is not None
+        return best.score
+
+    def test_missing_advanced_data_matches_the_base_phase3_score(self) -> None:
+        outgoing = _analysis("a", 128.0, duration=200.0)
+        incoming = _analysis("b", 128.0, duration=200.0)
+        with_key_absent = self._best_score(outgoing, incoming)
+        # Explicitly setting key on only one side must not change anything --
+        # both must be known for the bonus to apply.
+        one_sided = replace(outgoing, key="C major", key_confidence=0.8)
+        self.assertEqual(self._best_score(one_sided, incoming), with_key_absent)
+
+    def test_compatible_key_increases_score(self) -> None:
+        outgoing = _analysis("a", 128.0, duration=200.0)
+        incoming = _analysis("b", 128.0, duration=200.0)
+        baseline = self._best_score(outgoing, incoming)
+        compatible = self._best_score(
+            replace(outgoing, key="C major", key_confidence=0.8),
+            replace(incoming, key="G major", key_confidence=0.8),  # 8B/9B: Camelot-adjacent
+        )
+        self.assertGreater(compatible, baseline)
+
+    def test_incompatible_key_is_not_penalized(self) -> None:
+        outgoing = _analysis("a", 128.0, duration=200.0)
+        incoming = _analysis("b", 128.0, duration=200.0)
+        baseline = self._best_score(outgoing, incoming)
+        incompatible = self._best_score(
+            replace(outgoing, key="C major", key_confidence=0.8),
+            replace(incoming, key="F# major", key_confidence=0.8),  # 8B vs 2B: not compatible
+        )
+        self.assertEqual(incompatible, baseline)
+
+    def test_similar_energy_increases_score(self) -> None:
+        outgoing = _analysis("a", 128.0, duration=200.0)
+        incoming = _analysis("b", 128.0, duration=200.0)
+        baseline = self._best_score(outgoing, incoming)
+        similar = self._best_score(replace(outgoing, energy=0.7), replace(incoming, energy=0.72))
+        self.assertGreater(similar, baseline)
+
+    def test_vocal_overlap_on_both_sides_decreases_score(self) -> None:
+        outgoing = _analysis("a", 128.0, duration=200.0)
+        incoming = _analysis("b", 128.0, duration=200.0)
+        baseline = self._best_score(outgoing, incoming)
+        # Vocals near the very end of "a" and the very start of "b" so they
+        # land inside whatever overlap window gets chosen.
+        clashing = self._best_score(
+            replace(outgoing, vocal_activity=((190.0, 200.0),)),
+            replace(incoming, vocal_activity=((0.0, 10.0),)),
+        )
+        self.assertLess(clashing, baseline)
+
+    def test_vocal_activity_on_only_one_side_does_not_penalize(self) -> None:
+        outgoing = _analysis("a", 128.0, duration=200.0)
+        incoming = _analysis("b", 128.0, duration=200.0)
+        baseline = self._best_score(outgoing, incoming)
+        one_sided = self._best_score(replace(outgoing, vocal_activity=((190.0, 200.0),)), incoming)
+        self.assertEqual(one_sided, baseline)
 
 
 if __name__ == "__main__":

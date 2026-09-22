@@ -7,7 +7,12 @@ TrackAnalysis/settings input, output order and scores are always the
 same: bar lengths are tried in one fixed order and nothing here uses
 randomness (roadmap section 10, "Determinism").
 
-Scoring weights (must sum to 1.0), for a later developer tuning them:
+Scoring weights, for a later developer tuning them. The base five (roadmap
+Phase 3) sum to 1.0; the Phase 7 advanced three are additive bonuses/
+penalties on top, applied only when both tracks actually have that data --
+with none of it, the score is identical to Phase 3's (roadmap Phase 7
+section 8 / section 13's "same basic result when advanced data
+unavailable"):
 
     Factor                                          Weight   Effect
     ---------------------------------------------------------------
@@ -16,6 +21,10 @@ Scoring weights (must sum to 1.0), for a later developer tuning them:
     Tempo shift vs. the allowed budget               0.25     -
     Requested bar length actually used                0.15     +
     Cue proximity to the ideal anchor (beat/downbeat) 0.10     +
+    Compatible key (Camelot wheel), if both known     0.06     + (bonus only, never a penalty -- section 3)
+    Similar energy level, if both known               0.04     +
+    Vocal activity on both sides of the overlap,      0.10     - (if both tracks have vocal_activity data)
+      if both known
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from app.automix.analysis.key import camelot_compatible
 from app.automix.compatibility import TransitionCompatibility, resolve_target_bpm
 from app.automix.models import TrackAnalysis
 from app.automix.settings import AutoMixTransitionSettings
@@ -35,6 +45,10 @@ WEIGHT_METER = 0.15
 WEIGHT_TEMPO = 0.25
 WEIGHT_LENGTH = 0.15
 WEIGHT_PROXIMITY = 0.10
+
+WEIGHT_HARMONIC_BONUS = 0.06
+WEIGHT_ENERGY_CONTINUITY = 0.04
+WEIGHT_VOCAL_OVERLAP_PENALTY = 0.10
 
 
 class TransitionStrategy(str, Enum):
@@ -175,6 +189,7 @@ def _beat_based_candidate(
     confidence = min(outgoing.bpm_confidence, incoming.bpm_confidence)
     score, reasons = _score_beat_candidate(
         outgoing, incoming, compatibility, bars, strategy, settings, outgoing_snap, incoming_snap,
+        outgoing_source_time, incoming_source_time, duration_seconds,
     )
     return TransitionCandidate(
         from_track_id=outgoing.track_id, to_track_id=incoming.track_id,
@@ -198,6 +213,7 @@ def _score_beat_candidate(
     outgoing: TrackAnalysis, incoming: TrackAnalysis, compatibility: TransitionCompatibility,
     bars: int, strategy: TransitionStrategy, settings: AutoMixTransitionSettings,
     outgoing_snap: float, incoming_snap: float,
+    outgoing_source_time: float, incoming_source_time: float, duration_seconds: float,
 ) -> tuple[float, tuple[str, ...]]:
     reasons: list[str] = list(compatibility.reasons)
     score = 0.0
@@ -232,7 +248,35 @@ def _score_beat_candidate(
     else:
         reasons.append(f"+ incoming cue close to the nearest {anchor_name}")
 
-    return min(1.0, score), tuple(reasons)
+    if outgoing.key is not None and incoming.key is not None:
+        if camelot_compatible(outgoing.key, incoming.key):
+            score += WEIGHT_HARMONIC_BONUS
+            reasons.append("+ compatible key")
+        # No penalty for an incompatible key: key is a bonus modifier only,
+        # never a blocker (roadmap Phase 7 section 3).
+
+    if outgoing.energy is not None and incoming.energy is not None:
+        energy_similarity = max(0.0, 1.0 - abs(outgoing.energy - incoming.energy))
+        score += WEIGHT_ENERGY_CONTINUITY * energy_similarity
+        if energy_similarity >= 0.8:
+            reasons.append("+ similar energy level")
+
+    if outgoing.vocal_activity and incoming.vocal_activity:
+        outgoing_tail_has_vocals = _has_activity_in_range(
+            outgoing.vocal_activity, outgoing_source_time, outgoing.duration_seconds,
+        )
+        incoming_head_has_vocals = _has_activity_in_range(
+            incoming.vocal_activity, incoming_source_time, incoming_source_time + duration_seconds,
+        )
+        if outgoing_tail_has_vocals and incoming_head_has_vocals:
+            score -= WEIGHT_VOCAL_OVERLAP_PENALTY
+            reasons.append("- vocal overlap likely during the transition")
+
+    return max(0.0, min(1.0, score)), tuple(reasons)
+
+
+def _has_activity_in_range(spans: tuple[tuple[float, float], ...], start: float, end: float) -> bool:
+    return any(span_start < end and span_end > start for span_start, span_end in spans)
 
 
 def _fallback_candidates(

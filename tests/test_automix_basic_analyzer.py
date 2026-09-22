@@ -20,6 +20,14 @@ from app.automix.analysis.provider import AnalysisCancelled
 from app.models.playlist import PlaylistTrack
 
 
+def _tone_signal(
+    frequency: float, duration: float, sample_rate: int = SAMPLE_RATE, amplitude: float = 0.5,
+) -> np.ndarray:
+    """A pure sine tone, for key/energy/vocal-activity unit tests."""
+    t = np.linspace(0.0, duration, int(duration * sample_rate), endpoint=False)
+    return (amplitude * np.sin(2 * np.pi * frequency * t)).astype(np.float32)
+
+
 def _click_signal(bpm: float, duration: float, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     """A synthetic metronome click track at ``bpm``, for analyzer unit tests."""
     interval = 60.0 / bpm
@@ -149,6 +157,46 @@ class BasicAnalysisProviderTests(unittest.TestCase):
         track = _track(Path("does-not-exist.mp3"), 5.0)
         with self.assertRaises(RuntimeError):
             provider.analyze(track, cancel_event=threading.Event())
+
+    def test_key_energy_and_vocal_activity_are_populated_for_a_tonal_signal(self) -> None:
+        provider = BasicAnalysisProvider(Path("ffmpeg"))
+        signal = _tone_signal(440.0, 10.0)
+        result = self._analyze_signal(provider, signal, duration=10.0)
+        self.assertIsNotNone(result.key)
+        self.assertGreater(result.key_confidence, 0.0)
+        self.assertGreater(result.energy, 0.0)
+
+    def test_louder_signal_has_higher_energy_than_quieter_one(self) -> None:
+        quiet = BasicAnalysisProvider._estimate_energy(_tone_signal(440.0, 5.0, amplitude=0.05))
+        loud = BasicAnalysisProvider._estimate_energy(_tone_signal(440.0, 5.0, amplitude=0.5))
+        self.assertLess(quiet, loud)
+
+    def test_silence_has_zero_energy_and_no_key(self) -> None:
+        provider = BasicAnalysisProvider(Path("ffmpeg"))
+        result = self._analyze_signal(provider, np.zeros(int(8.0 * SAMPLE_RATE), dtype=np.float32), duration=8.0)
+        self.assertIsNone(result.key)
+        self.assertEqual(result.key_confidence, 0.0)
+        self.assertIsNone(result.energy)
+        self.assertEqual(result.vocal_activity, ())
+
+    def test_tone_inside_the_vocal_band_is_detected_as_sustained_activity(self) -> None:
+        windows = BasicAnalysisProvider._vocal_activity_windows(_tone_signal(1000.0, 6.0), 6.0)
+        self.assertTrue(windows)
+        total_active = sum(end - start for start, end in windows)
+        self.assertGreater(total_active, 4.0)
+
+    def test_tone_outside_the_vocal_band_is_not_detected_as_activity(self) -> None:
+        windows = BasicAnalysisProvider._vocal_activity_windows(_tone_signal(9000.0, 6.0), 6.0)
+        self.assertEqual(windows, ())
+
+    def test_vocal_activity_windows_are_valid_track_analysis_spans(self) -> None:
+        provider = BasicAnalysisProvider(Path("ffmpeg"))
+        signal = _tone_signal(1000.0, 8.0)
+        result = self._analyze_signal(provider, signal, duration=8.0)
+        for start, end in result.vocal_activity:
+            self.assertGreaterEqual(start, 0.0)
+            self.assertLess(start, end)
+            self.assertLessEqual(end, 8.0)
 
 
 @unittest.skipUnless(

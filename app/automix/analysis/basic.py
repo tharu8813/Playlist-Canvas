@@ -12,6 +12,22 @@ gives BPM and beat timestamps only. Bars are a provisional "every 4th
 beat" 4/4 guess, deliberately capped at a low confidence (see
 PROVISIONAL_METER_CONFIDENCE) so a planner never mistakes it for a real
 downbeat model's output -- see TrackAnalysis.beat_alignment_quality().
+
+Phase 7 additions (key/energy/vocal activity) reuse the same decoded
+signal -- no second FFmpeg decode -- and stay model-free like the rest of
+this analyzer:
+
+- key: Krumhansl-Schmuckler profile correlation over the track's mean
+  chroma vector (app/automix/analysis/key.py). Used only as a score
+  modifier later, never a blocker or an automatic pitch-shift trigger.
+- energy: RMS relative to a documented reference level, not a loudness
+  (LUFS) measurement -- see ENERGY_REFERENCE_RMS.
+- vocal_activity: a coarse heuristic (energy concentrated in the
+  ~300-3400 Hz "voice band" for a sustained window), not a real vocal
+  detector. It will false-positive on vocal-heavy instrumentation and
+  false-negative on sibilant or breathy vocals recorded outside that
+  band; it exists only to avoid the most obvious vocal-on-vocal clashes,
+  per roadmap Phase 7 section 5's "lightweight" tier.
 """
 
 from __future__ import annotations
@@ -25,6 +41,7 @@ from typing import Callable
 import librosa
 import numpy as np
 
+from app.automix.analysis.key import estimate_key
 from app.automix.analysis.provider import AnalysisCancelled
 from app.automix.models import TrackAnalysis
 from app.models.playlist import PlaylistTrack
@@ -45,6 +62,16 @@ MINIMUM_ANALYZABLE_SECONDS = 2.0
 SILENCE_PEAK_THRESHOLD = 1e-4
 BEAT_DEDUPE_TOLERANCE_SECONDS = 0.05
 PROVISIONAL_METER_CONFIDENCE = 0.3
+
+ENERGY_REFERENCE_RMS = 0.3
+"""RMS of a loud, modern pop/EDM master, used only as a normalization
+reference -- not a loudness standard. energy = min(1.0, rms / this)."""
+
+VOCAL_BAND_HZ = (300.0, 3400.0)
+"""The classic telephone-bandwidth approximation of where vocal
+fundamentals and formants concentrate; a coarse proxy, not a vocal model."""
+VOCAL_HOP_SECONDS = 1.0
+VOCAL_BAND_RATIO_THRESHOLD = 0.35
 
 
 def normalize_tempo_octave(
@@ -72,7 +99,11 @@ class BasicAnalysisProvider:
     """The always-available default AnalysisProvider (see AnalysisProvider Protocol)."""
 
     provider_id = "basic"
-    version = "1"
+    version = "2"
+    """Bumped from "1": Phase 7 added key/energy/vocal_activity to the
+    output, which invalidates any cache entry from before those fields
+    existed (see app/automix/cache.py -- analyzer_version is part of the
+    cache key)."""
 
     def __init__(self, ffmpeg_executable: Path) -> None:
         self.ffmpeg_executable = Path(ffmpeg_executable)
@@ -121,6 +152,11 @@ class BasicAnalysisProvider:
         report(0.7, "Resolving bars")
         downbeats, meter_confidence = self._infer_downbeats(beat_times)
 
+        report(0.8, "Estimating key and energy")
+        key, key_confidence = self._estimate_key(signal)
+        energy = self._estimate_energy(signal)
+        vocal_activity = self._vocal_activity_windows(signal, duration_seconds)
+
         report(0.9, "Validating result")
         result = TrackAnalysis(
             track_id=track.id, source_path=track.file_path, duration_seconds=duration_seconds,
@@ -131,6 +167,8 @@ class BasicAnalysisProvider:
             meter_numerator=4 if len(downbeats) else None,
             meter_denominator=4 if len(downbeats) else None,
             meter_confidence=meter_confidence,
+            key=key, key_confidence=key_confidence,
+            energy=energy, vocal_activity=vocal_activity,
             analyzer_id=self.provider_id, analyzer_version=self.version,
         )
         report(1.0, "AutoMix analysis completed")
@@ -229,3 +267,47 @@ class BasicAnalysisProvider:
         if len(beat_times) < 4:
             return np.array([], dtype=float), 0.0
         return beat_times[0::4], PROVISIONAL_METER_CONFIDENCE
+
+    @staticmethod
+    def _estimate_key(signal: np.ndarray) -> tuple[str | None, float]:
+        chroma = librosa.feature.chroma_stft(y=signal, sr=SAMPLE_RATE)
+        chroma_mean = np.mean(chroma, axis=1)
+        key, confidence = estimate_key(chroma_mean)
+        return (key, confidence) if confidence > 0.0 else (None, 0.0)
+
+    @staticmethod
+    def _estimate_energy(signal: np.ndarray) -> float:
+        """RMS relative to ENERGY_REFERENCE_RMS -- a documented heuristic, not LUFS."""
+        rms = float(np.sqrt(np.mean(np.square(signal))))
+        return max(0.0, min(1.0, rms / ENERGY_REFERENCE_RMS))
+
+    @staticmethod
+    def _vocal_activity_windows(
+        signal: np.ndarray, duration_seconds: float,
+    ) -> tuple[tuple[float, float], ...]:
+        """Coarse "voice band energy dominant" windows -- see module docstring."""
+        hop = int(VOCAL_HOP_SECONDS * SAMPLE_RATE)
+        if hop <= 0 or len(signal) < hop:
+            return ()
+        windows: list[tuple[float, float]] = []
+        active_start: float | None = None
+        low_hz, high_hz = VOCAL_BAND_HZ
+        for start in range(0, len(signal), hop):
+            segment = signal[start:start + hop]
+            if len(segment) == 0:
+                continue
+            spectrum = np.abs(np.fft.rfft(segment))
+            freqs = np.fft.rfftfreq(len(segment), 1.0 / SAMPLE_RATE)
+            band_mask = (freqs >= low_hz) & (freqs <= high_hz)
+            total_energy = float(np.sum(spectrum ** 2))
+            band_ratio = float(np.sum(spectrum[band_mask] ** 2)) / total_energy if total_energy > 0.0 else 0.0
+            timestamp = start / SAMPLE_RATE
+            if band_ratio >= VOCAL_BAND_RATIO_THRESHOLD:
+                if active_start is None:
+                    active_start = timestamp
+            elif active_start is not None:
+                windows.append((active_start, min(timestamp, duration_seconds)))
+                active_start = None
+        if active_start is not None and active_start < duration_seconds:
+            windows.append((active_start, duration_seconds))
+        return tuple(window for window in windows if window[1] > window[0])

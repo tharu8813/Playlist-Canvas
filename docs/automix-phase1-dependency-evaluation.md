@@ -152,6 +152,30 @@ no temp file) rather than through librosa's own `audioread`/`soundfile`
 loading path, so container/codec support tracks whatever FFmpeg already
 handles elsewhere in the app.
 
+## Phase 7 outcome
+
+Key, energy, and vocal-activity estimation (`app/automix/analysis/key.py`,
+and the additions to `app/automix/analysis/basic.py`) add **no new
+dependency** -- all three reuse `librosa`/`numpy`, already covered above.
+
+- **Key**: Krumhansl-Schmuckler major/minor tone-profile correlation
+  (Krumhansl & Kessler, 1982) is a published, decades-old music-cognition
+  research result, not a licensed software model -- the twelve profile
+  numbers used here are a standard, widely-reproduced constant, not
+  redistributed third-party code or weights.
+- **Energy**: a plain RMS-over-a-reference-level heuristic, original code.
+- **Vocal activity**: a plain voice-band (300-3400 Hz) energy-ratio
+  heuristic over short windows, original code -- not a trained model, and
+  explicitly documented (module docstring, roadmap Phase 7 section 5's
+  "lightweight" tier) as a coarse proxy rather than a real vocal detector.
+
+No optional advanced beat/downbeat engine (e.g. Beat This!) was added in
+Phase 7: the "Beat This!" evaluation above (PyTorch cost, ~500MB+) still
+applies, and the roadmap explicitly allows implementing only the subset
+of Phase 7 that is justified (section 16 / "It is acceptable to implement
+only a subset"). It remains a candidate for a future phase if a
+downloadable-model UX is built.
+
 Installed transitive footprint, captured from a Python 3.14 dev sandbox
 (`pip install librosa`): `scipy` 1.18.1, `numba` 0.67.0 + `llvmlite` 0.49.0
 (the largest single wheel, ~43 MB), `scikit-learn` 1.9.1, `soundfile`
