@@ -8,6 +8,7 @@ from math import ceil
 import os
 from pathlib import Path
 import threading
+from tempfile import TemporaryDirectory
 from time import monotonic
 from dataclasses import replace
 from weakref import WeakSet
@@ -49,7 +50,8 @@ from app.preview.gpu_texture_surface import (
 )
 from app.preview.gpu_health import GpuPreviewHealth
 from app.preview.text_template import format_timestamp
-from app.renderer.ffmpeg_renderer import VisualizerOverlay
+from app.controllers.preview_audio_controller import PreviewAudioController
+from app.renderer.ffmpeg_renderer import FFmpegRenderer, VisualizerOverlay
 from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.services.source_store import SourceStore
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
@@ -63,6 +65,8 @@ from app.video.preview_proxy import PreviewProxyCache, PreviewProxyWorker
 from app.utils.i18n import Language, Translator
 
 TIMELINE_SCALE = 100
+_BLENDED_AUDIO_TRACK_INDEX = -2
+"""Sentinel for `_active_track_index` when playing the pre-rendered AutoMix/crossfade mix."""
 LOGGER = logging.getLogger(__name__)
 OverlaySignature = tuple[int, ...]
 
@@ -353,7 +357,9 @@ class ExportPreviewDialog(QDialog):
                  parent: QWidget | None = None,
                  source_store: SourceStore | None = None,
                  embedded: bool = False,
-                 preferred_backend: str = "gpu_layers") -> None:
+                 preferred_backend: str = "gpu_layers",
+                 transition_mode: str = "none",
+                 crossfade_seconds: float = 3.0) -> None:
         super().__init__(parent)
         self.embedded = embedded
         self.preferred_backend = (
@@ -385,6 +391,22 @@ class ExportPreviewDialog(QDialog):
         self._preview_proxy_cache = (
             PreviewProxyCache() if self._preview_proxy_ffmpeg is not None else None
         )
+        self._transition_mode = transition_mode
+        self._crossfade_seconds = crossfade_seconds
+        self._blended_audio_path: Path | None = None
+        self._blended_audio_temp_dir: TemporaryDirectory | None = None
+        self._blended_audio_controller: PreviewAudioController | None = None
+        if self._transition_mode != "none" and self._preview_proxy_ffmpeg is not None and self.tracks:
+            self._blended_audio_temp_dir = TemporaryDirectory(prefix="playlist-preview-audio-")
+            self._blended_audio_controller = PreviewAudioController(
+                FFmpegRenderer(self._preview_proxy_ffmpeg), self,
+            )
+            self._blended_audio_controller.audio_ready.connect(self._on_blended_audio_ready)
+            self._blended_audio_controller.audio_failed.connect(self._on_blended_audio_failed)
+            self._blended_audio_controller.start(
+                self.tracks, Path(self._blended_audio_temp_dir.name),
+                self._transition_mode, self._crossfade_seconds,
+            )
         self._image = QImage()
         self._base_image = QImage()
         self._base_track_id = ""
@@ -2708,6 +2730,18 @@ class ExportPreviewDialog(QDialog):
             self._active_track_index = -1
             self._last_media_position_ms = 0
             return
+        if self._blended_audio_path is not None:
+            # One continuous, pre-rendered AutoMix/crossfade mix already has
+            # correct silence baked in at gaps and the same total duration as
+            # the legacy sequential timeline, so the playhead position IS the
+            # source position -- no per-track source switching needed.
+            if self._active_track_index != _BLENDED_AUDIO_TRACK_INDEX:
+                self._active_track_index = _BLENDED_AUDIO_TRACK_INDEX
+                self.media_player.setSource(QUrl.fromLocalFile(str(self._blended_audio_path)))
+            self.media_player.setPosition(round(playlist_seconds * 1000))
+            self._last_media_position_ms = round(playlist_seconds * 1000)
+            self.media_player.play()
+            return
         index, track, elapsed, _start = selected
         if index != self._active_track_index:
             self._active_track_index = index
@@ -2727,10 +2761,18 @@ class ExportPreviewDialog(QDialog):
         )
         predicted_seconds = self._playhead_seconds + elapsed_milliseconds / 1000.0
         player_milliseconds = self.media_player.position()
-        if (audio_was_active and selected_before is not None and player_milliseconds > 0
+        blended_audio_active = self._active_track_index == _BLENDED_AUDIO_TRACK_INDEX
+        if (audio_was_active and (selected_before is not None or blended_audio_active)
+                and player_milliseconds > 0
                 and player_milliseconds != self._last_media_position_ms):
             self._last_media_position_ms = player_milliseconds
-            audio_seconds = selected_before[3] + player_milliseconds / 1000.0
+            # The blended mix's own position IS the playlist position; a
+            # per-track source's position must be offset by that track's
+            # start-of-clip elapsed time instead.
+            audio_seconds = (
+                player_milliseconds / 1000.0 if blended_audio_active
+                else selected_before[3] + player_milliseconds / 1000.0
+            )
             # QMediaPlayer commonly reports position at roughly 10 Hz.  Use it
             # only to correct meaningful drift; the precise timer supplies the
             # intermediate 30/60 FPS playhead positions.
@@ -2753,7 +2795,8 @@ class ExportPreviewDialog(QDialog):
             new_index, next_value / TIMELINE_SCALE
         )
         if (
-            old_index and new_index
+            not blended_audio_active
+            and old_index and new_index
             and (old_index[0] != new_index[0] or audio_was_active != audio_is_active)
         ):
             self._start_audio_at_playhead()
@@ -3072,6 +3115,22 @@ class ExportPreviewDialog(QDialog):
             self._video_proxy_worker.cancel()
             self._finish_or_detach_worker(self._video_proxy_worker)
         self._video_proxy_worker = None
+        if self._blended_audio_controller is not None:
+            self._blended_audio_controller.cancel()
+        if self._blended_audio_temp_dir is not None:
+            self._blended_audio_temp_dir.cleanup()
+            self._blended_audio_temp_dir = None
+
+    def _on_blended_audio_ready(self, path_str: str) -> None:
+        self._blended_audio_path = Path(path_str)
+        # Swap the already-playing per-track source for the blended mix at
+        # the current playhead so a render that finishes mid-preview takes
+        # over without an audible restart-from-zero.
+        if self._playing:
+            self._start_audio_at_playhead()
+
+    def _on_blended_audio_failed(self, message: str) -> None:
+        LOGGER.warning("Preview blended-audio render failed, falling back to per-track playback: %s", message)
 
     def _apply_preview_style(self) -> None:
         """Use the application's shared playback styling."""

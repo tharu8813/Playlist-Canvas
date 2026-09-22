@@ -52,8 +52,8 @@ from app.services.export_storage_service import (
     estimate_export_storage,
 )
 from app.dialogs.export_preview_dialog import (
-    GPU_TEXTURE_SURFACE_AVAILABLE, ExportPreviewDialog, OverlayFrameWorker,
-    VideoDurationProbeWorker,
+    GPU_TEXTURE_SURFACE_AVAILABLE, TIMELINE_SCALE, ExportPreviewDialog, OverlayFrameWorker,
+    VideoDurationProbeWorker, _BLENDED_AUDIO_TRACK_INDEX,
 )
 from app.dialogs.ffmpeg_install_progress_dialog import FFmpegInstallProgressDialog
 from app.widgets.source_template_button import (
@@ -5396,6 +5396,112 @@ class MainWindowSafetyTests(unittest.TestCase):
             )
         finally:
             preview.close()
+
+    def test_preview_starts_blended_audio_render_for_non_none_transition_mode(self) -> None:
+        with TemporaryDirectory(prefix="playlist-fake-ffmpeg-") as directory:
+            fake_ffmpeg = Path(directory) / "ffmpeg.exe"
+            fake_ffmpeg.touch()
+            tracks = [
+                PlaylistTrack("a.wav", "A", duration_seconds=3.0),
+                PlaylistTrack("b.wav", "B", duration_seconds=3.0),
+            ]
+            with patch(
+                "app.dialogs.export_preview_dialog.PreviewAudioController.start",
+            ) as start:
+                preview = ExportPreviewDialog(
+                    self.window.canvas.scene_model, tracks, self.window.translator,
+                    ffmpeg_executable=fake_ffmpeg, parent=self.window,
+                    preferred_backend="cpu",
+                    transition_mode="crossfade", crossfade_seconds=5.0,
+                )
+            try:
+                self.assertIsNotNone(preview._blended_audio_controller)
+                start.assert_called_once()
+                called_tracks, _output_directory, mode, seconds = start.call_args.args
+                self.assertEqual(called_tracks, tracks)
+                self.assertEqual(mode, "crossfade")
+                self.assertEqual(seconds, 5.0)
+            finally:
+                preview._stop_preview()
+                preview.deleteLater()
+
+    def test_preview_skips_blended_audio_render_for_none_transition_mode(self) -> None:
+        with TemporaryDirectory(prefix="playlist-fake-ffmpeg-") as directory:
+            fake_ffmpeg = Path(directory) / "ffmpeg.exe"
+            fake_ffmpeg.touch()
+            preview = ExportPreviewDialog(
+                self.window.canvas.scene_model,
+                [PlaylistTrack("a.wav", "A", duration_seconds=3.0)],
+                self.window.translator,
+                ffmpeg_executable=fake_ffmpeg, parent=self.window,
+                preferred_backend="cpu",
+                transition_mode="none",
+            )
+            try:
+                self.assertIsNone(preview._blended_audio_controller)
+            finally:
+                preview._stop_preview()
+                preview.deleteLater()
+
+    def test_blended_audio_ready_swaps_source_and_seeks_absolute_position(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [
+                PlaylistTrack("a.wav", "A", duration_seconds=3.0),
+                PlaylistTrack("b.wav", "B", duration_seconds=3.0),
+            ],
+            self.window.translator,
+            parent=self.window,
+            preferred_backend="cpu",
+        )
+        try:
+            preview._playing = True
+            preview.timeline.setValue(round(4.0 * TIMELINE_SCALE))
+            with (
+                patch.object(preview.media_player, "setSource") as set_source,
+                patch.object(preview.media_player, "setPosition") as set_position,
+                patch.object(preview.media_player, "play"),
+            ):
+                preview._on_blended_audio_ready(str(Path("blended.m4a").resolve()))
+            self.assertEqual(preview._blended_audio_path, Path("blended.m4a").resolve())
+            self.assertEqual(preview._active_track_index, _BLENDED_AUDIO_TRACK_INDEX)
+            set_source.assert_called_once_with(
+                QUrl.fromLocalFile(str(Path("blended.m4a").resolve()))
+            )
+            set_position.assert_called_once_with(4_000)
+        finally:
+            preview._stop_preview()
+            preview.deleteLater()
+
+    def test_advance_playback_skips_track_change_restart_when_blended_audio_active(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [
+                PlaylistTrack("a.wav", "A", duration_seconds=3.0),
+                PlaylistTrack("b.wav", "B", duration_seconds=3.0),
+            ],
+            self.window.translator,
+            parent=self.window,
+            preferred_backend="cpu",
+        )
+        try:
+            preview._blended_audio_path = Path("blended.m4a")
+            preview._active_track_index = _BLENDED_AUDIO_TRACK_INDEX
+            preview._playing = True
+            preview._playhead_seconds = 2.9
+            preview._last_media_position_ms = 2_900_000  # force the drift branch to run
+            with (
+                patch.object(preview.play_clock, "restart", return_value=200),
+                patch.object(preview.media_player, "position", return_value=3_100),
+                patch.object(preview, "_start_audio_at_playhead") as start_audio,
+            ):
+                preview._advance_playback()
+            start_audio.assert_not_called()
+            # Absolute player position (3.1s), not track-relative, drives drift correction.
+            self.assertAlmostEqual(preview._playhead_seconds, 3.1, places=3)
+        finally:
+            preview._stop_preview()
+            preview.deleteLater()
 
     def test_track_lyrics_dialog_previews_audio_with_synchronized_lyrics(self) -> None:
         saved_volumes: list[int] = []

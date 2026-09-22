@@ -114,6 +114,8 @@ class PreviewController:
             window._export_visualizers(tracks), executable, window, source_store=window.store,
             embedded=True,
             preferred_backend=window._preview_backend_for_session,
+            transition_mode=window.project_settings.transition_mode,
+            crossfade_seconds=window.project_settings.crossfade_seconds,
         )
         controls_page = preview.build_embedded_controls_page()
         window._inline_preview = preview
