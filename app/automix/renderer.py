@@ -189,7 +189,17 @@ class AutoMixAudioPipeline:
         filter_complex, output_label = build_filter_graph(clips, plan.transitions)
 
         output_directory.mkdir(parents=True, exist_ok=True)
-        output_path = output_directory / "automix_mix.m4a"
+        # PCM in a NUT container, not AAC: this file is an *intermediate*
+        # that prepare_playlist_audio() (app/renderer/ffmpeg_renderer.py)
+        # goes on to run through loudness normalization and its own single
+        # final AAC encode. Encoding this stage to AAC too meant every
+        # AutoMix/crossfade export was lossy-to-lossy double-encoded, and no
+        # final bitrate the user picked could recover what was already lost
+        # at this fixed 192k intermediate step. NUT+PCM matches the exact
+        # format the legacy sequential path's own per-track intermediates
+        # already use (see _normalize_audio in ffmpeg_renderer.py), so the
+        # concat/decode step downstream needs no special-casing.
+        output_path = output_directory / "automix_mix.nut"
         expected_duration = max(clip.timeline_end for clip in clips)
 
         arguments = [str(self.ffmpeg_executable), "-hide_banner", "-loglevel", "error", "-nostdin"]
@@ -198,8 +208,8 @@ class AutoMixAudioPipeline:
         arguments.extend([
             "-filter_complex", filter_complex,
             "-map", f"[{output_label}]",
-            "-c:a", "aac", "-ar", str(SAMPLE_RATE), "-ac", "2", "-b:a", "192k",
-            "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", "-y", str(output_path),
+            "-c:a", "pcm_s16le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-f", "nut",
+            "-progress", "pipe:1", "-nostats", "-y", str(output_path),
         ])
 
         report("Rendering transitions", 0.1, "Rendering AutoMix transitions")

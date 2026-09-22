@@ -102,6 +102,43 @@ class MixTimingTests(unittest.TestCase):
             self.assertEqual(plans[-1].duration_seconds, 20)
             self.assertEqual(plans[-1].metadata.chapters[1].start, 10)
 
+    def test_crossfade_export_never_double_encodes_to_aac(self):
+        """The intermediate AutoMix/crossfade mix must be lossless (PCM),
+        not AAC: prepare_playlist_audio()'s own combine step already
+        re-encodes to AAC exactly once, after loudness normalization. AAC
+        at the intermediate step too would mean every AutoMix/crossfade
+        export was lossy-to-lossy double-encoded regardless of the final
+        bitrate the user picked."""
+        from app.automix.renderer import AutoMixAudioPipeline
+
+        renderer = FFmpegRenderer.__new__(FFmpegRenderer)
+        renderer.executable = Path('ffmpeg')
+        outer_commands: list[list[str]] = []
+        renderer._run = lambda arguments, **_kwargs: outer_commands.append(arguments)
+        inner_commands: list[list[str]] = []
+
+        def fake_pipeline_run(_self, arguments, _cancel_event, _on_progress_seconds):
+            inner_commands.append(arguments)
+
+        with TemporaryDirectory() as directory:
+            directory = Path(directory)
+            a, b = directory / 'a.wav', directory / 'b.wav'
+            a.write_bytes(b'\x00')
+            b.write_bytes(b'\x00')
+            tracks = [_track('a', 10), _track('b', 10)]
+            tracks[0].file_path, tracks[1].file_path = str(a), str(b)
+            with (
+                patch.object(AutoMixAudioPipeline, '_run', fake_pipeline_run),
+                patch.object(AutoMixAudioPipeline, '_probe_duration', return_value=17.0),
+            ):
+                renderer.prepare_playlist_audio(tracks, directory, RenderSettings(), 'crossfade')
+
+        self.assertEqual(len(inner_commands), 1)
+        self.assertNotIn('aac', inner_commands[0])
+        self.assertIn('pcm_s16le', inner_commands[0])
+        aac_encodes = [command for command in outer_commands if 'aac' in command]
+        self.assertEqual(len(aac_encodes), 1)
+
 
 class WorkerLifetimeTests(unittest.TestCase):
     @classmethod

@@ -1293,6 +1293,14 @@ class FFmpegRenderer:
         try:
             self._run(
                 combining_input_args + [
+                    # _run() hard-codes "-loglevel error" ahead of these
+                    # arguments; loudnorm's print_format=json stats are
+                    # logged at the "info" level, so without this override
+                    # they never reach stderr at all and every measurement
+                    # silently looked like a failure. FFmpeg takes the last
+                    # of two repeated global options, so this "-loglevel
+                    # info" wins over the earlier "-loglevel error".
+                    "-loglevel", "info",
                     "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
                     "-f", "null", "-",
                 ],

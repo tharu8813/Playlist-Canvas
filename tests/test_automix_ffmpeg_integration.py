@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import struct
+import subprocess
 import sys
 import unittest
 import wave
@@ -15,6 +17,34 @@ from PySide6.QtGui import QColor, QImage
 from app.automix.renderer import AutoMixRenderError
 from app.models.playlist import PlaylistTrack
 from app.renderer.ffmpeg_renderer import FFmpegRenderer, RenderSettings
+from app.utils.subprocess_utils import hidden_process_kwargs
+
+
+def _ffprobe_for(ffmpeg_executable: Path) -> Path:
+    name = "ffprobe.exe" if ffmpeg_executable.suffix.lower() == ".exe" else "ffprobe"
+    return ffmpeg_executable.with_name(name)
+
+
+def _audio_codec(ffmpeg_executable: Path, path: Path) -> str:
+    """The audio stream's codec name, via ffprobe (e.g. "aac", "pcm_s16le")."""
+    result = subprocess.run(
+        [str(_ffprobe_for(ffmpeg_executable)), "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=codec_name", "-of", "json", str(path)],
+        capture_output=True, text=True, check=True, **hidden_process_kwargs(),
+    )
+    return json.loads(result.stdout)["streams"][0]["codec_name"]
+
+
+def _measured_lufs(ffmpeg_executable: Path, path: Path) -> float:
+    """Re-measure a file's own integrated loudness (LUFS) via loudnorm's own analysis pass."""
+    result = subprocess.run(
+        [str(ffmpeg_executable), "-hide_banner", "-loglevel", "info", "-i", str(path),
+         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"],
+        capture_output=True, text=True, **hidden_process_kwargs(),
+    )
+    text = result.stderr
+    start, end = text.rfind("{"), text.rfind("}")
+    return float(json.loads(text[start:end + 1])["input_i"])
 
 
 def _write_tone_wav(path: Path, frequency: float, duration: float, sample_rate: int = 48000) -> None:
@@ -153,6 +183,10 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(sum(segment_durations), 37.0, delta=0.05)
             for path in segment_paths:
                 self.assertTrue(path.is_file())
+                # The intermediate AutoMix mix must be lossless PCM, not a
+                # second lossy AAC encode -- the final combine step already
+                # encodes to AAC exactly once, after loudness normalization.
+                self.assertEqual(_audio_codec(executable, path), "pcm_s16le")
 
     def test_full_render_with_automix_enabled_uses_mix_duration(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
@@ -179,6 +213,15 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             )
             self.assertTrue(output_path.is_file())
             self.assertAlmostEqual(result.validation.duration_seconds, 17.0, delta=0.5)
+            # The final mux still encodes audio exactly once, to AAC.
+            self.assertEqual(_audio_codec(executable, output_path), "aac")
+            # And loudness normalization must actually have run for this
+            # ordinary, several-second real clip -- not silently skipped
+            # the way it was before -loglevel info was added to the
+            # measurement pass (which made loudnorm's own JSON stats
+            # invisible in stderr, so every measurement looked like a
+            # failure and normalization silently never applied).
+            self.assertAlmostEqual(_measured_lufs(executable, output_path), -16.0, delta=1.0)
 
     def test_crossfade_export_uses_the_actual_mix_duration(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
@@ -204,6 +247,9 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(sum(segment_durations), 37.0, delta=0.05)
             # A 3s crossfade shortens the mix by 3s versus plain concatenation.
             self.assertAlmostEqual(segment_durations[0], 37.0, delta=0.1)
+            # Lossless intermediate, same as AutoMix -- see the equivalent
+            # assertion in test_automix_export_uses_the_actual_mix_duration.
+            self.assertEqual(_audio_codec(executable, segment_paths[0]), "pcm_s16le")
 
     def test_crossfade_preserves_an_explicit_gap(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
@@ -255,6 +301,39 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             )
             self.assertTrue(output_path.is_file())
             self.assertAlmostEqual(result.validation.duration_seconds, 18.0, delta=0.5)
+            self.assertEqual(_audio_codec(executable, output_path), "aac")
+            self.assertAlmostEqual(_measured_lufs(executable, output_path), -16.0, delta=1.0)
+
+    def test_full_render_with_sequential_mode_encodes_audio_once_too(self) -> None:
+        """transition_mode="none" must keep working exactly like before --
+        this pipeline change only touches the AutoMix/crossfade intermediate,
+        never the legacy sequential path."""
+        executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
+        with TemporaryDirectory(prefix="sequential-export-full-") as raw_directory:
+            directory = Path(raw_directory)
+            a_path = directory / "a.wav"
+            b_path = directory / "b.wav"
+            _write_tone_wav(a_path, 440.0, 10.0)
+            _write_tone_wav(b_path, 440.0, 10.0)
+            tracks = [
+                PlaylistTrack(str(a_path), "A", duration_seconds=10.0),
+                PlaylistTrack(str(b_path), "B", duration_seconds=10.0),
+            ]
+            image = QImage(32, 32, QImage.Format.Format_RGB32)
+            image.fill(QColor(10, 20, 30))
+            settings = RenderSettings(
+                fps=5, video_codec="libx264", crf=30, preset="ultrafast",
+                output_width=32, output_height=32,
+            )
+            renderer = FFmpegRenderer(executable)
+            output_path = directory / "out.mp4"
+            result = renderer.render(
+                [image, image], tracks, output_path, settings, transition_mode="none",
+            )
+            self.assertTrue(output_path.is_file())
+            self.assertAlmostEqual(result.validation.duration_seconds, 20.0, delta=0.5)
+            self.assertEqual(_audio_codec(executable, output_path), "aac")
+            self.assertAlmostEqual(_measured_lufs(executable, output_path), -16.0, delta=1.0)
 
 
 if __name__ == "__main__":

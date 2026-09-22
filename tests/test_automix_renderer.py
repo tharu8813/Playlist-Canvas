@@ -8,6 +8,7 @@ import unittest
 import wave
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 
@@ -132,6 +133,42 @@ class BuildFilterGraphTests(unittest.TestCase):
         self.assertEqual(label, "m2")
 
 
+class AutoMixMixIntermediateCodecTests(unittest.TestCase):
+    """The intermediate mix must be lossless, not a second lossy AAC pass.
+
+    prepare_playlist_audio() (app/renderer/ffmpeg_renderer.py) already
+    re-encodes to AAC exactly once, after loudness normalization. If this
+    intermediate render also encoded to AAC, every AutoMix/crossfade export
+    would be lossy-to-lossy double-encoded regardless of the final bitrate
+    the user picked.
+    """
+
+    def test_render_command_uses_pcm_in_nut_not_aac(self) -> None:
+        with TemporaryDirectory(prefix="automix-codec-") as directory:
+            directory = Path(directory)
+            source = directory / "a.wav"
+            source.write_bytes(b"\x00")  # never read; _run is mocked below
+            plan = AudioRenderPlan(clips=(_clip("a", "a", 0.0, 10.0),), transitions=())
+            pipeline = AutoMixAudioPipeline(Path("ffmpeg"))
+            captured: list[list[str]] = []
+
+            def fake_run(arguments, _cancel_event, _on_progress_seconds) -> None:
+                captured.append(arguments)
+
+            with (
+                patch.object(pipeline, "_run", fake_run),
+                patch.object(pipeline, "_probe_duration", return_value=10.0),
+            ):
+                result = pipeline.render(plan, {"a": str(source)}, directory)
+
+        command = captured[0]
+        self.assertNotIn("aac", command)
+        self.assertNotIn("192k", command)
+        self.assertIn("pcm_s16le", command)
+        self.assertIn("nut", command)
+        self.assertEqual(result.path.suffix, ".nut")
+
+
 def _write_tone_wav(path: Path, frequency: float, duration: float, sample_rate: int = SAMPLE_RATE) -> None:
     t = np.linspace(0.0, duration, int(duration * sample_rate), endpoint=False)
     signal = 0.5 * np.sin(2 * np.pi * frequency * t)
@@ -219,7 +256,7 @@ class RealAutoMixRenderTests(unittest.TestCase):
         output_directory = self.directory / "out"
         with self.assertRaises(AutoMixRenderCancelled):
             self._pipeline().render(plan, {"a": str(a), "b": str(b)}, output_directory, cancel_event=cancel_event)
-        self.assertFalse((output_directory / "automix_mix.m4a").exists())
+        self.assertFalse((output_directory / "automix_mix.nut").exists())
 
     def test_equal_power_crossfade_has_no_volume_hole_at_the_midpoint(self) -> None:
         a = self.directory / "a.wav"
