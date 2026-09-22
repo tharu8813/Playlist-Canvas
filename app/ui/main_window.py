@@ -2305,7 +2305,7 @@ class MainWindow(QMainWindow):
         not a user-initiated action (roadmap Phase 6 section 13 reserves
         the FFmpeg-missing UX for actual export/preview attempts).
         """
-        if not self.project_settings.automix_enabled:
+        if self.project_settings.transition_mode != "automix":
             return
         tracks = [track for track in self.playlist_service.tracks if track.enabled]
         if not tracks:

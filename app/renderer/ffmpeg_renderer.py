@@ -262,17 +262,20 @@ class FFmpegRenderer:
                video_clips: list[VideoClipOverlay] | None = None,
                metadata: "ExportMetadata | None" = None,
                storage_path_callback: Callable[[str, Path | None], None] | None = None,
-               use_automix: bool = False,
+               transition_mode: str = "none",
+               crossfade_seconds: float = 3.0,
                ) -> RenderResult:
         """Create a static Canvas video whose audio is the ordered enabled playlist.
 
-        ``use_automix`` swaps only the audio content for an AutoMix-blended
-        mix (app/automix/) when analysis and rendering succeed; video/Canvas
-        timing, chapters, and the exported duration are always the legacy
-        sequential values, unchanged (see _render_automix_audio_segments).
-        A failed or unavailable AutoMix render falls back to the normal
-        sequential audio path automatically -- ``use_automix=True`` never
-        turns a working export into a failed one.
+        ``transition_mode`` ("none" | "crossfade" | "automix") swaps only
+        the audio content -- for "crossfade", a plain fixed-length overlap
+        between every adjacent pair; for "automix", an AutoMix-blended mix
+        (app/automix/). Video/Canvas timing, chapters, and the exported
+        duration are always the legacy sequential values, unchanged (see
+        _render_fixed_crossfade_audio_segments / _render_automix_audio_segments).
+        A failed or unavailable render for either mode falls back to the
+        normal sequential audio path automatically -- neither mode can turn
+        a working export into a failed one.
         """
         cancel_event = cancel_event or threading.Event()
         if cancel_event.is_set():
@@ -441,14 +444,18 @@ class FFmpegRenderer:
             self._validate_visual_timeline(
                 visual_sequence, static_layers, total_duration, selected_settings.fps,
             )
-            automix_segments = (
-                self._render_automix_audio_segments(
+            blended_segments = None
+            if transition_mode == "automix":
+                blended_segments = self._render_automix_audio_segments(
                     active_tracks, temporary, total_duration, progress_callback, cancel_event,
                 )
-                if use_automix else None
-            )
-            if automix_segments is not None:
-                segments, segment_durations = automix_segments
+            elif transition_mode == "crossfade":
+                blended_segments = self._render_fixed_crossfade_audio_segments(
+                    active_tracks, temporary, total_duration, crossfade_seconds,
+                    progress_callback, cancel_event,
+                )
+            if blended_segments is not None:
+                segments, segment_durations = blended_segments
             else:
                 segments = self._normalize_audio(
                     active_tracks, temporary, selected_settings, progress_callback, cancel_event
@@ -1248,11 +1255,97 @@ class FFmpegRenderer:
                 raise RenderCancelledError("Rendering was cancelled.") from error
             LOGGER.warning("AutoMix export failed, falling back to sequential audio: %s", error)
             return None
+        return self._pad_prepared_audio_to_duration(
+            prepared, sequential_duration, temporary, "automix_pad_silence.nut", cancel_event,
+        )
+
+    def _render_fixed_crossfade_audio_segments(
+        self, active_tracks: list[PlaylistTrack], temporary: Path, sequential_duration: float,
+        crossfade_seconds: float,
+        progress_callback: Callable[[str, float, str], None] | None,
+        cancel_event: threading.Event,
+    ) -> tuple[list[Path], list[float]] | None:
+        """Render a plain, analysis-free crossfade between every adjacent pair.
+
+        Unlike AutoMix, this needs no BPM/beat analysis and no ``librosa`` --
+        it reuses AutoMixAudioPipeline purely as an FFmpeg filter-graph
+        renderer for a trivially-built AudioRenderPlan (linear "tri"
+        crossfades of a fixed length). An explicit user gap
+        (``start_time_seconds``) is preserved rather than bridged, the same
+        policy AutoMix uses. Padded to ``sequential_duration`` and falls
+        back to ``None`` on any failure, exactly like the AutoMix path.
+        """
+        try:
+            from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
+            from app.timeline.models import TransitionType
+            from app.timeline.render_plan import AudioRenderClip, AudioRenderPlan, AudioRenderTransition
+        except ImportError as error:
+            LOGGER.warning("Crossfade export skipped, a dependency is unavailable: %s", error)
+            return None
+        clips: list[AudioRenderClip] = []
+        transitions: list[AudioRenderTransition] = []
+        natural_cursor = 0.0
+        actual_cursor = 0.0
+        for index, track in enumerate(active_tracks):
+            natural_floor = natural_cursor
+            requested_start = track.start_time_seconds
+            natural_start = (
+                max(natural_floor, requested_start) if requested_start is not None else natural_floor
+            )
+            explicit_gap = natural_start - natural_floor
+            if index == 0 or explicit_gap > 1e-6:
+                timeline_start = natural_start if index == 0 else actual_cursor + explicit_gap
+            else:
+                previous_clip = clips[-1]
+                overlap = max(0.0, min(
+                    crossfade_seconds,
+                    previous_clip.timeline_end - previous_clip.timeline_start,
+                    track.duration_seconds,
+                ))
+                timeline_start = actual_cursor - overlap
+                if overlap > 1e-6:
+                    transitions.append(AudioRenderTransition(
+                        clip_a=previous_clip.clip_id, clip_b=f"crossfade:{track.id}",
+                        timeline_start=timeline_start, duration=overlap, type=TransitionType.CROSSFADE,
+                    ))
+            clip = AudioRenderClip(
+                clip_id=f"crossfade:{track.id}", track_id=track.id,
+                timeline_start=timeline_start, source_in=0.0, source_out=track.duration_seconds,
+            )
+            clips.append(clip)
+            natural_cursor = natural_start + track.duration_seconds
+            actual_cursor = clip.timeline_end
+        plan = AudioRenderPlan(clips=tuple(clips), transitions=tuple(transitions))
+        try:
+            self._report(progress_callback, "Preparing audio", 0.1, "Rendering crossfades")
+            prepared = AutoMixAudioPipeline(self.executable).render(
+                plan,
+                {track.id: track.file_path for track in active_tracks},
+                temporary,
+                cancel_event=cancel_event,
+                progress=lambda _stage, fraction, message: self._report(
+                    progress_callback, "Preparing audio", 0.1 + fraction * 0.4, message,
+                ),
+            )
+        except AutoMixRenderError as error:
+            if cancel_event.is_set():
+                raise RenderCancelledError("Rendering was cancelled.") from error
+            LOGGER.warning("Crossfade export failed, falling back to sequential audio: %s", error)
+            return None
+        return self._pad_prepared_audio_to_duration(
+            prepared, sequential_duration, temporary, "crossfade_pad_silence.nut", cancel_event,
+        )
+
+    def _pad_prepared_audio_to_duration(
+        self, prepared: "PreparedAudio", sequential_duration: float, temporary: Path,
+        silence_filename: str, cancel_event: threading.Event,
+    ) -> tuple[list[Path], list[float]]:
+        """Append silence so the returned segments sum to exactly ``sequential_duration``."""
         segments = [prepared.path]
         segment_durations = [prepared.duration_seconds]
         pad_seconds = sequential_duration - prepared.duration_seconds
         if pad_seconds > 0.05:
-            silence_path = temporary / "automix_pad_silence.nut"
+            silence_path = temporary / silence_filename
             self._run([
                 "-f", "lavfi", "-t", f"{pad_seconds:.6f}", "-i", "anullsrc=r=48000:cl=stereo",
                 "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "nut", "-y", str(silence_path),

@@ -3978,16 +3978,30 @@ class MainWindowSafetyTests(unittest.TestCase):
         finally:
             dialog.close()
 
-    def test_automix_toggle_is_a_per_project_setting(self) -> None:
-        self.assertFalse(self.window.project_settings.automix_enabled)
+    def test_transition_mode_is_a_per_project_setting(self) -> None:
+        self.assertEqual(self.window.project_settings.transition_mode, "none")
         dialog = ProjectSettingsDialog(
             self.window.project_settings, self.window.translator, QPixmap(),
         )
         try:
-            self.assertFalse(dialog.automix_check.isChecked())
-            dialog.automix_check.setChecked(True)
+            self.assertTrue(dialog.transition_none_radio.isChecked())
+            self.assertFalse(dialog.crossfade_seconds_spin.isEnabled())
+            dialog.transition_crossfade_radio.setChecked(True)
+            self.assertTrue(dialog.crossfade_seconds_spin.isEnabled())
+            dialog.crossfade_seconds_spin.setValue(5.0)
             dialog._accept()
-            self.assertTrue(dialog.selected_settings.automix_enabled)
+            self.assertEqual(dialog.selected_settings.transition_mode, "crossfade")
+            self.assertEqual(dialog.selected_settings.crossfade_seconds, 5.0)
+
+            dialog2 = ProjectSettingsDialog(
+                dialog.selected_settings, self.window.translator, QPixmap(),
+            )
+            try:
+                dialog2.transition_automix_radio.setChecked(True)
+                dialog2._accept()
+                self.assertEqual(dialog2.selected_settings.transition_mode, "automix")
+            finally:
+                dialog2.close()
         finally:
             dialog.close()
 
@@ -3999,8 +4013,17 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.window._maybe_start_automix_analysis()
         start.assert_not_called()
 
+    def test_automix_analysis_is_skipped_when_transition_mode_is_crossfade(self) -> None:
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="crossfade")
+        self.window.playlist_service.replace([
+            PlaylistTrack("a.mp3", "A", duration_seconds=30.0),
+        ])
+        with patch.object(self.window.automix_analysis_controller, "start") as start:
+            self.window._maybe_start_automix_analysis()
+        start.assert_not_called()
+
     def test_automix_analysis_starts_when_enabled_with_tracks_and_ffmpeg(self) -> None:
-        self.window.project_settings = replace(self.window.project_settings, automix_enabled=True)
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="automix")
         self.window.playlist_service.replace([
             PlaylistTrack("a.mp3", "A", duration_seconds=30.0),
         ])

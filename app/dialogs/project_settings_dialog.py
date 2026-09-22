@@ -9,12 +9,16 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
     QMessageBox, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from app.models.project import ProjectSettings
+from app.models.project import (
+    MAX_CROSSFADE_SECONDS,
+    MIN_CROSSFADE_SECONDS,
+    ProjectSettings,
+)
 from app.dialogs.new_project_dialog import CANVAS_PRESETS
 from app.utils.i18n import Language, Translator
 
@@ -108,16 +112,47 @@ class ProjectSettingsDialog(QDialog):
         (self.embed_radio if settings.content_mode == "embed" else self.reference_radio).setChecked(True)
         root.addWidget(self.content_group)
 
-        self.automix_group = QGroupBox()
-        automix_layout = QVBoxLayout(self.automix_group)
-        self.automix_check = QCheckBox()
-        self.automix_check.setChecked(settings.automix_enabled)
+        self.transition_group = QGroupBox()
+        transition_layout = QVBoxLayout(self.transition_group)
+        self.transition_none_radio = QRadioButton()
+        self.transition_crossfade_radio = QRadioButton()
+        self.transition_automix_radio = QRadioButton()
+        transition_buttons = QButtonGroup(self)
+        for radio in (
+            self.transition_none_radio, self.transition_crossfade_radio, self.transition_automix_radio,
+        ):
+            transition_buttons.addButton(radio)
+        crossfade_row = QWidget()
+        crossfade_row_layout = QHBoxLayout(crossfade_row)
+        crossfade_row_layout.setContentsMargins(24, 0, 0, 0)
+        self.crossfade_seconds_label = QLabel()
+        self.crossfade_seconds_spin = QDoubleSpinBox()
+        self.crossfade_seconds_spin.setRange(MIN_CROSSFADE_SECONDS, MAX_CROSSFADE_SECONDS)
+        self.crossfade_seconds_spin.setDecimals(1)
+        self.crossfade_seconds_spin.setSingleStep(0.5)
+        self.crossfade_seconds_spin.setValue(settings.crossfade_seconds)
+        self.crossfade_seconds_spin.setSuffix(" s")
+        crossfade_row_layout.addWidget(self.crossfade_seconds_label)
+        crossfade_row_layout.addWidget(self.crossfade_seconds_spin)
+        crossfade_row_layout.addStretch(1)
         self.automix_help = QLabel()
         self.automix_help.setObjectName("mutedLabel")
         self.automix_help.setWordWrap(True)
-        automix_layout.addWidget(self.automix_check)
-        automix_layout.addWidget(self.automix_help)
-        root.addWidget(self.automix_group)
+        transition_layout.addWidget(self.transition_none_radio)
+        transition_layout.addWidget(self.transition_crossfade_radio)
+        transition_layout.addWidget(crossfade_row)
+        transition_layout.addWidget(self.transition_automix_radio)
+        transition_layout.addWidget(self.automix_help)
+        {
+            "none": self.transition_none_radio,
+            "crossfade": self.transition_crossfade_radio,
+            "automix": self.transition_automix_radio,
+        }[settings.transition_mode].setChecked(True)
+        self.transition_crossfade_radio.toggled.connect(
+            self.crossfade_seconds_spin.setEnabled
+        )
+        self.crossfade_seconds_spin.setEnabled(self.transition_crossfade_radio.isChecked())
+        root.addWidget(self.transition_group)
 
         self.thumbnail_group = QGroupBox()
         thumbnail_layout = QHBoxLayout(self.thumbnail_group)
@@ -230,24 +265,30 @@ class ProjectSettingsDialog(QDialog):
             "원본 파일 경로를 사용합니다. 프로젝트는 작지만 원본을 이동하면 다시 연결해야 합니다."
             if korean else "Keeps original file paths. The project stays small, but moved files must be relinked."
         )
-        self.automix_group.setTitle("AutoMix" if korean else "AutoMix")
-        self.automix_check.setText(
-            "이 프로젝트에서 AutoMix 사용 (베타)" if korean else "Enable AutoMix for this project (beta)"
+        self.transition_group.setTitle("곡 전환 방식" if korean else "Track transitions")
+        self.transition_none_radio.setText("없음 (즉시 전환, 기본값)" if korean else "None (instant cut, default)")
+        self.transition_crossfade_radio.setText(
+            "크로스페이드 (지정한 초만큼 서서히 전환)" if korean else "Crossfade (fade over a set number of seconds)"
         )
+        self.crossfade_seconds_label.setText("전환 길이" if korean else "Crossfade length")
+        self.transition_automix_radio.setText("AutoMix (베타, 템포 인식 자동 전환)" if korean else "AutoMix (beta, tempo-aware)")
         self.automix_help.setText(
-            "활성화하면 곡을 분석해 내보내기 오디오를 템포에 맞춰 자연스럽게 이어줍니다. "
-            "분석에 실패하거나 템포가 맞지 않는 곡은 자동으로 일반 크로스페이드로 대체됩니다.\n\n"
-            "현재는 오디오에만 적용됩니다 — 앨범 커버·가사·트랙 전환 등 화면 타이밍과 "
-            "전체 재생 시간(짧아진 오디오 뒤는 무음)은 기존과 동일하며, Preview 화면에는 "
+            "크로스페이드는 각 곡이 끝나기 지정한 초 전부터 다음 곡이 서서히 겹쳐 재생됩니다(분석 없음).\n\n"
+            "AutoMix는 곡을 분석해 템포에 맞춰 자연스럽게 이어줍니다. 분석에 실패하거나 템포가 맞지 않는 "
+            "곡은 자동으로 크로스페이드로 대체됩니다.\n\n"
+            "두 방식 모두 현재는 내보내기 오디오에만 적용됩니다 — 앨범 커버·가사·트랙 전환 등 화면 "
+            "타이밍과 전체 재생 시간(짧아진 오디오 뒤는 무음)은 기존과 동일하며, Preview 화면에는 "
             "아직 반영되지 않습니다. 이 설정은 프로젝트별로 저장됩니다."
             if korean else
-            "When enabled, export analyzes tracks and blends between them using tempo-aware "
-            "audio transitions. A track that cannot be analyzed, or whose tempo does not match, "
-            "automatically falls back to a plain crossfade.\n\n"
-            "This currently affects audio only -- on-screen timing (album art, lyrics, track "
-            "switches) and the overall video length (silence after the shortened audio ends) "
-            "stay exactly as before, and Preview does not reflect it yet. This setting is saved "
-            "with the project, not the application."
+            "Crossfade overlaps each track's last few seconds with the next track's start, for "
+            "however many seconds you set (no analysis).\n\n"
+            "AutoMix analyzes tracks and blends between them using tempo-aware transitions. A "
+            "track that cannot be analyzed, or whose tempo does not match, automatically falls "
+            "back to a plain crossfade.\n\n"
+            "Both currently affect export audio only -- on-screen timing (album art, lyrics, "
+            "track switches) and the overall video length (silence after the shortened audio "
+            "ends) stay exactly as before, and Preview does not reflect either yet. This setting "
+            "is saved with the project, not the application."
         )
         self.thumbnail_group.setTitle("프로젝트 썸네일" if korean else "Project thumbnail")
         self.canvas_radio.setText("현재 캔버스를 자동 사용" if korean else "Use the current canvas")
@@ -313,5 +354,11 @@ class ProjectSettingsDialog(QDialog):
         self.selected_settings.description = self.description_edit.toPlainText().strip()
         self.selected_settings.content_mode = "embed" if self.embed_radio.isChecked() else "reference"
         self.selected_settings.thumbnail_mode = "custom" if self.custom_radio.isChecked() else "canvas"
-        self.selected_settings.automix_enabled = self.automix_check.isChecked()
+        if self.transition_crossfade_radio.isChecked():
+            self.selected_settings.transition_mode = "crossfade"
+        elif self.transition_automix_radio.isChecked():
+            self.selected_settings.transition_mode = "automix"
+        else:
+            self.selected_settings.transition_mode = "none"
+        self.selected_settings.crossfade_seconds = self.crossfade_seconds_spin.value()
         self.accept()

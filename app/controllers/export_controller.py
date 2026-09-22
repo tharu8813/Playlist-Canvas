@@ -1115,7 +1115,8 @@ class ExportOrchestrator:
             static_layers,
             video_clips,
             export_metadata,
-            automix_enabled=window.project_settings.automix_enabled,
+            transition_mode=window.project_settings.transition_mode,
+            crossfade_seconds=window.project_settings.crossfade_seconds,
         )
         export_dialog = window._export_dialog
         window._render_worker.progress.connect(

@@ -27,6 +27,12 @@ class CanvasSettings:
     zoom: float = 1.0
 
 
+TRANSITION_MODES = ("none", "crossfade", "automix")
+DEFAULT_CROSSFADE_SECONDS = 3.0
+MIN_CROSSFADE_SECONDS = 0.5
+MAX_CROSSFADE_SECONDS = 30.0
+
+
 @dataclass(slots=True)
 class ProjectSettings:
     """Project identity and portable-content policy."""
@@ -37,10 +43,13 @@ class ProjectSettings:
     content_mode: str = "embed"
     thumbnail_mode: str = "canvas"
     thumbnail_path: str = ""
-    # Per-project, not per-user: whether export/Preview should analyze
-    # tracks and blend between them with AutoMix. Off by default so
-    # existing projects keep their exact legacy sequential audio.
-    automix_enabled: bool = False
+    # Per-project, not per-user: how export blends between tracks.
+    # "none" (legacy instant cut) is the default so existing projects keep
+    # their exact legacy sequential audio.
+    transition_mode: str = "none"
+    # Only meaningful when transition_mode == "crossfade": how many seconds
+    # before each track ends the next one starts fading in.
+    crossfade_seconds: float = DEFAULT_CROSSFADE_SECONDS
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -53,6 +62,16 @@ class ProjectSettings:
             self.content_mode = "embed"
         if self.thumbnail_mode not in {"canvas", "custom"}:
             self.thumbnail_mode = "canvas"
+        if self.transition_mode not in TRANSITION_MODES:
+            self.transition_mode = "none"
+        if (not isinstance(self.crossfade_seconds, (int, float))
+                or isinstance(self.crossfade_seconds, bool)
+                or not isfinite(float(self.crossfade_seconds))):
+            self.crossfade_seconds = DEFAULT_CROSSFADE_SECONDS
+        else:
+            self.crossfade_seconds = max(
+                MIN_CROSSFADE_SECONDS, min(MAX_CROSSFADE_SECONDS, float(self.crossfade_seconds)),
+            )
 
 
 @dataclass(slots=True)
@@ -140,6 +159,15 @@ class ProjectDocument:
         settings_data = data.get("settings", {})
         if not isinstance(settings_data, dict):
             settings_data = {}
+        else:
+            settings_data = dict(settings_data)
+        if "transition_mode" not in settings_data and "automix_enabled" in settings_data:
+            # Migrate a project saved before transition_mode existed: the old
+            # field was a plain on/off AutoMix switch.
+            settings_data["transition_mode"] = (
+                "automix" if settings_data.get("automix_enabled") else "none"
+            )
+        settings_data.pop("automix_enabled", None)
         canvas_model = CanvasSettings(**canvas)
         for name in ("width", "height", "zoom"):
             value = getattr(canvas_model, name)
@@ -157,13 +185,17 @@ class ProjectDocument:
             raise ValueError("Project content mode must be 'embed' or 'reference'.")
         if settings_data.get("thumbnail_mode", "canvas") not in {"canvas", "custom"}:
             raise ValueError("Project thumbnail mode must be 'canvas' or 'custom'.")
+        if settings_data.get("transition_mode", "none") not in TRANSITION_MODES:
+            raise ValueError("Project transition mode must be 'none', 'crossfade', or 'automix'.")
+        crossfade_value = settings_data.get("crossfade_seconds", DEFAULT_CROSSFADE_SECONDS)
+        if (not isinstance(crossfade_value, (int, float)) or isinstance(crossfade_value, bool)
+                or not isfinite(float(crossfade_value))):
+            raise ValueError("Project crossfade_seconds must be a finite number.")
         settings_model = ProjectSettings(**settings_data)
         if not all(isinstance(getattr(settings_model, name), str) for name in (
             "title", "description", "author", "thumbnail_path", "created_at", "modified_at",
         )):
             raise ValueError("Project identity and timestamp fields must be strings.")
-        if not isinstance(settings_model.automix_enabled, bool):
-            raise ValueError("Project 'automix_enabled' must be a boolean.")
 
         source_models = [source_registry.deserialize(entry) for entry in sources]
         group_models = [LayerGroup.from_dict(entry) for entry in groups]

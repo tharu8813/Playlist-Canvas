@@ -76,6 +76,54 @@ class RenderAutomixAudioSegmentsUnitTests(unittest.TestCase):
                 )
 
 
+class RenderFixedCrossfadeAudioSegmentsUnitTests(unittest.TestCase):
+    """No real FFmpeg needed: exercises the fallback/degradation logic only."""
+
+    def test_missing_dependency_returns_none(self) -> None:
+        renderer = _renderer()
+        with patch.dict(sys.modules, {"app.automix.renderer": None}):
+            result = renderer._render_fixed_crossfade_audio_segments(
+                [PlaylistTrack("a.mp3", "A", duration_seconds=30.0)],
+                Path("."), 30.0, 3.0, None, __import__("threading").Event(),
+            )
+        self.assertIsNone(result)
+
+    def test_render_failure_falls_back_to_none_not_an_exception(self) -> None:
+        renderer = _renderer()
+        with patch(
+            "app.automix.renderer.AutoMixAudioPipeline.render",
+            side_effect=AutoMixRenderError("boom"),
+        ):
+            result = renderer._render_fixed_crossfade_audio_segments(
+                [
+                    PlaylistTrack("a.mp3", "A", duration_seconds=30.0),
+                    PlaylistTrack("b.mp3", "B", duration_seconds=30.0),
+                ],
+                Path("."), 60.0, 3.0, None, __import__("threading").Event(),
+            )
+        self.assertIsNone(result)
+
+    def test_cancellation_propagates_instead_of_falling_back(self) -> None:
+        import threading
+        from app.renderer.ffmpeg_renderer import RenderCancelledError
+
+        renderer = _renderer()
+        cancel_event = threading.Event()
+        cancel_event.set()
+        with patch(
+            "app.automix.renderer.AutoMixAudioPipeline.render",
+            side_effect=AutoMixRenderError("cancelled"),
+        ):
+            with self.assertRaises(RenderCancelledError):
+                renderer._render_fixed_crossfade_audio_segments(
+                    [
+                        PlaylistTrack("a.mp3", "A", duration_seconds=30.0),
+                        PlaylistTrack("b.mp3", "B", duration_seconds=30.0),
+                    ],
+                    Path("."), 60.0, 3.0, None, cancel_event,
+                )
+
+
 @unittest.skipUnless(
     os.environ.get("PLAYLIST_CANVAS_TEST_FFMPEG", "").strip(),
     "Set PLAYLIST_CANVAS_TEST_FFMPEG to run real FFmpeg AutoMix export checks.",
@@ -127,7 +175,83 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             renderer = FFmpegRenderer(executable)
             output_path = directory / "out.mp4"
             result = renderer.render(
-                [image, image], tracks, output_path, settings, use_automix=True,
+                [image, image], tracks, output_path, settings, transition_mode="automix",
+            )
+            self.assertTrue(output_path.is_file())
+            self.assertAlmostEqual(result.validation.duration_seconds, 20.0, delta=0.5)
+
+    def test_crossfade_export_matches_the_legacy_sequential_duration(self) -> None:
+        executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
+        with TemporaryDirectory(prefix="crossfade-export-") as raw_directory:
+            directory = Path(raw_directory)
+            a_path = directory / "a.wav"
+            b_path = directory / "b.wav"
+            _write_tone_wav(a_path, 440.0, 20.0)
+            _write_tone_wav(b_path, 440.0, 20.0)
+            tracks = [
+                PlaylistTrack(str(a_path), "A", duration_seconds=20.0),
+                PlaylistTrack(str(b_path), "B", duration_seconds=20.0),
+            ]
+            renderer = FFmpegRenderer(executable)
+            sequential_duration = renderer._timeline_duration(tracks)
+            self.assertEqual(sequential_duration, 40.0)
+
+            segments = renderer._render_fixed_crossfade_audio_segments(
+                tracks, directory, sequential_duration, 3.0, None, __import__("threading").Event(),
+            )
+            self.assertIsNotNone(segments)
+            segment_paths, segment_durations = segments
+            self.assertAlmostEqual(sum(segment_durations), sequential_duration, delta=0.05)
+            # A 3s crossfade shortens the mix by 3s versus plain concatenation.
+            self.assertAlmostEqual(segment_durations[0], 37.0, delta=0.1)
+
+    def test_crossfade_preserves_an_explicit_gap(self) -> None:
+        executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
+        with TemporaryDirectory(prefix="crossfade-gap-") as raw_directory:
+            directory = Path(raw_directory)
+            a_path = directory / "a.wav"
+            b_path = directory / "b.wav"
+            _write_tone_wav(a_path, 440.0, 10.0)
+            _write_tone_wav(b_path, 440.0, 10.0)
+            tracks = [
+                PlaylistTrack(str(a_path), "A", duration_seconds=10.0),
+                PlaylistTrack(str(b_path), "B", duration_seconds=10.0, start_time_seconds=15.0),
+            ]
+            renderer = FFmpegRenderer(executable)
+            sequential_duration = renderer._timeline_duration(tracks)
+            self.assertEqual(sequential_duration, 25.0)
+
+            segments = renderer._render_fixed_crossfade_audio_segments(
+                tracks, directory, sequential_duration, 3.0, None, __import__("threading").Event(),
+            )
+            self.assertIsNotNone(segments)
+            _segment_paths, segment_durations = segments
+            # No overlap should have been applied across the explicit gap.
+            self.assertAlmostEqual(sum(segment_durations), 25.0, delta=0.05)
+
+    def test_full_render_with_crossfade_mode_matches_legacy_duration(self) -> None:
+        executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
+        with TemporaryDirectory(prefix="crossfade-export-full-") as raw_directory:
+            directory = Path(raw_directory)
+            a_path = directory / "a.wav"
+            b_path = directory / "b.wav"
+            _write_tone_wav(a_path, 440.0, 10.0)
+            _write_tone_wav(b_path, 440.0, 10.0)
+            tracks = [
+                PlaylistTrack(str(a_path), "A", duration_seconds=10.0),
+                PlaylistTrack(str(b_path), "B", duration_seconds=10.0),
+            ]
+            image = QImage(32, 32, QImage.Format.Format_RGB32)
+            image.fill(QColor(10, 20, 30))
+            settings = RenderSettings(
+                fps=5, video_codec="libx264", crf=30, preset="ultrafast",
+                output_width=32, output_height=32,
+            )
+            renderer = FFmpegRenderer(executable)
+            output_path = directory / "out.mp4"
+            result = renderer.render(
+                [image, image], tracks, output_path, settings,
+                transition_mode="crossfade", crossfade_seconds=2.0,
             )
             self.assertTrue(output_path.is_file())
             self.assertAlmostEqual(result.validation.duration_seconds, 20.0, delta=0.5)

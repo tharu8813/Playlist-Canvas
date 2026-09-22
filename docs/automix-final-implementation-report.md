@@ -2,6 +2,8 @@
 
 Phase 8 completion report per `docs/08_PHASE8_FINAL_INTEGRATION_RELEASE_AUDIT.md`. Covers Phases 1-8 of `docs/00_AUTOMIX_IMPLEMENTATION_ROADMAP.md` plus the ad hoc UI/export-wiring work done alongside them.
 
+> **Post-Phase-8 addendum:** `ProjectSettings.automix_enabled: bool` described below was generalized to `transition_mode: str` (`"none" | "crossfade" | "automix"`) plus `crossfade_seconds: float`, adding a plain, analysis-free fixed-length crossfade option alongside AutoMix and the legacy instant cut. Old project files with `automix_enabled` migrate automatically (`True` -> `"automix"`, `False` -> `"none"`). `FFmpegRenderer.render()`'s `use_automix: bool` parameter was replaced by `transition_mode`/`crossfade_seconds` the same way; the crossfade path reuses `AutoMixAudioPipeline` purely as an FFmpeg filter-graph renderer and needs no analysis or `librosa`. Everything else in this report (architecture, fallback chain, known limitations, release blockers) is unchanged by this addition.
+
 ## Architecture
 
 ```text

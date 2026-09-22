@@ -42,21 +42,51 @@ class ProjectModelValidationTests(unittest.TestCase):
         restored = ProjectDocument.from_dict(payload)
         self.assertEqual(restored.app_version, "")
 
-    def test_automix_enabled_defaults_off_and_is_backward_compatible(self) -> None:
-        self.assertFalse(ProjectSettings().automix_enabled)
+    def test_transition_mode_defaults_to_none(self) -> None:
+        self.assertEqual(ProjectSettings().transition_mode, "none")
         payload = ProjectDocument().to_dict()
-        del payload["settings"]["automix_enabled"]
+        del payload["settings"]["transition_mode"]
         restored = ProjectDocument.from_dict(payload)
-        self.assertFalse(restored.settings.automix_enabled)
+        self.assertEqual(restored.settings.transition_mode, "none")
 
-    def test_automix_enabled_round_trips(self) -> None:
-        document = ProjectDocument(settings=ProjectSettings(automix_enabled=True))
+    def test_transition_mode_round_trips(self) -> None:
+        document = ProjectDocument(settings=ProjectSettings(transition_mode="crossfade"))
         restored = ProjectDocument.from_dict(document.to_dict())
-        self.assertTrue(restored.settings.automix_enabled)
+        self.assertEqual(restored.settings.transition_mode, "crossfade")
 
-    def test_automix_enabled_must_be_a_boolean(self) -> None:
+    def test_transition_mode_must_be_a_known_value(self) -> None:
         payload = ProjectDocument().to_dict()
-        payload["settings"]["automix_enabled"] = "yes"
+        payload["settings"]["transition_mode"] = "fade_to_black"
+        with self.assertRaises(ValueError):
+            ProjectDocument.from_dict(payload)
+
+    def test_legacy_automix_enabled_migrates_to_transition_mode(self) -> None:
+        payload = ProjectDocument().to_dict()
+        del payload["settings"]["transition_mode"]
+        payload["settings"]["automix_enabled"] = True
+        restored = ProjectDocument.from_dict(payload)
+        self.assertEqual(restored.settings.transition_mode, "automix")
+
+    def test_legacy_automix_disabled_migrates_to_none(self) -> None:
+        payload = ProjectDocument().to_dict()
+        del payload["settings"]["transition_mode"]
+        payload["settings"]["automix_enabled"] = False
+        restored = ProjectDocument.from_dict(payload)
+        self.assertEqual(restored.settings.transition_mode, "none")
+
+    def test_crossfade_seconds_defaults_and_round_trips(self) -> None:
+        self.assertEqual(ProjectSettings().crossfade_seconds, 3.0)
+        document = ProjectDocument(settings=ProjectSettings(crossfade_seconds=5.5))
+        restored = ProjectDocument.from_dict(document.to_dict())
+        self.assertEqual(restored.settings.crossfade_seconds, 5.5)
+
+    def test_crossfade_seconds_is_clamped_to_a_sane_range(self) -> None:
+        self.assertEqual(ProjectSettings(crossfade_seconds=0.0).crossfade_seconds, 0.5)
+        self.assertEqual(ProjectSettings(crossfade_seconds=999.0).crossfade_seconds, 30.0)
+
+    def test_crossfade_seconds_must_be_a_number(self) -> None:
+        payload = ProjectDocument().to_dict()
+        payload["settings"]["crossfade_seconds"] = "a lot"
         with self.assertRaises(ValueError):
             ProjectDocument.from_dict(payload)
 
