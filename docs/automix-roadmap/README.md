@@ -23,3 +23,20 @@ Phase 4의 실제 음악 청감 결과를 보고 이후 DSP 단계 우선순위�
 - E: Release hardening
 
 각 MD를 코딩 에이전트에게 한 단계씩 전달하고, 각 단계 종료 후 commit SHA 확인 → 실제 diff 검토 → regression 확인 → 다음 단계 진행 여부 결정 순서로 운영한다.
+
+
+## Status (2026-09-23)
+
+| step | result | commit |
+|---|---|---|
+| 01 progressive preview | done earlier; re-verified, churn numbers recorded | `789b73a`, `98cc274` |
+| 02 real music tuning | diagnostics framework + 2 real-music fixes; human listening still TODO | `fad3a72` |
+| 03 debug / explainability UI | done | `a7284da` |
+| 04 continuous filter sweep | implemented and A/B-able; selector keeps FILTER_BLEND until listening prefers it | `f98ff95` (+ `c8ab25f` long-graph fix) |
+| 05 vocal-aware DSP | done; voice-band heuristic removed (inverted on real music) | `b4ac154` |
+| 06 stem separation | deferred with cost, criteria and proposal | `aee8b5e` |
+| 07 presets | done | `449c168` |
+| 08 cache / background UX | done | `e9d45f2` |
+| 09 release hardening | done; full suite green | `4424d93` |
+
+Each step's file ends with an **Outcome** section. The completed phase 1-8 AutoMix documents live in `docs/automix-history/`.
