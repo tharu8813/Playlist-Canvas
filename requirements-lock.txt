@@ -4,7 +4,7 @@
 # were captured from a Python 3.14 dev sandbox, not the official Python
 # 3.12 release environment this file otherwise targets -- re-resolve and
 # confirm these exact pins on the real 3.12 build machine before relying
-# on them for a release (see docs/automix-phase1-dependency-evaluation.md
+# on them for a release (see docs/automix-history/automix-phase1-dependency-evaluation.md
 # and the Phase 2 report's "Known Limitations").
 altgraph==0.17.5
 cloudpickle==3.1.2

@@ -1,0 +1,92 @@
+# 공통 전제
+
+이 작업은 `tharu8813/Playlist-Canvas`의 최신 `main` 기준으로 진행한다.
+
+이미 완료된 핵심 기반은 되돌리지 말 것.
+
+- Beat This 기반 beat/downbeat/BPM 분석
+- Sonara 기반 structure/energy 분석
+- persistent analysis cache
+- AutoMix Planner v2
+- effective BPM propagation
+- Structure-aware / energy-aware candidate generation
+- Commit C.1 exact transition geometry
+- source/timeline rate-space consistency
+- score saturation fix
+- Preview/Export shared `CompiledRenderPlan`
+- Preview hot-swap의 pending seek / generation token
+- lossless PCM/NUT intermediate
+- downstream loudnorm + final AAC 1회 인코딩
+- Bass Swap DSP
+- VOCAL_SAFE_EQ
+- FILTER_BLEND
+- SHORT_FADE
+- Transition Style Selector
+- DSP reasons / diagnostic logging
+- DSP runtime fallback to legacy qsin/tri path
+- cancellation / stale generation 방어
+
+기존 regression을 깨뜨리면서 새 기능을 얹지 말 것.
+
+## 작업 원칙
+
+1. 실제 코드를 먼저 읽고 현재 구조를 확인한 뒤 수정한다.
+2. 보고서보다 실제 source code와 tests를 우선한다.
+3. Preview와 Export의 timing/DSP 결정이 서로 갈라지지 않게 한다.
+4. Planner는 어디서/얼마나/어떤 style을 결정하고 Renderer는 실행만 담당한다.
+5. 같은 입력은 항상 같은 결과를 내야 한다.
+6. silent geometry 변경 금지.
+7. synthetic test만 통과했다고 실제 음질이 좋다고 주장하지 않는다.
+8. known unrelated issue는 이번 단계 범위와 분리한다.
+
+# Phase 3 — Progressive AutoMix Preview
+
+## 목표
+모든 track 분석과 full mix render가 끝날 때까지 기다리지 않고, 분석 완료된 앞부분부터 AutoMix를 점진 적용한다.
+
+```text
+처음부터 Preview 재생 가능
+→ 뒤에서 Beat This / Sonara 분석
+→ 앞쪽 transition부터 확정
+→ 안전한 시점에 hot-swap
+→ AutoMix 구간이 뒤로 확장
+→ 마지막에는 Export와 동일한 final plan
+```
+
+## 요구사항
+- 곡별 rhythm+structure 결과가 준비되는 즉시 cache 반영.
+- 인접 pair가 준비되면 해당 transition 계획.
+- 아직 분석 안 된 tail은 sequential fallback.
+- 분석 이벤트마다 전체 playlist를 재렌더하지 말고 debounce/coalesce.
+- 현재 playhead 근처 transition을 우선.
+- 재생 중인 transition 자체는 가급적 교체하지 않고 safe boundary에서 swap.
+- 기존 pending seek / generation token / pause-play 상태 / seekable guard 유지.
+- 중간 preview마다 full EBU R128 2-pass 반복 금지. final preview에서 기존 loudness pipeline 사용.
+- 최종 progressive plan == normal full compile == Export plan.
+- fake progress timer 금지.
+- reorder/remove/AutoMix off/project change/preview close 시 stale generation 차단.
+
+## 성능 검증
+10/20/50 track synthetic playlist로 analysis event 수, plan update 수, render 수, hot-swap 수, cache-hit churn을 측정. render 수가 analysis event 수와 1:1이 되지 않게 한다.
+
+## 테스트
+- A/B 준비 후 A→B만 AutoMix
+- C 준비 후 B→C 추가
+- unready tail sequential
+- rapid analysis events coalesced
+- render/hot-swap 중 다음 결과 도착
+- 현재 transition 재생 중 unsafe swap 방지
+- seek/pause 상태 update
+- cache hit playlist
+- final progressive == full compile
+- final Preview == Export
+- cancellation/stale generation blocked
+
+## 금지
+Planner geometry 재정의, DSP selector 재설계, stem separation, intermediate AAC 재도입.
+
+## 권장 commit
+`feat: progressively apply AutoMix while preview analysis completes`
+
+## 최종 보고
+1. incremental architecture 2. partial plan 3. coalescing 4. safe swap 5. loudness 6. final parity 7. 10/20/50곡 수치 8. cache hit 9. cancellation 10. tests

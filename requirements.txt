@@ -3,7 +3,7 @@ mutagen>=1.47,<2.0
 numpy>=1.26,<3.0
 # AutoMix's default BPM/beat analyzer (app/automix/analysis/basic.py). Pulls
 # in scipy, numba/llvmlite, scikit-learn, soundfile, and pooch -- see
-# docs/automix-phase1-dependency-evaluation.md for why librosa was chosen
+# docs/automix-history/automix-phase1-dependency-evaluation.md for why librosa was chosen
 # over aubio/Essentia (GPL/AGPL) and Beat This!/Essentia's ML models
 # (PyTorch/TensorFlow cost, kept optional for a later phase instead).
 librosa>=1.0,<2.0
@@ -12,7 +12,7 @@ librosa>=1.0,<2.0
 # AutoMix analyzer for real beat/downbeat detection, deliberately NOT listed
 # here: it pulls in torch (commonly 500 MB+) and its own model download.
 # Install separately if you want it -- `pip install beat-this` -- see
-# docs/automix-phase1-dependency-evaluation.md's "AutoMix v3 outcome"
+# docs/automix-history/automix-phase1-dependency-evaluation.md's "AutoMix v3 outcome"
 # section. The app, its default install, and its test suite all work fully
 # without it; AutoMix falls back to the basic analyzer above per track.
 
@@ -21,6 +21,6 @@ librosa>=1.0,<2.0
 # unlike Beat This!, it is a tiny (~1.9 MB Windows wheel) Rust/PyO3 native
 # extension with no ML runtime dependency, but the app must still work fully
 # without it. Install separately if you want it -- `pip install sonara` --
-# see docs/automix-phase1-dependency-evaluation.md's "AutoMix v3 Commit B
+# see docs/automix-history/automix-phase1-dependency-evaluation.md's "AutoMix v3 Commit B
 # outcome" section. A missing install simply means no structure data;
 # rhythm analysis (Beat This!/basic) and AutoMix are entirely unaffected.

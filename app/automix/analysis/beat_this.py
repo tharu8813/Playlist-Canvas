@@ -12,7 +12,7 @@ what actually unlocks BEAT_MATCH-quality transitions in
 app/automix/candidates.py, not a planner change.
 
 ``torch``/``beat_this`` are heavyweight, optional runtime dependencies (not
-in requirements.txt -- see docs/automix-phase1-dependency-evaluation.md's
+in requirements.txt -- see docs/automix-history/automix-phase1-dependency-evaluation.md's
 "Beat This!" section for the original size/license evaluation) and are
 imported lazily, inside _load_model(), only once analysis is actually
 attempted -- never at module import time, matching the same principle

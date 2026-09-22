@@ -1,6 +1,6 @@
 """The default AutoMix analyzer: FFmpeg decode + librosa BPM/beat tracking.
 
-Chosen per docs/automix-phase1-dependency-evaluation.md: librosa carries a
+Chosen per docs/automix-history/automix-phase1-dependency-evaluation.md: librosa carries a
 permissive license, needs no downloaded model, and this project's own
 managed FFmpeg install (see app/ffmpeg/managed_installer.py) handles
 decoding -- so librosa never needs its own audioread/soundfile container
