@@ -222,7 +222,7 @@ class AutoMixDetailsPanel(QFrame):
 
     def retranslate(self) -> None:
         korean = self._korean()
-        self.toggle_button.setText("AutoMix 상세" if korean else "AutoMix details")
+        self.toggle_button.setText("전환 상세" if korean else "Transition details")
         self.toggle_button.setToolTip(
             "각 전환의 위치, 방식, 선택 근거를 봅니다." if korean
             else "See where each transition sits, how it is mixed, and why."

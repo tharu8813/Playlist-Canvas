@@ -21,9 +21,11 @@ from app.utils.i18n import Language, Translator
 class PreviewPreparationDialog(QDialog):
     """Blocks the caller (while staying responsive) until audio is ready or skipped."""
 
-    def __init__(self, translator: Translator, parent: QWidget | None = None) -> None:
+    def __init__(self, translator: Translator, parent: QWidget | None = None, *,
+                 transition_mode: str = "automix") -> None:
         super().__init__(parent)
         self.translator = translator
+        self.transition_mode = transition_mode
         self.skipped = False
         self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setMinimumWidth(380)
@@ -54,7 +56,10 @@ class PreviewPreparationDialog(QDialog):
 
     def retranslate(self) -> None:
         korean = self.translator.language is Language.KOREAN
-        title = "AutoMix 미리보기 준비 중" if korean else "Preparing AutoMix Preview"
+        if self.transition_mode == "crossfade":
+            title = "크로스페이드 미리보기 준비 중" if korean else "Preparing Crossfade Preview"
+        else:
+            title = "AutoMix 미리보기 준비 중" if korean else "Preparing AutoMix Preview"
         self.setWindowTitle(title)
         self.title_label.setText(title)
         self.description_label.setText(

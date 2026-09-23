@@ -223,7 +223,7 @@ class PreviewController:
             )
         else:
             controller = PreviewAudioController(FFmpegRenderer(executable), window)
-        dialog = PreviewPreparationDialog(window.translator, window)
+        dialog = PreviewPreparationDialog(window.translator, window, transition_mode=transition_mode)
         result: dict[str, tuple[Path, object]] = {}
 
         def on_ready(path_str: str, plan: object) -> None:

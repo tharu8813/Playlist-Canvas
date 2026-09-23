@@ -104,5 +104,17 @@ class AutoMixDetailsPanelTests(unittest.TestCase):
         self.assertIn("최종 계획", self.panel.status_label.text())
 
 
+class PreviewPreparationDialogTests(unittest.TestCase):
+    def test_title_names_the_projects_transition_mode(self) -> None:
+        from app.dialogs.preview_preparation_dialog import PreviewPreparationDialog
+
+        QApplication.instance() or QApplication([])
+        translator = SimpleNamespace(language=Language.KOREAN)
+        crossfade = PreviewPreparationDialog(translator, transition_mode="crossfade")
+        self.assertEqual(crossfade.title_label.text(), "크로스페이드 미리보기 준비 중")
+        automix = PreviewPreparationDialog(translator)
+        self.assertEqual(automix.title_label.text(), "AutoMix 미리보기 준비 중")
+
+
 if __name__ == "__main__":
     unittest.main()
