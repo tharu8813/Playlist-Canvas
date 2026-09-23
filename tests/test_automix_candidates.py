@@ -54,12 +54,12 @@ class GenerateCandidatesTests(unittest.TestCase):
         self.assertTrue(candidates)
         self.assertTrue(all(c.strategy is TransitionStrategy.BEAT_MATCH for c in candidates))
 
-    def test_no_downbeats_falls_back_to_beat_aligned_crossfade(self) -> None:
+    def test_reliable_beats_match_even_without_downbeats(self) -> None:
         outgoing = _analysis("a", 128.0, duration=200.0, with_downbeats=False)
         incoming = _analysis("b", 128.0, duration=200.0, with_downbeats=False)
         candidates = self._generate(outgoing, incoming)
         self.assertTrue(candidates)
-        self.assertTrue(all(c.strategy is TransitionStrategy.BEAT_ALIGNED_CROSSFADE for c in candidates))
+        self.assertTrue(all(c.strategy is TransitionStrategy.BEAT_MATCH for c in candidates))
         self.assertTrue(all(c.outgoing_rate == 1.0 and c.incoming_rate == 1.0 for c in candidates))
 
     def test_no_beats_still_allows_bpm_only_crossfade_when_confidence_present(self) -> None:
@@ -245,15 +245,15 @@ class StructureAwareCandidateTests(unittest.TestCase):
         with_kwargs_none = self._generate(outgoing, incoming, outgoing_structure=None, incoming_structure=None)
         self.assertEqual(with_kwargs_omitted, with_kwargs_none)
 
-    def test_structure_anchor_adds_a_candidate_near_the_outro(self) -> None:
+    def test_early_structure_anchor_cannot_cut_the_audible_ending(self) -> None:
         outgoing = _analysis("a", 128.0, duration=200.0)
         incoming = _analysis("b", 128.0, duration=200.0)
         # An outro starting well before the plain tail-based candidates would land.
         outgoing_structure = _structure("a", 200.0, outro_start=150.0)
         candidates = self._generate(outgoing, incoming, outgoing_structure=outgoing_structure)
         near_outro = [c for c in candidates if abs(c.outgoing_source_time - 150.0) < 2.0]
-        self.assertTrue(near_outro, "expected at least one candidate anchored near the structure outro")
-        self.assertTrue(any("structure anchor" in reason for reason in near_outro[0].reasons))
+        self.assertFalse(near_outro)
+        self.assertTrue(all(c.outgoing_source_out == 200.0 for c in candidates))
 
     def test_structure_anchor_adds_a_candidate_near_the_intro_end(self) -> None:
         outgoing = _analysis("a", 128.0, duration=200.0)

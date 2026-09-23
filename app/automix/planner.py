@@ -37,29 +37,12 @@ transitions could compound tempo drift silently, since each pair would be
 planned against a BPM number no longer matching what is actually playing
 by the time that transition happens.
 
-Candidate duration is authoritative (Commit C.1, fixes a real bug the
-structure-anchor feature exposed): `TransitionCandidate.duration_seconds`
-is now applied *directly* as `AudioRenderTransition.duration`, and the
-outgoing clip's `source_out` is trimmed (via `dataclasses.replace` on the
-already-appended clip -- `AudioRenderClip` is immutable) to
-`best.outgoing_source_out`, instead of deriving the actual overlap from
-`previous_clip.timeline_end - timeline_start`. That derivation silently
-assumed the outgoing clip always plays to its own natural end
-(`source_out == track.duration_seconds`, never trimmed), which was true
-for every candidate *before* structure anchors existed (a tail-based cue
-always lands near the track's real end anyway) but breaks whenever a
-structure anchor (an early `outro_start`) sits well before it: a candidate
-scored as a 16-second transition could render as a 30-second one, because
-the "overlap" was actually "anchor position to the untrimmed clip's own
-end," not the candidate's own `duration_seconds`. AutoMix intentionally
-allows skipping part of a track's outro this way (subject to the existing
-outgoing-tail-trim scoring penalty, `app.automix.candidates.WEIGHT_OUTGOING_TAIL_TRIM_PENALTY`)
--- this fix makes what actually gets rendered match what was scored,
-without changing that policy. `build_presentation_and_metadata()` derives
-presentation/chapter ownership purely from each window's *start* (never
-from a clip's own `timeline_end`), so trimming a clip's `source_out` here
-needs no special-casing there -- confirmed by
-`tests/test_automix_planner.py`'s dedicated geometry tests.
+Candidate duration is authoritative (Commit C.1): the planner applies
+`TransitionCandidate.duration_seconds` and `outgoing_source_out` directly.
+Candidates now retain the audible outgoing ending and finalize their actual
+source span and timeline duration before scoring. An early structure hint
+cannot discard the remaining audio or inflate the rendered overlap after
+scoring. Presentation and chapter ownership still follow transition starts.
 """
 
 from __future__ import annotations

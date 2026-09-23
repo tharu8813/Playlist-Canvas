@@ -122,6 +122,13 @@ def select_transition_dsp(
         dsp, rule = TransitionDsp.BASS_SWAP, "clean reliable beat match"
     else:
         dsp, rule = None, "aligned crossfade with no conflicts: legacy equal-power"
+    if vocals is None and dsp in (TransitionDsp.VOCAL_SAFE_EQ, TransitionDsp.FILTER_BLEND):
+        # Neither key nor energy says where the singer stops. Those styles
+        # mute the outgoing mids before the overlap ends; keep a full-window
+        # mid fade when vocal timing is unknown instead of cutting a phrase.
+        dsp = TransitionDsp.BASS_SWAP if strategy is TransitionStrategy.BEAT_MATCH else None
+        rule = "vocal activity unknown: preserve full-window mids"
+        handoff = None
     return TransitionDspDecision(
         dsp, (f"* {dsp.value if dsp else 'legacy'}: {rule}", *facts), metrics,
         vocal_handoff=handoff if dsp is TransitionDsp.VOCAL_SAFE_EQ else None,

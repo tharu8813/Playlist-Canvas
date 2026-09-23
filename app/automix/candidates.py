@@ -43,7 +43,7 @@ from enum import Enum
 
 from app.automix.analysis.key import camelot_compatible
 from app.automix.compatibility import TransitionCompatibility, resolve_target_bpm
-from app.automix.models import TrackAnalysis
+from app.automix.models import RELIABLE_BPM_CONFIDENCE, TrackAnalysis
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
 
@@ -188,7 +188,7 @@ def generate_candidates(
     """Generate every transition candidate worth considering for this pair.
 
     Degrades through, from best to worst (roadmap section 9):
-    BEAT_MATCH (both tracks' beat_alignment_quality is "reliable") ->
+    BEAT_MATCH (both tracks have reliable BPM and actual beat anchors) ->
     BEAT_ALIGNED_CROSSFADE (BPM usable but beat/bar confidence is not) ->
     FIXED_CROSSFADE (incompatible tempo or missing BPM, but both tracks
     have enough source duration for a plain timed crossfade) -> CUT (not
@@ -215,20 +215,27 @@ def generate_candidates(
     """
     if outgoing.bpm is None or incoming.bpm is None:
         return _fallback_candidates(
-            outgoing, incoming, settings, reasons=("- BPM is unknown for one or both tracks",),
+            outgoing, incoming, settings, outgoing_playback_rate=outgoing_playback_rate,
+            reasons=("- BPM is unknown for one or both tracks",),
         )
     if not compatibility.compatible:
-        return _fallback_candidates(outgoing, incoming, settings, reasons=compatibility.reasons)
+        return _fallback_candidates(
+            outgoing, incoming, settings, outgoing_playback_rate=outgoing_playback_rate,
+            reasons=compatibility.reasons,
+        )
 
     outgoing_quality = outgoing.beat_alignment_quality()
     incoming_quality = incoming.beat_alignment_quality()
     if outgoing_quality == "insufficient" or incoming_quality == "insufficient":
         return _fallback_candidates(
-            outgoing, incoming, settings,
+            outgoing, incoming, settings, outgoing_playback_rate=outgoing_playback_rate,
             reasons=("- beat confidence is too low to align a transition",),
         )
 
-    if outgoing_quality == "reliable" and incoming_quality == "reliable":
+    # A provisional bar grid is not a reason to leave two reliable beat
+    # tempos drifting apart. Match beats; only trust downbeats when measured.
+    if all(a.bpm_confidence >= RELIABLE_BPM_CONFIDENCE and len(a.beats) >= 4
+           for a in (outgoing, incoming)):
         strategy = TransitionStrategy.BEAT_MATCH
     else:
         strategy = TransitionStrategy.BEAT_ALIGNED_CROSSFADE
@@ -266,7 +273,7 @@ def generate_candidates(
 
     if not candidates:
         return _fallback_candidates(
-            outgoing, incoming, settings,
+            outgoing, incoming, settings, outgoing_playback_rate=outgoing_playback_rate,
             reasons=("- no bar length fit within the transition-length and track-duration limits",),
         )
     return candidates
@@ -338,16 +345,8 @@ def _beat_based_candidate(
         incoming_rate = 1.0
         seconds_per_bar = (outgoing.meter_numerator or DEFAULT_METER_NUMERATOR) * 60.0 / outgoing.bpm
 
-    # duration_seconds is the authoritative *timeline* length (roadmap
-    # C.1's core invariant): everything below derives from it, nothing
-    # below is ever used to redefine it. beats/downbeats/vocal_activity/
-    # structure timestamps are all in *source* seconds, so converting this
-    # timeline duration into how much source audio each side actually
-    # consumes needs each side's own playback rate -- outgoing_playback_rate
-    # (already fixed by whatever placed the outgoing clip, never this
-    # candidate's own outgoing_rate, which is always 1.0 -- "favor
-    # outgoing") for the outgoing side, incoming_rate (this candidate's own
-    # field) for the incoming side.
+    # Start with the requested bar length; after snapping, include the
+    # remaining audible tail before scoring the final timeline duration.
     duration_seconds = bars * seconds_per_bar
     if not (settings.min_transition_seconds <= duration_seconds <= settings.max_transition_seconds):
         return None
@@ -366,7 +365,8 @@ def _beat_based_candidate(
         else max(0.0, outgoing_end - outgoing_source_span)
     )
     naive_outgoing_time = max(0.0, min(naive_outgoing_time, outgoing.duration_seconds))
-    outgoing_anchors = outgoing.downbeats if strategy is TransitionStrategy.BEAT_MATCH else outgoing.beats
+    outgoing_anchors = (outgoing.downbeats if strategy is TransitionStrategy.BEAT_MATCH
+                        and _has_reliable_downbeats(outgoing) else outgoing.beats)
     # Bounded so the source window this candidate actually needs
     # (outgoing_source_span, fixed by duration_seconds) never overruns the
     # track -- nor its audible end, when there is room before it --
@@ -375,16 +375,33 @@ def _beat_based_candidate(
     outgoing_source_time, outgoing_snap = _nearest_bounded_anchor(
         outgoing_anchors, naive_outgoing_time, max(0.0, outgoing_end - outgoing_source_span),
     )
-    outgoing_source_out = min(outgoing_source_time + outgoing_source_span, outgoing.duration_seconds)
+    # Preserve the audible ending, including an off-grid last syllable.
+    # Finalize the candidate's duration here, BEFORE scoring/compilation;
+    # C.1 still renders exactly the duration that was scored. Early structure
+    # hints requiring an overlong overlap are rejected, never used to cut audio.
+    # Allow at most one extra bar for snapping, not an arbitrary long fade.
+    outgoing_source_out = outgoing_end
+    outgoing_source_span = outgoing_end - outgoing_source_time
+    duration_seconds = outgoing_source_span / outgoing_playback_rate
+    incoming_source_span = duration_seconds * incoming_rate
+    if (not settings.min_transition_seconds <= duration_seconds <= settings.max_transition_seconds
+            or duration_seconds > (bars + 1) * seconds_per_bar + _DURATION_EPSILON_SECONDS
+            or incoming_source_span > incoming.duration_seconds):
+        return None
+    if strategy is TransitionStrategy.BEAT_MATCH and outgoing_source_time not in outgoing_anchors:
+        return None
 
     naive_incoming_time = (
         incoming_naive_override if incoming_naive_override is not None else audible_start(incoming)
     )
     naive_incoming_time = max(0.0, min(naive_incoming_time, incoming.duration_seconds))
-    incoming_anchors = incoming.downbeats if strategy is TransitionStrategy.BEAT_MATCH else incoming.beats
+    incoming_anchors = (incoming.downbeats if strategy is TransitionStrategy.BEAT_MATCH
+                        and _has_reliable_downbeats(incoming) else incoming.beats)
     incoming_source_time, incoming_snap = _nearest_bounded_anchor(
         incoming_anchors, naive_incoming_time, incoming.duration_seconds - incoming_source_span,
     )
+    if strategy is TransitionStrategy.BEAT_MATCH and incoming_source_time not in incoming_anchors:
+        return None
 
     confidence = min(outgoing.bpm_confidence, incoming.bpm_confidence)
     score, reasons = _score_beat_candidate(
@@ -393,6 +410,10 @@ def _beat_based_candidate(
         outgoing_source_span=outgoing_source_span, incoming_source_span=incoming_source_span,
         outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
     )
+    if strategy is TransitionStrategy.BEAT_MATCH:
+        alignment = "downbeat" if all(_has_reliable_downbeats(a) for a in (outgoing, incoming)) else "beat (bar phase uncertain)"
+        reasons += (f"+ tempo matched at {alignment} cues",)
+    reasons += ("+ audible outgoing ending preserved",)
     return TransitionCandidate(
         from_track_id=outgoing.track_id, to_track_id=incoming.track_id,
         outgoing_source_time=outgoing_source_time, outgoing_source_out=outgoing_source_out,
@@ -402,6 +423,11 @@ def _beat_based_candidate(
         outgoing_rate=outgoing_rate, incoming_rate=incoming_rate,
         score=score, confidence=confidence, strategy=strategy, reasons=reasons,
     )
+
+
+def _has_reliable_downbeats(analysis: TrackAnalysis) -> bool:
+    """Only a measured bar grid may supply downbeat anchors."""
+    return analysis.beat_alignment_quality() == "reliable" and bool(analysis.downbeats)
 
 
 def _nearest_anchor(anchors: tuple[float, ...], naive_time: float) -> tuple[float, float]:
@@ -475,7 +501,7 @@ def _score_beat_candidate(
     snap_total = outgoing_snap + incoming_snap
     proximity_component = max(0.0, 1.0 - snap_total / 4.0)
     score += WEIGHT_PROXIMITY * proximity_component
-    anchor_name = "downbeat" if strategy is TransitionStrategy.BEAT_MATCH else "beat"
+    anchor_name = "downbeat" if strategy is TransitionStrategy.BEAT_MATCH and _has_reliable_downbeats(incoming) else "beat"
     if incoming_snap > 1.0:
         reasons.append(f"- incoming cue is {incoming_snap:.1f}s from the nearest {anchor_name}")
     else:
@@ -592,7 +618,7 @@ def _has_activity_in_range(spans: tuple[tuple[float, float], ...], start: float,
 
 def _fallback_candidates(
     outgoing: TrackAnalysis, incoming: TrackAnalysis, settings: AutoMixTransitionSettings,
-    reasons: tuple[str, ...],
+    reasons: tuple[str, ...], outgoing_playback_rate: float = 1.0,
 ) -> list[TransitionCandidate]:
     """FIXED_CROSSFADE if both tracks have room for one, otherwise CUT.
 
@@ -601,7 +627,7 @@ def _fallback_candidates(
     masters a fixed fade over the file's very end overlapped only silence.
     """
     outgoing_end, incoming_start = audible_end(outgoing), audible_start(incoming)
-    available = min(outgoing_end, incoming.duration_seconds - incoming_start)
+    available = min(outgoing_end / outgoing_playback_rate, incoming.duration_seconds - incoming_start)
     duration_seconds = min(settings.fallback_crossfade_seconds, available)
     if duration_seconds < settings.min_transition_seconds:
         return [TransitionCandidate(
@@ -614,13 +640,10 @@ def _fallback_candidates(
             score=0.1, confidence=0.0, strategy=TransitionStrategy.CUT,
             reasons=reasons + ("- not enough source duration for even a fixed crossfade",),
         )]
-    # rate is always 1.0 for a fixed crossfade, so the source span equals
-    # duration_seconds and outgoing_source_out lands exactly at the
-    # track's audible end -- consistent with the exact-duration invariant
-    # without needing separate span bookkeeping for this simple case.
+    # The incoming rate is 1.0; the outgoing clip may retain a prior match.
     return [TransitionCandidate(
         from_track_id=outgoing.track_id, to_track_id=incoming.track_id,
-        outgoing_source_time=max(0.0, outgoing_end - duration_seconds),
+        outgoing_source_time=max(0.0, outgoing_end - duration_seconds * outgoing_playback_rate),
         outgoing_source_out=outgoing_end,
         incoming_source_time=incoming_start,
         bars=0, duration_seconds=duration_seconds,

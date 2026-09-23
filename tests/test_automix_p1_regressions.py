@@ -33,15 +33,7 @@ from tests.test_automix_planner import _track, _analysis, ENABLED
 
 class MixTimingTests(unittest.TestCase):
     def test_selected_outgoing_beat_is_used_even_when_track_end_is_off_grid(self):
-        """Commit C.1: the rendered transition duration must equal the
-        winning candidate's own duration_seconds exactly, not whatever
-        ``previous_clip.timeline_end - timeline_start`` happens to work out
-        to for an off-grid track end. Track 'a' ends at 60.3s (not a beat
-        boundary at 120 BPM); the nearest beat at or before the natural
-        tail is 60.0s, so the 8-bar (16.0s) candidate's own outgoing cue is
-        44.0s -- previously this test asserted 44.5s/15.8s, the pre-C.1
-        clip-arithmetic-derived overlap that silently diverged from the
-        candidate's actual scored duration (16.0s)."""
+        """C.1 scores/renders the same duration, including the off-grid tail."""
         tracks = [_track('a', 60.3), _track('b', 60)]
         analyses = {t.id: _analysis(t.id, 120, t.duration_seconds, meter_confidence=.3) for t in tracks}
         a, b = analyses.values()
@@ -50,7 +42,7 @@ class MixTimingTests(unittest.TestCase):
         self.assertAlmostEqual(candidate.outgoing_source_time, 44.0)
         self.assertAlmostEqual(plan.audio.clips[1].timeline_start, candidate.outgoing_source_time)
         self.assertAlmostEqual(plan.audio.transitions[0].duration, candidate.duration_seconds)
-        self.assertAlmostEqual(plan.audio.transitions[0].duration, 16.0)
+        self.assertAlmostEqual(plan.audio.transitions[0].duration, 16.3)
 
     def test_frames_preview_and_chapters_use_the_same_source_time_and_duration(self):
         tracks = [_track('a', 60), _track('b', 60)]

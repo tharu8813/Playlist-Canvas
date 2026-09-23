@@ -1,0 +1,135 @@
+"""Audible endings and real beat matching must survive conservative analysis."""
+
+from dataclasses import replace
+import os
+from pathlib import Path
+import subprocess
+from tempfile import TemporaryDirectory
+import unittest
+import wave
+
+import numpy as np
+
+from app.automix.planner import compile_automix
+from app.automix.renderer import AutoMixAudioPipeline, band_fade_windows
+from app.utils.subprocess_utils import hidden_process_kwargs
+from app.timeline.models import TransitionType
+from tests.test_automix_planner import ENABLED, _analysis, _structure, _track
+
+
+class TailProtectionTests(unittest.TestCase):
+    def test_fallback_after_a_rate_matched_track_keeps_exact_geometry(self):
+        tracks = [_track(name, 60) for name in ('a', 'b', 'c')]
+        for bpm in (90, None):
+            with self.subTest(bpm=bpm):
+                analyses = {name: _analysis(name, tempo, 60)
+                            for name, tempo in zip(('a', 'b', 'c'), (120, 124, bpm))}
+                plan = compile_automix(tracks, analyses, ENABLED)
+                self.assertAlmostEqual(plan.audio.clips[1].playback_rate, 120 / 124)
+                self.assertEqual(plan.audio.transitions[1].type, TransitionType.CROSSFADE)
+                for clip, transition in zip(plan.audio.clips, plan.audio.transitions):
+                    self.assertEqual(clip.source_out, 60)
+                    self.assertAlmostEqual(clip.timeline_end, transition.timeline_start + transition.duration)
+
+    def test_structure_hint_cannot_discard_an_unknown_or_known_vocal_ending(self):
+        tracks = [_track("a", 200.3), _track("b", 200.0)]
+        for vocals in ((), ((185.0, 200.3),)):
+            with self.subTest(vocals=vocals):
+                analyses = {
+                    "a": replace(_analysis("a", 120, 200.3), vocal_activity=vocals),
+                    "b": _analysis("b", 120, 200),
+                }
+                plan = compile_automix(tracks, analyses, ENABLED,
+                                       structures={"a": _structure("a", 200.3, outro_start=150)})
+                clip = plan.audio.clips[0]
+                transition = plan.audio.transitions[0]
+                self.assertEqual(clip.source_out, 200.3)
+                self.assertAlmostEqual(clip.timeline_end, transition.timeline_start + transition.duration)
+                self.assertLessEqual(transition.duration, ENABLED.max_transition_seconds)
+
+    def test_uncertain_bars_do_not_disable_reliable_beat_tempo_matching(self):
+        tracks = [_track("a", 60.3), _track("b", 60)]
+        analyses = {"a": _analysis("a", 120, 60.3, meter_confidence=.3),
+                    "b": _analysis("b", 124, 60, meter_confidence=.3)}
+        plan = compile_automix(tracks, analyses, ENABLED)
+        transition = plan.audio.transitions[0]
+        outgoing, incoming = plan.audio.clips
+        self.assertEqual(transition.type, TransitionType.BEAT_MATCH)
+        self.assertAlmostEqual(incoming.playback_rate, 120 / 124)
+        self.assertEqual(outgoing.source_out, 60.3)
+        outgoing_cue = outgoing.source_in + transition.timeline_start * outgoing.playback_rate
+        self.assertIn(outgoing_cue, analyses["a"].beats)
+        self.assertIn(incoming.source_in, analyses["b"].beats)
+        out_times = [(b - outgoing_cue) / outgoing.playback_rate for b in analyses["a"].beats
+                     if outgoing_cue <= b < outgoing.source_out]
+        in_times = [(b - incoming.source_in) / incoming.playback_rate for b in analyses["b"].beats
+                    if incoming.source_in <= b < incoming.source_in + transition.duration * incoming.playback_rate]
+        for a, b in zip(out_times, in_times):
+            self.assertAlmostEqual(a, b, delta=2e-6)
+
+    def test_key_or_energy_conflict_with_unknown_vocals_does_not_early_mute_mids(self):
+        tracks = [_track("a", 60), _track("b", 60)]
+        for fields in ({"key": "F# major"}, {"energy": .9}):
+            with self.subTest(fields=fields):
+                analyses = {"a": replace(_analysis("a", 120, 60), key="C major", energy=.1),
+                            "b": replace(_analysis("b", 120, 60), **fields)}
+                plan = compile_automix(tracks, analyses, ENABLED)
+                transition = plan.audio.transitions[0]
+                clip = plan.audio.clips[0]
+                fade, start, length = band_fade_windows(
+                    "mid", clip.duration, None, (transition.dsp, transition.duration, transition.vocal_handoff)
+                )[0]
+                self.assertEqual(fade, "out")
+                self.assertAlmostEqual(start + length, clip.duration)
+                self.assertTrue(any("unknown" in r for r in transition.dsp_reasons))
+
+
+@unittest.skipUnless(os.environ.get('PLAYLIST_CANVAS_TEST_FFMPEG'), 'Requires real FFmpeg')
+class RenderedBeatProtectionTests(unittest.TestCase):
+    def test_real_render_matches_incoming_pulses_to_outgoing_beat_grid(self):
+        executable = Path(os.environ['PLAYLIST_CANVAS_TEST_FFMPEG'])
+        sample_rate = 48000
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {}
+            for name, bpm, channel in [('a', 120, 0), ('b', 124, 1)]:
+                samples = np.zeros((sample_rate * 32, 2), dtype=np.float64)
+                # Separate channels make each track's rendered pulse timing observable.
+                pulse_t = np.arange(2400) / sample_rate
+                pulse = .25 * np.sin(2 * np.pi * 1000 * pulse_t) * np.hanning(len(pulse_t))
+                for beat in np.arange(0, 31.9, 60 / bpm):
+                    start = round(beat * sample_rate)
+                    samples[start:start + len(pulse), channel] += pulse
+                path = root / f'{name}.wav'
+                with wave.open(str(path), 'wb') as output:
+                    output.setnchannels(2)
+                    output.setsampwidth(2)
+                    output.setframerate(sample_rate)
+                    output.writeframes((samples * 32767).astype('<i2').tobytes())
+                paths[name] = str(path)
+            analyses = {name: _analysis(name, bpm, 32, meter_confidence=.3)
+                        for name, bpm in [('a', 120), ('b', 124)]}
+            plan = compile_automix([_track('a', 32), _track('b', 32)], analyses, ENABLED)
+            with self.assertNoLogs('app.automix.renderer', level='WARNING'):
+                rendered = AutoMixAudioPipeline(executable).render(plan.audio, paths, root / 'mix')
+            decoded = subprocess.run(
+                [str(executable), '-v', 'error', '-i', str(rendered.path), '-f', 'f32le',
+                 '-ar', str(sample_rate), '-ac', '2', '-'], capture_output=True, check=True,
+                **hidden_process_kwargs(),
+            )
+            audio = np.frombuffer(decoded.stdout, dtype='<f4').reshape(-1, 2)
+            self.assertAlmostEqual(len(audio) / sample_rate, plan.duration_seconds, delta=.05)
+            transition = plan.audio.transitions[0]
+            # Check throughout the overlap, excluding nearly silent fade endpoints.
+            for offset in np.arange(2, transition.duration - 2, .5):
+                start = round((transition.timeline_start + offset - .1) * sample_rate)
+                window = audio[start:start + round(.25 * sample_rate)]
+                # 5 ms energy bins resist carrier phase and atempo waveform changes.
+                energy = (window ** 2).reshape(-1, 240, 2).mean(axis=1)
+                self.assertTrue(np.all(energy.max(axis=0) > 1e-7))
+                peaks = energy.argmax(axis=0) * .005
+                self.assertLess(abs(peaks[0] - peaks[1]), .045)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -87,7 +87,7 @@ class SelectTransitionDspTests(unittest.TestCase):
                       TransitionDsp.BASS_SWAP)
 
     def test_clashing_keys_are_vocal_safe_but_compatible_or_unknown_keys_are_not(self) -> None:
-        clash = self.select(outgoing=_analysis("a", key="C major"), incoming=_analysis("b", key="F# major"))
+        clash = self.select(outgoing=_analysis("a", key="C major", vocal_activity=((10, 20),)), incoming=_analysis("b", key="F# major", vocal_activity=((40, 50),)))
         self.assertIs(clash, TransitionDsp.VOCAL_SAFE_EQ)
         friendly = self.select(outgoing=_analysis("a", key="C major"), incoming=_analysis("b", key="G major"))
         self.assertIs(friendly, TransitionDsp.BASS_SWAP)
@@ -95,7 +95,7 @@ class SelectTransitionDspTests(unittest.TestCase):
         self.assertIs(unknown, TransitionDsp.BASS_SWAP)
 
     def test_local_energy_jump_is_filter_blend_and_overrides_global_energy(self) -> None:
-        calm = dict(outgoing=_analysis("a", energy=0.5), incoming=_analysis("b", energy=0.5))
+        calm = dict(outgoing=_analysis("a", energy=0.5, vocal_activity=((10, 20),)), incoming=_analysis("b", energy=0.5, vocal_activity=((40, 50),)))
         jump = self.select(**calm, outgoing_structure=_structure("a", 0.9), incoming_structure=_structure("b", 0.3))
         self.assertIs(jump, TransitionDsp.FILTER_BLEND)
         steady = self.select(outgoing=_analysis("a", energy=0.9), incoming=_analysis("b", energy=0.2),
@@ -103,13 +103,13 @@ class SelectTransitionDspTests(unittest.TestCase):
         self.assertIs(steady, TransitionDsp.BASS_SWAP)
 
     def test_global_energy_is_the_fallback_without_structure(self) -> None:
-        result = self.select(outgoing=_analysis("a", energy=0.9), incoming=_analysis("b", energy=0.4))
+        result = self.select(outgoing=_analysis("a", energy=0.9, vocal_activity=((10, 20),)), incoming=_analysis("b", energy=0.4, vocal_activity=((40, 50),)))
         self.assertIs(result, TransitionDsp.FILTER_BLEND)
 
     def test_beat_aligned_crossfade_is_legacy_unless_the_kicks_would_drift(self) -> None:
         aligned = _candidate(TransitionStrategy.BEAT_ALIGNED_CROSSFADE)
         self.assertIsNone(self.select(aligned, _compatibility(0.5)))  # 8 s * 0.5% = 0.04 s
-        self.assertIs(self.select(aligned, _compatibility(2.0)), TransitionDsp.FILTER_BLEND)  # 0.16 s
+        self.assertIs(self.select(aligned, _compatibility(2.0), **_KNOWN_QUIET), TransitionDsp.FILTER_BLEND)  # 0.16 s
         # A rate-matched BEAT_MATCH never drifts, whatever the raw BPM gap.
         self.assertIs(self.select(_candidate(), _compatibility(6.0)), TransitionDsp.BASS_SWAP)
 
@@ -120,6 +120,8 @@ class SelectTransitionDspTests(unittest.TestCase):
         self.assertEqual(results, {TransitionDsp.VOCAL_SAFE_EQ})
 
 
+_KNOWN_QUIET = dict(outgoing=_analysis("a", vocal_activity=((10, 20),)),
+                    incoming=_analysis("b", vocal_activity=((40, 50),)))
 _VOCALS_BOTH = dict(outgoing=_analysis("a", vocal_activity=((0.0, 120.0),)),
                     incoming=_analysis("b", vocal_activity=((0.0, 120.0),)))
 _ENERGY_JUMP = dict(outgoing_structure=_structure("a", 0.9), incoming_structure=_structure("b", 0.3))
@@ -141,7 +143,7 @@ class SelectorPrecedenceTests(unittest.TestCase):
         self.assertIs(self.select(**_VOCALS_BOTH, **_ENERGY_JUMP), TransitionDsp.VOCAL_SAFE_EQ)
 
     def test_energy_mismatch_on_reliable_beat_match_is_filter_blend(self) -> None:
-        self.assertIs(self.select(**_ENERGY_JUMP), TransitionDsp.FILTER_BLEND)
+        self.assertIs(self.select(**_ENERGY_JUMP, **_KNOWN_QUIET), TransitionDsp.FILTER_BLEND)
 
     def test_clean_reliable_beat_match_is_bass_swap(self) -> None:
         self.assertIs(self.select(), TransitionDsp.BASS_SWAP)
@@ -183,10 +185,10 @@ class DecisionReasonTests(unittest.TestCase):
         cases = [
             (dict(candidate=_candidate(duration=2.8)), "* short_fade: transition only 2.8s (< 4.0s)"),
             (dict(**_VOCALS_BOTH), "* vocal_safe_eq: vocals overlap"),
-            (dict(outgoing=_analysis("a", key="C major"), incoming=_analysis("b", key="F# major")),
+            (dict(outgoing=_analysis("a", key="C major", vocal_activity=((10, 20),)), incoming=_analysis("b", key="F# major", vocal_activity=((40, 50),))),
              "* vocal_safe_eq: keys clash"),
-            (dict(**_ENERGY_JUMP), "* filter_blend: local energy delta 0.60 (>= 0.3)"),
-            (dict(candidate=_candidate(TransitionStrategy.BEAT_ALIGNED_CROSSFADE), compatibility=_compatibility(0.9125)),
+            (dict(**_ENERGY_JUMP, **_KNOWN_QUIET), "* filter_blend: local energy delta 0.60 (>= 0.3)"),
+            (dict(candidate=_candidate(TransitionStrategy.BEAT_ALIGNED_CROSSFADE), compatibility=_compatibility(0.9125), **_KNOWN_QUIET),
              "* filter_blend: kicks would drift 73ms"),
             (dict(), "* bass_swap: clean reliable beat match"),
             (dict(candidate=_candidate(TransitionStrategy.FIXED_CROSSFADE)),
@@ -260,7 +262,7 @@ class LocalVocalTests(unittest.TestCase):
 
     def test_key_clash_alone_keeps_the_default_handoff(self) -> None:
         decision = select_transition_dsp(
-            _candidate(), _compatibility(), _analysis("a", key="C major"), _analysis("b", key="F# major"),
+            _candidate(), _compatibility(), _analysis("a", key="C major", vocal_activity=((10, 20),)), _analysis("b", key="F# major", vocal_activity=((40, 50),)),
         )
         self.assertIs(decision.dsp, TransitionDsp.VOCAL_SAFE_EQ)
         self.assertIsNone(decision.vocal_handoff)

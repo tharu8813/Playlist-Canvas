@@ -299,17 +299,15 @@ class CompileAutomixStructureTests(unittest.TestCase):
         self.assertEqual(without_param, with_empty)
         self.assertEqual(without_param, with_none)
 
-    def test_structure_data_can_shift_the_transition_anchor(self) -> None:
+    def test_early_structure_hint_cannot_discard_the_tail(self) -> None:
         tracks = [_track("a", 200.0), _track("b", 200.0)]
         analyses = {"a": _analysis("a", 120.0, 200.0), "b": _analysis("b", 120.0, 200.0)}
         without_structure = compile_automix(tracks, analyses, ENABLED)
         structures = {"a": _structure("a", 200.0, outro_start=150.0)}
         with_structure = compile_automix(tracks, analyses, ENABLED, structures=structures)
         validate_compiled_render_plan(with_structure)
-        # A real (if modest) shift -- the structure anchor is close enough
-        # to the tail to plausibly win once snapped to a downbeat, but
-        # this asserts the plan is genuinely different, not identical.
-        self.assertNotEqual(
+        # A structure label does not prove the remaining audio is disposable.
+        self.assertEqual(
             without_structure.audio.transitions[0].timeline_start,
             with_structure.audio.transitions[0].timeline_start,
         )
@@ -374,9 +372,8 @@ class TransitionGeometryTests(unittest.TestCase):
         self.assertLess(transition.duration, 20.0)
         self.assertGreater(transition.duration, 10.0)
         clip_a, _clip_b = plan.audio.clips
-        # The outgoing clip's audio must actually be trimmed to match --
-        # not still extend all the way to the track's own natural end.
-        self.assertLess(clip_a.source_out, 200.0)
+        # Finalize candidate geometry without discarding audible source audio.
+        self.assertEqual(clip_a.source_out, 200.0)
         self.assertAlmostEqual(clip_a.timeline_end, transition.timeline_start + transition.duration, places=6)
 
     def test_outgoing_clip_source_out_stays_within_bounds(self) -> None:
@@ -510,7 +507,7 @@ class TransitionDspSelectionTests(unittest.TestCase):
         plans = [compile_automix(tracks, analyses, ENABLED) for _ in range(5)]
         self.assertTrue(all(plan == plans[0] for plan in plans))
         self.assertEqual([t.dsp for t in plans[0].audio.transitions],
-                         [TransitionDsp.BASS_SWAP, TransitionDsp.FILTER_BLEND])
+                         [TransitionDsp.BASS_SWAP, TransitionDsp.BASS_SWAP])
 
 if __name__ == "__main__":
     unittest.main()
