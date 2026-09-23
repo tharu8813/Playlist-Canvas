@@ -2705,7 +2705,12 @@ class MainWindowSafetyTests(unittest.TestCase):
             self.window.preview_action.trigger()
             self.application.processEvents()
             self.assertFalse(self.window.left_workspace.isHidden())
-            QTest.qWait(230)
+            # The sidebar collapses over a 190 ms animation; under a loaded full
+            # run a fixed 230 ms wait was sometimes too short.
+            for _ in range(60):
+                QTest.qWait(50)
+                if self.window.left_workspace.isHidden():
+                    break
 
         preview = self.window._inline_preview
         self.assertIsNotNone(preview)
