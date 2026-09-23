@@ -52,16 +52,39 @@ def measure_loudness(executable: Path, path: str, cancel_event: threading.Event)
     if cancel_event.is_set():
         return -math.inf, -math.inf
     try:
-        result = subprocess.run(
+        with subprocess.Popen(
             [str(executable), "-hide_banner", "-nostats", "-i", path, "-map", "0:a:0",
              "-af", "ebur128=peak=sample", "-f", "null", "-"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
             **hidden_process_kwargs(),
-        )
+        ) as process:
+            deadline = monotonic() + 300
+            try:
+                while True:
+                    if cancel_event.is_set():
+                        return -math.inf, -math.inf
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(process.args, 300)
+                    try:
+                        _stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+            if process.returncode != 0:
+                return -math.inf, -math.inf
     except (OSError, subprocess.SubprocessError) as error:
         LOGGER.warning("Preview loudness measurement failed for %s: %s", path, error)
         return -math.inf, -math.inf
-    lufs, peaks = _LUFS.findall(result.stderr), _PEAK.findall(result.stderr)
+    lufs, peaks = _LUFS.findall(stderr), _PEAK.findall(stderr)
     return (float(lufs[-1]) if lufs else -math.inf), (float(peaks[-1]) if peaks else -math.inf)
 
 

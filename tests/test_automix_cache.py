@@ -20,6 +20,22 @@ def _analysis(source_path: str) -> TrackAnalysis:
 
 
 class AnalysisCacheTests(unittest.TestCase):
+    def test_non_utf8_entries_in_both_caches_recover_as_misses(self) -> None:
+        from app.automix.structure.cache import StructureAnalysisCache
+        from app.automix.structure.models import TrackStructureAnalysis
+
+        with TemporaryDirectory(prefix="automix-cache-") as directory:
+            source = Path(directory) / "a.mp3"
+            source.write_bytes(b"audio")
+            for cache_type, model in ((AnalysisCache, TrackAnalysis),
+                                      (StructureAnalysisCache, TrackStructureAnalysis)):
+                with self.subTest(cache=cache_type.__name__):
+                    root = Path(directory) / cache_type.__name__
+                    cache = cache_type(root, analyzer_id="test", analyzer_version="1")
+                    cache.store(str(source), model(track_id="a", source_path=str(source), duration_seconds=1.0))
+                    next(root.glob("*.json")).write_bytes(b"\xff\xfe\x00")
+                    self.assertIsNone(cache.load(str(source)))
+
     def test_store_then_load_round_trips_fields(self) -> None:
         with TemporaryDirectory(prefix="automix-cache-") as directory:
             source = Path(directory) / "a.mp3"

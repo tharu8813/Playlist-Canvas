@@ -74,7 +74,7 @@ class StructureAnalysisCache:
         except FileNotFoundError:
             LOGGER.debug("AutoMix structure cache miss: %s", fingerprint.canonical_path)
             return None
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             LOGGER.info("AutoMix structure cache invalidated: malformed entry for %s", fingerprint.canonical_path)
             return None
         if not self._envelope_matches(envelope, fingerprint):

@@ -134,7 +134,7 @@ class AnalysisCache:
         except FileNotFoundError:
             LOGGER.debug("AutoMix cache miss: %s", fingerprint.canonical_path)
             return None
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             LOGGER.info("AutoMix cache invalidated: malformed entry for %s", fingerprint.canonical_path)
             return None
         if not self._envelope_matches(envelope, fingerprint):
