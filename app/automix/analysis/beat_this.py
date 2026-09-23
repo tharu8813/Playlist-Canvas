@@ -43,6 +43,7 @@ hardcoded meter forced on the data.
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -59,7 +60,8 @@ from app.models.playlist import PlaylistTrack
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CHECKPOINT = "final0"
-"""Beat This!'s default pretrained checkpoint (~78 MB). Downloaded and
+"""Beat This!'s default pretrained checkpoint (~78 MB). The Windows installer
+ships it (see bundled_checkpoint); elsewhere it is downloaded and
 cached by the ``beat_this`` package itself on first use, in its own cache
 directory -- unlike app/ffmpeg/managed_installer.py, this provider does not
 implement its own download/checksum/staging pipeline for the model, since
@@ -258,8 +260,28 @@ class BeatThisAnalysisProvider:
 
             device = self._requested_device or ("cuda" if torch.cuda.is_available() else "cpu")
             LOGGER.info("Loading Beat This model %r on %s", self._checkpoint, device)
-            self._model = Audio2Beats(checkpoint_path=self._checkpoint, device=device, dbn=False)
+            self._model = Audio2Beats(
+                checkpoint_path=bundled_checkpoint(self._checkpoint) or self._checkpoint, device=device, dbn=False,
+            )
             return self._model
+
+
+BUNDLED_CHECKPOINT_DIRECTORY = Path("beat_this") / "checkpoints"
+"""Where the installer ships checkpoints (``<name>.ckpt``), relative to the
+frozen app's bundle folder, so the installed app analyzes offline."""
+
+
+def bundled_checkpoint(name: str) -> str | None:
+    """Path of ``name``'s checkpoint shipped inside a frozen build, else None.
+
+    Only the loading path changes: the cache identity stays the checkpoint
+    *name*, so bundled and downloaded copies of one model share cache entries.
+    """
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle is None:
+        return None
+    candidate = Path(bundle) / BUNDLED_CHECKPOINT_DIRECTORY / f"{name}.ckpt"
+    return str(candidate) if candidate.is_file() else None
 
 
 def _sanitize_timestamps(values: np.ndarray, duration_seconds: float) -> tuple[float, ...]:

@@ -435,5 +435,23 @@ class AnalysisProviderRegistryTests(unittest.TestCase):
             self.assertFalse(beat_this_available())
 
 
+class BundledCheckpointTests(unittest.TestCase):
+    def test_a_frozen_build_loads_its_shipped_checkpoint_and_otherwise_the_name(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        from app.automix.analysis.beat_this import BUNDLED_CHECKPOINT_DIRECTORY, bundled_checkpoint
+
+        self.assertIsNone(bundled_checkpoint("final0"))  # not frozen: beat_this resolves the name
+        with TemporaryDirectory() as bundle:
+            with patch("sys._MEIPASS", bundle, create=True):
+                self.assertIsNone(bundled_checkpoint("final0"))  # frozen but not shipped
+                shipped = Path(bundle) / BUNDLED_CHECKPOINT_DIRECTORY / "final0.ckpt"
+                shipped.parent.mkdir(parents=True)
+                shipped.write_bytes(b"weights")
+                self.assertEqual(bundled_checkpoint("final0"), str(shipped))
+                # The cache identity stays name-based, so bundled and downloaded copies share entries.
+                self.assertIn("+final0+", BeatThisAnalysisProvider(Path("ffmpeg")).version)
+
+
 if __name__ == "__main__":
     unittest.main()

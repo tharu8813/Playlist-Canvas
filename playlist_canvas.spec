@@ -12,17 +12,52 @@ numpy_datas, numpy_binaries, numpy_hiddenimports = collect_all("numpy")
 # (llvmlite), scipy's compiled extensions, scikit-learn, and soundfile's
 # bundled libsndfile. collect_all mirrors the existing numpy approach above
 # so PyInstaller finds their binaries/data even where a hooks-contrib entry
-# does not already cover them. NOT build-tested in this change -- verify a
-# packaged build launches AutoMix analysis before shipping a release (see
-# docs Phase 2 report's "Known Limitations").
+# does not already cover them.
+#
+# The installer also ships AutoMix's advanced analyzers: Beat This! (beat and
+# downbeat model on CPU PyTorch) and Sonara (song structure). torch itself is
+# collected by pyinstaller-hooks-contrib's hook; the Beat This checkpoint is
+# staged below so the installed app analyzes offline.
+#
+# collect_all only *warns* for a package that is not installed, which is how
+# 1.2.0.6 shipped without librosa and silently lost AutoMix. A release build
+# must fail instead.
+import importlib.util
+import shutil
+
+AUTOMIX_PACKAGES = (
+    "librosa", "numba", "llvmlite", "scipy", "sklearn", "soundfile",
+    "torch", "torchaudio", "beat_this", "einops", "rotary_embedding_torch", "soxr", "sonara",
+)
+_missing = [name for name in AUTOMIX_PACKAGES if importlib.util.find_spec(name) is None]
+if _missing:
+    raise SystemExit(
+        "Release build environment is missing AutoMix packages: " + ", ".join(_missing)
+        + ". Install requirements-lock.txt and requirements-packaging.txt (see PACKAGING.md)."
+    )
+
 automix_datas: list = []
 automix_binaries: list = []
 automix_hiddenimports: list = []
-for _package in ("librosa", "numba", "llvmlite", "scipy", "sklearn", "soundfile"):
+for _package in AUTOMIX_PACKAGES:
+    if _package == "torch":
+        continue  # the contrib hook collects torch; collect_all would add its test suites
     _datas, _binaries, _hiddenimports = collect_all(_package)
     automix_datas += _datas
     automix_binaries += _binaries
     automix_hiddenimports += _hiddenimports
+
+from beat_this.inference import load_checkpoint  # noqa: E402
+import torch  # noqa: E402
+
+_checkpoint_cache = Path(torch.hub.get_dir()) / "checkpoints" / "beat_this-final0.ckpt"
+if not _checkpoint_cache.is_file():
+    load_checkpoint("final0")  # one-time download into torch's hub cache
+_checkpoint_stage = project_root / "build" / "beat_this_checkpoints"
+_checkpoint_stage.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(_checkpoint_cache, _checkpoint_stage / "final0.ckpt")
+# Must match app.automix.analysis.beat_this.BUNDLED_CHECKPOINT_DIRECTORY.
+automix_datas.append((str(_checkpoint_stage / "final0.ckpt"), "beat_this/checkpoints"))
 
 analysis = Analysis(
     [str(project_root / "main.py")],

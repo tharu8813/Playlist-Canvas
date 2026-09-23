@@ -1,2 +1,11 @@
 -r requirements.txt
 pyinstaller==6.22.0
+
+# AutoMix's advanced analyzers, shipped inside the Windows installer (the
+# spec refuses to build without them; see PACKAGING.md). CPU-only PyTorch
+# keeps the installer smaller and runs on every machine.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0+cpu
+torchaudio==2.11.0+cpu
+beat-this==1.1.0
+sonara==0.3.6

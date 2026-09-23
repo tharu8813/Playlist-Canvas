@@ -12,7 +12,10 @@
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements-lock.txt
+python -m pip install -r requirements-packaging.txt
 ```
+
+설치본에는 AutoMix 고급 분석기인 **Beat This!**(CPU PyTorch 기반 박자·다운비트 모델)와 **Sonara**(곡 구조 분석)가 함께 들어갑니다. `playlist_canvas.spec`은 librosa·PyTorch·Beat This·Sonara 등 AutoMix 패키지가 하나라도 없으면 빌드를 중단합니다(1.2.0.6은 빌드 환경에 librosa가 없어 AutoMix 분석이 빠진 채 배포되었습니다). Beat This `final0` 체크포인트(약 78 MB)는 빌드할 때 PyTorch 캐시에서 가져오며, 없으면 한 번 내려받아 설치본에 포함하므로 설치된 앱은 오프라인에서도 분석합니다.
 
 ## 2. Windows 배포본 빌드
 
@@ -47,14 +50,14 @@ Inno Setup 6을 설치한 뒤 프로젝트 루트에서 다음 명령을 실행�
 완성된 설치 파일은 다음 위치에 생성됩니다.
 
 ```text
-output-setup\Playlist Canvas-1.2.0.6-setup.exe
+output-setup\Playlist Canvas-1.2.0.7-setup.exe
 ```
 
 이 Setup EXE를 GitHub Release에 첨부합니다. 사용자는 ZIP을 직접 관리하지 않고 설치 마법사를 통해 프로그램 위치, 시작 메뉴와 바탕 화면 바로가기를 설정할 수 있습니다.
 
 앱의 자동 업데이트가 Setup 자산을 찾고 검증할 수 있도록 릴리즈를 정식 공개 상태로 만들고 다음 조건을 지킵니다.
 
-- 태그는 `1.2.0.6`처럼 네 자리 버전 형식을 사용합니다. (`v` 접두사도 허용됩니다.)
+- 태그는 `1.2.0.7`처럼 네 자리 버전 형식을 사용합니다. (`v` 접두사도 허용됩니다.)
 - Setup 자산 이름에는 `Playlist Canvas`와 `setup`이 포함되어야 하며 확장자는 `.exe`여야 합니다.
 - Setup 파일은 반드시 이 저장소의 GitHub Release 자산으로 직접 첨부합니다. 외부 다운로드 URL은 앱이 거부합니다.
 - 초안 또는 사전 릴리즈는 자동 업데이트 대상에서 제외됩니다.
@@ -64,7 +67,7 @@ output-setup\Playlist Canvas-1.2.0.6-setup.exe
 
 새 Windows 사용자 계정 또는 가상 머신에서 다음을 확인합니다.
 
-1. `Playlist Canvas-1.2.0.6-setup.exe`로 설치와 제거가 정상 동작하는지 확인합니다.
+1. `Playlist Canvas-1.2.0.7-setup.exe`로 설치와 제거가 정상 동작하는지 확인합니다.
 2. 설치된 `Playlist Canvas.exe`가 실행되는지 확인합니다.
 3. 설정 화면에서 언어·테마·출력 폴더를 저장하고 재시작 후 유지되는지 확인합니다.
 4. 설정 화면의 FFmpeg 다운로드를 사용해 설치와 SHA-256 검증이 완료되는지 확인합니다.
