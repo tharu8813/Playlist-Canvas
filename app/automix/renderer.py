@@ -234,9 +234,7 @@ def build_filter_graph(
         next_label = f"m{index}"
         style = styles[index - 1]
         if style is not None:
-            # Band styles and the sweep carry their own fades; SHORT_FADE is a full-band qsin.
-            curve = "nofade" if style in BAND_ENVELOPES or style is TransitionDsp.FILTER_SWEEP else "qsin"
-            filters.extend(_limited_overlap_filters(running_label, labels[index], next_label, transition, curve))
+            filters.extend(_limited_overlap_filters(running_label, labels[index], next_label, transition, style))
         elif transition is not None and transition.duration > 0.0:
             curve = _CURVE_BY_TRANSITION_TYPE.get(transition.type, "tri")
             filters.append(
@@ -458,22 +456,36 @@ def _band_filters(
     return filters
 
 
-def _limited_overlap_filters(
-    running: str, incoming: str, output: str, transition: AudioRenderTransition, curve: str,
-) -> list[str]:
-    """Overlap two clips with ``curve``, then limit only the overlap window.
+DROP_IN_ATTACK_SECONDS = 0.02
+"""DROP_IN's incoming fade-in: just long enough not to click."""
 
-    Band styles pass ``nofade``: both sides already carry their envelopes,
-    so acrossfade just sums the last/first ``duration`` seconds. SHORT_FADE
-    passes ``qsin``. The limiter runs on that window alone, cut at
-    ``transition.timeline_start`` in the running timeline, so audio outside
-    the transition is untouched.
+
+def _limited_overlap_filters(
+    running: str, incoming: str, output: str, transition: AudioRenderTransition, style: TransitionDsp,
+) -> list[str]:
+    """Overlap two clips as ``style`` mixes them, then limit only the overlap window.
+
+    Band styles and the sweep carry their own envelopes (``nofade``), so
+    acrossfade just sums the last/first ``duration`` seconds. SHORT_FADE is a
+    full-band qsin. DROP_IN fades only the outgoing, already decaying, side:
+    the incoming one is at full level after DROP_IN_ATTACK_SECONDS. The
+    limiter runs on that window alone, cut at ``transition.timeline_start``
+    in the running timeline, so audio outside the transition is untouched.
     """
     start = transition.timeline_start
     end = start + transition.duration
     summed = f"{output}sum"
+    enveloped = style in BAND_ENVELOPES or style is TransitionDsp.FILTER_SWEEP
+    curve = "nofade" if enveloped else "qsin"
+    incoming_curve = "nofade" if style is TransitionDsp.DROP_IN else curve
+    attack = []
+    if style is TransitionDsp.DROP_IN:
+        attack = [f"[{incoming}]afade=t=in:d={DROP_IN_ATTACK_SECONDS}[{output}attack]"]
+        incoming = f"{output}attack"
     return [
-        f"[{running}][{incoming}]acrossfade=d={transition.duration:.6f}:curve1={curve}:curve2={curve}[{summed}]",
+        *attack,
+        f"[{running}][{incoming}]acrossfade=d={transition.duration:.6f}:curve1={curve}:curve2={incoming_curve}"
+        f"[{summed}]",
         f"[{summed}]asplit=3[{output}a][{output}b][{output}c]",
         f"[{output}a]atrim=end={start:.6f}[{output}pre]",
         f"[{output}b]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS,"

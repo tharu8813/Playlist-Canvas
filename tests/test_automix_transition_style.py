@@ -68,6 +68,37 @@ class SelectTransitionDspTests(unittest.TestCase):
             with self.subTest(strategy=strategy):
                 self.assertIsNone(self.select(_candidate(strategy, duration=2.0)))
 
+    def test_a_window_mostly_past_the_decay_start_drops_the_next_track_in(self) -> None:
+        # Window 100-108 s: its middle (104 s) against the outgoing decay start.
+        for decay_start, expected in ((104.0, TransitionDsp.DROP_IN), (104.5, TransitionDsp.BASS_SWAP)):
+            with self.subTest(decay_start=decay_start):
+                self.assertIs(self.select(outgoing=_quiet("a", decay_start_seconds=decay_start)), expected)
+
+    def test_drop_in_wins_over_every_other_rule_for_any_strategy(self) -> None:
+        # Short window, singing on both sides, clashing keys: every later rule would fire.
+        decayed = _analysis("a", decay_start_seconds=90.0, key="8A", vocal_activity=((100.0, 108.0),))
+        for strategy in TransitionStrategy:
+            if strategy is TransitionStrategy.CUT:
+                continue
+            with self.subTest(strategy=strategy):
+                decision = self.decide(_candidate(strategy, duration=3.0), outgoing=decayed,
+                                       incoming=_analysis("b", key="3B", vocal_activity=((0.0, 8.0),)))
+                self.assertIs(decision.dsp, TransitionDsp.DROP_IN)
+                self.assertEqual(decision.reasons[0], "* drop_in: outgoing already fading (from 90.0s)")
+                self.assertIn(("outgoing_decayed", True), decision.metrics)
+
+    def test_unknown_decay_start_changes_nothing(self) -> None:
+        self.assertIn(("outgoing_decayed", None), self.decide().metrics)
+
+    def test_decay_metric_is_a_plain_bool_for_numpy_cue_times(self) -> None:
+        import json
+
+        import numpy as np
+
+        candidate = _candidate(outgoing_source_time=np.float64(100.0), outgoing_source_out=np.float64(108.0))
+        metrics = dict(self.decide(candidate, outgoing=_quiet("a", decay_start_seconds=90.0)).metrics)
+        self.assertEqual(json.dumps(metrics["outgoing_decayed"]), "true")
+
     def test_short_window_is_short_fade_before_any_other_rule(self) -> None:
         vocal = ((0.0, 120.0),)
         result = self.select(_candidate(duration=3.5), outgoing=_analysis("a", vocal_activity=vocal),

@@ -15,6 +15,7 @@ from app.automix.analysis.basic import (
     SAMPLE_RATE,
     BasicAnalysisProvider,
     audible_bounds,
+    decay_start,
     normalize_tempo_octave,
 )
 from app.automix.analysis.provider import AnalysisCancelled
@@ -199,6 +200,23 @@ class AudibleBoundsTests(unittest.TestCase):
 
     def test_silence_has_no_bounds(self) -> None:
         self.assertEqual(audible_bounds(np.zeros(SAMPLE_RATE, dtype=np.float32), 1.0), (None, None))
+
+
+class DecayStartTests(unittest.TestCase):
+    def test_decay_starts_where_a_linear_fade_crosses_fifteen_db_down(self) -> None:
+        rate = SAMPLE_RATE
+        body = 0.5 * np.sin(2 * np.pi * 220 * np.arange(20 * rate) / rate)
+        fade = body[:10 * rate] * np.linspace(1.0, 0.0, 10 * rate)  # -15 dB at 1 - 10**(-15/20) of the way
+        signal = np.concatenate([body, fade, np.zeros(2 * rate)]).astype(np.float32)
+        expected = 20.0 + 10.0 * (1 - 10 ** (-15 / 20))
+        self.assertAlmostEqual(decay_start(signal, len(signal) / rate), expected, delta=0.3)
+
+    def test_a_track_that_stops_at_full_level_decays_at_its_end(self) -> None:
+        signal = (0.5 * np.sin(np.arange(5 * SAMPLE_RATE) * 0.1)).astype(np.float32)
+        self.assertAlmostEqual(decay_start(signal, 5.0), 5.0, delta=0.01)
+
+    def test_silence_has_no_decay_start(self) -> None:
+        self.assertIsNone(decay_start(np.zeros(SAMPLE_RATE, dtype=np.float32), 1.0))
 
 
 @unittest.skipUnless(

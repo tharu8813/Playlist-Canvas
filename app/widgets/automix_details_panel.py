@@ -24,6 +24,7 @@ _STYLE_LABELS = {
     "filter_blend": ("필터 블렌드", "Filter blend"),
     "short_fade": ("짧은 페이드", "Short fade"),
     "filter_sweep": ("필터 스윕", "Filter sweep"),
+    "drop_in": ("여운 위로 시작", "Drop in over the tail"),
     "legacy": ("기본 크로스페이드", "Plain crossfade"),
     "sequential": ("이어서 재생", "Back to back"),
     "gap": ("간격", "Gap"),

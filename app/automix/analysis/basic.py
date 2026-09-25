@@ -93,6 +93,25 @@ def audible_bounds(signal: np.ndarray, duration_seconds: float) -> tuple[float |
     return min(int(audible[0]) * AUDIBLE_BLOCK_SECONDS, end), end
 
 
+DECAY_BLOCK_SECONDS = 0.25
+DECAY_FLOOR_DB = -15.0
+"""Below this, relative to the track's 75th-percentile 0.25 s block power,
+the ending has faded or decayed. Transitions placed there faded the next
+track in over near-silence: on 31 real songs they dipped -13 to -28 dB."""
+
+
+def decay_start(signal: np.ndarray, duration_seconds: float) -> float | None:
+    """Last second of a mono SAMPLE_RATE signal within DECAY_FLOOR_DB of its body; None if unmeasurable."""
+    block = int(DECAY_BLOCK_SECONDS * SAMPLE_RATE)
+    count = len(signal) // block
+    if count == 0:
+        return None
+    power = np.mean(np.square(signal[:count * block].reshape(count, block), dtype=np.float64), axis=1)
+    body = float(np.percentile(power, 75))
+    loud = np.flatnonzero(power >= body * 10 ** (DECAY_FLOOR_DB / 10)) if body > 0.0 else ()
+    return min(duration_seconds, (int(loud[-1]) + 1) * DECAY_BLOCK_SECONDS) if len(loud) else None
+
+
 def normalize_tempo_octave(
     bpm: float, tempo_range: tuple[float, float] = DEFAULT_TEMPO_RANGE,
 ) -> float:
@@ -127,12 +146,12 @@ class BasicAnalysisProvider:
     """The always-available default AnalysisProvider (see AnalysisProvider Protocol)."""
 
     provider_id = "basic"
-    version = "5"
+    version = "6"
     """Bumped from "1": Phase 7 added key/energy/vocal_activity to the
     output, which invalidates any cache entry from before those fields
     existed (see app/automix/cache.py -- analyzer_version is part of the
     cache key). "3": audible start/end bounds. "4": no voice-band vocal guess.
-    "5": BPM from a fitted beat grid."""
+    "5": BPM from a fitted beat grid. "6": decay start."""
 
     def __init__(self, ffmpeg_executable: Path) -> None:
         self.ffmpeg_executable = Path(ffmpeg_executable)
@@ -209,6 +228,7 @@ class BasicAnalysisProvider:
             key=key, key_confidence=key_confidence,
             energy=energy,
             audible_start_seconds=audible_start, audible_end_seconds=audible_end,
+            decay_start_seconds=decay_start(signal, duration_seconds),
             analyzer_id=self.provider_id, analyzer_version=self.version,
         )
         report(1.0, "AutoMix analysis completed")

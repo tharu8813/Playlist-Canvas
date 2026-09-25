@@ -271,6 +271,14 @@ class TransitionStyleGraphTests(unittest.TestCase):
         self.assertIn("[c0][c1]acrossfade=d=3.000000:curve1=qsin:curve2=qsin[m1sum]", graph)
         self.assertIn("[m1b]atrim=start=57.000000:end=60.000000,asetpts=PTS-STARTPTS,alimiter=", graph)
 
+    def test_drop_in_fades_only_the_outgoing_side_behind_a_click_guard(self) -> None:
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 57.0, 60.0)]
+        graph, _label = build_filter_graph(clips, [_styled("a", "b", 57.0, 3.0, TransitionDsp.DROP_IN)])
+        self.assertNotIn("acrossover", graph)
+        self.assertIn("[c1]afade=t=in:d=0.02[m1attack]", graph)
+        self.assertIn("[c0][m1attack]acrossfade=d=3.000000:curve1=qsin:curve2=nofade[m1sum]", graph)
+        self.assertIn("alimiter=", graph)
+
     def test_planner_styles_apply_to_equal_power_transitions_too(self) -> None:
         graph = self._pair_graph(TransitionDsp.FILTER_BLEND, TransitionType.EQUAL_POWER)
         self.assertIn("acrossover", graph)

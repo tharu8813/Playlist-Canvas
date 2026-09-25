@@ -110,7 +110,7 @@ class BeatThisAnalysisProvider:
     """
 
     provider_id = "beat_this"
-    version = "4"
+    version = "5"
     """This *implementation's* version: bump it if the confidence
     calibration or output mapping in this module changes in a way that
     should invalidate previously cached results, independent of the
@@ -123,7 +123,7 @@ class BeatThisAnalysisProvider:
     signal (any format FFmpeg reads, e.g. AAC/M4A) instead of loading the file
     itself, plus BasicAnalysisProvider "3"'s audible bounds. "3": basic "4" (no
     voice-band vocal guess). "4": BPM from a fitted beat grid, not the
-    frame-quantized median interval."""
+    frame-quantized median interval. "5": basic "6" (decay start)."""
 
     def __init__(
         self, ffmpeg_executable: Path, *,

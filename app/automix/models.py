@@ -80,6 +80,9 @@ class TrackAnalysis:
     (``None``: unknown, treat the whole file as audible). Real masters
     commonly carry 1-4 s of silence after the last decay; a transition
     overlapping only that would be a gap, not a mix."""
+    decay_start_seconds: float | None = None
+    """The last moment the track is within 15 dB of its body's level; after it
+    only the ending's fade or decay is left (``None``: unknown)."""
 
     analyzer_id: str = ""
     analyzer_version: str = ""
@@ -123,7 +126,7 @@ class TrackAnalysis:
             if start < previous_end:
                 raise ValueError("TrackAnalysis.vocal_activity spans must be sorted and non-overlapping.")
             previous_end = end
-        for name in ("audible_start_seconds", "audible_end_seconds"):
+        for name in ("audible_start_seconds", "audible_end_seconds", "decay_start_seconds"):
             value = getattr(self, name)
             if value is not None and (not _is_finite_number(value) or not 0.0 <= value <= self.duration_seconds):
                 raise ValueError(f"TrackAnalysis.{name} must lie within the track when known.")
@@ -173,6 +176,7 @@ class TrackAnalysis:
             "vocal_activity": [list(span) for span in self.vocal_activity],
             "audible_start_seconds": self.audible_start_seconds,
             "audible_end_seconds": self.audible_end_seconds,
+            "decay_start_seconds": self.decay_start_seconds,
             "analyzer_id": self.analyzer_id,
             "analyzer_version": self.analyzer_version,
         }
@@ -197,6 +201,7 @@ class TrackAnalysis:
             vocal_activity=tuple(tuple(span) for span in fields.get("vocal_activity", ())),
             audible_start_seconds=fields.get("audible_start_seconds"),
             audible_end_seconds=fields.get("audible_end_seconds"),
+            decay_start_seconds=fields.get("decay_start_seconds"),
             analyzer_id=fields.get("analyzer_id", ""),
             analyzer_version=fields.get("analyzer_version", ""),
         )

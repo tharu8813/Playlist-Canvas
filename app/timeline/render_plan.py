@@ -109,6 +109,9 @@ class TransitionDsp(str, Enum):
     FILTER_BLEND = "filter_blend"
     SHORT_FADE = "short_fade"
     FILTER_SWEEP = "filter_sweep"
+    DROP_IN = "drop_in"
+    """The outgoing track is already fading: the incoming one starts at full
+    level while that tail fades out underneath it."""
 
 
 @dataclass(frozen=True, slots=True)

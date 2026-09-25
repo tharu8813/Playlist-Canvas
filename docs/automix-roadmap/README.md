@@ -40,3 +40,5 @@ Phase 4의 실제 음악 청감 결과를 보고 이후 DSP 단계 우선순위�
 | 09 release hardening | done; full suite green | `4424d93` |
 
 Each step's file ends with an **Outcome** section. The completed phase 1-8 AutoMix documents live in `docs/automix-history/`.
+
+2026-09-26: the default analyzer became Beat This! + Open-Unmix on ONNX Runtime, and transitions over a decaying tail drop the next track in -- measurements in `2026-09-26-onnx-analyzer-vocals-drop-in.md`.
