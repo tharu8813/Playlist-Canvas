@@ -6,8 +6,8 @@ independently-optional analyzer (Sonara) producing a different result
 type (``TrackStructureAnalysis``) on its own schedule, and mixing the two
 caches would make it harder to reason about invalidation when only one
 side changes (e.g. upgrading Sonara must never touch rhythm-analysis cache
-entries, and vice versa). Keyed by file fingerprint (path + size + mtime),
-same discipline as the rhythm cache, so a media replacement is detected
+entries, and vice versa). Keyed by file content (SHA-256 + size), same
+discipline as the rhythm cache, so a media replacement is detected
 automatically and switching structure providers/versions never returns a
 stale result under a new meaning.
 """
@@ -17,8 +17,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -28,7 +26,7 @@ from app.automix.structure.models import TrackStructureAnalysis
 
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: content-keyed (was path + mtime)
 
 
 class StructureAnalysisCache:
@@ -50,12 +48,7 @@ class StructureAnalysisCache:
         return base / "PlaylistCanvas" / "automix-structure-cache"
 
     def _entry_path(self, fingerprint: "_FileFingerprint") -> Path:
-        identity = "\0".join((
-            fingerprint.canonical_path, str(fingerprint.size), str(fingerprint.mtime_ns),
-            self.analyzer_id, self.analyzer_version, str(SCHEMA_VERSION),
-        ))
-        digest = sha256(identity.encode("utf-8")).hexdigest()
-        return self.root / f"{digest}.json"
+        return self.root / fingerprint.entry_name(self.analyzer_id, self.analyzer_version, str(SCHEMA_VERSION))
 
     def load(self, source_path: str) -> dict[str, Any] | None:
         """Return cached structure fields for ``source_path``, or None on any miss.
@@ -112,11 +105,7 @@ class StructureAnalysisCache:
             "schema_version": SCHEMA_VERSION,
             "analyzer_id": self.analyzer_id,
             "analyzer_version": self.analyzer_version,
-            "file": {
-                "path": fingerprint.canonical_path,
-                "size": fingerprint.size,
-                "mtime_ns": fingerprint.mtime_ns,
-            },
+            "file": fingerprint.record(),
             "analysis": analysis.to_cache_fields(),
         }
         self.root.mkdir(parents=True, exist_ok=True)
@@ -143,11 +132,4 @@ class StructureAnalysisCache:
         if (envelope.get("analyzer_id") != self.analyzer_id
                 or envelope.get("analyzer_version") != self.analyzer_version):
             return False
-        file_info = envelope.get("file")
-        if not isinstance(file_info, dict):
-            return False
-        return (
-            file_info.get("path") == fingerprint.canonical_path
-            and file_info.get("size") == fingerprint.size
-            and file_info.get("mtime_ns") == fingerprint.mtime_ns
-        )
+        return fingerprint.matches(envelope.get("file"))

@@ -1,9 +1,10 @@
 """Versioned, on-disk cache for AutoMix track analysis.
 
-Keyed by file fingerprint (path + size + mtime), not by track ID or
-analyzer identity alone, so a media replacement is detected automatically
-and switching analyzers never returns a stale result under a new meaning
-(the analyzer identity is folded into the cache key itself).
+Keyed by file *content* (SHA-256 + size), not by path, track ID or analyzer
+identity alone: the same song is analyzed once however its path changes
+(.pvsproj media is re-extracted to a new temp path on every open), a media
+replacement is still detected, and switching analyzers never returns a stale
+result under a new meaning (the analyzer identity is folded into the key).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from app.automix.models import TrackAnalysis
 
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: content-keyed (was path + mtime)
 
 
 _CACHE_FILE_PATTERNS = ("*.json", "*.tmp")
@@ -78,17 +79,53 @@ def canonical_media_path(path: str) -> str:
     return os.path.normcase(str(Path(path).expanduser().resolve()))
 
 
+_HASH_CHUNK_BYTES = 1024 * 1024
+# (canonical path, size, mtime_ns) -> content digest, so a session hashes each
+# file once. ponytail: unbounded, fine for playlist-sized sessions.
+_digest_memo: dict[tuple[str, int, int], str] = {}
+
+
+def _content_digest(canonical: str, size: int, mtime_ns: int) -> str:
+    key = (canonical, size, mtime_ns)
+    digest = _digest_memo.get(key)
+    if digest is None:
+        hasher = sha256()
+        with open(canonical, "rb") as file:
+            while chunk := file.read(_HASH_CHUNK_BYTES):
+                hasher.update(chunk)
+        digest = _digest_memo[key] = hasher.hexdigest()
+    return digest
+
+
 @dataclass(frozen=True, slots=True)
 class _FileFingerprint:
+    """Identifies media by *content*: .pvsproj projects re-extract their media to
+    a new temp path/mtime on every open, and a path-keyed cache re-analyzed every
+    track each time. ``canonical_path``/``mtime_ns`` are kept for logs only."""
+
     canonical_path: str
     size: int
     mtime_ns: int
+    content_sha256: str
 
     @classmethod
     def of(cls, path: str) -> "_FileFingerprint":
         canonical = canonical_media_path(path)
         stat = Path(canonical).stat()
-        return cls(canonical, stat.st_size, stat.st_mtime_ns)
+        return cls(canonical, stat.st_size, stat.st_mtime_ns,
+                   _content_digest(canonical, stat.st_size, stat.st_mtime_ns))
+
+    def entry_name(self, *identity: str) -> str:
+        """Cache file name for this content plus the cache's own identity parts."""
+        key = "\0".join((self.content_sha256, str(self.size), *identity))
+        return f"{sha256(key.encode('utf-8')).hexdigest()}.json"
+
+    def record(self) -> dict[str, Any]:
+        return {"path": self.canonical_path, "size": self.size, "sha256": self.content_sha256}
+
+    def matches(self, record: object) -> bool:
+        return (isinstance(record, dict) and record.get("sha256") == self.content_sha256
+                and record.get("size") == self.size)
 
 
 class AnalysisCache:
@@ -110,12 +147,7 @@ class AnalysisCache:
         return base / "PlaylistCanvas" / "automix-cache"
 
     def _entry_path(self, fingerprint: _FileFingerprint) -> Path:
-        identity = "\0".join((
-            fingerprint.canonical_path, str(fingerprint.size), str(fingerprint.mtime_ns),
-            self.analyzer_id, self.analyzer_version, str(SCHEMA_VERSION),
-        ))
-        digest = sha256(identity.encode("utf-8")).hexdigest()
-        return self.root / f"{digest}.json"
+        return self.root / fingerprint.entry_name(self.analyzer_id, self.analyzer_version, str(SCHEMA_VERSION))
 
     def load(self, source_path: str) -> dict[str, Any] | None:
         """Return cached analysis fields for ``source_path``, or None on any miss.
@@ -165,11 +197,7 @@ class AnalysisCache:
             "schema_version": SCHEMA_VERSION,
             "analyzer_id": self.analyzer_id,
             "analyzer_version": self.analyzer_version,
-            "file": {
-                "path": fingerprint.canonical_path,
-                "size": fingerprint.size,
-                "mtime_ns": fingerprint.mtime_ns,
-            },
+            "file": fingerprint.record(),
             "analysis": analysis.to_cache_fields(),
         }
         self.root.mkdir(parents=True, exist_ok=True)
@@ -196,11 +224,4 @@ class AnalysisCache:
         if (envelope.get("analyzer_id") != self.analyzer_id
                 or envelope.get("analyzer_version") != self.analyzer_version):
             return False
-        file_info = envelope.get("file")
-        if not isinstance(file_info, dict):
-            return False
-        return (
-            file_info.get("path") == fingerprint.canonical_path
-            and file_info.get("size") == fingerprint.size
-            and file_info.get("mtime_ns") == fingerprint.mtime_ns
-        )
+        return fingerprint.matches(envelope.get("file"))

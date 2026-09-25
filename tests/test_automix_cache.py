@@ -65,12 +65,36 @@ class AnalysisCacheTests(unittest.TestCase):
             source.write_bytes(b"a longer audio payload now")
             self.assertIsNone(cache.load(str(source)))
 
-    def test_mtime_change_invalidates_cache(self) -> None:
+    def test_same_content_at_a_new_path_and_mtime_is_still_a_hit(self) -> None:
+        # .pvsproj media is re-extracted to a fresh temp path (new mtime) on
+        # every open; that must not re-run a minute-long analysis per track.
+        from app.automix.structure.cache import StructureAnalysisCache
+        from app.automix.structure.models import TrackStructureAnalysis
+
+        with TemporaryDirectory(prefix="automix-cache-") as directory:
+            source = Path(directory) / "first-open" / "a.mp3"
+            source.parent.mkdir()
+            source.write_bytes(b"audio")
+            reopened = Path(directory) / "second-open" / "renamed a.mp3"
+            reopened.parent.mkdir()
+            reopened.write_bytes(b"audio")
+            future = time.time() + 5
+            os.utime(reopened, (future, future))
+            for cache_type, model in ((AnalysisCache, TrackAnalysis),
+                                      (StructureAnalysisCache, TrackStructureAnalysis)):
+                with self.subTest(cache=cache_type.__name__):
+                    cache = cache_type(Path(directory) / cache_type.__name__,
+                                       analyzer_id="basic", analyzer_version="1")
+                    cache.store(str(source), model(track_id="a", source_path=str(source), duration_seconds=1.0))
+                    self.assertIsNotNone(cache.load(str(reopened)))
+
+    def test_same_size_content_change_invalidates_cache(self) -> None:
         with TemporaryDirectory(prefix="automix-cache-") as directory:
             source = Path(directory) / "a.mp3"
             source.write_bytes(b"audio")
             cache = AnalysisCache(Path(directory) / "cache", analyzer_id="basic", analyzer_version="1")
             cache.store(str(source), _analysis(str(source)))
+            source.write_bytes(b"AUDIO")  # same size, different bytes
             future = time.time() + 5
             os.utime(source, (future, future))
             self.assertIsNone(cache.load(str(source)))
