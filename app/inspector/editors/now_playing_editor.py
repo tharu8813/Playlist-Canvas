@@ -1,21 +1,84 @@
-"""Inspector editor for SourceType.NOW_PLAYING, split out of
-SourceInspector._update_legacy_source_specific_fields."""
+"""Inspector section for SourceType.NOW_PLAYING.
+
+``edit`` decides which fields a now-playing card shows (split out of
+SourceInspector._update_legacy_source_specific_fields). ``NowPlayingSection``
+owns the card's own fields -- the ``Source.now_playing_*`` properties --
+end to end (see FieldSection).
+"""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from app.inspector.editors.base import apply_shared_fields, finish, hide_type_specific_fields
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QWidget
+
+from app.inspector.editors.base import FieldSection, apply_shared_fields, finish, hide_type_specific_fields
 from app.models.source import Source
 
 if TYPE_CHECKING:
     from app.inspector.source_inspector import SourceInspector
 
+
+class NowPlayingSection(FieldSection):
+    """The now-playing card's Inspector fields (``Source.now_playing_*``)."""
+
+    FAMILY = ("현재 재생 카드", "now-playing card")
+
+    ROWS = (
+        ("now_playing_style", None),
+        ("now_playing_duration", None),
+        ("now_playing_exit", "np_exit"),
+        ("now_playing_exit_duration", "np_exit"),
+    )
+
+    LABELS = {
+        "now_playing_style": ("카드 스타일", "Card style"),
+        "now_playing_duration": ("표시 시간", "Display seconds"),
+        "now_playing_exit": ("사라짐 효과", "Exit effect"),
+        "now_playing_exit_duration": ("사라짐 시간", "Exit duration"),
+    }
+
+    SECTION_TITLES = {"np_exit": ("종료 효과", "Exit")}
+
+    # "style" is shared with other families and stays in SourceInspector's table.
+    HELP = {
+        "duration": ("카드 또는 전환이 화면에 유지되는 시간입니다.", "How long the card or transition remains on screen."),
+        "exit": ("카드가 사라질 때 사용할 전환 효과입니다.", "Transition used when the card disappears."),
+        "exit_duration": ("사라짐 효과가 완료되는 데 걸리는 시간입니다.", "Time required for the exit effect to complete."),
+    }
+
+    # The field key predates the model attribute's name; language packs use the key.
+    ATTRIBUTES = {"now_playing_exit": "now_playing_exit_animation"}
+
+    def __init__(self, spin: Callable[[float, float, float], QDoubleSpinBox]) -> None:
+        style = QComboBox()
+        for label, value in (("Card", "card"), ("Minimal", "minimal"), ("Glass", "glass")):
+            style.addItem(label, value)
+        exit_combo = QComboBox()
+        for label, value in (("Fade", "fade"), ("Slide up", "slide_up"), ("Slide down", "slide_down"), ("Zoom", "zoom")):
+            exit_combo.addItem(label, value)
+        self.widgets: dict[str, QWidget] = {
+            "now_playing_style": style,
+            "now_playing_duration": spin(0.5, 15, 0.25),
+            "now_playing_exit": exit_combo,
+            "now_playing_exit_duration": spin(0.05, 3.0, 0.05),
+        }
+
+    def retranslate(self, korean: bool) -> None:
+        for key, labels in (
+            ("now_playing_style", ("카드", "미니멀", "글래스") if korean else ("Card", "Minimal", "Glass")),
+            ("now_playing_exit", ("페이드", "위쪽 슬라이드", "아래쪽 슬라이드", "줌")
+             if korean else ("Fade", "Slide up", "Slide down", "Zoom")),
+        ):
+            for index, label in enumerate(labels):
+                self.widgets[key].setItemText(index, label)
+
+
 _OWN_FIELD_KEYS = (
     "text", "font_size", "font_weight", "font_family",
     "text_stroke_color", "text_stroke_width", "text_alignment",
-    "now_playing_style", "now_playing_duration", "now_playing_exit",
-    "now_playing_exit_duration",
+    *(key for key, _section in NowPlayingSection.ROWS),
 )
 
 

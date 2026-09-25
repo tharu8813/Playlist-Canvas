@@ -46,6 +46,12 @@ from app.inspector.editors import (
     video_editor,
     watermark_editor,
 )
+from app.inspector.editors.audio_level_meter_editor import LevelMeterSection
+from app.inspector.editors.audio_visualizer_editor import VisualizerSection
+from app.inspector.editors.lyrics_editor import LyricsSection
+from app.inspector.editors.now_playing_editor import NowPlayingSection
+from app.inspector.editors.particle_overlay_editor import ParticleSection
+from app.inspector.editors.track_list_editor import TrackListSection
 from app.models.source import Source, SourceType
 from app.models.source_registry import source_registry
 from app.dialogs.color_editor_dialog import ColorEditorDialog
@@ -260,16 +266,7 @@ class SourceInspector(QScrollArea):
             ("YouTube", "youtube"), ("Gradient", "gradient"),
         ):
             self.progress_style_combo.addItem(label, value)
-        self.visualizer_style_combo = QComboBox()
-        for label, value in (
-            ("Bars", "bars"), ("Wave", "wave"), ("Dots", "dots"),
-            ("Line", "line"), ("Mirror", "mirror"), ("Spectrum", "spectrum"),
-            ("LED bars", "led"), ("Center bars", "center"), ("Capsules", "capsule"),
-            ("Arc", "arc"),
-        ):
-            self.visualizer_style_combo.addItem(label, value)
-        self.visualizer_bars_spin = QSpinBox()
-        self.visualizer_bars_spin.setRange(4, 96)
+        self.visualizer = VisualizerSection(self._spin)
         self.text_alignment_combo = QComboBox()
         for label, value in (("Left", "left"), ("Center", "center"), ("Right", "right")):
             self.text_alignment_combo.addItem(label, value)
@@ -295,129 +292,20 @@ class SourceInspector(QScrollArea):
         self.progress_mode_combo = QComboBox()
         for label, value in (("Current track", "track"), ("Whole video", "video")):
             self.progress_mode_combo.addItem(label, value)
-        self.visualizer_line_width_spin = self._spin(1, 30, 0.5)
-        self.visualizer_sensitivity_spin = self._spin(0.25, 3.0, 0.05)
-        self.visualizer_reactivity_spin = self._spin(0.05, 0.8, 0.05)
-        self.visualizer_noise_gate_spin = self._spin(0.0, 0.1, 0.001)
-        self.visualizer_noise_gate_spin.setDecimals(3)
-        self.visualizer_min_level_spin = self._spin(0.0, 0.5, 0.01)
-        self.visualizer_max_level_spin = self._spin(0.1, 1.0, 0.01)
-        self.visualizer_attack_spin = self._spin(0.01, 1.0, 0.05)
-        self.visualizer_release_spin = self._spin(0.01, 1.0, 0.05)
-        self.visualizer_smoothing_spin = self._spin(0.0, 1.0, 0.05)
-        self.visualizer_curve_spin = self._spin(0.25, 3.0, 0.05)
         self.album_frame_combo = QComboBox()
         for label, value in (("Rounded", "rounded"), ("Circle", "circle"), ("Polaroid", "polaroid"), ("Glass", "glass")):
             self.album_frame_combo.addItem(label, value)
-        self.track_list_count_spin = QSpinBox()
-        self.track_list_count_spin.setRange(0, 15)
-        self.track_list_style_combo = QComboBox()
-        for label, value in (
-            ("Compact", "compact"), ("Cards", "cards"), ("Queue", "queue"),
-            ("Minimal", "minimal"), ("Scroll / fade", "scroll"),
-            ("Glass", "glass"), ("Pills", "pills"),
-        ):
-            self.track_list_style_combo.addItem(label, value)
-        self.track_list_window_combo = QComboBox()
-        for label, value in (
-            ("Previous + current + next", "centered"),
-            ("Current + upcoming", "upcoming"),
-            ("History + current", "history"),
-        ):
-            self.track_list_window_combo.addItem(label, value)
-        self.track_list_show_number_check = QCheckBox()
-        self.track_list_show_artist_check = QCheckBox()
-        self.track_list_show_album_check = QCheckBox()
-        self.track_list_marker_combo = QComboBox()
-        for label, value in (
-            ("Play ▶", "play"), ("Dot ●", "dot"),
-            ("Accent ▌", "line"), ("None", "none"),
-        ):
-            self.track_list_marker_combo.addItem(label, value)
-        self.track_list_row_spacing_spin = self._spin(0, 40, 1)
-        self.track_list_item_padding_spin = self._spin(0, 40, 1)
-        self.track_list_current_color_button = self._color_button()
-        self.track_list_inactive_color_button = self._color_button()
-        self.track_list_current_background_button = self._color_button()
-        self.track_list_inactive_opacity_spin = self._spin(0.05, 1.0, 0.05)
-        self.track_list_current_scale_spin = self._spin(0.8, 1.5, 0.05)
-        self.track_list_show_dividers_check = QCheckBox()
-        self.now_playing_style_combo = QComboBox()
-        for label, value in (("Card", "card"), ("Minimal", "minimal"), ("Glass", "glass")):
-            self.now_playing_style_combo.addItem(label, value)
-        self.now_playing_duration_spin = self._spin(0.5, 15, 0.25)
-        self.now_playing_exit_combo = QComboBox()
-        for label, value in (("Fade", "fade"), ("Slide up", "slide_up"), ("Slide down", "slide_down"), ("Zoom", "zoom")):
-            self.now_playing_exit_combo.addItem(label, value)
-        self.now_playing_exit_duration_spin = self._spin(0.05, 3.0, 0.05)
-        self.subtitle_animation_combo = QComboBox()
-        for label, value in (
-            ("Glow", "glow"), ("Rise", "rise"), ("None", "none"),
-        ):
-            self.subtitle_animation_combo.addItem(label, value)
-        self.subtitle_animation_duration_spin = self._spin(0.05, 1.5, 0.05)
-        self.subtitle_context_lines_spin = QSpinBox()
-        self.subtitle_context_lines_spin.setRange(-1, 6)
-        self.subtitle_next_lines_spin = QSpinBox()
-        self.subtitle_next_lines_spin.setRange(-1, 6)
-        self.subtitle_line_spacing_spin = self._spin(0, 120, 1)
-        self.subtitle_previous_opacity_spin = self._spin(0.05, 0.9, 0.05)
-        self.subtitle_previous_blur_spin = self._spin(0, 8, 0.5)
-        self.subtitle_timing_offset_spin = self._spin(-5.0, 5.0, 0.01)
+        self.track_list = TrackListSection(self._spin, self._color_button)
+        self.now_playing = NowPlayingSection(self._spin)
+        self.lyrics = LyricsSection(self._spin)
         self.waveform_style_combo = QComboBox()
         for label, value in (("Line", "line"), ("Filled", "filled"), ("Mirror", "mirror")):
             self.waveform_style_combo.addItem(label, value)
-        self.level_meter_mode_combo = QComboBox()
-        for label, value in (("Stereo", "stereo"), ("Mono", "mono")):
-            self.level_meter_mode_combo.addItem(label, value)
-        self.level_meter_style_combo = QComboBox()
-        for label, value in (
-            ("Gradient", "gradient"), ("Solid", "solid"), ("LED", "led"),
-            ("Segments", "segments"),
-        ):
-            self.level_meter_style_combo.addItem(label, value)
-        self.level_meter_orientation_combo = QComboBox()
-        for label, value in (("Vertical", "vertical"), ("Horizontal", "horizontal")):
-            self.level_meter_orientation_combo.addItem(label, value)
-        self.level_meter_sensitivity_spin = self._spin(0.25, 4.0, 0.05)
-        self.level_meter_attack_spin = self._spin(0.01, 1.0, 0.05)
-        self.level_meter_release_spin = self._spin(0.01, 1.0, 0.05)
-        self.level_meter_min_level_spin = self._spin(0.0, 0.5, 0.01)
-        self.level_meter_max_level_spin = self._spin(0.1, 1.0, 0.01)
-        self.level_meter_segments_spin = QSpinBox()
-        self.level_meter_segments_spin.setRange(3, 64)
-        self.level_meter_gap_spin = self._spin(0.0, 30.0, 0.5)
-        self.level_meter_show_peak_check = QCheckBox()
-        self.level_meter_peak_hold_spin = self._spin(0.0, 3.0, 0.05)
-        self.level_meter_peak_decay_spin = self._spin(0.05, 3.0, 0.05)
-        self.level_meter_track_color_button = self._color_button()
-        self.level_meter_low_color_button = self._color_button()
-        self.level_meter_mid_color_button = self._color_button()
-        self.level_meter_high_color_button = self._color_button()
-        self.particle_style_combo = QComboBox()
-        for label, value in (
-            ("Dust", "dust"), ("Neon", "neon"), ("Noise", "noise"),
-            ("Snow", "snow"), ("Stars", "stars"), ("Bokeh", "bokeh"),
-            ("Confetti", "confetti"),
-        ):
-            self.particle_style_combo.addItem(label, value)
-        self.particle_density_spin = QSpinBox()
-        self.particle_density_spin.setRange(4, 500)
-        self.particle_speed_spin = self._spin(0.0, 5.0, 0.1)
-        self.particle_min_size_spin = self._spin(0.5, 40.0, 0.5)
-        self.particle_max_size_spin = self._spin(0.5, 80.0, 0.5)
-        self.particle_opacity_spin = self._spin(0.0, 1.0, 0.05)
-        self.particle_direction_spin = self._spin(-180.0, 180.0, 5.0)
-        self.particle_drift_spin = self._spin(0.0, 2.0, 0.05)
-        self.particle_twinkle_spin = self._spin(0.0, 1.0, 0.05)
-        self.particle_glow_spin = self._spin(0.0, 1.0, 0.05)
-        self.particle_secondary_color_button = self._color_button()
-        self.particle_seed_spin = QSpinBox()
-        self.particle_seed_spin.setRange(0, 999_999)
+        self.level_meter = LevelMeterSection(self._spin, self._color_button)
+        self.particle = ParticleSection(self._spin, self._color_button)
         self._add_labeled_row(content_form, "shape", self.shape_kind_combo)
         self._add_labeled_row(content_form, "progress_style", self.progress_style_combo)
-        self._add_labeled_row(content_form, "visualizer_style", self.visualizer_style_combo, section="vz_display")
-        self._add_labeled_row(content_form, "visualizer_bars", self.visualizer_bars_spin, section="vz_display")
+        self.visualizer.add_rows(self._add_labeled_row, content_form, VisualizerSection.EARLY_KEYS)
         self._add_labeled_row(text_form, "text_alignment", self.text_alignment_combo)
         self._add_labeled_row(text_form, "text_overflow", self.text_overflow_combo)
         self._add_labeled_row(content_form, "image_fit", self.image_fit_combo)
@@ -434,77 +322,14 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "progress_value", self.progress_value_spin)
         self._add_labeled_row(content_form, "progress_track_color", self.progress_track_color_button)
         self._add_labeled_row(content_form, "progress_mode", self.progress_mode_combo)
-        self._add_labeled_row(content_form, "visualizer_line_width", self.visualizer_line_width_spin, section="vz_display")
-        self._add_labeled_row(content_form, "visualizer_sensitivity", self.visualizer_sensitivity_spin, section="vz_response")
-        self._add_labeled_row(content_form, "visualizer_reactivity", self.visualizer_reactivity_spin, section="vz_response")
-        self._add_labeled_row(content_form, "visualizer_attack", self.visualizer_attack_spin, section="vz_response")
-        self._add_labeled_row(content_form, "visualizer_release", self.visualizer_release_spin, section="vz_response")
-        self._add_labeled_row(content_form, "visualizer_smoothing", self.visualizer_smoothing_spin, section="vz_response")
-        self._add_labeled_row(content_form, "visualizer_curve", self.visualizer_curve_spin, section="vz_response")
-        self._add_labeled_row(content_form, "visualizer_noise_gate", self.visualizer_noise_gate_spin, section="vz_range")
-        self._add_labeled_row(content_form, "visualizer_min_level", self.visualizer_min_level_spin, section="vz_range")
-        self._add_labeled_row(content_form, "visualizer_max_level", self.visualizer_max_level_spin, section="vz_range")
+        self.visualizer.add_rows(self._add_labeled_row, content_form, VisualizerSection.LATE_KEYS)
         self._add_labeled_row(content_form, "album_frame", self.album_frame_combo)
-        self._add_labeled_row(content_form, "track_list_count", self.track_list_count_spin, section="tl_layout")
-        self._add_labeled_row(content_form, "track_list_style", self.track_list_style_combo, section="tl_layout")
-        self._add_labeled_row(content_form, "track_list_window", self.track_list_window_combo, section="tl_layout")
-        self._add_labeled_row(content_form, "track_list_marker", self.track_list_marker_combo, section="tl_layout")
-        self._add_labeled_row(content_form, "track_list_show_number", self.track_list_show_number_check, section="tl_content")
-        self._add_labeled_row(content_form, "track_list_show_artist", self.track_list_show_artist_check, section="tl_content")
-        self._add_labeled_row(content_form, "track_list_show_album", self.track_list_show_album_check, section="tl_content")
-        self._add_labeled_row(content_form, "track_list_show_dividers", self.track_list_show_dividers_check, section="tl_content")
-        self._add_labeled_row(content_form, "track_list_row_spacing", self.track_list_row_spacing_spin, section="tl_spacing")
-        self._add_labeled_row(content_form, "track_list_item_padding", self.track_list_item_padding_spin, section="tl_spacing")
-        self._add_labeled_row(content_form, "track_list_current_scale", self.track_list_current_scale_spin, section="tl_spacing")
-        self._add_labeled_row(content_form, "track_list_inactive_opacity", self.track_list_inactive_opacity_spin, section="tl_spacing")
-        self._add_labeled_row(content_form, "track_list_current_color", self.track_list_current_color_button, section="tl_colors")
-        self._add_labeled_row(content_form, "track_list_inactive_color", self.track_list_inactive_color_button, section="tl_colors")
-        self._add_labeled_row(content_form, "track_list_current_background", self.track_list_current_background_button, section="tl_colors")
-        self._add_labeled_row(content_form, "now_playing_style", self.now_playing_style_combo)
-        self._add_labeled_row(content_form, "now_playing_duration", self.now_playing_duration_spin)
-        self._add_labeled_row(content_form, "now_playing_exit", self.now_playing_exit_combo, section="np_exit")
-        self._add_labeled_row(content_form, "now_playing_exit_duration", self.now_playing_exit_duration_spin, section="np_exit")
-        self._add_labeled_row(content_form, "subtitle_animation", self.subtitle_animation_combo, section="sub_transition")
-        self._add_labeled_row(content_form, "subtitle_animation_duration", self.subtitle_animation_duration_spin, section="sub_transition")
-        self._add_labeled_row(content_form, "subtitle_context_lines", self.subtitle_context_lines_spin, section="sub_layout")
-        self._add_labeled_row(content_form, "subtitle_next_lines", self.subtitle_next_lines_spin, section="sub_layout")
-        self._add_labeled_row(content_form, "subtitle_line_spacing", self.subtitle_line_spacing_spin, section="sub_layout")
-        self._add_labeled_row(content_form, "subtitle_previous_opacity", self.subtitle_previous_opacity_spin, section="sub_prev")
-        self._add_labeled_row(content_form, "subtitle_previous_blur", self.subtitle_previous_blur_spin, section="sub_prev")
-        self._add_labeled_row(content_form, "subtitle_timing_offset", self.subtitle_timing_offset_spin)
+        self.track_list.add_rows(self._add_labeled_row, content_form)
+        self.now_playing.add_rows(self._add_labeled_row, content_form)
+        self.lyrics.add_rows(self._add_labeled_row, content_form)
         self._add_labeled_row(content_form, "waveform_style", self.waveform_style_combo)
-        self._add_labeled_row(content_form, "level_meter_mode", self.level_meter_mode_combo, section="lm_display")
-        self._add_labeled_row(content_form, "level_meter_style", self.level_meter_style_combo, section="lm_display")
-        self._add_labeled_row(content_form, "level_meter_orientation", self.level_meter_orientation_combo, section="lm_display")
-        self._add_labeled_row(content_form, "level_meter_segments", self.level_meter_segments_spin, section="lm_display")
-        self._add_labeled_row(content_form, "level_meter_gap", self.level_meter_gap_spin, section="lm_display")
-        self._add_labeled_row(content_form, "level_meter_sensitivity", self.level_meter_sensitivity_spin, section="lm_response")
-        self._add_labeled_row(content_form, "level_meter_attack", self.level_meter_attack_spin, section="lm_response")
-        self._add_labeled_row(content_form, "level_meter_release", self.level_meter_release_spin, section="lm_response")
-        self._add_labeled_row(content_form, "level_meter_min_level", self.level_meter_min_level_spin, section="lm_range")
-        self._add_labeled_row(content_form, "level_meter_max_level", self.level_meter_max_level_spin, section="lm_range")
-        self._add_labeled_row(content_form, "level_meter_show_peak", self.level_meter_show_peak_check, section="lm_peak")
-        self._add_labeled_row(content_form, "level_meter_peak_hold", self.level_meter_peak_hold_spin, section="lm_peak")
-        self._add_labeled_row(content_form, "level_meter_peak_decay", self.level_meter_peak_decay_spin, section="lm_peak")
-        self._add_labeled_row(content_form, "level_meter_track_color", self.level_meter_track_color_button, section="lm_colors")
-        self._add_labeled_row(content_form, "level_meter_low_color", self.level_meter_low_color_button, section="lm_colors")
-        self._add_labeled_row(content_form, "level_meter_mid_color", self.level_meter_mid_color_button, section="lm_colors")
-        self._add_labeled_row(content_form, "level_meter_high_color", self.level_meter_high_color_button, section="lm_colors")
-        self._add_labeled_row(content_form, "particle_style", self.particle_style_combo, section="pt_display")
-        self._add_labeled_row(content_form, "particle_density", self.particle_density_spin, section="pt_display")
-        self._add_labeled_row(content_form, "particle_opacity", self.particle_opacity_spin, section="pt_display")
-        self._add_labeled_row(content_form, "particle_glow", self.particle_glow_spin, section="pt_display")
-        self._add_labeled_row(content_form, "particle_speed", self.particle_speed_spin, section="pt_motion")
-        self._add_labeled_row(content_form, "particle_direction", self.particle_direction_spin, section="pt_motion")
-        self._add_labeled_row(content_form, "particle_drift", self.particle_drift_spin, section="pt_motion")
-        self._add_labeled_row(content_form, "particle_twinkle", self.particle_twinkle_spin, section="pt_motion")
-        self._add_labeled_row(content_form, "particle_min_size", self.particle_min_size_spin, section="pt_shape")
-        self._add_labeled_row(content_form, "particle_max_size", self.particle_max_size_spin, section="pt_shape")
-        self._add_labeled_row(
-            content_form, "particle_secondary_color", self.particle_secondary_color_button,
-            section="pt_shape",
-        )
-        self._add_labeled_row(content_form, "particle_seed", self.particle_seed_spin, section="pt_shape")
+        self.level_meter.add_rows(self._add_labeled_row, content_form)
+        self.particle.add_rows(self._add_labeled_row, content_form)
         self.x_spin = self._spin(-5000, 5000, 1)
         self.y_spin = self._spin(-5000, 5000, 1)
         self.width_spin = self._spin(32, 5000, 1)
@@ -630,49 +455,24 @@ class SourceInspector(QScrollArea):
             self.name_edit, self.text_edit, self.expand_text_button,
             self.file_path_edit, self.file_button,
             self.clear_file_button, self.shape_kind_combo, self.progress_style_combo,
-            self.visualizer_style_combo, self.visualizer_bars_spin, self.x_spin, self.y_spin,
+            *(self.visualizer.widgets[key] for key in VisualizerSection.EARLY_KEYS),
+            self.x_spin, self.y_spin,
             self.text_alignment_combo, self.text_overflow_combo,
             self.image_fit_combo, self.progress_value_spin,
             self.progress_mode_combo,
             self.background_mode_combo, self.background_ambient_check,
             self.background_track_transition_check,
             self.background_track_transition_seconds_spin,
-            self.progress_track_color_button, self.visualizer_line_width_spin,
-            self.visualizer_sensitivity_spin, self.visualizer_reactivity_spin,
-            self.visualizer_noise_gate_spin, self.visualizer_min_level_spin,
-            self.visualizer_max_level_spin, self.visualizer_attack_spin,
-            self.visualizer_release_spin, self.visualizer_smoothing_spin,
-            self.visualizer_curve_spin,
-            self.album_frame_combo, self.track_list_count_spin, self.track_list_style_combo,
-            self.track_list_window_combo, self.track_list_show_number_check,
-            self.track_list_show_artist_check, self.track_list_show_album_check,
-            self.track_list_marker_combo, self.track_list_row_spacing_spin,
-            self.track_list_item_padding_spin, self.track_list_current_color_button,
-            self.track_list_inactive_color_button, self.track_list_current_background_button,
-            self.track_list_inactive_opacity_spin, self.track_list_current_scale_spin,
-            self.track_list_show_dividers_check,
-            self.now_playing_style_combo, self.now_playing_duration_spin,
-            self.now_playing_exit_combo, self.now_playing_exit_duration_spin,
-            self.subtitle_animation_combo, self.subtitle_animation_duration_spin,
-            self.subtitle_context_lines_spin, self.subtitle_next_lines_spin, self.subtitle_line_spacing_spin,
-            self.subtitle_previous_opacity_spin, self.subtitle_previous_blur_spin,
-            self.subtitle_timing_offset_spin,
-            self.waveform_style_combo, self.level_meter_mode_combo,
-            self.level_meter_style_combo, self.level_meter_orientation_combo,
-            self.level_meter_sensitivity_spin, self.level_meter_attack_spin,
-            self.level_meter_release_spin, self.level_meter_min_level_spin,
-            self.level_meter_max_level_spin, self.level_meter_segments_spin,
-            self.level_meter_gap_spin, self.level_meter_show_peak_check,
-            self.level_meter_peak_hold_spin, self.level_meter_peak_decay_spin,
-            self.level_meter_track_color_button, self.level_meter_low_color_button,
-            self.level_meter_mid_color_button, self.level_meter_high_color_button,
-            self.particle_style_combo,
-            self.particle_density_spin, self.particle_speed_spin,
-            self.particle_min_size_spin, self.particle_max_size_spin,
-            self.particle_opacity_spin, self.particle_direction_spin,
-            self.particle_drift_spin, self.particle_twinkle_spin,
-            self.particle_glow_spin, self.particle_secondary_color_button,
-            self.particle_seed_spin,
+            self.progress_track_color_button,
+            *(widget for key, widget in self.visualizer.widgets.items()
+              if key not in VisualizerSection.EARLY_KEYS),
+            self.album_frame_combo,
+            *self.track_list.widgets.values(),
+            *self.now_playing.widgets.values(),
+            *self.lyrics.widgets.values(),
+            self.waveform_style_combo,
+            *self.level_meter.widgets.values(),
+            *self.particle.widgets.values(),
             self.width_spin, self.height_spin, self.rotation_spin, self.scale_spin,
             self.opacity_spin, self.radius_spin, self.outline_spin, self.font_size_spin,
             self.font_weight_combo,
@@ -823,75 +623,29 @@ class SourceInspector(QScrollArea):
             return common[key][0 if korean else 1]
 
         families = {
-            "visualizer_": ("오디오 비주얼라이저", "audio visualizer"),
-            "track_list_": ("트랙 목록", "track list"),
-            "now_playing_": ("현재 재생 카드", "now-playing card"),
-            "subtitle_": ("가사", "lyrics"),
-            "level_meter_": ("오디오 레벨 미터", "audio level meter"),
-            "particle_": ("파티클 효과", "particle effect"),
+            "visualizer_": VisualizerSection.FAMILY,
+            "track_list_": TrackListSection.FAMILY,
+            "now_playing_": NowPlayingSection.FAMILY,
+            "subtitle_": LyricsSection.FAMILY,
+            "level_meter_": LevelMeterSection.FAMILY,
+            "particle_": ParticleSection.FAMILY,
         }
         prefix = next((entry for entry in families if key.startswith(entry)), "")
         suffix = key[len(prefix):] if prefix else key
         details = {
             "style": ("표현 디자인을 선택합니다. 데이터와 타이밍은 유지되고 모양만 바뀝니다.", "Chooses the visual design while preserving data and timing."),
-            "bars": ("표시할 막대 또는 점의 개수입니다. 많을수록 세밀하지만 렌더링 부하가 늘어납니다.", "Number of bars or dots. More detail can increase rendering cost."),
-            "line_width": ("선을 그리는 두께입니다. 값이 클수록 효과가 굵고 강하게 보입니다.", "Stroke width. Larger values make the effect heavier and stronger."),
+            # Shared by the visualizer and the level meter.
             "sensitivity": ("오디오 입력을 증폭하는 정도입니다. 값이 크면 작은 소리에도 크게 반응합니다.", "Audio-input gain. Larger values react more strongly to quiet sound."),
-            "reactivity": ("오디오 변화에 따라 움직이는 민감도입니다. 높을수록 움직임이 빠르고 역동적입니다.", "Movement response to audio changes. Higher values feel faster and more dynamic."),
-            "noise_gate": ("이 값보다 작은 입력은 무음으로 처리합니다. 0이면 게이트를 사용하지 않습니다.", "Treats input below this value as silence. Set to 0 to disable the gate."),
             "min_level": ("입력이 작거나 무음일 때 유지할 최소 표시 높이입니다.", "Minimum displayed level for quiet input or silence."),
             "max_level": ("가장 큰 입력에서 사용할 최대 표시 높이입니다.", "Maximum displayed level at the loudest input."),
             "attack": ("소리가 커질 때 표시가 상승하는 속도입니다. 높을수록 피크를 빠르게 따라갑니다.", "How quickly the display rises with louder sound. Higher values follow peaks faster."),
             "release": ("소리가 작아질 때 표시가 내려오는 속도입니다. 낮추면 움직임이 더 오래 남습니다.", "How quickly the display falls as sound gets quieter. Lower values linger longer."),
-            "smoothing": ("인접한 주파수 구간의 높이 차이를 평균화해 움직임을 부드럽게 합니다.", "Averages neighboring frequency bands for smoother movement."),
-            "curve": ("작은 소리와 큰 소리 중 어느 영역의 움직임을 더 강조할지 조정합니다.", "Balances emphasis between quiet detail and loud peaks."),
-            "count": ("화면에 동시에 표시할 항목 수입니다.", "Number of entries displayed at the same time."),
-            "window": ("현재 항목을 기준으로 이전 항목과 다음 항목을 어떤 비율로 보여줄지 정합니다.", "Chooses how previous and upcoming entries are arranged around the current item."),
-            "show_number": ("각 곡 앞에 플레이리스트 순번을 표시합니다.", "Shows the playlist position before each track."),
-            "show_artist": ("트랙 목록에 아티스트 이름을 함께 표시합니다.", "Shows artist names in the track list."),
-            "show_album": ("트랙 목록에 앨범 이름을 함께 표시합니다.", "Shows album names in the track list."),
-            "marker": ("재생 중인 곡을 알아보기 위한 아이콘 또는 강조선을 선택합니다.", "Chooses an icon or accent that identifies the current track."),
-            "row_spacing": ("목록의 각 행 사이 간격입니다. 값이 크면 목록이 더 넓게 펼쳐집니다.", "Space between rows. Larger values spread the list farther apart."),
-            "item_padding": ("각 목록 항목의 글자와 배경 사이 안쪽 여백입니다.", "Inner space between each row's text and background."),
-            "current_color": ("현재 재생 중인 곡의 글자색입니다.", "Text color for the currently playing track."),
-            "inactive_color": ("현재 곡을 제외한 다른 곡의 글자색입니다.", "Text color for tracks other than the current one."),
-            "current_background": ("현재 곡 뒤에 표시할 강조 배경색입니다.", "Highlight background behind the current track."),
-            "inactive_opacity": ("현재 곡이 아닌 항목을 흐리게 표시하는 정도입니다.", "Controls how faint non-current entries appear."),
-            "current_scale": ("현재 곡만 확대하거나 축소하는 배율입니다. 1은 원래 크기입니다.", "Scale applied only to the current track. A value of 1 is original size."),
-            "show_dividers": ("목록의 각 행 사이에 구분선을 표시합니다.", "Shows divider lines between list rows."),
-            "duration": ("카드 또는 전환이 화면에 유지되는 시간입니다.", "How long the card or transition remains on screen."),
-            "exit": ("카드가 사라질 때 사용할 전환 효과입니다.", "Transition used when the card disappears."),
-            "exit_duration": ("사라짐 효과가 완료되는 데 걸리는 시간입니다.", "Time required for the exit effect to complete."),
-            "animation": ("현재 가사 줄이 바뀔 때 사용할 전환 효과입니다.", "Transition used when the active lyric line changes."),
-            "animation_duration": ("가사 줄 전환 효과가 재생되는 시간입니다.", "Duration of the lyric-line transition."),
-            "context_lines": ("현재 줄 위에 함께 표시할 이전 가사 줄 수입니다.", "Number of previous lyric lines shown above the current line."),
-            "next_lines": ("현재 줄 아래에 미리 표시할 다음 가사 줄 수입니다.", "Number of upcoming lyric lines shown below the current line."),
-            "line_spacing": ("가사 줄과 줄 사이의 세로 간격입니다.", "Vertical spacing between lyric lines."),
-            "previous_opacity": ("지나간 가사 줄을 얼마나 흐리게 표시할지 정합니다.", "Controls how faint previous lyric lines appear."),
-            "previous_blur": ("지나간 가사 줄에 적용할 흐림 정도입니다.", "Blur applied to previous lyric lines."),
-            "timing_offset": ("모든 곡의 가사를 초 단위로 앞당기거나 늦추는 공통 보정입니다. 곡별 보정값과 합산됩니다.", "Global timing adjustment for lyrics on every track. It is added to each track's individual offset."),
-            "mode": ("스테레오 채널을 나눠 표시하거나 하나의 모노 신호로 합칠지 선택합니다.", "Chooses separate stereo channels or one combined mono signal."),
-            "orientation": ("미터가 세로로 상승할지 가로로 진행할지 선택합니다.", "Chooses whether the meter rises vertically or progresses horizontally."),
-            "segments": ("분할형 미터에 표시할 칸의 개수입니다. 많을수록 변화가 세밀합니다.", "Number of blocks in a segmented meter. More blocks show finer changes."),
-            "gap": ("스테레오 두 채널 사이의 간격입니다.", "Space between the two stereo channels."),
-            "show_peak": ("최근 가장 큰 레벨 위치를 피크 표시선으로 유지합니다.", "Keeps a marker at the most recent maximum level."),
-            "peak_hold": ("피크 표시선이 내려가기 전에 현재 위치를 유지하는 시간입니다.", "Time the peak marker stays in place before falling."),
-            "peak_decay": ("유지 시간이 끝난 뒤 피크 표시선이 내려오는 속도입니다.", "Speed at which the peak marker falls after its hold time."),
-            "track_color": ("신호가 없는 미터 배경 영역의 색상입니다.", "Color of the inactive meter track."),
-            "low_color": ("낮은 음량 구간에 사용할 색상입니다.", "Color used for low audio levels."),
-            "mid_color": ("중간 음량 구간에 사용할 색상입니다.", "Color used for medium audio levels."),
-            "high_color": ("높은 음량과 피크 구간에 사용할 색상입니다.", "Color used for high levels and peaks."),
-            "density": ("화면에 동시에 나타나는 파티클 수입니다. 높은 값은 렌더링 부하를 늘릴 수 있습니다.", "Number of particles on screen. High values can increase rendering cost."),
-            "speed": ("파티클이 이동하는 기본 속도입니다. 0이면 위치 변화가 멈춥니다.", "Base particle movement speed. Set to 0 to stop positional movement."),
-            "min_size": ("무작위로 생성되는 파티클의 최소 크기입니다.", "Minimum size of randomly generated particles."),
-            "max_size": ("무작위로 생성되는 파티클의 최대 크기입니다. 최소 크기보다 작게 설정되지 않습니다.", "Maximum random particle size; it cannot be smaller than the minimum."),
-            "opacity": ("효과 전체가 보이는 정도입니다. 0은 완전히 투명하고 1은 완전히 보입니다.", "Overall effect opacity. 0 is fully transparent and 1 is fully visible."),
-            "direction": ("파티클이 이동하는 기준 각도입니다. 0°는 오른쪽, 90°는 아래쪽입니다.", "Base movement angle. 0° is right and 90° is down."),
-            "drift": ("기본 이동 방향에서 좌우로 흔들리는 무작위 움직임의 강도입니다.", "Strength of random side-to-side movement away from the base direction."),
-            "twinkle": ("파티클 밝기가 시간에 따라 반짝이는 정도입니다.", "Amount of brightness variation over time."),
-            "glow": ("파티클 주변의 빛 번짐 강도입니다. 높은 값은 렌더링 부하를 늘릴 수 있습니다.", "Glow around particles. High values can increase rendering cost."),
-            "secondary_color": ("주 채우기 색과 섞어서 사용할 두 번째 파티클 색상입니다.", "Second particle color mixed with the primary fill color."),
-            "seed": ("파티클의 초기 배치를 결정합니다. 값을 바꾸면 같은 설정으로 새 배치를 만듭니다.", "Determines initial particle placement. Change it for a new layout with the same settings."),
+            **VisualizerSection.HELP,
+            **TrackListSection.HELP,
+            **NowPlayingSection.HELP,
+            **LyricsSection.HELP,
+            **LevelMeterSection.HELP,
+            **ParticleSection.HELP,
         }
         detail = details.get(suffix)
         if detail is None:
@@ -910,6 +664,9 @@ class SourceInspector(QScrollArea):
         for key, label in self._form_labels.items():
             widget = self._field_widgets[key]
             description = self._property_help_text(key)
+            note = self._field_notes.get(key, "")
+            if note:
+                description = f"{description} {note}"
             range_text = ""
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 minimum = f"{widget.minimum():g}"
@@ -1106,10 +863,8 @@ class SourceInspector(QScrollArea):
             "track_list_show_dividers",
         ):
             self._set_field_visible(key, source_type is SourceType.TRACK_LIST)
-        self._set_field_visible("now_playing_style", source_type is SourceType.NOW_PLAYING)
-        self._set_field_visible("now_playing_duration", source_type is SourceType.NOW_PLAYING)
-        self._set_field_visible("now_playing_exit", source_type is SourceType.NOW_PLAYING)
-        self._set_field_visible("now_playing_exit_duration", source_type is SourceType.NOW_PLAYING)
+        for key in self.now_playing.widgets:
+            self._set_field_visible(key, source_type is SourceType.NOW_PLAYING)
         self._set_field_visible("subtitle_animation", source_type is SourceType.LYRICS)
         self._set_field_visible("subtitle_animation_duration", source_type is SourceType.LYRICS)
         self._set_field_visible("subtitle_context_lines", source_type is SourceType.LYRICS)
@@ -1178,10 +933,8 @@ class SourceInspector(QScrollArea):
             "shadow_blur": source.shadow.enabled,
             "shadow_x": source.shadow.enabled,
             "shadow_y": source.shadow.enabled,
-            "level_meter_peak_hold": source.level_meter_show_peak,
-            "level_meter_peak_decay": source.level_meter_show_peak,
-            "subtitle_previous_opacity": source.subtitle_context_lines != 0,
-            "subtitle_previous_blur": source.subtitle_context_lines != 0,
+            **self.level_meter.hidden_when_off(source),
+            **self.lyrics.hidden_when_off(source),
         }
         for key, active in hidden_when_off.items():
             if not active and key in self._field_widgets:
@@ -1265,12 +1018,7 @@ class SourceInspector(QScrollArea):
         self.progress_style_combo.currentIndexChanged.connect(
             lambda _index: self._update("progress_style", self.progress_style_combo.currentData())
         )
-        self.visualizer_style_combo.currentIndexChanged.connect(
-            lambda _index: self._update("visualizer_style", self.visualizer_style_combo.currentData())
-        )
-        self.visualizer_bars_spin.valueChanged.connect(
-            lambda _value: self._update("visualizer_bars", self.visualizer_bars_spin.value())
-        )
+        self.visualizer.connect(self._update)
         self.text_alignment_combo.currentIndexChanged.connect(lambda _index: self._update("text_alignment", self.text_alignment_combo.currentData()))
         self.text_overflow_combo.currentIndexChanged.connect(
             lambda _index: self._update(
@@ -1293,130 +1041,19 @@ class SourceInspector(QScrollArea):
         self.progress_mode_combo.currentIndexChanged.connect(
             lambda _index: self._update("progress_mode", self.progress_mode_combo.currentData())
         )
-        self.visualizer_line_width_spin.valueChanged.connect(lambda _value: self._update("visualizer_line_width", self.visualizer_line_width_spin.value()))
-        self.visualizer_sensitivity_spin.valueChanged.connect(lambda _value: self._update("visualizer_sensitivity", self.visualizer_sensitivity_spin.value()))
-        self.visualizer_reactivity_spin.valueChanged.connect(lambda _value: self._update("visualizer_reactivity", self.visualizer_reactivity_spin.value()))
-        for field, widget in (
-            ("visualizer_noise_gate", self.visualizer_noise_gate_spin),
-            ("visualizer_min_level", self.visualizer_min_level_spin),
-            ("visualizer_max_level", self.visualizer_max_level_spin),
-            ("visualizer_attack", self.visualizer_attack_spin),
-            ("visualizer_release", self.visualizer_release_spin),
-            ("visualizer_smoothing", self.visualizer_smoothing_spin),
-            ("visualizer_curve", self.visualizer_curve_spin),
-        ):
-            widget.valueChanged.connect(
-                lambda _value, key=field, control=widget: self._update(key, control.value())
-            )
         self.album_frame_combo.currentIndexChanged.connect(lambda _index: self._update("album_frame_style", self.album_frame_combo.currentData()))
-        self.track_list_count_spin.valueChanged.connect(lambda value: self._update("track_list_count", value))
-        self.track_list_style_combo.currentIndexChanged.connect(lambda _index: self._update("track_list_style", self.track_list_style_combo.currentData()))
-        self.track_list_window_combo.currentIndexChanged.connect(
-            lambda _index: self._update("track_list_window", self.track_list_window_combo.currentData())
+        self.track_list.connect(
+            self._update, choose_color=self._choose_color,
+            apply_mixed_checkbox=self._apply_mixed_checkbox,
         )
-        self.track_list_show_number_check.toggled.connect(
-            lambda value: self._update("track_list_show_number", value)
-        )
-        self.track_list_show_artist_check.toggled.connect(
-            lambda value: self._update("track_list_show_artist", value)
-        )
-        self.track_list_show_album_check.toggled.connect(
-            lambda value: self._update("track_list_show_album", value)
-        )
-        self.track_list_marker_combo.currentIndexChanged.connect(
-            lambda _index: self._update("track_list_marker", self.track_list_marker_combo.currentData())
-        )
-        for field, widget in (
-            ("track_list_row_spacing", self.track_list_row_spacing_spin),
-            ("track_list_item_padding", self.track_list_item_padding_spin),
-            ("track_list_inactive_opacity", self.track_list_inactive_opacity_spin),
-            ("track_list_current_scale", self.track_list_current_scale_spin),
-        ):
-            widget.valueChanged.connect(
-                lambda _value, key=field, control=widget: self._update(key, control.value())
-            )
-        self.track_list_show_dividers_check.toggled.connect(
-            lambda value: self._update("track_list_show_dividers", value)
-        )
-        for field, button in (
-            ("track_list_current_color", self.track_list_current_color_button),
-            ("track_list_inactive_color", self.track_list_inactive_color_button),
-            ("track_list_current_background", self.track_list_current_background_button),
-        ):
-            button.clicked.connect(
-                lambda _checked=False, key=field, control=button: self._choose_color(key, control)
-            )
-        self.now_playing_style_combo.currentIndexChanged.connect(lambda _index: self._update("now_playing_style", self.now_playing_style_combo.currentData()))
-        self.now_playing_duration_spin.valueChanged.connect(lambda value: self._update("now_playing_duration", value))
-        self.now_playing_exit_combo.currentIndexChanged.connect(lambda _index: self._update("now_playing_exit_animation", self.now_playing_exit_combo.currentData()))
-        self.now_playing_exit_duration_spin.valueChanged.connect(lambda value: self._update("now_playing_exit_duration", value))
-        self.subtitle_animation_combo.currentIndexChanged.connect(lambda _index: self._update("subtitle_animation", self.subtitle_animation_combo.currentData()))
-        self.subtitle_animation_duration_spin.valueChanged.connect(lambda value: self._update("subtitle_animation_duration", value))
-        self.subtitle_context_lines_spin.valueChanged.connect(lambda value: self._update("subtitle_context_lines", value))
-        self.subtitle_next_lines_spin.valueChanged.connect(lambda value: self._update("subtitle_next_lines", value))
-        self.subtitle_line_spacing_spin.valueChanged.connect(lambda value: self._update("subtitle_line_spacing", value))
-        self.subtitle_previous_opacity_spin.valueChanged.connect(lambda value: self._update("subtitle_previous_opacity", value))
-        self.subtitle_previous_blur_spin.valueChanged.connect(lambda value: self._update("subtitle_previous_blur", value))
-        self.subtitle_timing_offset_spin.valueChanged.connect(lambda value: self._update("subtitle_timing_offset", value))
+        self.now_playing.connect(self._update)
+        self.lyrics.connect(self._update)
         self.waveform_style_combo.currentIndexChanged.connect(lambda _index: self._update("waveform_style", self.waveform_style_combo.currentData()))
-        self.level_meter_mode_combo.currentIndexChanged.connect(lambda _index: self._update("level_meter_mode", self.level_meter_mode_combo.currentData()))
-        self.level_meter_style_combo.currentIndexChanged.connect(
-            lambda _index: self._update(
-                "level_meter_style", self.level_meter_style_combo.currentData()
-            )
+        self.level_meter.connect(
+            self._update, choose_color=self._choose_color,
+            apply_mixed_checkbox=self._apply_mixed_checkbox,
         )
-        self.level_meter_orientation_combo.currentIndexChanged.connect(
-            lambda _index: self._update(
-                "level_meter_orientation", self.level_meter_orientation_combo.currentData()
-            )
-        )
-        for field, widget in (
-            ("level_meter_sensitivity", self.level_meter_sensitivity_spin),
-            ("level_meter_attack", self.level_meter_attack_spin),
-            ("level_meter_release", self.level_meter_release_spin),
-            ("level_meter_min_level", self.level_meter_min_level_spin),
-            ("level_meter_max_level", self.level_meter_max_level_spin),
-            ("level_meter_segments", self.level_meter_segments_spin),
-            ("level_meter_gap", self.level_meter_gap_spin),
-            ("level_meter_peak_hold", self.level_meter_peak_hold_spin),
-            ("level_meter_peak_decay", self.level_meter_peak_decay_spin),
-        ):
-            widget.valueChanged.connect(
-                lambda _value, key=field, control=widget: self._update(key, control.value())
-            )
-        self.level_meter_show_peak_check.toggled.connect(
-            lambda value: self._update("level_meter_show_peak", value)
-        )
-        for field, button in (
-            ("level_meter_track_color", self.level_meter_track_color_button),
-            ("level_meter_low_color", self.level_meter_low_color_button),
-            ("level_meter_mid_color", self.level_meter_mid_color_button),
-            ("level_meter_high_color", self.level_meter_high_color_button),
-        ):
-            button.clicked.connect(
-                lambda _checked=False, key=field, control=button: self._choose_color(key, control)
-            )
-        self.particle_style_combo.currentIndexChanged.connect(lambda _index: self._update("particle_style", self.particle_style_combo.currentData()))
-        self.particle_density_spin.valueChanged.connect(lambda value: self._update("particle_density", value))
-        self.particle_speed_spin.valueChanged.connect(lambda value: self._update("particle_speed", value))
-        for field, widget in (
-            ("particle_min_size", self.particle_min_size_spin),
-            ("particle_max_size", self.particle_max_size_spin),
-            ("particle_opacity", self.particle_opacity_spin),
-            ("particle_direction", self.particle_direction_spin),
-            ("particle_drift", self.particle_drift_spin),
-            ("particle_twinkle", self.particle_twinkle_spin),
-            ("particle_glow", self.particle_glow_spin),
-            ("particle_seed", self.particle_seed_spin),
-        ):
-            widget.valueChanged.connect(
-                lambda _value, key=field, control=widget: self._update(key, control.value())
-            )
-        self.particle_secondary_color_button.clicked.connect(
-            lambda: self._choose_color(
-                "particle_secondary_color", self.particle_secondary_color_button,
-            )
-        )
+        self.particle.connect(self._update, choose_color=self._choose_color)
         self.progress_track_color_button.clicked.connect(lambda: self._choose_color("progress_track_color", self.progress_track_color_button))
         self.animation_in_combo.currentIndexChanged.connect(lambda _index: self._update("animation_in", self.animation_in_combo.currentData()))
         self.animation_out_combo.currentIndexChanged.connect(lambda _index: self._update("animation_out", self.animation_out_combo.currentData()))
@@ -1485,11 +1122,6 @@ class SourceInspector(QScrollArea):
         direct_checks = (
             ("background_ambient", self.background_ambient_check),
             ("background_track_transition", self.background_track_transition_check),
-            ("track_list_show_number", self.track_list_show_number_check),
-            ("track_list_show_artist", self.track_list_show_artist_check),
-            ("track_list_show_album", self.track_list_show_album_check),
-            ("track_list_show_dividers", self.track_list_show_dividers_check),
-            ("level_meter_show_peak", self.level_meter_show_peak_check),
             ("visible", self.visible_check), ("locked", self.locked_check),
         )
         for field, checkbox in direct_checks:
@@ -1787,20 +1419,10 @@ class SourceInspector(QScrollArea):
             "name": ("이름", "Name"), "text": ("텍스트", "Text"), "file": ("파일", "File"),
             "video_settings": ("영상 사용 범위", "Video scope"),
             "shape": ("도형", "Shape"), "progress_style": ("진행 바 스타일", "Progress style"),
-            "visualizer_style": ("비주얼라이저 스타일", "Visualizer style"),
-            "visualizer_bars": ("막대 / 점 개수", "Bars / dots"),
             "text_alignment": ("텍스트 정렬", "Text alignment"),
             "text_overflow": ("긴 텍스트 처리", "Long text handling"),
             "image_fit": ("이미지 맞춤", "Image fit"),
             "progress_value": ("진행 값", "Progress value"), "progress_track_color": ("트랙 색", "Track color"),
-            "visualizer_line_width": ("선 두께", "Line width"),
-            "visualizer_noise_gate": ("노이즈 게이트", "Noise gate"),
-            "visualizer_min_level": ("최소 높이", "Minimum level"),
-            "visualizer_max_level": ("최대 높이", "Maximum level"),
-            "visualizer_attack": ("상승 속도", "Attack speed"),
-            "visualizer_release": ("하강 속도", "Release speed"),
-            "visualizer_smoothing": ("밴드 평활화", "Band smoothing"),
-            "visualizer_curve": ("다이내믹 커브", "Dynamic curve"),
             "x": ("X", "X"), "y": ("Y", "Y"), "width": ("너비", "Width"),
             "height": ("높이", "Height"), "rotation": ("회전", "Rotation"),
             "scale": ("크기", "Scale"), "opacity": ("투명도", "Opacity"),
@@ -1826,72 +1448,20 @@ class SourceInspector(QScrollArea):
             "layer": ("레이어", "Layer"),
         }
         labels.update({
-            "visualizer_sensitivity": ("비주얼라이저 감도", "Visualizer sensitivity"),
-            "visualizer_reactivity": ("반응 속도", "Response speed"),
             "background_mode": ("배경 모드", "Background mode"),
             "background_ambient": ("앨범 커버 앰비언트 블러", "Album art ambient blur"),
             "background_track_transition": ("곡 전환 시 배경 크로스페이드", "Cross-fade background on track change"),
             "background_track_transition_seconds": ("전환 길이(초)", "Transition length (s)"),
             "progress_mode": ("진행 기준", "Progress timing"),
             "album_frame": ("앨범 커버 프레임", "Album cover frame"),
-            "track_list_count": ("표시 곡 개수", "Visible tracks"),
-            "track_list_style": ("목록 스타일", "List style"),
-            "track_list_window": ("표시 범위", "Track range"),
-            "track_list_show_number": ("트랙 번호", "Show track numbers"),
-            "track_list_show_artist": ("아티스트", "Show artist"),
-            "track_list_show_album": ("앨범", "Show album"),
-            "track_list_marker": ("현재 곡 표시", "Current-track marker"),
-            "track_list_row_spacing": ("행 간격", "Row spacing"),
-            "track_list_item_padding": ("목록 안쪽 여백", "List padding"),
-            "track_list_current_color": ("현재 곡 글자색", "Current text color"),
-            "track_list_inactive_color": ("다른 곡 글자색", "Other-track color"),
-            "track_list_current_background": ("현재 곡 강조색", "Current highlight"),
-            "track_list_inactive_opacity": ("다른 곡 투명도", "Other-track opacity"),
-            "track_list_current_scale": ("현재 곡 크기", "Current-track scale"),
-            "track_list_show_dividers": ("행 구분선", "Row dividers"),
-            "now_playing_style": ("카드 스타일", "Card style"),
-            "now_playing_duration": ("표시 시간", "Display seconds"),
-            "now_playing_exit": ("사라짐 효과", "Exit effect"),
-            "now_playing_exit_duration": ("사라짐 시간", "Exit duration"),
-            "subtitle_animation": ("가사 전환", "Lyrics transition"),
-            "subtitle_animation_duration": ("전환 시간", "Transition duration"),
-            "subtitle_context_lines": ("이전 가사 줄", "Previous lyric lines"),
-            "subtitle_next_lines": ("다음 가사 줄", "Next lyric lines"),
-            "subtitle_previous_opacity": ("이전 가사 투명도", "Previous lyric opacity"),
-            "subtitle_previous_blur": ("이전 가사 블러", "Previous lyric blur"),
-            "subtitle_timing_offset": ("가사 시간 보정 (초)", "Lyric timing offset (s)"),
             "waveform_style": ("파형 스타일", "Waveform style"),
-            "level_meter_mode": ("레벨 미터", "Level meter"),
-            "level_meter_style": ("미터 스타일", "Meter style"),
-            "level_meter_orientation": ("방향", "Orientation"),
-            "level_meter_sensitivity": ("입력 감도", "Input sensitivity"),
-            "level_meter_attack": ("상승 속도", "Attack speed"),
-            "level_meter_release": ("하강 속도", "Release speed"),
-            "level_meter_min_level": ("최소 레벨", "Minimum level"),
-            "level_meter_max_level": ("최대 레벨", "Maximum level"),
-            "level_meter_segments": ("구간 수", "Segments"),
-            "level_meter_gap": ("채널 간격", "Channel gap"),
-            "level_meter_show_peak": ("피크 표시", "Show peak"),
-            "level_meter_peak_hold": ("피크 유지 시간", "Peak hold"),
-            "level_meter_peak_decay": ("피크 하강 속도", "Peak decay"),
-            "level_meter_track_color": ("배경 트랙 색", "Track color"),
-            "level_meter_low_color": ("낮은 레벨 색", "Low-level color"),
-            "level_meter_mid_color": ("중간 레벨 색", "Mid-level color"),
-            "level_meter_high_color": ("피크 색", "Peak color"),
-            "particle_style": ("파티클 스타일", "Particle style"),
-            "particle_density": ("파티클 밀도", "Particle density"),
-            "particle_speed": ("파티클 속도", "Particle speed"),
-            "particle_min_size": ("최소 크기", "Minimum size"),
-            "particle_max_size": ("최대 크기", "Maximum size"),
-            "particle_opacity": ("파티클 투명도", "Particle opacity"),
-            "particle_direction": ("이동 방향", "Direction"),
-            "particle_drift": ("흔들림", "Drift"),
-            "particle_twinkle": ("반짝임", "Twinkle"),
-            "particle_glow": ("글로우", "Glow"),
-            "particle_secondary_color": ("보조 색상", "Secondary color"),
-            "particle_seed": ("배치 시드", "Layout seed"),
         })
-        labels["subtitle_line_spacing"] = ("가사 줄 간격", "Lyric line spacing")
+        labels.update(VisualizerSection.LABELS)
+        labels.update(LyricsSection.LABELS)
+        labels.update(LevelMeterSection.LABELS)
+        labels.update(TrackListSection.LABELS)
+        labels.update(NowPlayingSection.LABELS)
+        labels.update(ParticleSection.LABELS)
         korean = self.translator.language.value == "ko"
         for key, label in self._form_labels.items():
             label.setText(labels[key][0 if korean else 1])
@@ -1909,25 +1479,12 @@ class SourceInspector(QScrollArea):
                 self._tab_indices[category], pair[0 if korean else 1],
             )
         section_titles = {
-            "vz_display": ("표시", "Display"),
-            "vz_response": ("반응", "Response"),
-            "vz_range": ("레벨 범위", "Level range"),
-            "tl_layout": ("레이아웃", "Layout"),
-            "tl_content": ("표시 항목", "Shown details"),
-            "tl_spacing": ("간격 · 크기", "Spacing & size"),
-            "tl_colors": ("색상", "Colors"),
-            "lm_display": ("표시", "Display"),
-            "lm_response": ("반응", "Response"),
-            "lm_range": ("레벨 범위", "Level range"),
-            "lm_peak": ("피크 표시", "Peak"),
-            "lm_colors": ("색상", "Colors"),
-            "pt_display": ("표시", "Display"),
-            "pt_motion": ("움직임", "Motion"),
-            "pt_shape": ("모양", "Shape"),
-            "sub_transition": ("전환", "Transition"),
-            "sub_layout": ("줄 배치", "Line layout"),
-            "sub_prev": ("이전 줄", "Previous lines"),
-            "np_exit": ("종료 효과", "Exit"),
+            **VisualizerSection.SECTION_TITLES,
+            **TrackListSection.SECTION_TITLES,
+            **LevelMeterSection.SECTION_TITLES,
+            **ParticleSection.SECTION_TITLES,
+            **LyricsSection.SECTION_TITLES,
+            **NowPlayingSection.SECTION_TITLES,
         }
         for (_category, section), group in self._sections.items():
             pair = section_titles.get(section, (section, section))
@@ -1971,135 +1528,26 @@ class SourceInspector(QScrollArea):
         for combo in (self.animation_in_combo, self.animation_out_combo):
             for index, label in enumerate(animation_labels):
                 combo.setItemText(index, label)
-        track_style_labels = (
-            ("컴팩트", "카드", "재생 대기열", "미니멀", "스크롤 / 페이드", "글래스", "필")
-            if korean else
-            ("Compact", "Cards", "Queue", "Minimal", "Scroll / fade", "Glass", "Pills")
-        )
-        for index, label in enumerate(track_style_labels):
-            self.track_list_style_combo.setItemText(index, label)
-        track_window_labels = (
-            ("이전 + 현재 + 다음", "현재 + 다음 곡", "이전 곡 + 현재")
-            if korean else
-            ("Previous + current + next", "Current + upcoming", "History + current")
-        )
-        for index, label in enumerate(track_window_labels):
-            self.track_list_window_combo.setItemText(index, label)
-        marker_labels = (
-            ("재생 ▶", "점 ●", "강조선 ▌", "표시 없음")
-            if korean else ("Play ▶", "Dot ●", "Accent ▌", "None")
-        )
-        for index, label in enumerate(marker_labels):
-            self.track_list_marker_combo.setItemText(index, label)
-        automatic_label = "자동" if korean else "Auto"
-        self.track_list_count_spin.setSpecialValueText(automatic_label)
-        self.subtitle_context_lines_spin.setSpecialValueText(automatic_label)
-        self.subtitle_next_lines_spin.setSpecialValueText(automatic_label)
-        subtitle_animation_labels = (
-            ("글로우", "라이즈", "없음")
-            if korean else
-            ("Glow", "Rise", "None")
-        )
-        for index, label in enumerate(subtitle_animation_labels):
-            self.subtitle_animation_combo.setItemText(index, label)
-        self.subtitle_animation_combo.setToolTip(
-            "글로우: 흐릿하게 시작해 제자리에서 또렷해지는 부드러운 전환. "
-            "라이즈: 흐림·확대 없이 아래에서 위로 빠르게 미끄러져 올라오는 선명한 전환."
-            if korean else
-            "Glow: a soft transition that starts blurred and sharpens in place. "
-            "Rise: a crisp upward slide from below, with no blur or scale."
-        )
-        self.font_add_button.setToolTip(
-            "TTF 또는 OTF 글꼴 파일을 이 프로젝트의 텍스트에 추가합니다."
-            if korean else "Add a TTF or OTF font file for this project's text sources."
-        )
-        self.track_list_window_combo.setToolTip(
-            "현재 곡을 기준으로 목록에 이전 곡과 다음 곡을 어떻게 배치할지 정합니다."
-            if korean else "Choose how previous and upcoming tracks are arranged around the current track."
-        )
-        self.track_list_count_spin.setToolTip(
-            "자동을 선택하면 요소 높이와 글자 크기에 맞춰 표시 곡 수가 바뀝니다."
-            if korean else
-            "Auto changes the visible track count to fit the source height and font size."
-        )
-        automatic_lyrics_tip = (
-            "자동을 선택하면 요소 높이, 글자 크기와 줄 간격에 맞춰 표시할 가사 수를 계산합니다."
-            if korean else
-            "Auto calculates the visible lyric context from the source height, font size, and line spacing."
-        )
-        self.subtitle_context_lines_spin.setToolTip(automatic_lyrics_tip)
-        self.subtitle_next_lines_spin.setToolTip(automatic_lyrics_tip)
-        self.track_list_inactive_opacity_spin.setToolTip(
-            "현재 재생 중이 아닌 곡을 흐리게 표시하는 정도입니다."
-            if korean else "Controls how faint non-current tracks appear."
-        )
-        self.track_list_current_scale_spin.setToolTip(
-            "현재 곡 글자만 확대하여 목록에서 더 잘 보이게 합니다."
-            if korean else "Enlarges only the current track to strengthen its emphasis."
-        )
-        visualizer_tips = {
-            self.visualizer_noise_gate_spin: (
-                "이 값보다 작은 입력을 무음으로 처리합니다. 0이면 비활성화됩니다.",
-                "Treat input below this value as silence. Set to 0 to disable.",
+        self.track_list.retranslate(korean)
+        self.now_playing.retranslate(korean)
+        self.lyrics.retranslate(korean)
+        # Field-specific guidance beyond _property_help_text. It is merged into
+        # the hover help by _install_property_tooltips; a plain setToolTip here
+        # would be overwritten by it.
+        self._field_notes = {
+            "text": (
+                "지원 토큰: " if korean else "Supported tokens: "
+            ) + (
+                "%title%, %artist%, %album%, %track%, %track_total%, %filename%, "
+                "%current_time%, %total_time%, %track_current_time%, %track_total_time%, "
+                "%video_current_time%, %video_total_time%"
             ),
-            self.visualizer_min_level_spin: (
-                "무음일 때의 기본 높이입니다. 완전히 평평하게 하려면 0으로 설정하세요.",
-                "Baseline at silence. Set to 0 for a completely flat idle wave.",
-            ),
-            self.visualizer_max_level_spin: (
-                "가장 큰 소리에서 사용할 최대 높이입니다.",
-                "Maximum height used for the loudest signal.",
-            ),
-            self.visualizer_attack_spin: (
-                "소리가 커질 때 따라가는 속도입니다.",
-                "How quickly the visualizer follows rising audio.",
-            ),
-            self.visualizer_release_spin: (
-                "소리가 작아질 때 내려오는 속도입니다.",
-                "How quickly the visualizer falls after audio gets quieter.",
-            ),
-            self.visualizer_smoothing_spin: (
-                "인접한 주파수 막대 사이의 높이 차이를 부드럽게 만듭니다.",
-                "Smooth height differences between neighbouring frequency bands.",
-            ),
-            self.visualizer_curve_spin: (
-                "1보다 작으면 작은 소리를 강조하고, 1보다 크면 큰 소리를 강조합니다.",
-                "Below 1 emphasizes quiet detail; above 1 emphasizes strong peaks.",
-            ),
+            **self.visualizer.notes(korean),
+            **self.track_list.notes(korean),
+            **self.lyrics.notes(korean),
         }
-        for widget, tip in visualizer_tips.items():
-            widget.setToolTip(tip[0 if korean else 1])
-        particle_style_labels = (
-            ("먼지", "네온", "노이즈", "눈", "별", "보케", "색종이")
-            if korean else
-            ("Dust", "Neon", "Noise", "Snow", "Stars", "Bokeh", "Confetti")
-        )
-        for index, label in enumerate(particle_style_labels):
-            self.particle_style_combo.setItemText(index, label)
-        self.particle_direction_spin.setToolTip(
-            "각도 기준: 0° 오른쪽, 90° 아래, -90° 위"
-            if korean else "Angle: 0° right, 90° down, -90° up"
-        )
-        self.particle_seed_spin.setToolTip(
-            "값을 바꾸면 같은 설정으로 새로운 파티클 배치를 만듭니다."
-            if korean else "Change this value to generate a new layout with the same settings."
-        )
-        self.particle_density_spin.setToolTip(
-            "높은 밀도와 강한 글로우를 함께 사용하면 미리보기 성능이 낮아질 수 있습니다."
-            if korean else
-            "High density combined with strong glow can reduce preview performance."
-        )
-        self.level_meter_show_peak_check.setText("사용" if korean else "Enabled")
-        meter_style_labels = (
-            ("그라데이션", "단색", "LED", "분할 막대")
-            if korean else ("Gradient", "Solid", "LED", "Segments")
-        )
-        for index, label in enumerate(meter_style_labels):
-            self.level_meter_style_combo.setItemText(index, label)
-        self.level_meter_mode_combo.setItemText(0, "스테레오" if korean else "Stereo")
-        self.level_meter_mode_combo.setItemText(1, "모노" if korean else "Mono")
-        self.level_meter_orientation_combo.setItemText(0, "세로" if korean else "Vertical")
-        self.level_meter_orientation_combo.setItemText(1, "가로" if korean else "Horizontal")
+        self.particle.retranslate(korean)
+        self.level_meter.retranslate(korean)
         self.gradient_check.setText("사용" if korean else "Enabled")
         self.animation_preview_button.setText(
             "애니메이션 미리보기" if korean else "Preview animation"
@@ -2111,11 +1559,6 @@ class SourceInspector(QScrollArea):
         )
         self.text_edit.setPlaceholderText(
             "%title% · %artist% · %album%"
-        )
-        self.text_edit.setToolTip(
-            "지원: %title%, %artist%, %album%, %track%, %track_total%, %filename%, %current_time%, %total_time%, %track_current_time%, %track_total_time%, %video_current_time%, %video_total_time%"
-            if korean else
-            "Supported: %title%, %artist%, %album%, %track%, %track_total%, %filename%, %current_time%, %total_time%, %track_current_time%, %track_total_time%, %video_current_time%, %video_total_time%"
         )
         self._install_property_tooltips()
         self._refresh_property_tabs(self._selected_sources())
@@ -2311,24 +1754,13 @@ class SourceInspector(QScrollArea):
         add("combo", {
             "shape_kind": self.shape_kind_combo,
             "progress_style": self.progress_style_combo,
-            "visualizer_style": self.visualizer_style_combo,
             "text_alignment": self.text_alignment_combo,
             "text_overflow": self.text_overflow_combo,
             "image_fit_mode": self.image_fit_combo,
             "background_mode": self.background_mode_combo,
             "progress_mode": self.progress_mode_combo,
             "album_frame_style": self.album_frame_combo,
-            "track_list_style": self.track_list_style_combo,
-            "track_list_window": self.track_list_window_combo,
-            "track_list_marker": self.track_list_marker_combo,
-            "now_playing_style": self.now_playing_style_combo,
-            "now_playing_exit_animation": self.now_playing_exit_combo,
-            "subtitle_animation": self.subtitle_animation_combo,
             "waveform_style": self.waveform_style_combo,
-            "level_meter_mode": self.level_meter_mode_combo,
-            "level_meter_style": self.level_meter_style_combo,
-            "level_meter_orientation": self.level_meter_orientation_combo,
-            "particle_style": self.particle_style_combo,
             "font_family": self.font_family_combo,
             "font_weight": self.font_weight_combo,
             "animation_in": self.animation_in_combo,
@@ -2340,53 +1772,9 @@ class SourceInspector(QScrollArea):
             "scale": self.scale_spin, "opacity": self.opacity_spin,
             "border_radius": self.radius_spin, "outline_width": self.outline_spin,
             "font_size": self.font_size_spin, "z_index": self.z_spin,
-            "visualizer_bars": self.visualizer_bars_spin,
             "progress_value": self.progress_value_spin,
             "background_track_transition_seconds":
                 self.background_track_transition_seconds_spin,
-            "visualizer_line_width": self.visualizer_line_width_spin,
-            "visualizer_sensitivity": self.visualizer_sensitivity_spin,
-            "visualizer_reactivity": self.visualizer_reactivity_spin,
-            "visualizer_noise_gate": self.visualizer_noise_gate_spin,
-            "visualizer_min_level": self.visualizer_min_level_spin,
-            "visualizer_max_level": self.visualizer_max_level_spin,
-            "visualizer_attack": self.visualizer_attack_spin,
-            "visualizer_release": self.visualizer_release_spin,
-            "visualizer_smoothing": self.visualizer_smoothing_spin,
-            "visualizer_curve": self.visualizer_curve_spin,
-            "track_list_count": self.track_list_count_spin,
-            "track_list_row_spacing": self.track_list_row_spacing_spin,
-            "track_list_item_padding": self.track_list_item_padding_spin,
-            "track_list_inactive_opacity": self.track_list_inactive_opacity_spin,
-            "track_list_current_scale": self.track_list_current_scale_spin,
-            "now_playing_duration": self.now_playing_duration_spin,
-            "now_playing_exit_duration": self.now_playing_exit_duration_spin,
-            "subtitle_animation_duration": self.subtitle_animation_duration_spin,
-            "subtitle_context_lines": self.subtitle_context_lines_spin,
-            "subtitle_next_lines": self.subtitle_next_lines_spin,
-            "subtitle_line_spacing": self.subtitle_line_spacing_spin,
-            "subtitle_previous_opacity": self.subtitle_previous_opacity_spin,
-            "subtitle_previous_blur": self.subtitle_previous_blur_spin,
-            "subtitle_timing_offset": self.subtitle_timing_offset_spin,
-            "level_meter_sensitivity": self.level_meter_sensitivity_spin,
-            "level_meter_attack": self.level_meter_attack_spin,
-            "level_meter_release": self.level_meter_release_spin,
-            "level_meter_min_level": self.level_meter_min_level_spin,
-            "level_meter_max_level": self.level_meter_max_level_spin,
-            "level_meter_segments": self.level_meter_segments_spin,
-            "level_meter_gap": self.level_meter_gap_spin,
-            "level_meter_peak_hold": self.level_meter_peak_hold_spin,
-            "level_meter_peak_decay": self.level_meter_peak_decay_spin,
-            "particle_density": self.particle_density_spin,
-            "particle_speed": self.particle_speed_spin,
-            "particle_min_size": self.particle_min_size_spin,
-            "particle_max_size": self.particle_max_size_spin,
-            "particle_opacity": self.particle_opacity_spin,
-            "particle_direction": self.particle_direction_spin,
-            "particle_drift": self.particle_drift_spin,
-            "particle_twinkle": self.particle_twinkle_spin,
-            "particle_glow": self.particle_glow_spin,
-            "particle_seed": self.particle_seed_spin,
             "blur": self.blur_spin, "brightness": self.brightness_spin,
             "contrast": self.contrast_spin,
             "text_stroke_width": self.text_stroke_width_spin,
@@ -2400,25 +1788,12 @@ class SourceInspector(QScrollArea):
         add("check", {
             "background_ambient": self.background_ambient_check,
             "background_track_transition": self.background_track_transition_check,
-            "track_list_show_number": self.track_list_show_number_check,
-            "track_list_show_artist": self.track_list_show_artist_check,
-            "track_list_show_album": self.track_list_show_album_check,
-            "track_list_show_dividers": self.track_list_show_dividers_check,
-            "level_meter_show_peak": self.level_meter_show_peak_check,
             "visible": self.visible_check, "locked": self.locked_check,
             "gradient.enabled": self.gradient_check,
             "shadow.enabled": self.shadow_check,
         })
         add("color", {
             "progress_track_color": self.progress_track_color_button,
-            "track_list_current_color": self.track_list_current_color_button,
-            "track_list_inactive_color": self.track_list_inactive_color_button,
-            "track_list_current_background": self.track_list_current_background_button,
-            "level_meter_track_color": self.level_meter_track_color_button,
-            "level_meter_low_color": self.level_meter_low_color_button,
-            "level_meter_mid_color": self.level_meter_mid_color_button,
-            "level_meter_high_color": self.level_meter_high_color_button,
-            "particle_secondary_color": self.particle_secondary_color_button,
             "fill_color": self.fill_color_button,
             "outline_color": self.outline_color_button,
             "text_stroke_color": self.text_stroke_color_button,
@@ -2426,6 +1801,12 @@ class SourceInspector(QScrollArea):
             "gradient.end_color": self.gradient_end_button,
             "shadow.color": self.shadow_color_button,
         })
+        bindings.update(self.visualizer.bindings())
+        bindings.update(self.lyrics.bindings())
+        bindings.update(self.level_meter.bindings())
+        bindings.update(self.track_list.bindings())
+        bindings.update(self.now_playing.bindings())
+        bindings.update(self.particle.bindings())
         # Text sources and drawable outlines share the legacy model field, but
         # expose it in separate, correctly named UI categories.
         bindings["text_color"] = (
@@ -2468,8 +1849,7 @@ class SourceInspector(QScrollArea):
             self.font_family_combo.setCurrentText(source.font_family)
             self.shape_kind_combo.setCurrentIndex(max(0, self.shape_kind_combo.findData(source.shape_kind)))
             self.progress_style_combo.setCurrentIndex(max(0, self.progress_style_combo.findData(source.progress_style)))
-            self.visualizer_style_combo.setCurrentIndex(max(0, self.visualizer_style_combo.findData(source.visualizer_style)))
-            self.visualizer_bars_spin.setValue(source.visualizer_bars)
+            self.visualizer.fill(source)
             self.text_alignment_combo.setCurrentIndex(max(0, self.text_alignment_combo.findData(source.text_alignment)))
             self.text_overflow_combo.setCurrentIndex(
                 max(0, self.text_overflow_combo.findData(source.text_overflow))
@@ -2485,79 +1865,13 @@ class SourceInspector(QScrollArea):
             )
             self.progress_value_spin.setValue(source.progress_value)
             self.progress_mode_combo.setCurrentIndex(max(0, self.progress_mode_combo.findData(source.progress_mode)))
-            self.visualizer_line_width_spin.setValue(source.visualizer_line_width)
-            self.visualizer_sensitivity_spin.setValue(source.visualizer_sensitivity)
-            self.visualizer_reactivity_spin.setValue(source.visualizer_reactivity)
-            self.visualizer_noise_gate_spin.setValue(source.visualizer_noise_gate)
-            self.visualizer_min_level_spin.setValue(source.visualizer_min_level)
-            self.visualizer_max_level_spin.setValue(source.visualizer_max_level)
-            self.visualizer_attack_spin.setValue(source.visualizer_attack)
-            self.visualizer_release_spin.setValue(source.visualizer_release)
-            self.visualizer_smoothing_spin.setValue(source.visualizer_smoothing)
-            self.visualizer_curve_spin.setValue(source.visualizer_curve)
             self.album_frame_combo.setCurrentIndex(max(0, self.album_frame_combo.findData(source.album_frame_style)))
-            self.track_list_count_spin.setValue(source.track_list_count)
-            self.track_list_style_combo.setCurrentIndex(max(0, self.track_list_style_combo.findData(source.track_list_style)))
-            self.track_list_window_combo.setCurrentIndex(max(0, self.track_list_window_combo.findData(source.track_list_window)))
-            self.track_list_show_number_check.setChecked(source.track_list_show_number)
-            self.track_list_show_artist_check.setChecked(source.track_list_show_artist)
-            self.track_list_show_album_check.setChecked(source.track_list_show_album)
-            self.track_list_marker_combo.setCurrentIndex(max(0, self.track_list_marker_combo.findData(source.track_list_marker)))
-            self.track_list_row_spacing_spin.setValue(source.track_list_row_spacing)
-            self.track_list_item_padding_spin.setValue(source.track_list_item_padding)
-            self.track_list_inactive_opacity_spin.setValue(source.track_list_inactive_opacity)
-            self.track_list_current_scale_spin.setValue(source.track_list_current_scale)
-            self.track_list_show_dividers_check.setChecked(source.track_list_show_dividers)
-            self._set_color_button(self.track_list_current_color_button, source.track_list_current_color)
-            self._set_color_button(self.track_list_inactive_color_button, source.track_list_inactive_color)
-            self._set_color_button(self.track_list_current_background_button, source.track_list_current_background)
-            self.now_playing_style_combo.setCurrentIndex(max(0, self.now_playing_style_combo.findData(source.now_playing_style)))
-            self.now_playing_duration_spin.setValue(source.now_playing_duration)
-            self.now_playing_exit_combo.setCurrentIndex(max(0, self.now_playing_exit_combo.findData(source.now_playing_exit_animation)))
-            self.now_playing_exit_duration_spin.setValue(source.now_playing_exit_duration)
-            self.subtitle_animation_combo.setCurrentIndex(max(0, self.subtitle_animation_combo.findData(source.subtitle_animation)))
-            self.subtitle_animation_duration_spin.setValue(source.subtitle_animation_duration)
-            self.subtitle_context_lines_spin.setValue(source.subtitle_context_lines)
-            self.subtitle_next_lines_spin.setValue(source.subtitle_next_lines)
-            self.subtitle_line_spacing_spin.setValue(source.subtitle_line_spacing)
-            self.subtitle_previous_opacity_spin.setValue(source.subtitle_previous_opacity)
-            self.subtitle_previous_blur_spin.setValue(source.subtitle_previous_blur)
-            self.subtitle_timing_offset_spin.setValue(source.subtitle_timing_offset)
+            self.track_list.fill(source, set_color=self._set_color_button)
+            self.now_playing.fill(source)
+            self.lyrics.fill(source)
             self.waveform_style_combo.setCurrentIndex(max(0, self.waveform_style_combo.findData(source.waveform_style)))
-            legacy_led = source.level_meter_mode == "led"
-            meter_mode = "stereo" if legacy_led else source.level_meter_mode
-            meter_style = "led" if legacy_led else source.level_meter_style
-            self.level_meter_mode_combo.setCurrentIndex(max(0, self.level_meter_mode_combo.findData(meter_mode)))
-            self.level_meter_style_combo.setCurrentIndex(max(0, self.level_meter_style_combo.findData(meter_style)))
-            self.level_meter_orientation_combo.setCurrentIndex(max(0, self.level_meter_orientation_combo.findData(source.level_meter_orientation)))
-            self.level_meter_sensitivity_spin.setValue(source.level_meter_sensitivity)
-            self.level_meter_attack_spin.setValue(source.level_meter_attack)
-            self.level_meter_release_spin.setValue(source.level_meter_release)
-            self.level_meter_min_level_spin.setValue(source.level_meter_min_level)
-            self.level_meter_max_level_spin.setValue(source.level_meter_max_level)
-            self.level_meter_segments_spin.setValue(source.level_meter_segments)
-            self.level_meter_gap_spin.setValue(source.level_meter_gap)
-            self.level_meter_show_peak_check.setChecked(source.level_meter_show_peak)
-            self.level_meter_peak_hold_spin.setValue(source.level_meter_peak_hold)
-            self.level_meter_peak_decay_spin.setValue(source.level_meter_peak_decay)
-            self._set_color_button(self.level_meter_track_color_button, source.level_meter_track_color)
-            self._set_color_button(self.level_meter_low_color_button, source.level_meter_low_color)
-            self._set_color_button(self.level_meter_mid_color_button, source.level_meter_mid_color)
-            self._set_color_button(self.level_meter_high_color_button, source.level_meter_high_color)
-            self.particle_style_combo.setCurrentIndex(max(0, self.particle_style_combo.findData(source.particle_style)))
-            self.particle_density_spin.setValue(source.particle_density)
-            self.particle_speed_spin.setValue(source.particle_speed)
-            self.particle_min_size_spin.setValue(source.particle_min_size)
-            self.particle_max_size_spin.setValue(source.particle_max_size)
-            self.particle_opacity_spin.setValue(source.particle_opacity)
-            self.particle_direction_spin.setValue(source.particle_direction)
-            self.particle_drift_spin.setValue(source.particle_drift)
-            self.particle_twinkle_spin.setValue(source.particle_twinkle)
-            self.particle_glow_spin.setValue(source.particle_glow)
-            self._set_color_button(
-                self.particle_secondary_color_button, source.particle_secondary_color,
-            )
-            self.particle_seed_spin.setValue(source.particle_seed)
+            self.level_meter.fill(source, set_color=self._set_color_button)
+            self.particle.fill(source, set_color=self._set_color_button)
             self._set_color_button(self.progress_track_color_button, source.progress_track_color)
             self._set_color_button(self.fill_color_button, source.fill_color)
             self._set_color_button(self.outline_color_button, source.outline_color)

@@ -12,12 +12,125 @@ function did (finish).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Collection
+from typing import TYPE_CHECKING, ClassVar
+
+from PySide6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QPushButton, QWidget
 
 from app.models.source import Source
 
 if TYPE_CHECKING:
     from app.inspector.source_inspector import SourceInspector
+
+
+class FieldSection:
+    """One source type's own Inspector fields, keyed by the Source attribute each edits.
+
+    Because a field key is also its model attribute, rows, signal wiring,
+    multi-selection bindings and filling all follow from ``widgets`` and the
+    widget kind: QComboBox (item data), QCheckBox, QPushButton (colour picker)
+    or a spin box. SourceInspector calls each hook exactly where its phase used
+    to handle these fields inline, so form order, tab order and tooltip
+    precedence are unchanged. Subclasses build ``widgets`` and fill the tables.
+    """
+
+    FAMILY: ClassVar[tuple[str, str]]
+    """(Korean, English) help-text family name for the section's key prefix."""
+    ROWS: ClassVar[tuple[tuple[str, str | None], ...]]
+    """(field key, collapsible sub-section or None), in form order."""
+    LABELS: ClassVar[dict[str, tuple[str, str]]]
+    SECTION_TITLES: ClassVar[dict[str, tuple[str, str]]]
+    HELP: ClassVar[dict[str, tuple[str, str]]]
+    """Help details keyed by the field key without the family prefix."""
+    ATTRIBUTES: ClassVar[dict[str, str]] = {}
+    """Model attribute for a field key that is not itself the attribute name."""
+
+    widgets: dict[str, QWidget]
+
+    def attribute(self, key: str) -> str:
+        return self.ATTRIBUTES.get(key, key)
+
+    @staticmethod
+    def kind(widget: QWidget) -> str:
+        if isinstance(widget, QComboBox):
+            return "combo"
+        if isinstance(widget, QCheckBox):
+            return "check"
+        if isinstance(widget, QPushButton):
+            return "color"
+        return "spin"
+
+    def add_rows(
+        self, add_row: Callable[..., None], form: QFormLayout, keys: Collection[str] | None = None,
+    ) -> None:
+        """Add the rows (in ROWS order); ``keys`` adds just those, for sections
+        whose rows the form places in more than one spot."""
+        for key, section in self.ROWS:
+            if keys is None or key in keys:
+                add_row(form, key, self.widgets[key], section=section)
+
+    def connect(
+        self, update: Callable[[str, object], None], *,
+        choose_color: Callable[[str, QPushButton], None] | None = None,
+        apply_mixed_checkbox: Callable[[str, bool], None] | None = None,
+    ) -> None:
+        for field, widget in self.widgets.items():
+            key = self.attribute(field)
+            kind = self.kind(widget)
+            if kind == "combo":
+                widget.currentIndexChanged.connect(
+                    lambda _index, key=key, combo=widget: update(key, combo.currentData())
+                )
+            elif kind == "check":
+                widget.toggled.connect(lambda value, key=key: update(key, value))
+                # A click on a mixed multi-selection value must still apply it.
+                widget.clicked.connect(
+                    lambda checked=False, key=key: apply_mixed_checkbox(key, checked)
+                )
+            elif kind == "color":
+                widget.clicked.connect(
+                    lambda _checked=False, key=key, button=widget: choose_color(key, button)
+                )
+            else:
+                widget.valueChanged.connect(lambda value, key=key: update(key, value))
+
+    def bindings(self) -> dict[str, tuple[str, QWidget, str]]:
+        """Multi-selection bindings: model path -> (path, control, kind)."""
+        return {
+            self.attribute(key): (self.attribute(key), widget, self.kind(widget))
+            for key, widget in self.widgets.items()
+        }
+
+    def displayed_value(self, source: Source, key: str) -> object:
+        """The value a field shows for ``source``; override to present legacy data."""
+        return getattr(source, self.attribute(key))
+
+    def fill(
+        self, source: Source, *,
+        set_color: Callable[[QPushButton, str], None] | None = None,
+    ) -> None:
+        for key, widget in self.widgets.items():
+            value = self.displayed_value(source, key)
+            kind = self.kind(widget)
+            if kind == "combo":
+                widget.setCurrentIndex(max(0, widget.findData(value)))
+            elif kind == "check":
+                widget.setChecked(value)
+            elif kind == "color":
+                set_color(widget, value)
+            else:
+                widget.setValue(value)
+
+    def hidden_when_off(self, source: Source) -> dict[str, bool]:
+        """Fields to hide while the toggle/value they depend on is off."""
+        return {}
+
+    def retranslate(self, korean: bool) -> None:
+        """Localize texts inside the widgets (item texts, special values)."""
+
+    def notes(self, korean: bool) -> dict[str, str]:
+        """Field-specific guidance merged into each field's hover help."""
+        return {}
 
 # Every field key _update_legacy_source_specific_fields toggles purely by
 # source_type. Excludes shadow_* (every source shows it, see
