@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -10,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 from tempfile import NamedTemporaryFile, gettempdir
+import threading
 import time
 import zipfile
 
@@ -21,6 +23,15 @@ from app.models.project import ProjectDocument
 
 class ProjectError(Exception):
     """Raised when a project document cannot be safely saved or loaded."""
+
+
+class ProjectLoadCancelled(ProjectError):
+    """Raised when the user cancels a package load; the workspace is untouched."""
+
+
+# (extracted bytes, total asset bytes)
+LoadProgress = Callable[[int, int], None]
+_EXTRACT_CHUNK_BYTES = 1024 * 1024
 
 
 @dataclass(slots=True, frozen=True)
@@ -81,12 +92,20 @@ class ProjectService:
             raise ProjectError(f"Could not save project: {error}") from error
 
     @classmethod
-    def load(cls, path: str | Path) -> ProjectDocument:
-        """Load a package or a backwards-compatible UTF-8 JSON document."""
+    def load(
+        cls, path: str | Path, *,
+        progress: LoadProgress | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> ProjectDocument:
+        """Load a package or a backwards-compatible UTF-8 JSON document.
+
+        ``progress``/``cancel_event`` only matter for packages, whose embedded
+        media extraction is the slow part; cancelling raises ProjectLoadCancelled.
+        """
         target = Path(path).expanduser().resolve()
         try:
             if target.suffix.lower() == cls.PACKAGE_SUFFIX:
-                return cls._load_package(target)
+                return cls._load_package(target, progress, cancel_event)
             with target.open("r", encoding="utf-8") as file:
                 return ProjectDocument.from_dict(json.load(file))
         except (OSError, json.JSONDecodeError, TypeError, ValueError,
@@ -206,7 +225,11 @@ class ProjectService:
         return target
 
     @classmethod
-    def _load_package(cls, target: Path) -> ProjectDocument:
+    def _load_package(
+        cls, target: Path,
+        progress: LoadProgress | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> ProjectDocument:
         fingerprint = sha256(
             f"{target}:{target.stat().st_mtime_ns}:{target.stat().st_size}".encode("utf-8")
         ).hexdigest()[:20]
@@ -228,6 +251,9 @@ class ProjectService:
                 raise OSError("Not enough temporary disk space to open this project safely.")
             data = json.loads(archive.read(cls.MANIFEST_NAME).decode("utf-8"))
             extracted_assets: dict[str, Path] = {}
+            extracted_bytes = 0
+            if progress is not None:
+                progress(0, required_bytes)
             for info in archive.infolist():
                 parts = PurePosixPath(info.filename).parts
                 if info.is_dir() or not parts or parts[0] != "assets":
@@ -238,8 +264,17 @@ class ProjectService:
                 local_path = cls._asset_archive_path(archive_path, parts[-1])
                 destination = cache_root.joinpath(*PurePosixPath(local_path).parts)
                 destination.parent.mkdir(parents=True, exist_ok=True)
+                # Chunked (not copyfileobj) so one multi-GB video can still be
+                # cancelled promptly. A partial file is harmless: every load of
+                # this package re-extracts all assets into the same cache folder.
                 with archive.open(info, "r") as source, destination.open("wb") as output:
-                    shutil.copyfileobj(source, output)
+                    while chunk := source.read(_EXTRACT_CHUNK_BYTES):
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise ProjectLoadCancelled("Project loading was cancelled.")
+                        output.write(chunk)
+                        extracted_bytes += len(chunk)
+                        if progress is not None:
+                            progress(extracted_bytes, required_bytes)
                 extracted_assets[archive_path] = destination
             thumbnail_cache = cache_root / cls.THUMBNAIL_NAME
             if cls.THUMBNAIL_NAME in archive.namelist():

@@ -17,24 +17,18 @@ class _Window:
             crossfade_seconds=2.0,
             automix_preset="auto",
         )
-        self._export_frame_staging = TemporaryDirectory(
-            prefix="playlist-test-frames-before-"
-        )
-        self._export_frame_index = 0
-        self._export_capture_count = 0
-        self._export_frame_cache = {}
-        self._export_frame_metrics = None
-        self._last_export_frame_metrics = None
-        self._export_png_pipeline = None
         self._export_storage_monitor = None
         self._active_export_output_path = None
         self.orchestrator = ExportOrchestrator(self)
+        self.orchestrator.frames.staging = TemporaryDirectory(
+            prefix="playlist-test-frames-before-"
+        )
 
     def _stop_export_storage_monitor(self) -> None:
         self._export_storage_monitor = None
 
     def _cancel_export_png_pipeline(self) -> None:
-        self._export_png_pipeline = None
+        self.orchestrator.cancel_png_pipeline()
 
     def _clear_export_frame_staging(self) -> None:
         self.orchestrator.clear_frame_staging()
@@ -56,7 +50,7 @@ class ExportAudioStagingRegressionTests(unittest.TestCase):
         self.window.cleanup()
 
     def test_transition_audio_survives_frame_staging_recreation(self) -> None:
-        old_frame_directory = Path(self.window._export_frame_staging.name)
+        old_frame_directory = Path(self.window.orchestrator.frames.staging.name)
         observed_directory: list[Path] = []
 
         def fake_prepare(
@@ -104,7 +98,7 @@ class ExportAudioStagingRegressionTests(unittest.TestCase):
             "prepared AutoMix/crossfade audio must outlive frame staging relocation",
         )
         self.assertNotEqual(
-            Path(self.window._export_frame_staging.name),
+            Path(self.window.orchestrator.frames.staging.name),
             observed_directory[0],
         )
 

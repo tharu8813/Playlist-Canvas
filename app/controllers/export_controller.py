@@ -5,20 +5,16 @@ lock/unlock, system-tray notifications, and storage-monitor plumbing that
 surround an export run. MainWindow keeps identically-named thin wrapper
 methods that delegate here.
 
-Named ExportOrchestrator (not ExportController) because
-app/services/export_controller.py already defines a small, stateless
-ExportController used for pure work-mode/output-validation policy
-decisions shared by the UI and renderer -- a distinct, narrower concern
-from this class's MainWindow-coupled orchestration. They are kept separate
-rather than merged.
+The pure work-mode/output-validation decisions shared by the UI and the
+renderer live separately in the stateless ExportPolicy
+(app/services/export_policy.py); this class is only the MainWindow-coupled
+orchestration around a run.
 
 The core `_export_video` render orchestration (this file's `export_video`
-method and its direct helpers) also lives here now. FFmpegRenderer,
-RenderWorker, and ExportSettingsDialog are looked up lazily from
-app.ui.main_window at call time (not imported at module scope) because
-existing tests patch them at "app.ui.main_window.<Name>" -- importing
-them here directly would silently stop those patches from intercepting
-real FFmpeg/encoder construction during tests.
+method and its direct helpers) also lives here now. Tests keep real
+FFmpeg/encoder hardware out of a run by patching FFmpegRenderer,
+RenderWorker and ExportSettingsDialog here, at
+"app.controllers.export_controller.<Name>".
 
 FFmpeg install/catalog management (_load_ffmpeg_catalog and friends) is
 left in MainWindow: it is a distinct concern (installing/selecting an
@@ -32,9 +28,10 @@ import shutil
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer
@@ -50,10 +47,12 @@ from app.preview.export_plan import build_export_plan, canvas_render_scale
 from app.preview.export_session import ExportSession, PngStaging
 from app.dialogs.export_complete_dialog import ExportCompleteDialog
 from app.dialogs.export_progress_dialog import ExportProgressDialog
+from app.dialogs.export_settings_dialog import ExportSettingsDialog
 from app.renderer.ffmpeg_renderer import (
     EncoderUnavailableError,
     ExportMetadata,
     FFmpegNotFoundError,
+    FFmpegRenderer,
     RenderCancelledError,
     RenderError,
     RenderFrame,
@@ -70,8 +69,9 @@ from app.renderer.png_frame_staging import (
     PngFrameStagingError,
     PngFrameStagingPipeline,
 )
+from app.renderer.render_worker import RenderWorker
 from app.services.app_settings_service import AppSettings, VIDEO_ENCODERS
-from app.services.export_controller import ExportController
+from app.services.export_policy import ExportPolicy
 from app.services.export_storage_service import ExportStorageMonitor, estimate_export_storage
 from app.services.playlist_service import PlaylistService
 from app.timeline.compiler import compile_playlist
@@ -87,10 +87,77 @@ from app.utils.logging_setup import report_unexpected_error
 from app.video.timeline import build_video_occurrences
 
 if TYPE_CHECKING:
-    from app.renderer.ffmpeg_renderer import FFmpegRenderer
     from app.ui.main_window import MainWindow
 
 LOGGER = logging.getLogger(__name__)
+
+# Share of the export progress bar given to preparation (Canvas capture,
+# audio mix) before encoding starts.
+EXPORT_PREPARATION_PROGRESS_WEIGHT = 0.25
+
+
+@dataclass(slots=True)
+class ExportFrameStagingMetrics:
+    """Read-only export diagnostics collected without changing staged frames."""
+
+    started_at: float = field(default_factory=monotonic)
+    elapsed_seconds: float = 0.0
+    capture_count: int = 0
+    unique_file_count: int = 0
+    reused_frame_count: int = 0
+    total_bytes: int = 0
+    largest_file_bytes: int = 0
+    largest_width: int = 0
+    largest_height: int = 0
+    stream_file_counts: dict[str, int] = field(default_factory=dict)
+    stream_bytes: dict[str, int] = field(default_factory=dict)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False,
+    )
+
+    def record_capture(self) -> None:
+        with self._lock:
+            self.capture_count += 1
+
+    def record_reuse(self) -> None:
+        with self._lock:
+            self.reused_frame_count += 1
+
+    def record_file(self, stream_key: str, image: QImage, byte_count: int) -> None:
+        with self._lock:
+            self.unique_file_count += 1
+            self.total_bytes += byte_count
+            self.stream_file_counts[stream_key] = self.stream_file_counts.get(stream_key, 0) + 1
+            self.stream_bytes[stream_key] = self.stream_bytes.get(stream_key, 0) + byte_count
+            if byte_count > self.largest_file_bytes:
+                self.largest_file_bytes = byte_count
+                self.largest_width = image.width()
+                self.largest_height = image.height()
+
+    def snapshot(self) -> ExportFrameStagingMetrics:
+        """Freeze current counters for diagnostics after the temp directory is gone."""
+        with self._lock:
+            return replace(
+                self,
+                elapsed_seconds=max(0.0, monotonic() - self.started_at),
+                stream_file_counts=dict(self.stream_file_counts),
+                stream_bytes=dict(self.stream_bytes),
+            )
+
+
+@dataclass(slots=True)
+class ExportFrameState:
+    """Disk-backed frame staging of the export in flight; owned by ExportOrchestrator."""
+
+    staging: TemporaryDirectory[str] | None = None
+    index: int = 0
+    capture_count: int = 0
+    # stream key -> last staged (image, path), to reuse identical consecutive frames
+    cache: dict[str, tuple[QImage, Path]] = field(default_factory=dict)
+    metrics: ExportFrameStagingMetrics | None = None
+    png_pipeline: PngFrameStagingPipeline | None = None
+    last_metrics: ExportFrameStagingMetrics | None = None
+    """Summary of the most recently cleared staging, kept for diagnostics."""
 
 
 class ExportOrchestrator:
@@ -98,6 +165,7 @@ class ExportOrchestrator:
 
     def __init__(self, window: "MainWindow") -> None:
         self.window = window
+        self.frames = ExportFrameState()
         # Blended audio must outlive frame-staging relocation. The export disk-
         # space preflight intentionally tears down and recreates the frame temp
         # directory, so storing AutoMix/crossfade audio there made its returned
@@ -141,35 +209,33 @@ class ExportOrchestrator:
         self, image: QImage, duration_seconds: float, stream_key: str = "base",
     ) -> RenderFrame:
         """Stage a frame synchronously or queue it to the active PNG pipeline."""
-        from app.ui.main_window import ExportFrameStagingMetrics
-
         window = self.window
-        if window._export_frame_staging is None:
+        if self.frames.staging is None:
             raise RenderError("Export frame staging has not been initialized.")
         if image.isNull():
             raise RenderError("Could not stage an empty export frame on disk.")
-        window._export_capture_count += 1
-        if window._export_frame_metrics is None:
-            window._export_frame_metrics = ExportFrameStagingMetrics()
-        window._export_frame_metrics.record_capture()
-        previous = window._export_frame_cache.get(stream_key)
+        self.frames.capture_count += 1
+        if self.frames.metrics is None:
+            self.frames.metrics = ExportFrameStagingMetrics()
+        self.frames.metrics.record_capture()
+        previous = self.frames.cache.get(stream_key)
         if previous is not None and image == previous[0]:
-            window._export_frame_metrics.record_reuse()
+            self.frames.metrics.record_reuse()
             return RenderFrame(previous[1], max(0.001, duration_seconds))
         # Disk usage queries are surprisingly expensive on synced/network-backed
         # Windows temp drives. Check periodically instead of once per PNG.
-        if window._export_frame_index % 32 == 0:
-            free_space = shutil.disk_usage(window._export_frame_staging.name).free
+        if self.frames.index % 32 == 0:
+            free_space = shutil.disk_usage(self.frames.staging.name).free
             minimum_free = max(512 * 1024 * 1024, image.width() * image.height() * 8)
             if free_space < minimum_free:
                 raise RenderError(
                     "Not enough temporary disk space to safely prepare export frames. "
                     "Free at least 1 GB on the system temporary drive and try again."
                 )
-        path = Path(window._export_frame_staging.name) / f"frame_{window._export_frame_index:07d}.png"
-        window._export_frame_index += 1
+        path = Path(self.frames.staging.name) / f"frame_{self.frames.index:07d}.png"
+        self.frames.index += 1
         owned_image = image.copy()
-        pipeline = window._export_png_pipeline
+        pipeline = self.frames.png_pipeline
         if pipeline is not None:
             try:
                 pipeline.submit(owned_image, path, stream_key)
@@ -194,30 +260,28 @@ class ExportOrchestrator:
                 # into an export failure on an unusual or transient filesystem.
                 LOGGER.warning("Could not measure staged export frame %s: %s", path, error)
                 staged_bytes = 0
-            window._export_frame_metrics.record_file(
+            self.frames.metrics.record_file(
                 stream_key, owned_image, staged_bytes,
             )
-        window._export_frame_cache[stream_key] = (owned_image, path)
+        self.frames.cache[stream_key] = (owned_image, path)
         return RenderFrame(path, max(0.001, duration_seconds))
 
     def start_png_pipeline(
         self, cancel_event: "threading.Event", *, queue_capacity: int = 3,
     ) -> None:
         """Start bounded PNG writes so Canvas capture can continue concurrently."""
-        from app.ui.main_window import ExportFrameStagingMetrics
-
         window = self.window
-        if window._export_png_pipeline is not None:
+        if self.frames.png_pipeline is not None:
             raise RenderError("Export PNG staging is already active.")
-        if window._export_frame_metrics is None:
-            window._export_frame_metrics = ExportFrameStagingMetrics()
+        if self.frames.metrics is None:
+            self.frames.metrics = ExportFrameStagingMetrics()
 
         def record_written(stream_key: str, image: QImage, byte_count: int) -> None:
-            metrics = window._export_frame_metrics
+            metrics = self.frames.metrics
             if metrics is not None:
                 metrics.record_file(stream_key, image, byte_count)
 
-        window._export_png_pipeline = PngFrameStagingPipeline(
+        self.frames.png_pipeline = PngFrameStagingPipeline(
             record_written,
             cancel_event=cancel_event,
             wait_callback=QApplication.processEvents,
@@ -226,10 +290,10 @@ class ExportOrchestrator:
 
     def finish_png_pipeline(self) -> None:
         window = self.window
-        pipeline = window._export_png_pipeline
+        pipeline = self.frames.png_pipeline
         if pipeline is None:
             return
-        window._export_png_pipeline = None
+        self.frames.png_pipeline = None
         try:
             pipeline.finish()
         except PngFrameStagingCancelled as error:
@@ -243,8 +307,8 @@ class ExportOrchestrator:
 
     def cancel_png_pipeline(self) -> None:
         window = self.window
-        pipeline = window._export_png_pipeline
-        window._export_png_pipeline = None
+        pipeline = self.frames.png_pipeline
+        self.frames.png_pipeline = None
         if pipeline is not None:
             pipeline.cancel()
 
@@ -258,9 +322,9 @@ class ExportOrchestrator:
         window = self.window
         window._stop_export_storage_monitor()
         window._cancel_export_png_pipeline()
-        if window._export_frame_metrics is not None:
-            summary = window._export_frame_metrics.snapshot()
-            window._last_export_frame_metrics = summary
+        if self.frames.metrics is not None:
+            summary = self.frames.metrics.snapshot()
+            self.frames.last_metrics = summary
             LOGGER.info(
                 "Export frame staging summary: captures=%d files=%d reused=%d "
                 "bytes=%d largest=%d (%dx%d) elapsed=%.3fs streams=%s",
@@ -280,13 +344,13 @@ class ExportOrchestrator:
                     for key in sorted(summary.stream_file_counts)
                 },
             )
-        if window._export_frame_staging is not None:
-            window._export_frame_staging.cleanup()
-            window._export_frame_staging = None
-        window._export_frame_index = 0
-        window._export_capture_count = 0
-        window._export_frame_cache.clear()
-        window._export_frame_metrics = None
+        if self.frames.staging is not None:
+            self.frames.staging.cleanup()
+            self.frames.staging = None
+        self.frames.index = 0
+        self.frames.capture_count = 0
+        self.frames.cache.clear()
+        self.frames.metrics = None
 
     # -- main-form lock --------------------------------------------------
 
@@ -360,7 +424,7 @@ class ExportOrchestrator:
                 window._notification_tray.deleteLater()
                 window._notification_tray = None
             return
-        window._ensure_notification_tray()
+        self.ensure_notification_tray()
 
     def ensure_notification_tray(self) -> QSystemTrayIcon | None:
         window = self.window
@@ -401,7 +465,7 @@ class ExportOrchestrator:
         critical: bool = False,
     ) -> bool:
         window = self.window
-        tray = window._ensure_notification_tray()
+        tray = self.ensure_notification_tray()
         if tray is None:
             return False
         icon = (
@@ -487,8 +551,6 @@ class ExportOrchestrator:
         message: str,
     ) -> None:
         """Keep progress UI, status activity, and notifications synchronized."""
-        from app.ui.main_window import EXPORT_PREPARATION_PROGRESS_WEIGHT
-
         window = self.window
         overall = (
             EXPORT_PREPARATION_PROGRESS_WEIGHT
@@ -516,8 +578,8 @@ class ExportOrchestrator:
         window = self.window
         window._stop_export_storage_monitor()
         monitor = ExportStorageMonitor(output_path, window)
-        if window._export_frame_staging is not None:
-            monitor.set_path("frames", window._export_frame_staging.name)
+        if self.frames.staging is not None:
+            monitor.set_path("frames", self.frames.staging.name)
         monitor.snapshot_ready.connect(window._handle_export_storage_snapshot)
         window._export_storage_monitor = monitor
         monitor.start()
@@ -614,13 +676,13 @@ class ExportOrchestrator:
                     "temporary drive is short on space.", output_parent,
                 )
         window._clear_export_frame_staging()
-        window._export_frame_staging = TemporaryDirectory(
+        self.frames.staging = TemporaryDirectory(
             prefix="playlist-video-frames-",
             dir=str(staging_dir) if staging_dir is not None else None,
         )
-        window._export_frame_index = 0
+        self.frames.index = 0
 
-        checks = [(Path(window._export_frame_staging.name), temp_need)]
+        checks = [(Path(self.frames.staging.name), temp_need)]
         if output_parent is not None:
             checks.append((output_parent, output_need))
         shortfalls: list[str] = []
@@ -711,7 +773,7 @@ class ExportOrchestrator:
             selected_app_settings,
             # Workload is selected from the actual export cost so the user
             # does not need to tune a machine-specific setting before export.
-            work_mode=ExportController.choose_work_mode(
+            work_mode=ExportPolicy.choose_work_mode(
                 width, height, selected_app_settings.fps,
             ),
         )
@@ -799,12 +861,6 @@ class ExportOrchestrator:
 
     def export_video(self) -> None:
         """Render the static Canvas and enabled playlist tracks to an MP4 file."""
-        # FFmpegRenderer, RenderWorker, and ExportSettingsDialog are looked up
-        # from app.ui.main_window (not imported at module scope) because
-        # existing tests patch "app.ui.main_window.<Name>" to avoid touching
-        # real FFmpeg/encoder hardware during a test run.
-        from app.ui.main_window import ExportSettingsDialog, FFmpegRenderer, RenderWorker
-
         window = self.window
         korean = window.translator.language is Language.KOREAN
         try:
@@ -868,7 +924,7 @@ class ExportOrchestrator:
         requested_app_settings = export_options.app_settings
         quality_profile_name = export_options.quality_mode_combo.currentText()
         output = str(export_options.output_path)
-        resolved = window._resolve_export_render_settings(
+        resolved = self.resolve_render_settings(
             renderer, requested_app_settings, output,
             export_options.save_as_default,
         )
@@ -902,7 +958,7 @@ class ExportOrchestrator:
                 QMessageBox.StandardButton.No,
             ) != QMessageBox.StandardButton.Yes:
                 return
-        font_warnings = window._export_font_warnings(korean)
+        font_warnings = self.font_warnings(korean)
         if font_warnings:
             listed = "\n".join(font_warnings[:5])
             if QMessageBox.question(
@@ -991,10 +1047,10 @@ class ExportOrchestrator:
             QApplication.processEvents()
             self.clear_audio_staging()
             window._clear_export_frame_staging()
-            window._export_frame_staging = TemporaryDirectory(
+            self.frames.staging = TemporaryDirectory(
                 prefix="playlist-video-frames-"
             )
-            window._export_frame_index = 0
+            self.frames.index = 0
         except Exception as error:
             window._export_preparation_cancel = None
             self.clear_audio_staging()
@@ -1005,7 +1061,7 @@ class ExportOrchestrator:
             window._unlock_main_form_after_export()
             window.activity_progress.finish("export")
             report_unexpected_error("Starting export preparation", error)
-            window._notify_export_problem(str(error))
+            self.notify_problem(str(error))
             window._active_export_output_path = None
             QMessageBox.critical(
                 window, "내보내기 오류" if korean else "Export error", str(error)
@@ -1059,10 +1115,10 @@ class ExportOrchestrator:
                 max(1, len(plan.z_bands)),
             )
             window._export_dialog.set_storage_estimate(actual_storage_estimate)
-            window._start_export_storage_monitor(output)
+            self.start_storage_monitor(output)
             stream_root = (
-                Path(window._export_frame_staging.name)
-                if plan.use_streamed_visuals and window._export_frame_staging is not None
+                Path(self.frames.staging.name)
+                if plan.use_streamed_visuals and self.frames.staging is not None
                 else None
             )
             export_session = ExportSession(
@@ -1076,21 +1132,21 @@ class ExportOrchestrator:
                 korean=korean,
                 staging=PngStaging(
                     stage_frame=window._stage_export_frame,
-                    start_pipeline=lambda capacity: window._start_export_png_pipeline(
+                    start_pipeline=lambda capacity: self.start_png_pipeline(
                         preparation_cancel, queue_capacity=capacity,
                     ),
-                    finish_pipeline=window._finish_export_png_pipeline,
+                    finish_pipeline=self.finish_png_pipeline,
                     cancel_pipeline=window._cancel_export_png_pipeline,
                     pending_frames=lambda: (
-                        window._export_png_pipeline.pending_frames
-                        if window._export_png_pipeline is not None else 0
+                        self.frames.png_pipeline.pending_frames
+                        if self.frames.png_pipeline is not None else 0
                     ),
                     queue_capacity=window._export_png_queue_capacity(render_settings),
                 ),
                 layer_worker_count=lambda count: window._export_layer_worker_count(
                     render_settings, count,
                 ),
-                report_progress=window._report_export_preparation_progress,
+                report_progress=self.report_preparation_progress,
                 pump_ui=QApplication.processEvents,
             )
             window._active_export_session = export_session
@@ -1098,7 +1154,7 @@ class ExportOrchestrator:
             frames = artifacts.frames
             static_layers = artifacts.static_layers
         except RenderCancelledError:
-            window._cancel_active_export_session()
+            self.cancel_active_session()
             window._export_preparation_cancel = None
             self.clear_audio_staging()
             window._clear_export_frame_staging()
@@ -1107,7 +1163,7 @@ class ExportOrchestrator:
                 window._export_dialog = None
             window._unlock_main_form_after_export()
             window.activity_progress.finish("export")
-            window._notify_export_problem(
+            self.notify_problem(
                 "Export preparation was cancelled.", cancelled=True,
             )
             window._active_export_output_path = None
@@ -1117,7 +1173,7 @@ class ExportOrchestrator:
             window._resume_close_after_export_cancel()
             return
         except RenderError as error:
-            window._cancel_active_export_session()
+            self.cancel_active_session()
             window._export_preparation_cancel = None
             self.clear_audio_staging()
             window._clear_export_frame_staging()
@@ -1126,7 +1182,7 @@ class ExportOrchestrator:
                 window._export_dialog = None
             window._unlock_main_form_after_export()
             window.activity_progress.finish("export")
-            window._notify_export_problem(str(error))
+            self.notify_problem(str(error))
             window._active_export_output_path = None
             QMessageBox.critical(
                 window, "내보내기 오류" if korean else "Export error", str(error)
@@ -1134,7 +1190,7 @@ class ExportOrchestrator:
             window._resume_close_after_export_cancel()
             return
         except Exception as error:
-            window._cancel_active_export_session()
+            self.cancel_active_session()
             window._export_preparation_cancel = None
             self.clear_audio_staging()
             window._clear_export_frame_staging()
@@ -1144,7 +1200,7 @@ class ExportOrchestrator:
             window._unlock_main_form_after_export()
             window.activity_progress.finish("export")
             report_unexpected_error("Preparing export frames", error)
-            window._notify_export_problem(str(error))
+            self.notify_problem(str(error))
             window._active_export_output_path = None
             QMessageBox.critical(
                 window, "내보내기 오류" if korean else "Export error", str(error)
@@ -1187,7 +1243,7 @@ class ExportOrchestrator:
         )
         export_dialog = window._export_dialog
         window._render_worker.progress.connect(
-            lambda stage, fraction, message: window._handle_export_render_progress(
+            lambda stage, fraction, message: self.handle_render_progress(
                 export_dialog, stage, fraction, message,
             )
         )
@@ -1625,7 +1681,7 @@ class ExportOrchestrator:
             window._export_dialog = None
         korean = window.translator.language is Language.KOREAN
         window._pending_export_result = None
-        window._notify_export_problem(message)
+        self.notify_problem(message)
         QMessageBox.critical(window, "내보내기 오류" if korean else "Export error", message)
         window.statusBar().showMessage(message, 7000)
 
@@ -1637,7 +1693,7 @@ class ExportOrchestrator:
             window._export_dialog = None
         message = "내보내기를 취소했습니다." if window.translator.language is Language.KOREAN else "Export cancelled."
         window._pending_export_result = None
-        window._notify_export_problem(message, cancelled=True)
+        self.notify_problem(message, cancelled=True)
         window.statusBar().showMessage(message, 5000)
 
     def finished(self) -> None:
@@ -1654,7 +1710,7 @@ class ExportOrchestrator:
         if completed_result is not None:
             QTimer.singleShot(
                 0,
-                lambda result=completed_result: window._show_export_complete_dialog(
+                lambda result=completed_result: self.show_complete_dialog(
                     result,
                 ),
             )

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 import json
 import logging
 from pathlib import Path
 import shutil  # re-exported: tests patch app.ui.main_window.shutil.disk_usage
 import threading
-from time import monotonic
 from tempfile import TemporaryDirectory
 
 from PySide6.QtCore import (QByteArray, QEvent, QEventLoop, QMimeData, QProcess, QSettings,
@@ -59,7 +58,6 @@ from app.animation.canvas_preview import CanvasAnimationPreviewController
 from app.dialogs.export_progress_dialog import ExportProgressDialog
 from app.dialogs.ffmpeg_install_progress_dialog import FFmpegInstallProgressDialog
 from app.dialogs.export_preview_dialog import ExportPreviewDialog
-from app.dialogs.export_settings_dialog import ExportSettingsDialog
 from app.dialogs.missing_media_dialog import MissingMediaDialog
 from app.dialogs.new_project_dialog import NewProjectDialog
 from app.dialogs.playlist_export_dialog import PlaylistExportDialog
@@ -71,7 +69,6 @@ from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.dialogs.lyrics_compare_dialog import LyricsCompareDialog
 from app.dialogs.settings_dialog import SettingsDialog
-from app.dialogs.startup_dialog import StartupDialog
 from app.dialogs.track_details_dialog import TrackDetailsDialog
 from app.dialogs.shortcuts_dialog import ShortcutsDialog
 from app.dialogs.text_editor_dialog import TextEditorDialog
@@ -132,7 +129,6 @@ from app.preview.export_session import ExportSession
 from app.preview.gpu_texture_surface import (
     GPU_TEXTURE_SURFACE_AVAILABLE, GpuTexturePreviewSurface,
 )
-from app.renderer.png_frame_staging import PngFrameStagingPipeline
 from app.renderer.ffmpeg_renderer import (
     FFmpegNotFoundError,
     FFmpegRenderer,
@@ -157,58 +153,8 @@ from app import __version__
 
 
 LOGGER = logging.getLogger(__name__)
-EXPORT_PREPARATION_PROGRESS_WEIGHT = 0.25
 
 SOURCE_CLIPBOARD_MIME = "application/x-playlist-video-studio-sources+json"
-
-
-@dataclass(slots=True)
-class ExportFrameStagingMetrics:
-    """Read-only export diagnostics collected without changing staged frames."""
-
-    started_at: float = field(default_factory=monotonic)
-    elapsed_seconds: float = 0.0
-    capture_count: int = 0
-    unique_file_count: int = 0
-    reused_frame_count: int = 0
-    total_bytes: int = 0
-    largest_file_bytes: int = 0
-    largest_width: int = 0
-    largest_height: int = 0
-    stream_file_counts: dict[str, int] = field(default_factory=dict)
-    stream_bytes: dict[str, int] = field(default_factory=dict)
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, repr=False, compare=False,
-    )
-
-    def record_capture(self) -> None:
-        with self._lock:
-            self.capture_count += 1
-
-    def record_reuse(self) -> None:
-        with self._lock:
-            self.reused_frame_count += 1
-
-    def record_file(self, stream_key: str, image: QImage, byte_count: int) -> None:
-        with self._lock:
-            self.unique_file_count += 1
-            self.total_bytes += byte_count
-            self.stream_file_counts[stream_key] = self.stream_file_counts.get(stream_key, 0) + 1
-            self.stream_bytes[stream_key] = self.stream_bytes.get(stream_key, 0) + byte_count
-            if byte_count > self.largest_file_bytes:
-                self.largest_file_bytes = byte_count
-                self.largest_width = image.width()
-                self.largest_height = image.height()
-
-    def snapshot(self) -> ExportFrameStagingMetrics:
-        """Freeze current counters for diagnostics after the temp directory is gone."""
-        with self._lock:
-            return replace(
-                self,
-                elapsed_seconds=max(0.0, monotonic() - self.started_at),
-                stream_file_counts=dict(self.stream_file_counts),
-                stream_bytes=dict(self.stream_bytes),
-            )
 
 
 class CanvasCenteredSplitter(QSplitter):
@@ -381,10 +327,7 @@ class MainWindow(QMainWindow):
         self._history_applying = False
         self._project_dirty = False
         self._project_change_serial = 0
-        self._project_save_worker: ProjectSaveWorker | None = None
-        self._project_save_context: tuple[int, Path | None] | None = None
         self._autosave_worker: AutosaveWorker | None = None
-        self._project_save_succeeded: bool | None = None
         self._history_timer = QTimer(self)
         self._history_timer.setSingleShot(True)
         self._history_timer.setInterval(300)
@@ -411,13 +354,6 @@ class MainWindow(QMainWindow):
         self._panel_transition_serial = {"left": 0, "right": 0, "bottom": 0}
         self._render_worker: RenderWorker | None = None
         self._active_export_session: ExportSession | None = None
-        self._export_frame_staging: TemporaryDirectory[str] | None = None
-        self._export_frame_index = 0
-        self._export_capture_count = 0
-        self._export_frame_cache: dict[str, tuple[QImage, Path]] = {}
-        self._export_frame_metrics: ExportFrameStagingMetrics | None = None
-        self._export_png_pipeline: PngFrameStagingPipeline | None = None
-        self._last_export_frame_metrics: ExportFrameStagingMetrics | None = None
         self._export_dialog: ExportProgressDialog | None = None
         self._export_storage_monitor: ExportStorageMonitor | None = None
         self._export_ui_lock_state: tuple[bool, bool, bool, bool, bool] | None = None
@@ -2329,11 +2265,10 @@ class MainWindow(QMainWindow):
             ).executable
         except FFmpegNotFoundError:
             return
-        # "auto": Beat This! when its optional dependency is available,
-        # otherwise the basic analyzer -- the same policy
-        # FFmpegRenderer._render_automix_audio_segments uses for Preview/
-        # Export, so this playlist-badge analysis and the render path can
-        # never disagree on which analyzer produced a given result.
+        # "auto": the light default analyzer (see analysis/registry.py) -- the
+        # same policy FFmpegRenderer._render_automix_audio_segments uses for
+        # Preview/Export, so this playlist-badge analysis and the render path
+        # can never disagree on which analyzer produced a given result.
         # enable_structure_analysis=True: Sonara (optional, ~2 MB, no
         # heavyweight ML runtime unlike Beat This!) runs after rhythm
         # analysis in the same background worker when installed; when it
@@ -2871,14 +2806,6 @@ class MainWindow(QMainWindow):
     ) -> RenderFrame:
         return self.export_orchestrator.stage_frame(image, duration_seconds, stream_key)
 
-    def _start_export_png_pipeline(
-        self, cancel_event: threading.Event, *, queue_capacity: int = 3,
-    ) -> None:
-        self.export_orchestrator.start_png_pipeline(cancel_event, queue_capacity=queue_capacity)
-
-    def _finish_export_png_pipeline(self) -> None:
-        self.export_orchestrator.finish_png_pipeline()
-
     def _cancel_export_png_pipeline(self) -> None:
         self.export_orchestrator.cancel_png_pipeline()
 
@@ -2906,9 +2833,6 @@ class MainWindow(QMainWindow):
     def _sync_export_notification_tray(self, settings: AppSettings) -> None:
         self.export_orchestrator.sync_notification_tray(settings)
 
-    def _ensure_notification_tray(self) -> QSystemTrayIcon | None:
-        return self.export_orchestrator.ensure_notification_tray()
-
     def _restore_from_export_notification(self) -> None:
         self.export_orchestrator.restore_from_notification()
 
@@ -2924,24 +2848,9 @@ class MainWindow(QMainWindow):
     def _notify_export_stage(self, stage: str) -> None:
         self.export_orchestrator.notify_stage(stage)
 
-    def _notify_export_problem(self, message: str, *, cancelled: bool = False) -> None:
-        self.export_orchestrator.notify_problem(message, cancelled=cancelled)
-
-    def _handle_export_render_progress(
-        self,
-        export_dialog: ExportProgressDialog,
-        stage: str,
-        fraction: float,
-        message: str,
-    ) -> None:
-        self.export_orchestrator.handle_render_progress(export_dialog, stage, fraction, message)
-
     @staticmethod
     def _format_bytes(count: int) -> str:
         return ExportOrchestrator.format_bytes(count)
-
-    def _start_export_storage_monitor(self, output_path: str | Path) -> None:
-        self.export_orchestrator.start_storage_monitor(output_path)
 
     def _freeze_export_storage_monitor(self) -> None:
         self.export_orchestrator.freeze_storage_monitor()
@@ -2963,22 +2872,6 @@ class MainWindow(QMainWindow):
     ) -> bool:
         return self.export_orchestrator.prepare_staging_space(
             render_settings, duration_seconds, layer_count, use_streamed_visuals, korean,
-        )
-
-    def _report_export_preparation_progress(
-        self, fraction: float, detail: str,
-    ) -> None:
-        self.export_orchestrator.report_preparation_progress(fraction, detail)
-
-    def _cancel_active_export_session(self) -> None:
-        self.export_orchestrator.cancel_active_session()
-
-    def _resolve_export_render_settings(
-        self, renderer: FFmpegRenderer, requested_app_settings: AppSettings,
-        output: str, save_as_default: bool,
-    ) -> tuple[list, RenderSettings, AppSettings, str, bool] | None:
-        return self.export_orchestrator.resolve_render_settings(
-            renderer, requested_app_settings, output, save_as_default,
         )
 
     def _export_video(self) -> None:
@@ -3045,26 +2938,11 @@ class MainWindow(QMainWindow):
         finally:
             self._history_restoring = restoring
 
-    def _open_playlist_preview(self) -> None:
-        self.preview_controller.open_playlist_preview()
-
     def _bottom_workspace_tab_changed(self, index: int) -> None:
         self.preview_controller.bottom_workspace_tab_changed(index)
 
-    def _select_edit_bottom_tab(self, index: int | None = None) -> None:
-        self.preview_controller.select_edit_bottom_tab(index)
-
-    def _show_export_preview(self, tracks: list) -> None:
-        self.preview_controller.show_export_preview(tracks)
-
-    def _lock_editor_for_inline_preview(self) -> None:
-        self.preview_controller.lock_editor_for_inline_preview()
-
     def _finish_inline_preview(self, _result: int = 0) -> None:
         self.preview_controller.finish_inline_preview(_result)
-
-    def _unlock_editor_after_inline_preview(self) -> None:
-        self.preview_controller.unlock_editor_after_inline_preview()
 
     def _preview_source_animation(self, source_id: str) -> None:
         self.preview_controller.preview_source_animation(source_id)
@@ -3093,9 +2971,6 @@ class MainWindow(QMainWindow):
         return self.export_orchestrator.upscale_warnings(
             active_tracks, render_settings, render_scale, korean,
         )
-
-    def _export_font_warnings(self, korean: bool) -> list[str]:
-        return self.export_orchestrator.font_warnings(korean)
 
     def _export_visualizers(
         self, tracks: list | None = None, render_scale: float = 1.0,
@@ -3830,20 +3705,17 @@ class MainWindow(QMainWindow):
             message,
         )
 
-    def _export_succeeded(self, result: RenderResult) -> None:
-        self.export_orchestrator.succeeded(result)
+    def _export_cancelled(self) -> None:
+        self.export_orchestrator.cancelled()
 
     def _export_failed(self, message: str) -> None:
         self.export_orchestrator.failed(message)
 
-    def _export_cancelled(self) -> None:
-        self.export_orchestrator.cancelled()
+    def _export_succeeded(self, result: RenderResult) -> None:
+        self.export_orchestrator.succeeded(result)
 
     def _export_finished(self) -> None:
         self.export_orchestrator.finished()
-
-    def _show_export_complete_dialog(self, result: RenderResult) -> None:
-        self.export_orchestrator.show_complete_dialog(result)
 
     def _resume_close_after_export_cancel(self) -> None:
         self.export_orchestrator.resume_close_after_cancel()
@@ -4257,26 +4129,14 @@ class MainWindow(QMainWindow):
     def _redo(self) -> None:
         self.history_controller.redo()
 
-    def _flush_pending_history(self) -> None:
-        self.history_controller.flush_pending()
-
-    def _restore_history_snapshot(
-        self, snapshot: dict, selected_source_ids: object = (),
-        active_source_id: str | None = None,
-    ) -> None:
-        self.history_controller.restore_snapshot(snapshot, selected_source_ids, active_source_id)
-
     def _autosave_project(self) -> None:
         self.autosave_controller.autosave()
-
-    def _autosave_succeeded(self, _path: object) -> None:
-        self.autosave_controller.succeeded(_path)
 
     def _autosave_failed(self, message: str) -> None:
         self.autosave_controller.failed(message)
 
-    def _autosave_thread_finished(self, worker: AutosaveWorker) -> None:
-        self.autosave_controller.thread_finished(worker)
+    def _autosave_succeeded(self, _path: object) -> None:
+        self.autosave_controller.succeeded(_path)
 
     def _offer_recovery(self) -> bool:
         return self.autosave_controller.offer_recovery()
@@ -4294,14 +4154,11 @@ class MainWindow(QMainWindow):
     def _wait_for_project_save(self, worker: ProjectSaveWorker) -> None:
         self.project_controller.wait_for_save(worker)
 
-    def _project_save_finished_successfully(self, saved_path: object) -> None:
-        self.project_controller.save_finished_successfully(saved_path)
-
     def _project_save_failed(self, message: str) -> None:
         self.project_controller.save_failed(message)
 
-    def _project_save_thread_finished(self, worker: ProjectSaveWorker) -> None:
-        self.project_controller.save_thread_finished(worker)
+    def _project_save_finished_successfully(self, saved_path: object) -> None:
+        self.project_controller.save_finished_successfully(saved_path)
 
     def _open_project(self) -> None:
         self.project_controller.open_project()
@@ -4318,12 +4175,6 @@ class MainWindow(QMainWindow):
 
     def _load_project_path(self, path: Path) -> bool:
         return self.project_controller.load_path(path)
-
-    def _show_project_load_crash(
-        self, path: Path, stage: str, error: Exception,
-        rollback_error: Exception | None = None,
-    ) -> None:
-        self.project_controller.show_load_crash(path, stage, error, rollback_error)
 
     @staticmethod
     def _project_load_guidance(error: BaseException, korean: bool) -> str:
@@ -4738,7 +4589,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Avoid destroying a running FFmpeg thread during application shutdown."""
-        if self._project_save_worker is not None:
+        if self.project_controller.saving:
             message = (
                 "프로젝트 저장이 완료된 후 종료해 주세요."
                 if self.translator.language is Language.KOREAN

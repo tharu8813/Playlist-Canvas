@@ -19,10 +19,11 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressDialog
 
 from app.dialogs.missing_media_dialog import MissingMediaDialog
 from app.dialogs.new_project_dialog import NewProjectDialog
+from app.dialogs.startup_dialog import StartupDialog
 from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
 from app.models.project import CanvasSettings, ProjectDocument, ProjectSettings
 from app.preview.canvas_snapshot import CanvasSnapshot
@@ -31,8 +32,10 @@ from app.services.project_persistence_service import (
     default_project_path,
     is_legacy_project_path,
 )
+from app.services.export_storage_service import format_bytes
+from app.services.project_load_worker import ProjectLoadWorker
 from app.services.project_save_worker import ProjectSaveWorker
-from app.services.project_service import ProjectError, ProjectService
+from app.services.project_service import ProjectError, ProjectLoadCancelled, ProjectService
 from app.utils.i18n import Language
 from app.utils.logging_setup import log_directory
 from app import __version__
@@ -48,6 +51,15 @@ class ProjectController:
 
     def __init__(self, window: "MainWindow") -> None:
         self.window = window
+        # The background save in flight (at most one), the (change serial,
+        # previous path) it was started with, and how the last save ended.
+        self.save_worker: ProjectSaveWorker | None = None
+        self.save_context: tuple[int, Path | None] | None = None
+        self.save_succeeded: bool | None = None
+
+    @property
+    def saving(self) -> bool:
+        return self.save_worker is not None
 
     # -- document assembly -------------------------------------------------
 
@@ -119,8 +131,8 @@ class ProjectController:
             "새 프로젝트" if korean else "New project"
         )
         saving = (
-            window._project_save_worker is not None
-            and window._project_save_worker.isRunning()
+            self.save_worker is not None
+            and self.save_worker.isRunning()
         )
         state = (
             "저장 중" if korean and saving else
@@ -211,10 +223,6 @@ class ProjectController:
 
     def show_project_start_dialog(self) -> bool:
         """Reuse the launch project chooser for File > New and the toolbar action."""
-        # Imported here (not at module scope) so tests that patch
-        # app.ui.main_window.StartupDialog still intercept it.
-        from app.ui.main_window import StartupDialog
-
         window = self.window
         if not window._confirm_unsaved_changes():
             return False
@@ -231,8 +239,6 @@ class ProjectController:
 
     def show_startup_dialog(self) -> bool:
         """Block the editor until the user chooses how to start the session."""
-        from app.ui.main_window import StartupDialog
-
         window = self.window
         # Recovery belongs before the project choice.  Requiring the user to click
         # "New project" first meant a newer snapshot could be silently skipped when
@@ -258,7 +264,7 @@ class ProjectController:
     ) -> bool:
         """Start a background save and optionally wait in a responsive event loop."""
         window = self.window
-        active_worker = window._project_save_worker
+        active_worker = self.save_worker
         if active_worker is not None:
             window.statusBar().showMessage(
                 "이미 프로젝트를 저장하고 있습니다."
@@ -268,7 +274,7 @@ class ProjectController:
             )
             if wait_for_completion:
                 window._wait_for_project_save(active_worker)
-                return window._project_save_succeeded is True
+                return self.save_succeeded is True
             return False
         target = None if force_choose else window.current_project_path
         if target is None:
@@ -293,14 +299,14 @@ class ProjectController:
 
         previous_project_path = window.current_project_path
         worker = ProjectSaveWorker(target, document_data, thumbnail)
-        window._project_save_worker = worker
-        window._project_save_context = (
+        self.save_worker = worker
+        self.save_context = (
             window._project_change_serial, previous_project_path,
         )
-        window._project_save_succeeded = None
+        self.save_succeeded = None
         worker.succeeded.connect(window._project_save_finished_successfully)
         worker.failed.connect(window._project_save_failed)
-        worker.finished.connect(lambda: window._project_save_thread_finished(worker))
+        worker.finished.connect(lambda: self.save_thread_finished(worker))
         window.save_action.setEnabled(False)
         window.save_as_action.setEnabled(False)
         window._autosave_debounce_timer.stop()
@@ -317,7 +323,7 @@ class ProjectController:
         window._update_project_status()
         if wait_for_completion:
             window._wait_for_project_save(worker)
-            return window._project_save_succeeded is True
+            return self.save_succeeded is True
         return True
 
     def wait_for_save(self, worker: ProjectSaveWorker) -> None:
@@ -331,7 +337,7 @@ class ProjectController:
     def save_finished_successfully(self, saved_path: object) -> None:
         """Commit saved state without hiding edits made during the save."""
         window = self.window
-        context = window._project_save_context
+        context = self.save_context
         if context is None:
             return
         saved_serial, previous_project_path = context
@@ -362,13 +368,13 @@ class ProjectController:
             window.statusBar().showMessage(message, 4000)
         except ProjectError as error:
             window._show_project_error(error)
-            window._project_save_succeeded = False
+            self.save_succeeded = False
             return
-        window._project_save_succeeded = True
+        self.save_succeeded = True
 
     def save_failed(self, message: str) -> None:
         window = self.window
-        window._project_save_succeeded = False
+        self.save_succeeded = False
         if window._project_dirty:
             window._autosave_debounce_timer.start()
         window._show_project_error(ProjectError(message))
@@ -376,9 +382,9 @@ class ProjectController:
     def save_thread_finished(self, worker: ProjectSaveWorker) -> None:
         window = self.window
         window.activity_progress.finish("project_save")
-        if window._project_save_worker is worker:
-            window._project_save_worker = None
-            window._project_save_context = None
+        if self.save_worker is worker:
+            self.save_worker = None
+            self.save_context = None
         window.save_action.setEnabled(True)
         window.save_as_action.setEnabled(True)
         window._update_project_status()
@@ -423,8 +429,8 @@ class ProjectController:
         window = self.window
         # Opening/replacing the workspace while an older snapshot is still
         # saving would let its completion overwrite the new active path.
-        if window._project_save_worker is not None:
-            window._wait_for_project_save(window._project_save_worker)
+        if self.save_worker is not None:
+            window._wait_for_project_save(self.save_worker)
         if not window._project_dirty:
             return True
         korean = window.translator.language is Language.KOREAN
@@ -452,7 +458,6 @@ class ProjectController:
             "project_load", "프로젝트 불러오기" if korean else "Loading project",
             detail=f"{stage} · {path.name}",
         )
-        QApplication.processEvents()
         previous_document = ProjectDocument.from_dict(window._project_document().to_dict())
         previous_path = window.current_project_path
         previous_legacy_path = window._legacy_project_path
@@ -461,7 +466,7 @@ class ProjectController:
         previous_active = window.store.selected.id if window.store.selected is not None else None
         apply_started = False
         try:
-            document = ProjectService.load(path)
+            document = self._load_document_off_gui_thread(path)
             if document.app_version and document.app_version != __version__:
                 korean = window.translator.language is Language.KOREAN
                 QMessageBox.warning(
@@ -513,6 +518,13 @@ class ProjectController:
             if window._legacy_project_path is not None:
                 QTimer.singleShot(0, window._offer_legacy_upgrade)
             return True
+        except ProjectLoadCancelled:
+            # Cancelling only happens before apply, so the workspace is untouched.
+            window.statusBar().showMessage(
+                "프로젝트 불러오기를 취소했습니다." if korean else "Project loading cancelled.",
+                4000,
+            )
+            return False
         except Exception as error:
             rollback_error: Exception | None = None
             if apply_started:
@@ -536,10 +548,83 @@ class ProjectController:
             window.upgrade_project_action.setEnabled(previous_legacy_path is not None)
             window._project_dirty = previous_dirty
             window._update_project_status()
-            window._show_project_load_crash(path, stage, error, rollback_error)
+            self.show_load_crash(path, stage, error, rollback_error)
             return False
         finally:
             window.activity_progress.finish("project_load")
+
+    _LOAD_DIALOG_DELAY_MS = 400
+
+    def _load_document_off_gui_thread(self, path: Path) -> ProjectDocument:
+        """Run ProjectService.load in a worker while the GUI keeps repainting.
+
+        Short loads finish with user input excluded (nothing can start a second
+        load or edit mid-load). Past a short delay a window-modal progress
+        dialog with Cancel appears; its modality keeps blocking the editor.
+        """
+        window = self.window
+        korean = window.translator.language is Language.KOREAN
+        worker = ProjectLoadWorker(path)
+        loop = QEventLoop()
+        dialog: QProgressDialog | None = None
+        last_progress: list[tuple[int, int]] = []
+
+        def on_progress(done: int, total: int) -> None:
+            last_progress[:] = [(done, total)]
+            fraction = done / total if total > 0 else 0.0
+            sizes = f"{format_bytes(done)} / {format_bytes(total)}"
+            window.activity_progress.update(
+                "project_load", 0.7 * fraction,
+                f"{'포함 미디어 풀기' if korean else 'Extracting media'} · {sizes}",
+            )
+            if dialog is not None:
+                dialog.setValue(round(1000 * fraction))
+                dialog.setLabelText(
+                    f"{path.name}\n\n"
+                    f"{'포함 미디어 풀기' if korean else 'Extracting embedded media'}  {sizes}"
+                )
+
+        # Both queued across threads: a fast finish can't quit before exec(),
+        # and progress callbacks run on the GUI thread.
+        worker.finished.connect(loop.quit, Qt.ConnectionType.QueuedConnection)
+        worker.progress.connect(on_progress, Qt.ConnectionType.QueuedConnection)
+        worker.start()
+        delay = QTimer()
+        delay.setSingleShot(True)
+        delay.timeout.connect(loop.quit)
+        delay.start(self._LOAD_DIALOG_DELAY_MS)
+        loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        delay.stop()
+        if worker.isRunning():
+            dialog = QProgressDialog(
+                f"{path.name}\n\n{'프로젝트 정보 읽는 중' if korean else 'Reading project'}",
+                "취소" if korean else "Cancel", 0, 1000, window,
+            )
+            dialog.setWindowTitle("프로젝트 불러오기" if korean else "Loading project")
+            dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.setMinimumDuration(0)
+            if last_progress:  # extraction may have started before the dialog
+                on_progress(*last_progress[0])
+            # Cancel hides the dialog (dropping modality), so leave the loop at
+            # once; wait() below blocks for at most one extraction chunk.
+            dialog.canceled.connect(worker.cancel_event.set)
+            dialog.canceled.connect(loop.quit)
+            dialog.show()
+            loop.exec()
+            dialog.canceled.disconnect()  # hide/close would emit canceled
+            dialog.hide()
+            dialog.deleteLater()
+        worker.wait()
+        document, error = worker.document, worker.error
+        worker.deleteLater()
+        if error is not None:
+            raise error
+        if worker.cancel_event.is_set():  # cancelled after extraction finished
+            raise ProjectLoadCancelled("Project loading was cancelled.")
+        assert document is not None
+        return document
 
     def show_load_crash(
         self, path: Path, stage: str, error: Exception,

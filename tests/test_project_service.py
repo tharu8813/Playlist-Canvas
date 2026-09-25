@@ -13,7 +13,7 @@ from app import __version__
 from app.models.playlist import PlaylistTrack
 from app.models.project import ProjectDocument, ProjectSettings
 from app.models.source import Source, SourceType
-from app.services.project_service import ProjectError, ProjectService
+from app.services.project_service import ProjectError, ProjectLoadCancelled, ProjectService
 from app.services.project_media_service import ProjectMediaService
 
 
@@ -102,6 +102,33 @@ class ProjectServiceTests(unittest.TestCase):
             with zipfile.ZipFile(package) as archive:
                 manifest = json.loads(archive.read(ProjectService.MANIFEST_NAME))
             self.assertEqual(manifest["app_version"], __version__)
+
+    def test_package_load_reports_byte_progress_and_can_be_cancelled(self) -> None:
+        import threading
+
+        with TemporaryDirectory(prefix="pvs-project-progress-") as raw_directory:
+            directory = Path(raw_directory)
+            audio = directory / "audio.wav"
+            audio.write_bytes(b"x" * (3 * 1024 * 1024 + 7))  # several chunks
+            package = ProjectService.save(
+                directory / "progress.pvsproj",
+                ProjectDocument(
+                    playlist=[PlaylistTrack(str(audio), "Track")],
+                    settings=ProjectSettings(content_mode="embed"),
+                ),
+            )
+            reports: list[tuple[int, int]] = []
+            ProjectService.load(package, progress=lambda done, total: reports.append((done, total)))
+            total = audio.stat().st_size
+            self.assertEqual(reports[0], (0, total))
+            self.assertEqual(reports[-1], (total, total))
+            self.assertEqual([done for done, _ in reports], sorted(done for done, _ in reports))
+
+            cancel = threading.Event()
+            cancel.set()
+            with self.assertRaises(ProjectLoadCancelled):
+                ProjectService.load(package, cancel_event=cancel)
+            self.assertTrue(issubclass(ProjectLoadCancelled, ProjectError))
 
     def test_repeated_package_saves_do_not_accumulate_hash_prefixes(self) -> None:
         with TemporaryDirectory(prefix="pvs-project-resave-") as raw_directory:

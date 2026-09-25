@@ -11,8 +11,8 @@ from app.services.export_validation_service import (
 )
 
 
-class ExportController:
-    """Keep export policy out of MainWindow while the render pipeline stays unchanged."""
+class ExportPolicy:
+    """Stateless export decisions (work mode, output validation) shared by UI and renderer."""
 
     @staticmethod
     def choose_work_mode(width: int, height: int, fps: int) -> str:

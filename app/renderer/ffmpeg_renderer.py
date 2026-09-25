@@ -26,7 +26,7 @@ from app.renderer.ffmpeg import filter_graph
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
 from app.utils.subprocess_utils import hidden_process_kwargs
 from app.services.export_validation_service import ExportValidationResult
-from app.services.export_controller import ExportController
+from app.services.export_policy import ExportPolicy
 
 
 LOGGER = logging.getLogger(__name__)
@@ -777,7 +777,7 @@ class FFmpegRenderer:
                         temporary_video,
                     )
         self._report(progress_callback, "Complete", 1.0, "Export completed")
-        validation = ExportController.validate_output(
+        validation = ExportPolicy.validate_output(
             target,
             width=selected_settings.output_width,
             height=selected_settings.output_height,

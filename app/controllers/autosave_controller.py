@@ -39,7 +39,7 @@ class AutosaveController:
         """
         window = self.window
         if (not window._history_ready or not window._project_dirty
-                or window._project_save_worker is not None
+                or window.project_controller.saving
                 or window._autosave_worker is not None):
             return
         korean = window.translator.language is Language.KOREAN
@@ -57,7 +57,7 @@ class AutosaveController:
         )
         worker.succeeded.connect(window._autosave_succeeded)
         worker.failed.connect(window._autosave_failed)
-        worker.finished.connect(lambda: window._autosave_thread_finished(worker))
+        worker.finished.connect(lambda: self.thread_finished(worker))
         window._autosave_worker = worker
         worker.start()
 
