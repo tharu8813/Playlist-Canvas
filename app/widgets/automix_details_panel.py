@@ -213,7 +213,16 @@ class AutoMixDetailsPanel(QFrame):
             lines.extend(f"  {reason}" for reason in reasons.split("; "))
         elif row["duration"]:
             lines.append("선택 근거 정보가 없는 전환입니다." if korean else "No selection reasons recorded for this transition.")
+        elif self.automix and row["type"] == "sequential":
+            lines.append(self._back_to_back_reason(korean))
         return "\n".join(lines)
+
+    @staticmethod
+    def _back_to_back_reason(korean: bool) -> str:
+        return ("곡 끝까지 노래가 이어지거나 분석이 없는 곡은 두 보컬이 겹치지 않도록 섞지 않고, "
+                "앞 곡의 마지막 소리 바로 뒤에 다음 곡을 이어 재생합니다." if korean
+                else "A track that sings to its last sound, or has no analysis, is not blended so two voices "
+                     "never overlap: the next track starts right after its last sound.")
 
     def _show_details(self) -> None:
         row = self.list.currentRow()
@@ -231,6 +240,10 @@ class AutoMixDetailsPanel(QFrame):
         state, ready_through = self._state
         mixed = sum(1 for row in self.rows if float(row["duration"]) > 0.0)
         plain = sum(1 for row in self.rows if row["dsp"] == "legacy") if self.automix else 0
+        # Planned back-to-back junctions (a provisional plan's unanalyzed tail is not planned yet).
+        planned = len(self.rows) if state == "final" else (ready_through or 1) - 1
+        joined = sum(1 for row in self.rows if row["type"] == "sequential" and int(row["index"]) <= planned
+                     ) if self.automix else 0
         if self._failed and state != "final":
             if state == "provisional":
                 text = (f"! {ready_through}번째 곡까지만 AutoMix 적용 · 이후는 곡을 차례로 재생합니다" if korean
@@ -251,6 +264,8 @@ class AutoMixDetailsPanel(QFrame):
         if plain and state in {"provisional", "final"}:
             text += (f" · {plain}개는 기본 크로스페이드" if korean
                      else f" · {plain} as plain crossfade")
+        if joined and state in {"provisional", "final"}:
+            text += f" · {joined}개는 바로 이어 재생" if korean else f" · {joined} back to back"
         self.status_label.setText(text)
         explanation = " ".join(part for part in (
             ("미리보기 믹스를 만들지 못했습니다. 원인은 로그에 기록됩니다." if korean
@@ -258,6 +273,7 @@ class AutoMixDetailsPanel(QFrame):
             ("기본 크로스페이드는 분석이 부족하거나 템포가 맞지 않는 곡 사이에 AutoMix 대신 쓰였습니다." if korean
              else "Plain crossfades replace AutoMix where analysis was incomplete or tempos did not match.")
             if plain else "",
+            self._back_to_back_reason(korean) if joined else "",
             ("미리보기는 계속 재생할 수 있습니다." if korean else "Preview keeps playing.")
             if plain or self._failed else "",
         ) if part)

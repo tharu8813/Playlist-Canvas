@@ -100,6 +100,23 @@ class AutoMixDetailsPanelTests(unittest.TestCase):
         self.assertTrue(failed.status_label.text().startswith("! Could not prepare the mix"))
         self.assertIn("Preview keeps playing", failed.status_label.accessibleDescription())
 
+    def test_back_to_back_junctions_are_counted_and_explained_in_automix_mode(self) -> None:
+        from dataclasses import replace
+
+        # b sings to its last second: it cannot be blended into c.
+        analyses = dict(self.analyses, b=replace(self.analyses["b"], vocal_activity=((60.0, 90.0),)))
+        plan = compile_automix(self.tracks, analyses, ENABLED)
+        panel = AutoMixDetailsPanel(self.translator, automix=True)
+        panel.set_plan(plan, self.tracks, state="final")
+        self.assertIn("Back to back", panel.list.item(1).text())
+        self.assertTrue(panel.status_label.text().endswith("· 1 back to back"), panel.status_label.text())
+        self.assertIn("sings to its last sound", panel.status_label.toolTip())
+        panel.list.setCurrentRow(1)
+        self.assertIn("two voices never overlap", panel.details.toPlainText())
+        # The provisional plan's unanalyzed tail is back to back too, but not yet planned.
+        panel.set_plan(plan, self.tracks, state="provisional", ready_through=2)
+        self.assertNotIn("back to back", panel.status_label.text())
+
     def test_details_name_the_analyzer_without_alarming_the_status(self) -> None:
         from dataclasses import replace
 
