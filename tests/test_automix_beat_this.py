@@ -94,6 +94,13 @@ class _FakeFile2Beats:
 
 
 class BeatThisAnalysisProviderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Hermetic: never run the real Demucs detector on these fake files, even
+        # when it is installed. Vocal tests inject their own fake ``_vocals``.
+        patcher = patch("app.automix.analysis.beat_this.vocal_detection_available", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_provider_identity(self) -> None:
         provider = BeatThisAnalysisProvider(Path("ffmpeg"))
         self.assertEqual(provider.provider_id, "beat_this")
@@ -123,6 +130,28 @@ class BeatThisAnalysisProviderTests(unittest.TestCase):
         # Fields the hybrid provider reuses verbatim from BasicAnalysisProvider.
         self.assertEqual(result.key, basic_result.key)
         self.assertEqual(result.energy, basic_result.energy)
+
+    def _analyze_with_vocals(self, detect) -> TrackAnalysis:
+        track = _track(duration_seconds=10.0)
+        provider = BeatThisAnalysisProvider(Path("ffmpeg"))
+        provider._vocals = SimpleNamespace(detect=detect)
+        fake_model = _FakeFile2Beats(np.arange(1.0, 5.0, 0.5), np.array([1.0, 3.0]))
+        with _basic(_basic_result(track)), patch.object(provider, "_load_model", return_value=fake_model):
+            return provider.analyze(track, cancel_event=threading.Event())
+
+    def test_detected_vocal_spans_reach_the_analysis(self) -> None:
+        result = self._analyze_with_vocals(lambda path, duration, cancel: ((0.5, 3.0), (7.0, 10.0)))
+        self.assertEqual(result.vocal_activity, ((0.5, 3.0), (7.0, 10.0)))
+        self.assertEqual(result.analyzer_id, "beat_this")
+
+    def test_failed_vocal_detection_stays_unknown_and_is_not_a_cache_hit_later(self) -> None:
+        def broken(path, duration, cancel):
+            raise OSError("model download failed")
+
+        result = self._analyze_with_vocals(broken)
+        self.assertEqual(result.vocal_activity, ())
+        self.assertIsNotNone(result.bpm)  # rhythm analysis is unaffected
+        self.assertNotEqual(result.analyzer_id, "beat_this")  # AnalysisService retries it next time
 
     def test_every_beat_reported_as_downbeat_is_kept_but_never_reliable(self) -> None:
         """The exact P1 finding: a homogeneous synthetic click fixture made
@@ -417,15 +446,13 @@ class AnalysisProviderRegistryTests(unittest.TestCase):
         self.assertEqual(provider.provider_id, "beat_this")
         self.assertIsInstance(provider, BeatThisAnalysisProvider)
 
-    def test_auto_selects_basic_when_beat_this_is_not_importable(self) -> None:
-        with patch("app.automix.analysis.registry.beat_this_available", return_value=False):
-            provider = create_analysis_provider("auto", Path("ffmpeg"))
-        self.assertEqual(provider.provider_id, "basic")
-
-    def test_auto_selects_beat_this_when_available(self) -> None:
-        with patch("app.automix.analysis.registry.beat_this_available", return_value=True):
-            provider = create_analysis_provider("auto", Path("ffmpeg"))
-        self.assertEqual(provider.provider_id, "beat_this")
+    def test_auto_is_the_light_analyzer_even_when_beat_this_is_installed(self) -> None:
+        # PyTorch analyzers are opt-in by explicit id only (too heavy by default).
+        for available in (False, True):
+            with self.subTest(beat_this_installed=available), patch(
+                "app.automix.analysis.registry.beat_this_available", return_value=available,
+            ):
+                self.assertEqual(create_analysis_provider("auto", Path("ffmpeg")).provider_id, "basic")
 
     def test_beat_this_available_does_not_import_torch(self) -> None:
         """find_spec-based probing must not trigger the actual heavy import."""

@@ -94,29 +94,3 @@ def evaluate_compatibility(
     )
 
 
-def resolve_target_bpm(outgoing: TrackAnalysis) -> float:
-    """Target tempo for a BEAT_MATCH transition: always the outgoing track's own tempo.
-
-    Not a confidence-weighted midpoint (an earlier version of this
-    function was): app/automix/planner.py never revisits a clip's rate
-    once it has been placed -- a clip plays two roles (outgoing for its
-    own transition, incoming for the one that placed it), and changing its
-    rate after placement would retroactively invalidate the transition
-    that set it (see planner.py's module docstring, "favor outgoing").
-    "Always match outgoing" is therefore not a preference but the only
-    target that can ever actually be applied to a real render, so this
-    function's result and the plan planner.py actually builds can no
-    longer diverge (candidates.py's own ``TransitionCandidate.outgoing_rate``
-    is consequently always 1.0, and ``incoming_rate`` is exactly the rate
-    planner.py applies to the incoming clip -- previously planner.py
-    recomputed a separate, independent formula for that rate instead of
-    using the candidate's own).
-
-    ``outgoing`` must already carry its own *effective* BPM here -- raw
-    analyzed BPM adjusted for any playback_rate a previous transition
-    already applied to it in a chain (see
-    ``planner._effective_analysis_for_outgoing``) -- not necessarily its
-    raw analyzed BPM, so tempo drift does not compound silently across a
-    chain of transitions.
-    """
-    return outgoing.bpm

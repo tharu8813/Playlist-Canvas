@@ -6,9 +6,10 @@ exact window) is fixed, and stores the result in
 that choice; it never re-reads analysis, so Preview and Export always hear
 the same style. Pure and deterministic: same inputs, same decision.
 
-Missing data is never evidence: an unknown key, energy, or vocal activity
-simply cannot trigger its rule, so sparse analysis degrades to the plain
-BASS_SWAP (BEAT_MATCH) or legacy qsin (BEAT_ALIGNED_CROSSFADE) mix.
+Missing data is never evidence: an unknown key or energy simply cannot
+trigger its rule. Unknown vocal activity (the light analyzer's normal case)
+is the exception: it picks VOCAL_SAFE_EQ, so two singers never share the whole
+window.
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ def select_transition_dsp(
        one starts late) are not a clash.
     4. energy jump, or (not rate-matched) kick drift across the window -> FILTER_BLEND.
     5. BEAT_MATCH -> BASS_SWAP; BEAT_ALIGNED_CROSSFADE -> ``None`` (legacy qsin).
+    Then: vocal activity unknown on either side -> VOCAL_SAFE_EQ (rules 3-5).
     """
     strategy = candidate.strategy
     duration = candidate.duration_seconds
@@ -122,12 +124,13 @@ def select_transition_dsp(
         dsp, rule = TransitionDsp.BASS_SWAP, "clean reliable beat match"
     else:
         dsp, rule = None, "aligned crossfade with no conflicts: legacy equal-power"
-    if vocals is None and dsp in (TransitionDsp.VOCAL_SAFE_EQ, TransitionDsp.FILTER_BLEND):
-        # Neither key nor energy says where the singer stops. Those styles
-        # mute the outgoing mids before the overlap ends; keep a full-window
-        # mid fade when vocal timing is unknown instead of cutting a phrase.
-        dsp = TransitionDsp.BASS_SWAP if strategy is TransitionStrategy.BEAT_MATCH else None
-        rule = "vocal activity unknown: preserve full-window mids"
+    if vocals is None and dsp is not TransitionDsp.SHORT_FADE:
+        # The light analyzer never measures vocals, so this is the normal case.
+        # A full-window mid crossfade lets two singers overlap for the whole
+        # blend; hand the voice band over mid-window instead. (Planning already
+        # keeps the window after the outgoing track's last known sung line.)
+        dsp = TransitionDsp.VOCAL_SAFE_EQ
+        rule = "vocal activity unknown: hand the voice band over mid-window"
         handoff = None
     return TransitionDspDecision(
         dsp, (f"* {dsp.value if dsp else 'legacy'}: {rule}", *facts), metrics,

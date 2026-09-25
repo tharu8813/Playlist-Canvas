@@ -117,17 +117,22 @@ def divergence_seconds(old: CompiledRenderPlan, new: CompiledRenderPlan) -> floa
     def placement(clip):
         return clip.track_id, clip.timeline_start, clip.source_in, clip.playback_rate
 
+    def tail_start(clip):
+        """Source second where the clip's tail (tempo ramp, then its end) begins."""
+        return clip.tempo_ramp.source_start if clip.tempo_ramp is not None else clip.source_out
+
     points: list[float] = []
     for before, after in zip_longest(old.audio.clips, new.audio.clips):
         if before is not None and after is not None and placement(before) == placement(after) \
-                and before.source_out == after.source_out:
+                and (before.source_out, before.tempo_ramp) == (after.source_out, after.tempo_ramp):
             continue
         if before is None or after is None:
             points.append((before or after).timeline_start)
         elif placement(before) != placement(after):
             points.append(min(before.timeline_start, after.timeline_start))
         else:
-            points.append(min(before.timeline_end, after.timeline_end))
+            # Same head: identical until the earlier of the two tails starts.
+            points.append(before.timeline_at(min(tail_start(before), tail_start(after))))
         break
 
     def windows(plan):
@@ -137,24 +142,38 @@ def divergence_seconds(old: CompiledRenderPlan, new: CompiledRenderPlan) -> floa
     return min(points, default=math.inf)
 
 
-def swap_is_safe(
+def swap_playhead(
     committed: CompiledRenderPlan, candidate: CompiledRenderPlan, playhead: float, playing: bool,
-) -> bool:
-    """Whether Preview may replace ``committed`` with ``candidate`` right now.
+) -> float | None:
+    """Where Preview's playhead lands if it replaces ``committed`` with ``candidate`` now; None = not now.
 
-    Never while the listener is at/after the point where the two differ (the
-    same global second would be different music), and, while playing, never
-    inside -- or about to enter -- a transition: an overlap already sounding
-    keeps its current audio and the new mix takes over at a solo stretch.
+    Before the point where the two plans differ the playhead stays put.
+    At/after it (the listener outran analysis) the same global second is
+    different music, so the playhead moves to the same track and source
+    second in ``candidate`` instead: the music continues, only the timeline
+    shifts. While playing, never inside -- or about to enter -- a transition
+    in either plan: an overlap already sounding keeps its current audio and
+    the new mix takes over at a solo stretch.
     """
     margin = SWAP_MARGIN_SECONDS if playing else 0.0
+    target: float | None = playhead
     if playhead + margin >= divergence_seconds(committed, candidate):
-        return False
+        target = None
+        clip = next((c for c in committed.audio.clips if c.timeline_start <= playhead < c.timeline_end), None)
+        if clip is not None:
+            source = clip.source_at(playhead)
+            match = next((c for c in candidate.audio.clips
+                          if c.track_id == clip.track_id and c.source_in <= source < c.source_out), None)
+            if match is not None:
+                target = match.timeline_at(source)
+    if target is None:
+        return None
     if playing:
-        for transition in (*committed.audio.transitions, *candidate.audio.transitions):
-            if transition.timeline_start - margin <= playhead < transition.timeline_start + transition.duration:
-                return False
-    return True
+        for plan, at in ((committed, playhead), (candidate, target)):
+            for transition in plan.audio.transitions:
+                if transition.timeline_start - margin <= at < transition.timeline_start + transition.duration:
+                    return None
+    return target
 
 
 def render_prefix(plan: CompiledRenderPlan, track_count: int, gain: float) -> tuple[AudioRenderPlan, float]:
@@ -248,19 +267,23 @@ class RenderScheduler:
         self.rendering = False
 
     def _unrendered_change(self) -> float:
-        """Timeline second of the first planned-but-unrendered difference (inf if none)."""
+        """Start of the first planned-but-unrendered transition still ahead of the listener (inf if none).
+
+        Transitions only ever append (module docstring), so the unrendered ones
+        are the tail past what ``rendered`` holds. One the listener already
+        passed is skipped, not a reason to stop: a later one can still be
+        swapped in via :func:`swap_playhead`. The new plan's timeline never
+        runs later than the committed one, so "ahead" here is conservative.
+        """
         if self.latest is None or self.latest_frontier <= self.rendered_frontier:
             return math.inf
-        if self.rendered is None:
-            transitions = self.latest.audio.transitions
-            return min((t.timeline_start for t in transitions), default=math.inf)
-        return divergence_seconds(self.rendered, self.latest)
+        done = len(self.rendered.audio.transitions) if self.rendered is not None else 0
+        return min((t.timeline_start for t in self.latest.audio.transitions[done:]
+                    if t.timeline_start > self.playhead), default=math.inf)
 
     def _urgent(self) -> bool:
         change = self._unrendered_change()
-        if not math.isfinite(change) or change <= self.playhead:
-            # Nothing new, or the listener already passed it: a render could not
-            # be swapped in without moving the music under the playhead.
+        if not math.isfinite(change):
             return False
         if change - self.playhead <= URGENT_HORIZON_SECONDS:
             return True

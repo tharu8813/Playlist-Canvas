@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.automix.compatibility import evaluate_compatibility, resolve_target_bpm
+from app.automix.compatibility import evaluate_compatibility
 from app.automix.models import TrackAnalysis
 from app.automix.settings import AutoMixTransitionSettings
 
@@ -65,25 +65,6 @@ class EvaluateCompatibilityTests(unittest.TestCase):
         settings = AutoMixTransitionSettings(max_tempo_change_percent=10.0)
         result = evaluate_compatibility(_analysis("a", 100.0), _analysis("b", 110.1), settings)
         self.assertFalse(result.compatible)
-
-
-class ResolveTargetBpmTests(unittest.TestCase):
-    """"Favor outgoing" policy (Commit C): the target is always the
-    outgoing track's own (possibly chain-propagated effective) BPM --
-    unified with the rate planner.py actually applies, see
-    resolve_target_bpm's docstring. No confidence weighting is left to
-    test; ``outgoing.bpm`` alone determines the result."""
-
-    def test_target_is_always_the_outgoing_tracks_own_bpm(self) -> None:
-        self.assertAlmostEqual(resolve_target_bpm(_analysis("a", 120.0)), 120.0)
-        self.assertAlmostEqual(resolve_target_bpm(_analysis("a", 95.5)), 95.5)
-
-    def test_incoming_bpm_and_confidence_have_no_effect(self) -> None:
-        # The function only ever reads outgoing.bpm now -- there is nothing
-        # else to vary; this documents that explicitly for a reader coming
-        # from the pre-Commit-C confidence-weighted-midpoint policy.
-        outgoing = _analysis("a", 120.0)
-        self.assertEqual(resolve_target_bpm(outgoing), resolve_target_bpm(outgoing))
 
 
 if __name__ == "__main__":

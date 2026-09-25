@@ -45,6 +45,8 @@ import threading
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
+
 from app.automix.structure.models import TrackSection, TrackStructureAnalysis
 from app.automix.structure.provider import StructureAnalysisCancelled
 from app.models.playlist import PlaylistTrack
@@ -83,14 +85,18 @@ class SonaraStructureProvider:
     """StructureAnalysisProvider backed by the optional ``sonara`` package."""
 
     provider_id = "sonara_structure"
-    version = "1"
+    version = "2"  # 2: analyzes FFmpeg-decoded PCM (sonara's own M4A decode doubled every time)
     """This implementation's version -- see __init__, which folds in the
     installed sonara package version into the actual per-instance cache
     identity (self.version); each analyze() result additionally folds in
     Sonara's own result schema_version (analyzer_version), since that can
     change independently of the pip package version."""
 
-    def __init__(self, *, sample_rate: int | None = None) -> None:
+    def __init__(self, ffmpeg_executable: Path | None = None, *, sample_rate: int | None = None) -> None:
+        """``ffmpeg_executable``: decode through FFmpeg (the app's path). Without
+        it sonara reads the file itself, which for AAC/M4A reported every
+        time (duration, intro/outro, sections) at twice its real value."""
+        self._ffmpeg_executable = ffmpeg_executable
         self._sample_rate = sample_rate
         # Shadows the class attribute above with the full cache identity
         # for this instance. importlib.metadata reads installed-package
@@ -114,9 +120,19 @@ class SonaraStructureProvider:
         if progress is not None:
             progress(0.3, "Analyzing track structure")
         keyword_arguments: dict[str, object] = {"features": ["structure"]}
-        if self._sample_rate is not None:
-            keyword_arguments["sr"] = self._sample_rate
-        result = sonara.analyze_file(str(Path(track.file_path)), **keyword_arguments)
+        if self._ffmpeg_executable is not None:
+            from app.automix.analysis.basic import SAMPLE_RATE, BasicAnalysisProvider
+
+            sample_rate = self._sample_rate or SAMPLE_RATE
+            signal = BasicAnalysisProvider(self._ffmpeg_executable)._decode_mono_pcm(
+                Path(track.file_path), cancel_event, sample_rate=sample_rate,
+            )
+            result = sonara.analyze_signal(np.asarray(signal, dtype=np.float32), sr=sample_rate,
+                                           **keyword_arguments)
+        else:
+            if self._sample_rate is not None:
+                keyword_arguments["sr"] = self._sample_rate
+            result = sonara.analyze_file(str(Path(track.file_path)), **keyword_arguments)
         if cancel_event.is_set():
             # sonara.analyze_file() cannot be interrupted mid-call; this is
             # the latest point cancellation can still be honored before

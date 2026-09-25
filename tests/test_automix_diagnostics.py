@@ -25,10 +25,10 @@ class TransitionRowsTests(unittest.TestCase):
         transition = self.plan.audio.transitions[0]
         self.assertEqual((mixed["from"], mixed["to"]), ("Song A", "Song B"))
         self.assertEqual((mixed["timeline_start"], mixed["duration"]), (transition.timeline_start, transition.duration))
-        self.assertEqual((mixed["strategy"], mixed["dsp"]), ("beat_match", "bass_swap"))
+        self.assertEqual((mixed["strategy"], mixed["dsp"]), ("beat_match", "vocal_safe_eq"))
         self.assertEqual(mixed["outgoing_bpm"], 120.0)
         self.assertIsNone(mixed["vocal_overlap"])  # unknown stays unknown, never "no vocals"
-        self.assertTrue(mixed["reasons"].startswith("* bass_swap"))
+        self.assertTrue(mixed["reasons"].startswith("* vocal_safe_eq: vocal activity unknown"))
         self.assertEqual((gap["to"], gap["type"], gap["duration"]), ("c", "gap", 0.0))
 
     def test_details_are_deterministic_and_carried_by_the_plan(self) -> None:

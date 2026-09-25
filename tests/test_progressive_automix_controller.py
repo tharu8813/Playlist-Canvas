@@ -115,6 +115,7 @@ class ProgressiveControllerTests(unittest.TestCase):
         self.analyze("t2", "t3")
         self.settle()
         self.assertEqual(len(self.partials), 1)
+        self.assertFalse(self.controller._timer.isActive())  # no 10 ms re-arm loop while partials are off
         self.analyze("t4", "t5")
         self.assertEqual(len(self.finals), 1)
 
@@ -127,7 +128,7 @@ class ProgressiveControllerTests(unittest.TestCase):
         self.analyze("t0", "t1")
         self.settle()
         transition = self.partials[-1]._plan.audio.transitions[0]
-        self.assertEqual(transition.duration, 8.0)  # 4 bars at 120 BPM, Auto would pick 8 bars
+        self.assertAlmostEqual(transition.duration, 8.0)  # 4 bars at 120 BPM, Auto would pick 8 bars
         self.analyze(*(t.id for t in self.tracks[2:]))
         self.partials[-1].ready.emit(self.partials[-1]._generation, "mix.flac", self.partials[-1]._plan, 1.0, 1.0)
         self.assertIs(self.finals[-1][2]["automix_settings"], energetic)  # Preview final == Export settings

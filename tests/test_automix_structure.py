@@ -236,6 +236,35 @@ class SonaraStructureProviderTests(unittest.TestCase):
             self.assertIn("schema6", result.analyzer_version)
             self.assertEqual(fake_module.calls, [(str(Path(track.file_path)), {"features": ["structure"]})])
 
+    def test_with_ffmpeg_the_decoded_pcm_is_analyzed_not_the_file(self) -> None:
+        # sonara's own AAC/M4A decode reported every time at twice its value.
+        import numpy as np
+        from types import SimpleNamespace
+
+        from app.automix.analysis.basic import SAMPLE_RATE, BasicAnalysisProvider
+
+        with TemporaryDirectory(prefix="structure-") as directory:
+            track = _track(Path(directory))
+            seen: dict[str, object] = {}
+
+            def analyze_signal(y, *, sr, **kwargs):
+                seen.update(length=len(y), dtype=y.dtype, sr=sr, kwargs=kwargs)
+                return _FAKE_SONARA_RESULT
+
+            def analyze_file(*_args, **_kwargs):
+                raise AssertionError("the file must not be decoded by sonara")
+
+            fake_module = SimpleNamespace(analyze_signal=analyze_signal, analyze_file=analyze_file)
+            pcm = np.zeros(SAMPLE_RATE * 2, dtype=np.float32)
+            with patch.dict("sys.modules", {"sonara": fake_module}), patch.object(
+                BasicAnalysisProvider, "_decode_mono_pcm", return_value=pcm,
+            ) as decode:
+                result = SonaraStructureProvider(Path("ffmpeg")).analyze(track, cancel_event=threading.Event())
+            decode.assert_called_once()
+            self.assertEqual(seen, {"length": len(pcm), "dtype": np.float32, "sr": SAMPLE_RATE,
+                                    "kwargs": {"features": ["structure"]}})
+            self.assertAlmostEqual(result.outro_start_seconds, 51.4)
+
     def test_boundary_overshoot_past_duration_is_clamped(self) -> None:
         """Floating-point overshoot right at track end must not fail
         validation -- clamped into [0, duration], not silently discarded."""

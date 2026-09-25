@@ -1,11 +1,8 @@
 -r requirements.txt
 pyinstaller==6.22.0
 
-# AutoMix's advanced analyzers, shipped inside the Windows installer (the
-# spec refuses to build without them; see PACKAGING.md). CPU-only PyTorch
-# keeps the installer smaller and runs on every machine.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.14.0+cpu
-torchaudio==2.11.0+cpu
-beat-this==1.1.0
+# AutoMix's structure analyzer ships in the Windows installer (the spec refuses
+# to build without it; see PACKAGING.md). It is a ~2 MB Rust extension. The
+# PyTorch-based analyzers (Beat This!, Demucs) are deliberately NOT shipped:
+# the light analyzer is the default, and the spec excludes them.
 sonara==0.3.6

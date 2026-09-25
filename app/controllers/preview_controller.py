@@ -4,8 +4,8 @@ Extracted from MainWindow: the "Preview" bottom-tab embedded playback flow
 (swap the Canvas for an embedded ExportPreviewDialog, lock editing, restore
 on close) and the non-blocking single-source animation preview. MainWindow
 keeps identically-named thin wrapper methods that delegate here, so every
-existing call site, signal connection, and test monkeypatch target in
-main_window.py keeps working unchanged.
+existing call site and signal connection keeps working unchanged. Tests
+patch this module's own names ("app.controllers.preview_controller.<Name>").
 
 This does not touch the underlying playback backends: each dialog
 (ExportPreviewDialog, content preview, track order, LRC generator, ...)
@@ -24,6 +24,8 @@ from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMessageBox, QWidget
 
+from app.dialogs.export_preview_dialog import ExportPreviewDialog
+from app.renderer.ffmpeg_renderer import FFmpegNotFoundError, FFmpegRenderer
 from app.utils.i18n import Language
 
 if TYPE_CHECKING:
@@ -62,9 +64,9 @@ class PreviewController:
                     "Add at least one enabled track before opening Preview."
                 ),
             )
-            window._select_edit_bottom_tab(window._last_edit_bottom_tab)
+            self.select_edit_bottom_tab(window._last_edit_bottom_tab)
             return
-        window._show_export_preview(tracks)
+        self.show_export_preview(tracks)
 
     def bottom_workspace_tab_changed(self, index: int) -> None:
         """Enter Preview from its tab and restore editing from either edit tab."""
@@ -72,7 +74,7 @@ class PreviewController:
         if window._bottom_tab_change_guard:
             return
         if index == PREVIEW_TAB_INDEX:
-            window._open_playlist_preview()
+            self.open_playlist_preview()
             return
         if index not in {0, 1}:
             return
@@ -95,11 +97,6 @@ class PreviewController:
 
     def show_export_preview(self, tracks: list) -> None:
         """Show a track-aware playback preview in the main Canvas workspace."""
-        # ExportPreviewDialog and FFmpegRenderer are looked up from
-        # app.ui.main_window (not imported at module scope) because existing
-        # tests patch "app.ui.main_window.<Name>".
-        from app.ui.main_window import ExportPreviewDialog, FFmpegNotFoundError, FFmpegRenderer
-
         window = self.window
         if window._inline_preview is not None:
             window.canvas_stack.setCurrentWidget(window._inline_preview)
@@ -151,7 +148,7 @@ class PreviewController:
         window.canvas_stack.addWidget(preview)
         window.preview_tab_layout.addWidget(controls_page)
         window.canvas_stack.setCurrentWidget(preview)
-        window._lock_editor_for_inline_preview()
+        self.lock_editor_for_inline_preview()
         track_panel = getattr(preview, "track_list_panel", None)
         if isinstance(track_panel, QWidget):
             window._inline_preview_track_panel = track_panel
@@ -193,8 +190,9 @@ class PreviewController:
         - ``preloaded`` is ``(path, plan)`` if the render finished before the
           dialog closed, so the caller can open Preview already on the final
           plan instead of the sequential one.
-        - ``controller`` is the still-running PreviewAudioController if the
-          user skipped while it was rendering, so the caller can hand it to
+        - ``controller`` is the still-running controller if the user skipped
+          while it was rendering, or (AutoMix) its first partial mix landed
+          -- Preview then opens on that partial -- so the caller can hand it to
           ExportPreviewDialog to adopt (same worker, no duplicate render)
           instead of starting a second one.
         - ``temp_dir`` backs whichever of the above is not None, and must
@@ -233,15 +231,28 @@ class PreviewController:
         def on_failed(_message: str) -> None:
             dialog.accept()
 
+        def on_partial(*_args: object) -> None:
+            # The first AutoMix transitions are playable: open Preview on them
+            # now and let it adopt the still-running controller for the rest.
+            dialog.accept()
+
         controller.audio_ready.connect(on_ready)
         controller.audio_failed.connect(on_failed)
         controller.progress.connect(dialog.set_progress)
+        progressive_ready = getattr(controller, "progressive_ready", None)
+        if progressive_ready is not None:
+            progressive_ready.connect(on_partial)
         controller.start(tracks, Path(temp_dir.name), transition_mode, crossfade_seconds,
                          automix_settings=automix_settings)
+        if progressive_ready is not None:
+            # Attach as a paused listener at 0 so partial mixes render during the wait.
+            controller.report_playhead(0.0, False)
         dialog.exec()
         controller.audio_ready.disconnect(on_ready)
         controller.audio_failed.disconnect(on_failed)
         controller.progress.disconnect(dialog.set_progress)
+        if progressive_ready is not None:
+            progressive_ready.disconnect(on_partial)
         dialog.deleteLater()
 
         if "preloaded" in result:
@@ -249,7 +260,9 @@ class PreviewController:
             # further to adopt, so release the empty controller shell.
             controller.deleteLater()
             return result["preloaded"], None, temp_dir
-        if dialog.skipped:
+        if dialog.skipped or getattr(controller, "latest_partial", None) is not None:
+            # Hand the same running controller to Preview: analysis and
+            # rendering continue exactly where this dialog left them.
             return None, controller, temp_dir
         # The render failed outright (audio_failed) or the dialog closed some
         # other way: nothing to hand off, so let ExportPreviewDialog try its
@@ -306,6 +319,9 @@ class PreviewController:
         controller.progress.connect(on_progress)
         controller.audio_ready.connect(on_ready)
         controller.audio_failed.connect(on_failed)
+        last = getattr(controller, "last_progress", None)
+        if last is not None:
+            on_progress(*last)  # continue from where the preparation popup was
 
     def lock_editor_for_inline_preview(self) -> None:
         """Lock project mutation while keeping bottom mode tabs interactive."""
@@ -313,8 +329,15 @@ class PreviewController:
         if window._preview_ui_lock_state is not None:
             return
         widgets = (window.canvas,)
+        # Help only opens read-only dialogs, so it stays usable (F1 included);
+        # every other menu keeps its action disabled like before.
+        read_only_actions = {
+            window.help_menu.menuAction(), window.help_action,
+            window.shortcuts_action, window.about_action,
+        }
         actions = tuple(
             (action, action.isEnabled()) for action in window.findChildren(QAction)
+            if action not in read_only_actions
         )
         window._preview_ui_lock_state = {
             "widgets": tuple((widget, widget.isEnabled()) for widget in widgets),
@@ -336,7 +359,6 @@ class PreviewController:
             widget.setEnabled(False)
         for action, _enabled in actions:
             action.setEnabled(False)
-        window.menuBar().setEnabled(False)
         window.toolbar.setEnabled(False)
         window._set_sidebar_visible(False, persist=False, sync_action=False)
         sizes = window.workspace_splitter.sizes()
@@ -369,9 +391,9 @@ class PreviewController:
             window.preview_tab_layout.removeWidget(controls_page)
             controls_page.deleteLater()
         preview.deleteLater()
-        window._unlock_editor_after_inline_preview()
+        self.unlock_editor_after_inline_preview()
         if window.bottom_tabs.currentIndex() == PREVIEW_TAB_INDEX:
-            window._select_edit_bottom_tab()
+            self.select_edit_bottom_tab()
         window.activity_progress.finish("inline_preview")
         window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)  # render cancelled with Preview
         window.statusBar().showMessage(

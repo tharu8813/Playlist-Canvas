@@ -62,10 +62,15 @@ class PreviewPreparationDialog(QDialog):
             title = "AutoMix 미리보기 준비 중" if korean else "Preparing AutoMix Preview"
         self.setWindowTitle(title)
         self.title_label.setText(title)
-        self.description_label.setText(
-            "최종 전환 오디오를 준비하고 있습니다." if korean else
-            "Preparing the final transition audio."
-        )
+        if self.transition_mode == "automix":
+            description = (
+                "첫 전환이 준비되면 바로 미리보기를 시작하고, 나머지는 재생 중에 이어서 준비합니다."
+                if korean else
+                "Preview opens as soon as the first transitions are ready; the rest keeps preparing during playback."
+            )
+        else:
+            description = "최종 전환 오디오를 준비하고 있습니다." if korean else "Preparing the final transition audio."
+        self.description_label.setText(description)
         self.skip_button.setText("기다리지 않고 시작" if korean else "Start Without Waiting")
 
     def set_progress(self, stage: str, fraction: float, message: str) -> None:

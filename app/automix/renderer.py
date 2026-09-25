@@ -170,7 +170,7 @@ class PreparedAudio:
 
 def build_filter_graph(
     clips: Sequence[AudioRenderClip], transitions: Sequence[AudioRenderTransition],
-    *, transition_dsp: bool = True,
+    *, transition_dsp: bool = True, ramp_filter: str | None = "rubberband",
 ) -> tuple[str, str]:
     """Build the filter_complex graph for ``clips``, in input order.
 
@@ -180,6 +180,7 @@ def build_filter_graph(
     executable. ``transition_dsp=False`` renders every DSP-styled transition
     as its type's plain legacy acrossfade (BEAT_MATCH: qsin) -- the fallback
     when the DSP filters are unavailable. Timing is identical either way.
+    ``ramp_filter`` is how tempo ramps stretch (see _clip_filter_chain).
     """
     if not clips:
         raise AutoMixRenderError("Cannot render an AudioRenderPlan with no clips.")
@@ -208,10 +209,10 @@ def build_filter_graph(
         incoming, outgoing = band_side(index - 1), band_side(index)
         sweep_in, sweep_out = sweep_side(index - 1), sweep_side(index)
         if incoming is None and outgoing is None and sweep_in is None and sweep_out is None:
-            filters.append(_clip_filter_chain(index, clip, labels[index]))
+            filters.append(_clip_filter_chain(index, clip, labels[index], ramp_filter=ramp_filter))
             continue
         current = f"{labels[index]}pre"
-        filters.append(_clip_filter_chain(index, clip, current))
+        filters.append(_clip_filter_chain(index, clip, current, ramp_filter=ramp_filter))
         if sweep_in is not None or sweep_out is not None:
             swept = f"{labels[index]}swept"
             filters.append(_sweep_filter(index, current, swept, clip.duration, sweep_in, sweep_out))
@@ -257,16 +258,83 @@ def build_filter_graph(
     return ";".join(filters), running_label
 
 
-def _clip_filter_chain(index: int, clip: AudioRenderClip, label: str) -> str:
+def _clip_filter_chain(index: int, clip: AudioRenderClip, label: str, *, ramp_filter: str | None = "rubberband") -> str:
+    """One clip, trimmed/stretched/gained to exactly its planned placement.
+
+    A TempoRamp renders with ``ramp_filter`` (a time-stretcher taking timed
+    ``tempo`` commands); ``None`` renders its rate steps as separate,
+    sample-pinned segments instead (same timing, a stretcher restart per step).
+    """
+    if clip.tempo_ramp is not None and ramp_filter is None:
+        return _segmented_clip_filters(index, clip, label)
     parts = [
         f"[{index}:a]atrim=start={clip.source_in:.6f}:end={clip.source_out:.6f}",
         "asetpts=PTS-STARTPTS",
     ]
-    parts.extend(_atempo_filters(clip.playback_rate))
+    if clip.tempo_ramp is None:
+        parts.extend(_atempo_filters(clip.playback_rate))
+    else:
+        parts.extend(_tempo_ramp_filters(index, clip, ramp_filter))
     if abs(clip.gain - 1.0) > 1e-9:
         parts.append(f"volume={clip.gain:.6f}")
     parts.append(f"aformat=sample_rates={SAMPLE_RATE}:channel_layouts=stereo")
+    if clip.tempo_ramp is not None:
+        # Overlaps align on the clip's END (acrossfade), so pin its length to
+        # the plan: the stretcher may leave it a frame short or long.
+        samples = round(clip.duration * SAMPLE_RATE)
+        parts.append(f"apad=whole_len={samples},atrim=end_sample={samples}")
     return ",".join(parts) + f"[{label}]"
+
+
+RAMP_COMMAND_FRAME_SAMPLES = 512
+"""asendcmd fires per input frame: small frames land each tempo step within ~11 ms of its source second."""
+
+
+def _tempo_ramp_filters(index: int, clip: AudioRenderClip, ramp_filter: str) -> list[str]:
+    """One continuous stretcher whose tempo follows ``clip.rate_segments()`` via timed commands.
+
+    rubberband, not atempo: measured on FFmpeg 9, every atempo ``tempo``
+    command dropped ~21 ms of input, so a 32-step ramp played its beats
+    690 ms early; rubberband stayed within 3 ms of the plan over the same
+    ramp. Command times are clip-local *source* seconds, the timestamps
+    asendcmd sees before the stretcher.
+    """
+    name = f"{ramp_filter}@ramp{index}"
+    segments = clip.rate_segments()
+    commands = ";".join(f"{start - clip.source_in:.6f} {name} tempo {rate:.6f}" for start, _end, rate in segments[1:])
+    return [
+        f"asetnsamples=n={RAMP_COMMAND_FRAME_SAMPLES}:p=0",
+        f"asendcmd=c='{commands}'",
+        f"{name}=tempo={segments[0][2]:.6f}",
+    ]
+
+
+def _segmented_clip_filters(index: int, clip: AudioRenderClip, label: str) -> str:
+    """Fallback ramp without a command-driven stretcher: one atempo per rate step.
+
+    Each step is pinned to the sample count the plan gives it (boundaries
+    rounded once, on the cumulative timeline), so timing never accumulates
+    error; the cost is a stretcher restart at each step.
+    # ponytail: measured 15-18 ms early inside a long constant-rate step
+    # (atempo start-up), vs <= 3 ms with rubberband; compensate if this path matters.
+    """
+    segments = clip.rate_segments()
+    names = [f"r{index}s{k}" for k in range(len(segments))]
+    filters = [f"[{index}:a]asplit={len(segments)}" + "".join(f"[{name}]" for name in names)]
+    edge, elapsed = 0, 0.0
+    for name, (start, end, rate) in zip(names, segments):
+        elapsed += (end - start) / rate
+        samples = round(elapsed * SAMPLE_RATE) - edge
+        edge += samples
+        filters.append(",".join([
+            f"[{name}]atrim=start={start:.6f}:end={end:.6f}", "asetpts=PTS-STARTPTS",
+            *_atempo_filters(rate), f"aformat=sample_rates={SAMPLE_RATE}:channel_layouts=stereo",
+            f"apad=whole_len={samples}", f"atrim=end_sample={samples}",
+        ]) + f"[{name}p]")
+    joined = "".join(f"[{name}p]" for name in names) + f"concat=n={len(segments)}:v=0:a=1"
+    gain = f",volume={clip.gain:.6f}" if abs(clip.gain - 1.0) > 1e-9 else ""
+    filters.append(f"{joined}{gain}[{label}]")
+    return ";".join(filters)
 
 
 def transition_dsp_style(transition: AudioRenderTransition) -> TransitionDsp | None:
@@ -416,17 +484,21 @@ def _limited_overlap_filters(
 
 
 @lru_cache(maxsize=None)
-def ffmpeg_supports_transition_dsp(executable: str) -> bool:
-    """Whether ``executable`` has every filter the transition DSP needs (cached per path)."""
+def ffmpeg_filter_names(executable: str) -> frozenset[str]:
+    """Every filter ``executable`` lists (cached per path; empty if it cannot be asked)."""
     try:
         result = subprocess.run(
             [executable, "-hide_banner", "-filters"], capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=15, **hidden_process_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    names = {parts[1] for parts in (line.split() for line in result.stdout.splitlines()) if len(parts) > 2}
-    return _DSP_REQUIRED_FILTERS <= names
+        return frozenset()
+    return frozenset(parts[1] for parts in (line.split() for line in result.stdout.splitlines()) if len(parts) > 2)
+
+
+def ffmpeg_supports_transition_dsp(executable: str) -> bool:
+    """Whether ``executable`` has every filter the transition DSP needs."""
+    return _DSP_REQUIRED_FILTERS <= ffmpeg_filter_names(executable)
 
 
 def _atempo_filters(rate: float) -> list[str]:
@@ -507,8 +579,14 @@ class AutoMixAudioPipeline:
         codec = ["-c:a", "flac", "-compression_level", "0"] if container == "flac" else ["-c:a", "pcm_s16le"]
         expected_duration = max(clip.timeline_end for clip in clips)
 
+        # Tempo ramps need a stretcher that takes timed tempo commands.
+        ramp_filter = "rubberband" if any(clip.tempo_ramp for clip in clips) and (
+            "rubberband" in ffmpeg_filter_names(str(self.ffmpeg_executable))) else None
+
         def command(dsp: bool) -> list[str]:
-            filter_complex, output_label = build_filter_graph(clips, plan.transitions, transition_dsp=dsp)
+            filter_complex, output_label = build_filter_graph(
+                clips, plan.transitions, transition_dsp=dsp, ramp_filter=ramp_filter,
+            )
             graph = ["-filter_complex", filter_complex]
             if len(filter_complex) > INLINE_FILTER_GRAPH_LIMIT:
                 # Windows caps a command line at 32,767 characters; a band-DSP

@@ -60,7 +60,7 @@ class GenerateCandidatesTests(unittest.TestCase):
         candidates = self._generate(outgoing, incoming)
         self.assertTrue(candidates)
         self.assertTrue(all(c.strategy is TransitionStrategy.BEAT_MATCH for c in candidates))
-        self.assertTrue(all(c.outgoing_rate == 1.0 and c.incoming_rate == 1.0 for c in candidates))
+        self.assertTrue(all(abs(c.outgoing_rate - 1.0) < 1e-6 and c.incoming_rate == 1.0 for c in candidates))
 
     def test_no_beats_still_allows_bpm_only_crossfade_when_confidence_present(self) -> None:
         outgoing = _analysis("a", 128.0, duration=200.0, with_beats=False)
@@ -193,25 +193,51 @@ class AdvancedScoringTests(unittest.TestCase):
         similar = self._best_score(replace(outgoing, energy=0.7), replace(incoming, energy=0.72))
         self.assertGreater(similar, baseline)
 
-    def test_vocal_overlap_on_both_sides_decreases_score(self) -> None:
+
+class VocalAwareWindowTests(unittest.TestCase):
+    """Never mix while the outgoing track sings; mix right after it stops (or later)."""
+
+    def _generate(self, outgoing, incoming):
+        settings = AutoMixTransitionSettings(max_transition_seconds=60.0)
+        return generate_candidates(outgoing, incoming, evaluate_compatibility(outgoing, incoming, settings), settings)
+
+    def test_vocals_outside_the_windows_leave_beat_matching_untouched(self) -> None:
         outgoing = _analysis("a", 128.0, duration=200.0)
         incoming = _analysis("b", 128.0, duration=200.0)
-        baseline = self._best_score(outgoing, incoming)
-        # Vocals near the very end of "a" and the very start of "b" so they
-        # land inside whatever overlap window gets chosen.
-        clashing = self._best_score(
-            replace(outgoing, vocal_activity=((190.0, 200.0),)),
-            replace(incoming, vocal_activity=((0.0, 10.0),)),
-        )
-        self.assertLess(clashing, baseline)
+        baseline = self._generate(outgoing, incoming)
+        sung = self._generate(replace(outgoing, vocal_activity=((20.0, 120.0),)),
+                              replace(incoming, vocal_activity=((60.0, 150.0),)))
+        self.assertEqual([(c.bars, c.outgoing_source_time) for c in sung],
+                         [(c.bars, c.outgoing_source_time) for c in baseline])
 
-    def test_vocal_activity_on_only_one_side_does_not_penalize(self) -> None:
+    def test_mixing_starts_on_the_first_downbeat_after_the_last_vocal(self) -> None:
+        outgoing = replace(_analysis("a", 128.0, duration=200.0), vocal_activity=((10.0, 185.3),))
+        candidates = self._generate(outgoing, _analysis("b", 128.0, duration=200.0))
+        self.assertTrue(candidates)
+        bar = 4 * 60.0 / 128.0
+        for candidate in candidates:
+            self.assertGreaterEqual(candidate.outgoing_source_time, 185.3)
+        self.assertLess(min(c.outgoing_source_time for c in candidates) - 185.3, bar)  # right after, not bars later
+
+    def test_the_incoming_track_may_already_sing_in_the_overlap(self) -> None:
         outgoing = _analysis("a", 128.0, duration=200.0)
         incoming = _analysis("b", 128.0, duration=200.0)
-        baseline = self._best_score(outgoing, incoming)
-        one_sided = self._best_score(replace(outgoing, vocal_activity=((190.0, 200.0),)), incoming)
-        self.assertEqual(one_sided, baseline)
+        baseline = self._generate(outgoing, incoming)
+        singing = self._generate(outgoing, replace(incoming, vocal_activity=((1.0, 150.0),)))
+        self.assertEqual([c.outgoing_source_time for c in singing], [c.outgoing_source_time for c in baseline])
 
+    def test_a_short_instrumental_tail_still_blends_instead_of_cutting(self) -> None:
+        outgoing = replace(_analysis("a", 128.0, duration=200.0), vocal_activity=((10.0, 198.4),))
+        (best,) = [select_best_candidate(self._generate(outgoing, _analysis("b", 128.0, duration=200.0)))]
+        self.assertIsNot(best.strategy, TransitionStrategy.CUT)
+        self.assertGreaterEqual(best.outgoing_source_time, 198.4)
+        self.assertGreaterEqual(best.duration_seconds, 1.0)
+
+    def test_singing_through_the_junction_leaves_only_a_cut(self) -> None:
+        outgoing = replace(_analysis("a", 128.0, duration=200.0), vocal_activity=((10.0, 200.0),))
+        incoming = _analysis("b", 128.0, duration=200.0)
+        candidates = self._generate(outgoing, incoming)
+        self.assertEqual([c.strategy for c in candidates], [TransitionStrategy.CUT])
 
 def _structure(
     track_id: str, duration: float, *,
@@ -328,42 +354,6 @@ class StructureAwareCandidateTests(unittest.TestCase):
         keys = [(c.outgoing_source_time, c.incoming_source_time, c.bars, c.strategy) for c in first]
         self.assertEqual(len(keys), len(set(keys)), "duplicate candidate geometry was not deduplicated")
 
-    def test_vocal_overlap_only_checks_the_actual_transition_window(self) -> None:
-        """Regression: the outgoing side previously checked vocal activity
-        all the way to the track's own end, wider than the real transition
-        window whenever the cue landed before the natural tail. Vocals
-        placed outside the real window (but inside the track's tail) must
-        no longer trigger the penalty. Tested directly against
-        _score_beat_candidate with fixed cue positions -- candidate
-        selection itself can shift bars/anchors between runs, which would
-        make an end-to-end best-candidate comparison flaky."""
-        from app.automix.candidates import _score_beat_candidate
-
-        outgoing = _analysis("a", 128.0, duration=200.0)
-        incoming = _analysis("b", 128.0, duration=200.0)
-        settings = AutoMixTransitionSettings()
-        compatibility = evaluate_compatibility(outgoing, incoming, settings)
-        outgoing_source_time, incoming_source_time, duration_seconds = 180.0, 0.0, 10.0
-        incoming_with_vocals = replace(incoming, vocal_activity=((0.0, 5.0),))
-
-        def score(outgoing_analysis) -> float:
-            result, _reasons = _score_beat_candidate(
-                outgoing_analysis, incoming_with_vocals, compatibility, 8, TransitionStrategy.BEAT_MATCH,
-                settings, 0.0, 0.0, outgoing_source_time, incoming_source_time, duration_seconds,
-            )
-            return result
-
-        baseline = score(outgoing)  # no vocal_activity at all
-        # Vocals after the real window (180-190) ends, but still before the
-        # track's own natural end -- the old, wider check would have flagged
-        # this; the tightened window must not.
-        outside_window_score = score(replace(outgoing, vocal_activity=((191.0, 200.0),)))
-        self.assertAlmostEqual(outside_window_score, baseline)
-        # Sanity: vocals actually inside the real window must still penalize.
-        inside_window_score = score(replace(outgoing, vocal_activity=((185.0, 195.0),)))
-        self.assertLess(inside_window_score, baseline)
-
-
 class ScoreSaturationTests(unittest.TestCase):
     """Commit C.1: score is an unclamped ranking signal, not a 0..1
     probability -- a perfect-confidence base candidate must not swallow the
@@ -422,38 +412,6 @@ class ScoreSaturationTests(unittest.TestCase):
             replace(outgoing, energy=0.7), replace(incoming, energy=0.72), settings,
         )
         self.assertGreater(similar_energy, baseline)
-
-
-class RateAwareVocalWindowTests(unittest.TestCase):
-    """Commit C.1: the vocal-overlap window must use each side's own
-    source-space span (duration_seconds * rate), not the raw timeline
-    duration -- otherwise a rate far from 1.0 silently mis-judges overlap."""
-
-    def test_incoming_vocal_window_uses_the_source_span_not_the_timeline_duration(self) -> None:
-        from app.automix.candidates import _score_beat_candidate
-
-        outgoing = _analysis("a", 128.0, duration=200.0)
-        incoming = _analysis("b", 128.0, duration=200.0)
-        settings = AutoMixTransitionSettings()
-        compatibility = evaluate_compatibility(outgoing, incoming, settings)
-        outgoing_with_vocals = replace(outgoing, vocal_activity=((185.0, 195.0),))
-        duration_seconds = 10.0
-        incoming_rate = 2.0  # source span is 20s, twice the timeline duration
-
-        def score(incoming_analysis) -> float:
-            result, _reasons = _score_beat_candidate(
-                outgoing_with_vocals, incoming_analysis, compatibility, 8, TransitionStrategy.BEAT_MATCH,
-                settings, 0.0, 0.0, 185.0, 0.0, duration_seconds,
-                incoming_source_span=duration_seconds * incoming_rate,
-            )
-            return result
-
-        baseline = score(incoming)
-        # Vocals land at 12-14s into the incoming track: outside the naive
-        # (timeline-duration) window [0, 10) but inside the real,
-        # rate-aware source window [0, 20).
-        outside_naive_window_score = score(replace(incoming, vocal_activity=((12.0, 14.0),)))
-        self.assertLess(outside_naive_window_score, baseline)
 
 
 def _score_with_local_energy(outgoing, incoming, compatibility, settings, outgoing_energy, incoming_energy):

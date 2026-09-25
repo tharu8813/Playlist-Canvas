@@ -68,6 +68,11 @@ class TrackAnalysis:
 
     energy: float | None = None
     vocal_activity: tuple[tuple[float, float], ...] = ()
+    lyric_vocal_spans: tuple[tuple[float, float], ...] = ()
+    """Where the track's synced lyrics say it is being sung (audio seconds).
+    A lower bound only -- LRC files routinely omit ad-libs and outro vocals --
+    so it may keep a transition from starting mid-line but never proves the
+    track is silent. Added at planning time from the playlist; never cached."""
 
     audible_start_seconds: float | None = None
     audible_end_seconds: float | None = None

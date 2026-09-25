@@ -447,8 +447,15 @@ class ExportPreviewDialog(QDialog):
         # and track boundaries below are final from the very first frame
         # instead of starting sequential and jumping once blended audio
         # arrives later.
+        # An adopted progressive controller may already hold a partial mix
+        # (the preparation dialog closes on the first one): start on it too.
+        latest_partial = (
+            getattr(blended_audio_controller, "latest_partial", None)
+            if preloaded_blended_audio is None else None
+        )
         self._compiled_plan = (
             preloaded_blended_audio[1] if preloaded_blended_audio is not None
+            else latest_partial[1] if latest_partial is not None
             else compile_playlist(tracks)
         )
         self._track_schedule = self._build_track_schedule()
@@ -483,6 +490,9 @@ class ExportPreviewDialog(QDialog):
         # wait in _pending_swap until progressive.swap_is_safe() allows them.
         self._blended_audio_until = math.inf
         self._per_track_gain = 1.0
+        if latest_partial is not None:
+            path_str, _plan, self._blended_audio_until, self._per_track_gain = latest_partial
+            self._blended_audio_path = Path(path_str)
         self._pending_swap: tuple[Path, CompiledRenderPlan, float, float | None] | None = None
         self._progressive = False
         self._last_playhead_report = -math.inf
@@ -501,6 +511,7 @@ class ExportPreviewDialog(QDialog):
             blended_audio_controller.setParent(self)
             blended_audio_controller.audio_ready.connect(self._on_blended_audio_ready)
             blended_audio_controller.audio_failed.connect(self._on_blended_audio_failed)
+            blended_audio_controller.progress.connect(self._on_blended_audio_progress)
             progressive_ready = getattr(blended_audio_controller, "progressive_ready", None)
             if progressive_ready is not None:
                 self._progressive = True
@@ -514,6 +525,7 @@ class ExportPreviewDialog(QDialog):
             )
             self._blended_audio_controller.audio_ready.connect(self._on_blended_audio_ready)
             self._blended_audio_controller.audio_failed.connect(self._on_blended_audio_failed)
+            self._blended_audio_controller.progress.connect(self._on_blended_audio_progress)
             self._blended_audio_controller.start(
                 self.tracks, Path(self._blended_audio_temp_dir.name),
                 self._transition_mode, self._crossfade_seconds, automix_settings=automix_settings,
@@ -775,9 +787,14 @@ class ExportPreviewDialog(QDialog):
         # Read-only "why does this transition sound like that" for blended previews.
         self.automix_details: AutoMixDetailsPanel | None = None
         if self._transition_mode != "none":
-            self.automix_details = AutoMixDetailsPanel(translator)
+            self.automix_details = AutoMixDetailsPanel(
+                translator, automix=self._transition_mode == "automix",
+            )
             track_panel_layout.addWidget(self.automix_details)
-            self._refresh_automix_details()
+            self._refresh_automix_details(self._blended_audio_until if self._blended_audio_path else None)
+            last = getattr(self._blended_audio_controller, "last_progress", None)
+            if last is not None:  # continue from where the preparation popup was
+                self._on_blended_audio_progress(*last)
         self.shortcut_hint_label = QLabel()
         self.shortcut_hint_label.setObjectName("mutedLabel")
         self.shortcut_hint_label.setWordWrap(True)
@@ -3389,16 +3406,18 @@ class ExportPreviewDialog(QDialog):
         if self._active_track_index == _BLENDED_AUDIO_TRACK_INDEX and not self._media_source_ready:
             return  # _resume_pending_media_seek() retries once the previous swap is seekable
         path, plan, covered_until, gain = pending
+        playhead = self._playhead_seconds
         if not force:
-            from app.automix.progressive import swap_is_safe
+            from app.automix.progressive import swap_playhead
 
-            if not swap_is_safe(self._compiled_plan, plan, self._playhead_seconds, self._playing):
+            playhead = swap_playhead(self._compiled_plan, plan, playhead, self._playing)
+            if playhead is None:
                 return
         self._pending_swap = None
         self.progressive_swap_count += 1
         if gain is not None:
             self._per_track_gain = gain
-        self._apply_blended_audio(path, plan, covered_until)
+        self._apply_blended_audio(path, plan, covered_until, playhead=playhead)
 
     def _report_playhead(self, *, force: bool = False) -> None:
         """Tell a progressive controller where the listener is (throttled to ~2 Hz)."""
@@ -3417,8 +3436,12 @@ class ExportPreviewDialog(QDialog):
         gain = 1.0 if self._active_track_index == _BLENDED_AUDIO_TRACK_INDEX else getattr(self, "_per_track_gain", 1.0)
         self.audio_output.setVolume(slider.value() / 100.0 * gain)
 
-    def _apply_blended_audio(self, path: Path, plan, covered_until: float = math.inf) -> None:
+    def _apply_blended_audio(self, path: Path, plan, covered_until: float = math.inf,
+                             *, playhead: float | None = None) -> None:
+        """``playhead``: where the same music sits in ``plan`` (progressive.swap_playhead); None keeps it."""
         self._blended_audio_until = covered_until
+        if playhead is not None:
+            self._playhead_seconds = playhead
         if self._active_track_index == _BLENDED_AUDIO_TRACK_INDEX and path != self._blended_audio_path:
             # Mix -> newer mix: force a real source change so the new file goes
             # through the same setSource / pending-seek / generation handshake.
@@ -3428,9 +3451,9 @@ class ExportPreviewDialog(QDialog):
         self._track_schedule_starts = tuple(row[2] for row in self._track_schedule)
         self._playlist_duration_cache = plan.duration_seconds
         self._blended_audio_path = path
-        # Only ever shorten the playhead to fit a shorter final plan; never
-        # otherwise move it -- a fast-path plan replacement must not reset
-        # or jump the timeline the user is already watching.
+        # Beyond the remap above (same music, new timeline), only ever shorten
+        # the playhead to fit a shorter plan -- a plan replacement must not
+        # reset or jump the music the user is already hearing.
         self._playhead_seconds = min(self._playhead_seconds, plan.duration_seconds)
         self.timeline.blockSignals(True)
         self.timeline.setRange(0, max(1, ceil(plan.duration_seconds * TIMELINE_SCALE)))
@@ -3455,6 +3478,14 @@ class ExportPreviewDialog(QDialog):
 
     def _on_blended_audio_failed(self, message: str) -> None:
         LOGGER.warning("Preview blended-audio render failed, falling back to per-track playback: %s", message)
+        panel = getattr(self, "automix_details", None)
+        if panel is not None and not self._closing:
+            panel.set_failed()
+
+    def _on_blended_audio_progress(self, _stage: str, _fraction: float, message: str) -> None:
+        panel = getattr(self, "automix_details", None)
+        if panel is not None and not self._closing:
+            panel.set_progress_message(message)
 
     def _apply_preview_style(self) -> None:
         """Use the application's shared playback styling."""

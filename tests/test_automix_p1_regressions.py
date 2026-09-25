@@ -39,10 +39,11 @@ class MixTimingTests(unittest.TestCase):
         a, b = analyses.values()
         candidate = select_best_candidate(generate_candidates(a, b, evaluate_compatibility(a, b, ENABLED), ENABLED))
         plan = compile_automix(tracks, analyses, ENABLED)
-        self.assertAlmostEqual(candidate.outgoing_source_time, 44.0)
+        # Bar phase unknown (meter .3): the 8-bar preference is halved to 4 bars (8 s).
+        self.assertAlmostEqual(candidate.outgoing_source_time, 52.0)
         self.assertAlmostEqual(plan.audio.clips[1].timeline_start, candidate.outgoing_source_time)
         self.assertAlmostEqual(plan.audio.transitions[0].duration, candidate.duration_seconds)
-        self.assertAlmostEqual(plan.audio.transitions[0].duration, 16.3)
+        self.assertAlmostEqual(plan.audio.transitions[0].duration, 8.3)
 
     def test_frames_preview_and_chapters_use_the_same_source_time_and_duration(self):
         tracks = [_track('a', 60), _track('b', 60)]
@@ -78,7 +79,9 @@ class MixTimingTests(unittest.TestCase):
         selected = ExportPreviewDialog._track_at(preview, 122)
         self.assertEqual(selected[1].id, 'c')
         self.assertTrue(ExportPreviewDialog._has_audio(preview, selected, 122))
-        self.assertFalse(ExportPreviewDialog._has_audio(preview, selected, 106))
+        b_end, c_start = plan.audio.clips[1].timeline_end, plan.audio.clips[2].timeline_start
+        self.assertGreater(c_start, b_end)  # the explicit gap survives the overlap
+        self.assertFalse(ExportPreviewDialog._has_audio(preview, selected, (b_end + c_start) / 2))
         samples = ExportTimelinePlanner.build(tracks, [], 30, plan)
         self.assertAlmostEqual(sum(s.duration_seconds for s in samples), plan.duration_seconds)
 

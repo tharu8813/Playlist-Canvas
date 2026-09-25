@@ -13,7 +13,7 @@ from app.automix.progressive import (
     partial_plan,
     preview_gain,
     render_prefix,
-    swap_is_safe,
+    swap_playhead,
 )
 from tests.test_automix_planner import ENABLED, _analysis, _track
 
@@ -87,20 +87,32 @@ class DivergenceAndSwapSafetyTests(unittest.TestCase):
         self.assertAlmostEqual(divergence_seconds(self.two, self.three), self.new_transition.timeline_start)
         self.assertEqual(divergence_seconds(self.three, self.three), math.inf)
 
-    def test_swap_is_safe_only_before_the_change_point(self) -> None:
+    def test_swap_keeps_the_playhead_before_the_change_point(self) -> None:
         change = self.new_transition.timeline_start
-        self.assertTrue(swap_is_safe(self.two, self.three, change - 10.0, playing=True))
-        self.assertFalse(swap_is_safe(self.two, self.three, change - 1.0, playing=True))   # inside the margin
-        self.assertFalse(swap_is_safe(self.two, self.three, change + 5.0, playing=False))  # different music there
+        self.assertEqual(swap_playhead(self.two, self.three, change - 10.0, playing=True), change - 10.0)
+        self.assertIsNone(swap_playhead(self.two, self.three, change - 1.0, playing=True))   # inside the margin
+        self.assertIsNone(swap_playhead(self.two, self.three, change + 5.0, playing=True))   # t1 tail now overlaps t2
 
     def test_no_swap_while_a_transition_is_sounding(self) -> None:
         first = self.two.audio.transitions[0]
         inside = first.timeline_start + first.duration / 2
-        self.assertFalse(swap_is_safe(self.two, self.three, inside, playing=True))
-        self.assertFalse(swap_is_safe(self.two, self.three, first.timeline_start - 1.0, playing=True))
-        self.assertTrue(swap_is_safe(self.two, self.three, first.timeline_start + first.duration + 1.0, playing=True))
-        # Paused, nothing is sounding: only the change point matters.
-        self.assertTrue(swap_is_safe(self.two, self.three, inside, playing=False))
+        self.assertIsNone(swap_playhead(self.two, self.three, inside, playing=True))
+        self.assertIsNone(swap_playhead(self.two, self.three, first.timeline_start - 1.0, playing=True))
+        after = first.timeline_start + first.duration + 1.0
+        self.assertEqual(swap_playhead(self.two, self.three, after, playing=True), after)
+        # Paused, nothing is sounding.
+        self.assertEqual(swap_playhead(self.two, self.three, inside, playing=False), inside)
+
+    def test_a_listener_past_the_change_point_keeps_the_same_music_on_the_new_timeline(self) -> None:
+        # Listener outran analysis: 30 s into t3, sequential in ``two``.
+        t3_old = self.two.audio.clips[3]
+        playhead = t3_old.timeline_start + 30.0
+        target = swap_playhead(self.two, self.three, playhead, playing=True)
+        t3_new = self.three.audio.clips[3]
+        self.assertIsNotNone(target)
+        self.assertLess(target, playhead)  # AutoMix overlaps pull t3 earlier
+        self.assertAlmostEqual(t3_new.source_in + (target - t3_new.timeline_start) * t3_new.playback_rate,
+                               t3_old.source_in + 30.0 * t3_old.playback_rate)  # same source second of t3
 
 
 class RenderPrefixAndGainTests(unittest.TestCase):
@@ -174,6 +186,14 @@ class RenderSchedulerTests(unittest.TestCase):
         scheduler.playhead_changed(divergence_seconds(self.plans[3], self.plans[4]) + 1.0, True)
         self.assertIs(scheduler.decide(10.0), Action.NONE)
 
+    def test_a_listener_past_one_change_still_gets_the_next_junction_rendered(self) -> None:
+        scheduler = _unrendered_scheduler(self.plans[3])
+        scheduler.render_started()
+        scheduler.render_finished()
+        scheduler.playhead_changed(self.plans[3].audio.clips[3].timeline_start + 30.0, True)  # inside t3
+        scheduler.plan_updated(self.plans[5], 5, 1.0)  # t2->t3 is behind, t3->t4 ahead
+        self.assertIs(scheduler.decide(10.0), Action.RENDER)
+
     def test_complete_analysis_goes_straight_to_the_final_render(self) -> None:
         scheduler = _unrendered_scheduler(self.plans[6], 6)
         scheduler.analysis_complete = True  # e.g. a fully cached playlist
@@ -197,7 +217,7 @@ def simulate(count: int, *, analysis_seconds: float = 15.0, workers: int = 4,
     Analysis: ``workers`` tracks in parallel, ``analysis_seconds`` each (a
     cache-miss Beat This + Sonara pass). Rendering: a partial mix renders at
     ``render_speed`` x realtime of the audio it covers. Playback starts at
-    0 and runs in real time; swaps follow ``swap_is_safe``.
+    0 and runs in real time; swaps follow ``swap_playhead``.
     """
     tracks, analyses = _playlist(count)
     state = ProgressiveAnalysis(tracks, structure_enabled=False)
@@ -210,6 +230,7 @@ def simulate(count: int, *, analysis_seconds: float = 15.0, workers: int = 4,
     counts = {"analysis_events": 0, "plan_updates": 0, "renders": 0, "swaps": 0}
     frontier = 0
     now, step = 0.0, 0.25
+    playhead = 0.0
     scheduler.playhead_changed(0.0, True)
     while True:
         while completions and completions[0][0] <= now:
@@ -227,10 +248,10 @@ def simulate(count: int, *, analysis_seconds: float = 15.0, workers: int = 4,
             if render_plan is None:  # the final export mix
                 break
             pending = render_plan
-        if pending is not None and swap_is_safe(committed, pending, now, True):
-            committed, pending = pending, None
+        if pending is not None and (target := swap_playhead(committed, pending, playhead, True)) is not None:
+            committed, pending, playhead = pending, None, target
             counts["swaps"] += 1
-        scheduler.playhead_changed(now, True)
+        scheduler.playhead_changed(playhead, True)
         action = scheduler.decide(now)
         if action is Action.RENDER:
             scheduler.render_started()
@@ -244,6 +265,7 @@ def simulate(count: int, *, analysis_seconds: float = 15.0, workers: int = 4,
             render_plan = None
             render_done_at = now + committed.duration_seconds / render_speed * 3  # mix + 2-pass loudnorm
         now += step
+        playhead += step
     counts["swaps"] += 1  # the final mix
     return counts
 

@@ -15,7 +15,9 @@ python -m pip install -r requirements-lock.txt
 python -m pip install -r requirements-packaging.txt
 ```
 
-설치본에는 AutoMix 고급 분석기인 **Beat This!**(CPU PyTorch 기반 박자·다운비트 모델)와 **Sonara**(곡 구조 분석)가 함께 들어갑니다. `playlist_canvas.spec`은 librosa·PyTorch·Beat This·Sonara 등 AutoMix 패키지가 하나라도 없으면 빌드를 중단합니다(1.2.0.6은 빌드 환경에 librosa가 없어 AutoMix 분석이 빠진 채 배포되었습니다). Beat This `final0` 체크포인트(약 78 MB)는 빌드할 때 PyTorch 캐시에서 가져오며, 없으면 한 번 내려받아 설치본에 포함하므로 설치된 앱은 오프라인에서도 분석합니다.
+설치본에는 AutoMix의 가벼운 분석기만 들어갑니다: librosa(박자·BPM·키·에너지)와 **Sonara**(곡 구조 분석, 약 2 MB Rust 확장). `playlist_canvas.spec`은 이 패키지들이 하나라도 없으면 빌드를 중단합니다(1.2.0.6은 빌드 환경에 librosa가 없어 AutoMix 분석이 빠진 채 배포되었습니다).
+
+PyTorch 기반 분석기(**Beat This!** 다운비트 모델, **Demucs** 보컬 분리)는 설치본에 넣지 않습니다. 설치본이 약 1 GB로 커지고 첫 분석 동안 CPU를 크게 점유했기 때문입니다. 빌드 환경에 설치돼 있어도 spec의 `excludes`로 제외됩니다. 코드(`app/automix/analysis/beat_this.py`, `vocals.py`)는 청감 평가 도구 등에서 명시적으로 요청할 때만 쓰입니다.
 
 ## 2. Windows 배포본 빌드
 

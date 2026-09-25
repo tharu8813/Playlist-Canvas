@@ -31,10 +31,10 @@ class PresetResolutionTests(unittest.TestCase):
             plan = compile_automix(tracks, analyses, resolve_automix_settings(preset))
             self.assertEqual(plan, compile_automix(tracks, analyses, resolve_automix_settings(preset)))
             durations[preset] = plan.audio.transitions[0].duration
-        self.assertEqual(durations["energetic"], 8.0)   # 4 bars at 120 BPM
-        self.assertEqual(durations["auto"], 16.0)       # 8 bars
-        self.assertEqual(durations["smooth"], 32.0)     # 16 bars
-        self.assertEqual(durations["dj"], 32.0)
+        self.assertAlmostEqual(durations["energetic"], 8.0)   # 4 bars at 120 BPM
+        self.assertAlmostEqual(durations["auto"], 16.0)       # 8 bars
+        self.assertAlmostEqual(durations["smooth"], 32.0)     # 16 bars
+        self.assertAlmostEqual(durations["dj"], 32.0)
 
     def test_dj_beat_matches_a_tempo_gap_that_auto_and_smooth_only_crossfade(self) -> None:
         tracks = [_track("a", 180.0), _track("b", 180.0)]

@@ -22,6 +22,20 @@ from app.timeline.models import TransitionType
 
 
 @dataclass(frozen=True, slots=True)
+class TempoRamp:
+    """A clip's tail tempo change: ``playback_rate`` until ``source_start``,
+    ``end_rate`` from ``source_end`` on, and ``steps`` equal source slices
+    stepping between them. AutoMix uses it to walk the outgoing track onto
+    the incoming track's beat before their overlap; the renderer plays the
+    exact same steps (atempo commands), so the timing here is what renders."""
+
+    source_start: float
+    source_end: float
+    end_rate: float
+    steps: int = 32
+
+
+@dataclass(frozen=True, slots=True)
 class AudioRenderClip:
     """One resolved audio placement: a clip, exactly where and how it plays."""
 
@@ -32,10 +46,49 @@ class AudioRenderClip:
     source_out: float
     playback_rate: float = 1.0
     gain: float = 1.0
+    tempo_ramp: TempoRamp | None = None
+
+    def rate_segments(self) -> tuple[tuple[float, float, float], ...]:
+        """``(source_start, source_end, rate)`` spans covering ``[source_in, source_out]``."""
+        ramp = self.tempo_ramp
+        if ramp is None:
+            return ((self.source_in, self.source_out, self.playback_rate),)
+        start = min(max(ramp.source_start, self.source_in), self.source_out)
+        end = min(max(ramp.source_end, start), self.source_out)
+        step = (end - start) / ramp.steps
+        segments = [(self.source_in, start, self.playback_rate)]
+        segments.extend(
+            (start + index * step, start + (index + 1) * step,
+             self.playback_rate + (ramp.end_rate - self.playback_rate) * (index + 0.5) / ramp.steps)
+            for index in range(ramp.steps)
+        )
+        segments.append((end, self.source_out, ramp.end_rate))
+        return tuple(segment for segment in segments if segment[1] > segment[0])
+
+    def timeline_at(self, source_seconds: float) -> float:
+        """Timeline second at which this clip plays ``source_seconds`` of its track."""
+        position = self.timeline_start
+        for start, end, rate in self.rate_segments():
+            if source_seconds <= end:
+                return position + (max(source_seconds, start) - start) / rate
+            position += (end - start) / rate
+        return position
+
+    def source_at(self, timeline_seconds: float) -> float:
+        """Track second this clip plays at ``timeline_seconds`` (clamped to the clip)."""
+        position = self.timeline_start
+        for start, end, rate in self.rate_segments():
+            length = (end - start) / rate
+            if timeline_seconds <= position + length:
+                return start + max(0.0, timeline_seconds - position) * rate
+            position += length
+        return self.source_out
 
     @property
     def duration(self) -> float:
-        return (self.source_out - self.source_in) / self.playback_rate
+        if self.tempo_ramp is None:
+            return (self.source_out - self.source_in) / self.playback_rate
+        return sum((end - start) / rate for start, end, rate in self.rate_segments())
 
     @property
     def timeline_end(self) -> float:
@@ -196,6 +249,8 @@ def build_presentation_and_metadata(
             timeline_start=clip.timeline_start,
             timeline_end=clip.timeline_end,
             source_time_at_start=clip.source_in,
+            # ponytail: visuals ignore a tail TempoRamp (a few % over its last bars, only
+            # until the next owner takes over); map through clip.source_at if lyrics need it.
             playback_rate=clip.playback_rate,
         )
         for clip in clips
@@ -226,6 +281,12 @@ def validate_compiled_render_plan(plan: CompiledRenderPlan) -> None:
             raise ValueError(f"Clip {clip.clip_id!r} has invalid source bounds.")
         if not isfinite(clip.playback_rate) or clip.playback_rate <= 0.0:
             raise ValueError(f"Clip {clip.clip_id!r} has an invalid playback_rate.")
+        ramp = clip.tempo_ramp
+        if ramp is not None and not (
+            isfinite(ramp.end_rate) and ramp.end_rate > 0.0 and ramp.steps >= 1
+            and clip.source_in <= ramp.source_start <= ramp.source_end <= clip.source_out
+        ):
+            raise ValueError(f"Clip {clip.clip_id!r} has an invalid tempo ramp.")
 
     clip_ids = {clip.clip_id for clip in plan.audio.clips}
     for transition in plan.audio.transitions:

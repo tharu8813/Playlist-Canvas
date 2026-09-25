@@ -99,9 +99,50 @@ from/to, timeline_start, duration, strategy, dsp, effective BPM, tempo delta, be
 Not changed: SHORT_FADE 4 s, energy jump 0.30, kick drift 50 ms, all band envelopes, structure/vocal weights. Real beat-matched pairs (REDRED -> instrumental, 16 s BASS_SWAP; Attention -> instrumental, 19.2 s) showed no low-end build-up (low band -0.7..-1.9 dB vs context) and no level spike (+0.5..+3.4 dB peak), i.e. no measured failure to tune against; changing them on two songs would be guessing.
 
 ### Remaining TODO (needs a human listener)
-- 20-50 legally owned songs across K-pop/EDM/hip-hop/rock/ballad/acoustic, including half/double tempo and long intros/outros; rate timing, bass/vocal clash, energy holes, style choice per transition using `tools/automix_listening_report.py --ab`.
+- 20-50 legally owned songs across K-pop/EDM/hip-hop/rock/ballad/acoustic, including half/double tempo and long intros/outros; rate timing, bass/vocal clash, energy holes, style choice per transition using `tools/automix_listening_report.py --ab` (procedure and rating sheet: "사람 청감 평가 절차" below).
 - Whether the 3 s fixed crossfade for incompatible tempos should be longer/shorter, and whether a quiet intro after a decaying outro (REDRED -> Attention: -24 dB dip even after fix #2) should start the incoming track earlier.
 
 ### Tests
 `tests/test_automix_diagnostics.py` (rows/CSV/JSON/metrics), audible-bound cases in `tests/test_automix_candidates.py` and `tests/test_automix_basic_analyzer.py`, Beat This tests moved to the signal API.
 **Commit:** `fad3a72 refine: tune AutoMix transition selection against real music`. Full suite: 1036 passed, 1 pre-existing failure (`test_real_video_preview_performance`, Phase 09).
+
+## 사람 청감 평가 절차 (Listening panel protocol)
+
+AutoMix 프리셋 값, DSP 선택 임계값, 기본 전환 스타일(예: FILTER_BLEND → FILTER_SWEEP)을
+바꾸는 변경은 **이 절차로 만든 평가 결과를 근거로만** 한다. 수치 지표(`report.csv`)는 구멍·과다
+저역 같은 명백한 실패를 잡는 용도이고, 음색과 자연스러움은 사람 귀로만 판단한다.
+
+### 곡 선정
+- 합법적으로 보유한 20~50곡. 장르별로 섞는다: K-pop, EDM, 힙합, 록, 발라드, 어쿠스틱.
+- 꼭 포함할 경우: half/double tempo 쌍, 긴 인트로·아웃트로, 보컬끼리 겹치는 전환, 템포 차이가
+  큰 쌍(일반 크로스페이드로 대체되는 경우 확인용).
+- 곡 파일과 결과물은 저장소에 커밋하지 않는다.
+
+### 실행
+```
+python tools/automix_listening_report.py OUT_DIR SONG1 SONG2 ... --ab --preset auto
+```
+- 평가할 프리셋마다 `--preset`을 바꿔 따로 실행한다(`OUT_DIR`도 분리).
+- 결과: `automix_mix.flac`(전체 믹스), `ab/<n>_<style>.flac`(같은 위치·길이, 스타일만 다른 발췌),
+  `report.csv`(기계 지표), `ratings.csv`(빈 평가지).
+
+### 평가 (`ratings.csv`, 전환 한 행)
+| 열 | 기준 |
+|---|---|
+| `timing_1to5` | 박자·마디가 자연스럽게 맞물리는가 (5 = 매우 자연스러움) |
+| `vocal_clash_1to5` | 두 곡 보컬이 부딪히지 않는가 (5 = 충돌 없음) |
+| `low_end_clash_1to5` | 베이스·킥이 뭉개지거나 비지 않는가 (5 = 깔끔) |
+| `energy_drop_1to5` | 에너지가 꺼지는 구멍이 없는가 (5 = 끊김 없음) |
+| `length_short_ok_long` | 전환 길이: `short` / `ok` / `long` |
+| `preferred_ab_style` | `--ab` 발췌 중 가장 좋은 스타일 이름 |
+| `comment` | 자유 의견 |
+
+- 전체 믹스를 먼저 이어서 듣고 1~4번을 채운 뒤, 발췌를 들으며 `preferred_ab_style`을 채운다.
+- 가능하면 2명 이상이 독립적으로 채운다. 발췌 파일 이름에 스타일이 드러나므로, 다른 사람이
+  파일 이름을 가린 채 재생해 주면 편향이 줄어든다.
+
+### 판단 기준 (변경의 근거로 쓸 때)
+- 바꾸려는 스타일·값이 같은 전환 묶음에서 평균 점수를 낮추지 않아야 한다.
+- 어떤 항목이든 **2점 이하가 새로 생기면** 변경하지 않는다(평균이 올라도).
+- `preferred_ab_style`에서 현재 기본 스타일보다 다른 스타일이 과반일 때만 기본값 교체를 검토한다.
+- 결과 요약(곡 수, 장르, 항목별 평균, 2점 이하 사례)을 해당 변경의 커밋 메시지나 PR 본문에 적는다.

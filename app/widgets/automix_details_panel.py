@@ -36,7 +36,8 @@ _DETAIL_FIELDS = (
     ("outgoing_bpm", "나가는 곡 BPM", "Outgoing BPM"),
     ("incoming_bpm", "들어오는 곡 BPM", "Incoming BPM"),
     ("target_bpm", "목표 BPM", "Target BPM"),
-    ("incoming_rate", "들어오는 곡 속도", "Incoming rate"),
+    ("outgoing_rate", "나가는 곡 속도(전환 중)", "Outgoing rate (in overlap)"),
+    ("tempo_ramp_seconds", "템포 맞춤 구간(초)", "Tempo ramp (s)"),
     ("tempo_delta_percent", "템포 차이 %", "Tempo delta %"),
     ("outgoing_cue", "나가는 곡 큐(초)", "Outgoing cue (s)"),
     ("incoming_cue", "들어오는 곡 큐(초)", "Incoming cue (s)"),
@@ -45,6 +46,10 @@ _DETAIL_FIELDS = (
     ("energy_delta", "에너지 차이", "Energy delta"),
     ("vocal_overlap", "보컬 겹침", "Vocal overlap"),
     ("key_clash", "키 충돌", "Key clash"),
+    ("outgoing_downbeat_confidence", "나가는 곡 다운비트 신뢰도", "Outgoing downbeat confidence"),
+    ("incoming_downbeat_confidence", "들어오는 곡 다운비트 신뢰도", "Incoming downbeat confidence"),
+    ("outgoing_analyzer", "나가는 곡 분석기", "Outgoing analyzer"),
+    ("incoming_analyzer", "들어오는 곡 분석기", "Incoming analyzer"),
 )
 
 
@@ -66,14 +71,20 @@ def _clock(seconds: float) -> str:
 class AutoMixDetailsPanel(QFrame):
     """Transitions of the playing plan, the one under the playhead marked."""
 
-    def __init__(self, translator: Translator, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, translator: Translator, parent: QWidget | None = None, *, automix: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("automixDetailsPanel")
         self.translator = translator
+        # Only AutoMix plans can fall back; in crossfade mode "legacy" is the plan itself.
+        self.automix = automix
         self.rows: list[dict[str, object]] = []
         self._windows: list[tuple[float, float]] = []
         self._current = -1
         self._state = ("waiting", None)
+        self._progress_message = ""
+        self._failed = False
         self.toggle_button = QToolButton()
         self.toggle_button.setCheckable(True)
         self.toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -133,6 +144,16 @@ class AutoMixDetailsPanel(QFrame):
         if self.rows:
             self.list.setCurrentRow(min(max(selected, 0), len(self.rows) - 1))
         self._show_details()
+        self._update_status()
+
+    def set_progress_message(self, message: str) -> None:
+        """Live preparation text ("Analyzing 4 / 12 ..."), shown until a mix plays."""
+        self._progress_message = message or ""
+        self._update_status()
+
+    def set_failed(self) -> None:
+        """The mix could not be prepared: Preview keeps playing what it already has."""
+        self._failed = True
         self._update_status()
 
     def set_playhead(self, seconds: float) -> None:
@@ -204,17 +225,44 @@ class AutoMixDetailsPanel(QFrame):
             self.details.setPlainText(self._detail_text(row, self._korean()))
 
     def _update_status(self) -> None:
+        """One status line, symbol + text (never color alone): ● preparing, ◐ partial, ✓ final, ! fallback."""
         korean = self._korean()
         state, ready_through = self._state
         mixed = sum(1 for row in self.rows if float(row["duration"]) > 0.0)
-        if state == "provisional":
-            text = (f"임시 계획 · {ready_through}번째 곡까지 AutoMix 적용됨 · 전환 {mixed}개" if korean
-                    else f"Provisional · AutoMix through track {ready_through} · {mixed} transition(s)")
+        plain = sum(1 for row in self.rows if row["dsp"] == "legacy") if self.automix else 0
+        if self._failed and state != "final":
+            if state == "provisional":
+                text = (f"! {ready_through}번째 곡까지만 AutoMix 적용 · 이후는 곡을 차례로 재생합니다" if korean
+                        else f"! AutoMix only through track {ready_through} · then tracks play back to back")
+            else:
+                text = ("! 믹스를 준비하지 못해 곡을 차례로 재생합니다" if korean
+                        else "! Could not prepare the mix · playing tracks back to back")
+        elif state == "provisional":
+            text = (f"◐ 임시 계획 · {ready_through}번째 곡까지 AutoMix 적용됨 · 전환 {mixed}개" if korean
+                    else f"◐ Provisional · AutoMix through track {ready_through} · {mixed} transition(s)")
         elif state == "final":
-            text = f"최종 계획 · 전환 {mixed}개" if korean else f"Final plan · {mixed} transition(s)"
+            text = f"✓ 최종 계획 · 전환 {mixed}개" if korean else f"✓ Final plan · {mixed} transition(s)"
+        elif self._progress_message:
+            text = f"● {self._progress_message}"
         else:
-            text = "믹스 준비 중 · 곡을 차례로 재생합니다" if korean else "Preparing the mix · playing tracks back to back"
+            text = ("● 믹스 준비 중 · 곡을 차례로 재생합니다" if korean
+                    else "● Preparing the mix · playing tracks back to back")
+        if plain and state in {"provisional", "final"}:
+            text += (f" · {plain}개는 기본 크로스페이드" if korean
+                     else f" · {plain} as plain crossfade")
         self.status_label.setText(text)
+        explanation = " ".join(part for part in (
+            ("미리보기 믹스를 만들지 못했습니다. 원인은 로그에 기록됩니다." if korean
+             else "The preview mix could not be rendered; the cause is in the log.") if self._failed else "",
+            ("기본 크로스페이드는 분석이 부족하거나 템포가 맞지 않는 곡 사이에 AutoMix 대신 쓰였습니다." if korean
+             else "Plain crossfades replace AutoMix where analysis was incomplete or tempos did not match.")
+            if plain else "",
+            ("미리보기는 계속 재생할 수 있습니다." if korean else "Preview keeps playing.")
+            if plain or self._failed else "",
+        ) if part)
+        self.status_label.setToolTip(f"{text}\n{explanation}".strip())
+        self.status_label.setAccessibleName(("믹스 상태: " if korean else "Mix status: ") + text.lstrip("●◐✓! "))
+        self.status_label.setAccessibleDescription(explanation)
 
     def _set_expanded(self, expanded: bool) -> None:
         self.body.setVisible(expanded)

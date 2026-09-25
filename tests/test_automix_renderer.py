@@ -20,6 +20,7 @@ from app.automix.renderer import (
     _atempo_filters,
     band_fade_windows,
     build_filter_graph,
+    ffmpeg_filter_names,
     ffmpeg_supports_transition_dsp,
 )
 from app.timeline.models import TransitionType
@@ -372,8 +373,8 @@ class BassSwapFallbackTests(unittest.TestCase):
     def test_capability_probe_reads_the_filter_list(self) -> None:
         listing = "\n".join(f" .. {name}  A->A  x" for name in ("acrossover", "afade", "amix", "alimiter",
                                                                "asplit", "acrossfade"))
-        ffmpeg_supports_transition_dsp.cache_clear()
-        self.addCleanup(ffmpeg_supports_transition_dsp.cache_clear)
+        ffmpeg_filter_names.cache_clear()
+        self.addCleanup(ffmpeg_filter_names.cache_clear)
         with patch("app.automix.renderer.subprocess.run",
                    return_value=subprocess.CompletedProcess([], 0, stdout=listing)):
             self.assertTrue(ffmpeg_supports_transition_dsp("ffmpeg-full"))

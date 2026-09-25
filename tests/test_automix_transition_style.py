@@ -41,14 +41,22 @@ def _structure(track_id: str, energy: float) -> TrackStructureAnalysis:
     )
 
 
+def _quiet(track_id: str, **fields) -> TrackAnalysis:
+    """Vocals measured, and nowhere near the default window on either side."""
+    spans = ((10.0, 20.0),) if track_id == "a" else ((40.0, 50.0),)
+    return _analysis(track_id, vocal_activity=spans, **fields)
+
+
 class SelectTransitionDspTests(unittest.TestCase):
     def select(self, candidate=None, compatibility=None, outgoing=None, incoming=None, **structures):
         return self.decide(candidate, compatibility, outgoing, incoming, **structures).dsp
 
     def decide(self, candidate=None, compatibility=None, outgoing=None, incoming=None, **structures):
+        # Defaults have *known*, non-overlapping vocals so each test exercises
+        # its own rule; unknown vocals are their own rule (UnknownDataTests).
         return select_transition_dsp(
             candidate or _candidate(), compatibility or _compatibility(),
-            outgoing or _analysis("a"), incoming or _analysis("b"),
+            outgoing or _quiet("a"), incoming or _quiet("b"),
             structures.get("outgoing_structure"), structures.get("incoming_structure"),
         )
 
@@ -89,16 +97,16 @@ class SelectTransitionDspTests(unittest.TestCase):
     def test_clashing_keys_are_vocal_safe_but_compatible_or_unknown_keys_are_not(self) -> None:
         clash = self.select(outgoing=_analysis("a", key="C major", vocal_activity=((10, 20),)), incoming=_analysis("b", key="F# major", vocal_activity=((40, 50),)))
         self.assertIs(clash, TransitionDsp.VOCAL_SAFE_EQ)
-        friendly = self.select(outgoing=_analysis("a", key="C major"), incoming=_analysis("b", key="G major"))
+        friendly = self.select(outgoing=_quiet("a", key="C major"), incoming=_quiet("b", key="G major"))
         self.assertIs(friendly, TransitionDsp.BASS_SWAP)
-        unknown = self.select(outgoing=_analysis("a", key="C major"), incoming=_analysis("b", key="???"))
+        unknown = self.select(outgoing=_quiet("a", key="C major"), incoming=_quiet("b", key="???"))
         self.assertIs(unknown, TransitionDsp.BASS_SWAP)
 
     def test_local_energy_jump_is_filter_blend_and_overrides_global_energy(self) -> None:
         calm = dict(outgoing=_analysis("a", energy=0.5, vocal_activity=((10, 20),)), incoming=_analysis("b", energy=0.5, vocal_activity=((40, 50),)))
         jump = self.select(**calm, outgoing_structure=_structure("a", 0.9), incoming_structure=_structure("b", 0.3))
         self.assertIs(jump, TransitionDsp.FILTER_BLEND)
-        steady = self.select(outgoing=_analysis("a", energy=0.9), incoming=_analysis("b", energy=0.2),
+        steady = self.select(outgoing=_quiet("a", energy=0.9), incoming=_quiet("b", energy=0.2),
                              outgoing_structure=_structure("a", 0.6), incoming_structure=_structure("b", 0.5))
         self.assertIs(steady, TransitionDsp.BASS_SWAP)
 
@@ -150,29 +158,39 @@ class SelectorPrecedenceTests(unittest.TestCase):
 
 
 class UnknownDataTests(unittest.TestCase):
-    """Missing analysis is never evidence for a style."""
+    """Missing key/energy/structure is never evidence for a style; unknown vocals
+    (the light analyzer's normal case) hand the voice band over mid-window."""
 
     select = SelectTransitionDspTests.select
     decide = SelectTransitionDspTests.decide
 
-    def test_no_optional_analysis_degrades_to_the_plain_styles(self) -> None:
+    def test_unknown_vocals_hand_the_voice_band_over_mid_window(self) -> None:
         # _analysis() has no key, energy, vocals; no structure passed.
-        self.assertIs(self.select(), TransitionDsp.BASS_SWAP)
-        self.assertIsNone(self.select(_candidate(TransitionStrategy.BEAT_ALIGNED_CROSSFADE)))
+        bare = dict(outgoing=_analysis("a"), incoming=_analysis("b"))
+        for strategy in (TransitionStrategy.BEAT_MATCH, TransitionStrategy.BEAT_ALIGNED_CROSSFADE):
+            with self.subTest(strategy=strategy):
+                decision = self.decide(_candidate(strategy), **bare)
+                self.assertIs(decision.dsp, TransitionDsp.VOCAL_SAFE_EQ)
+                self.assertEqual(decision.reasons[0],
+                                 "* vocal_safe_eq: vocal activity unknown: hand the voice band over mid-window")
+        # A window too short for a band handoff stays a plain short fade.
+        self.assertIs(self.select(_candidate(duration=3.0), **bare), TransitionDsp.SHORT_FADE)
 
     def test_one_sided_data_never_triggers_a_rule(self) -> None:
         cases = {
-            "vocals": dict(outgoing=_analysis("a", vocal_activity=((0.0, 120.0),))),
-            "key": dict(outgoing=_analysis("a", key="C major")),
-            "energy": dict(outgoing=_analysis("a", energy=1.0), incoming=_analysis("b", energy=None)),
+            "key": dict(outgoing=_quiet("a", key="C major")),
+            "energy": dict(outgoing=_quiet("a", energy=1.0), incoming=_quiet("b", energy=None)),
             "structure": dict(outgoing_structure=_structure("a", 1.0)),
         }
         for name, fields in cases.items():
             with self.subTest(name):
                 self.assertIs(self.select(**fields), TransitionDsp.BASS_SWAP)
+        # One-sided vocals are unknown vocals, not "no clash".
+        one_sided = self.select(outgoing=_analysis("a", vocal_activity=((0.0, 120.0),)), incoming=_analysis("b"))
+        self.assertIs(one_sided, TransitionDsp.VOCAL_SAFE_EQ)
 
     def test_unknowns_are_reported_as_unknown(self) -> None:
-        reasons = self.decide().reasons
+        reasons = self.decide(outgoing=_analysis("a"), incoming=_analysis("b")).reasons
         self.assertIn("? vocal activity unknown", reasons)
         self.assertIn("? key unknown", reasons)
         self.assertIn("? energy unknown", reasons)

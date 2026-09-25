@@ -45,6 +45,7 @@ import numpy as np
 
 from app.automix.analysis.key import estimate_key
 from app.automix.analysis.provider import AnalysisCancelled
+from app.automix.beatgrid import fit_beat_grid
 from app.automix.models import TrackAnalysis
 from app.models.playlist import PlaylistTrack
 from app.utils.subprocess_utils import hidden_process_kwargs
@@ -126,11 +127,12 @@ class BasicAnalysisProvider:
     """The always-available default AnalysisProvider (see AnalysisProvider Protocol)."""
 
     provider_id = "basic"
-    version = "4"
+    version = "5"
     """Bumped from "1": Phase 7 added key/energy/vocal_activity to the
     output, which invalidates any cache entry from before those fields
     existed (see app/automix/cache.py -- analyzer_version is part of the
-    cache key). "3": audible start/end bounds. "4": no voice-band vocal guess."""
+    cache key). "3": audible start/end bounds. "4": no voice-band vocal guess.
+    "5": BPM from a fitted beat grid."""
 
     def __init__(self, ffmpeg_executable: Path) -> None:
         self.ffmpeg_executable = Path(ffmpeg_executable)
@@ -177,6 +179,9 @@ class BasicAnalysisProvider:
         beat_times = self._clean_beats(np.atleast_1d(np.asarray(raw_beat_times, dtype=float)), duration_seconds)
 
         bpm_value = float(np.atleast_1d(tempo)[0]) if np.size(tempo) else 0.0
+        grid = fit_beat_grid(beat_times)  # librosa's tempo is hop-quantized like the beats
+        if grid is not None:
+            bpm_value = grid.bpm
         bpm_value = normalize_tempo_octave(bpm_value) if bpm_value > 0.0 else 0.0
         low, high = PLAUSIBLE_BPM_RANGE
         if not (low <= bpm_value <= high):
@@ -209,14 +214,18 @@ class BasicAnalysisProvider:
         report(1.0, "AutoMix analysis completed")
         return result
 
-    def _decode_mono_pcm(self, path: Path, cancel_event: threading.Event) -> np.ndarray:
-        """Decode ``path`` to mono float32 PCM at SAMPLE_RATE via FFmpeg, without a temp file."""
+    def _decode_mono_pcm(
+        self, path: Path, cancel_event: threading.Event, *,
+        sample_rate: int = SAMPLE_RATE, channels: int = 1, start: float = 0.0, duration: float | None = None,
+    ) -> np.ndarray:
+        """Decode ``path`` (from ``start``, for ``duration``) to interleaved float32 PCM via FFmpeg, no temp file."""
         if not path.is_file():
             raise RuntimeError(f"Audio file is missing: {path}")
+        window = (["-ss", f"{start:.3f}"] if start > 0.0 else []) + (["-t", f"{duration:.3f}"] if duration else [])
         command = [
             str(self.ffmpeg_executable), "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-i", str(path), "-vn", "-sn", "-dn",
-            "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1",
+            *window, "-i", str(path), "-vn", "-sn", "-dn",
+            "-ac", str(channels), "-ar", str(sample_rate), "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1",
         ]
         try:
             process = subprocess.Popen(

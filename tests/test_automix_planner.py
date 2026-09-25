@@ -99,14 +99,25 @@ class CompileAutomixTwoTrackTests(unittest.TestCase):
         for transition in plan.audio.transitions:
             self.assertNotEqual(transition.type, TransitionType.BEAT_MATCH)
 
-    def test_beat_match_applies_rate_only_to_incoming_clip(self) -> None:
+    def test_beat_match_eases_the_outgoing_track_onto_the_incoming_beat(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0)]
         analyses = {"a": _analysis("a", 120.0, 60.0), "b": _analysis("b", 124.0, 60.0)}
         plan = compile_automix(tracks, analyses, ENABLED)
         clip_a, clip_b = plan.audio.clips
+        (transition,) = plan.audio.transitions
+        self.assertEqual(transition.type, TransitionType.BEAT_MATCH)
+        # The incoming track plays at its own tempo; the outgoing one moves.
+        self.assertEqual((clip_b.playback_rate, clip_b.tempo_ramp), (1.0, None))
         self.assertEqual(clip_a.playback_rate, 1.0)
-        self.assertAlmostEqual(clip_b.playback_rate, 120.0 / 124.0)
-        self.assertEqual(plan.audio.transitions[0].type, TransitionType.BEAT_MATCH)
+        self.assertAlmostEqual(clip_a.tempo_ramp.end_rate, 124.0 / 120.0, places=6)
+        cue = dict(transition.details)["outgoing_cue"]
+        self.assertAlmostEqual(clip_a.tempo_ramp.source_end, cue)
+        self.assertAlmostEqual(clip_a.timeline_at(cue), transition.timeline_start, places=9)
+        # Every beat of both tracks lands together through the whole overlap.
+        for k in range(int(transition.duration / (60.0 / 124.0))):
+            outgoing_beat = clip_a.timeline_at(cue + k * 60.0 / 120.0)
+            incoming_beat = clip_b.timeline_at(clip_b.source_in + k * 60.0 / 124.0)
+            self.assertAlmostEqual(outgoing_beat, incoming_beat, delta=1e-4)
 
     def test_missing_analysis_on_one_track_falls_back_to_sequential_adjacency(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0)]
@@ -221,12 +232,14 @@ class CompileAutomixThreeTrackTests(unittest.TestCase):
         self.assertLess(clip_c.timeline_start, clip_b.timeline_end)
 
 
-class EffectiveBpmPropagationTests(unittest.TestCase):
-    """Commit C: fixes the v1 simplification -- a chained transition must
-    plan against the outgoing clip's actual (rate-adjusted) tempo, not its
-    raw analyzed BPM."""
+class TempoReturnsTests(unittest.TestCase):
+    """Every track plays at its own tempo; only its last bars bend toward the next one.
 
-    def test_second_transition_uses_the_first_transitions_actual_rate(self) -> None:
+    The old policy played the whole incoming track at the outgoing tempo and
+    carried that into the next pair, so a slowed-down track never came back.
+    """
+
+    def test_each_track_starts_at_its_own_tempo_along_a_chain(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0), _track("c", 60.0)]
         analyses = {
             "a": _analysis("a", 120.0, 60.0),
@@ -236,43 +249,42 @@ class EffectiveBpmPropagationTests(unittest.TestCase):
         plan = compile_automix(tracks, analyses, ENABLED)
         validate_compiled_render_plan(plan)
         clip_a, clip_b, clip_c = plan.audio.clips
+        self.assertEqual([clip.playback_rate for clip in plan.audio.clips], [1.0, 1.0, 1.0])
+        # Each ramp targets the NEXT track's own tempo, never a propagated one.
+        self.assertAlmostEqual(clip_a.tempo_ramp.end_rate, 124.0 / 120.0, places=6)
+        self.assertAlmostEqual(clip_b.tempo_ramp.end_rate, 128.0 / 124.0, places=6)
+        self.assertIsNone(clip_c.tempo_ramp)
+        # B is back at rate 1.0 before its own ramp starts.
+        self.assertEqual(clip_b.rate_segments()[0][2], 1.0)
 
-        self.assertEqual(clip_a.playback_rate, 1.0)
-        self.assertAlmostEqual(clip_b.playback_rate, 120.0 / 124.0)
-        b_actual_bpm = 124.0 * clip_b.playback_rate  # what B is really sounding at: ~120.0
-        self.assertAlmostEqual(b_actual_bpm, 120.0, places=6)
+    def test_frame_quantized_beats_still_line_up_through_the_overlap(self) -> None:
+        """The reported bug: Beat This reports beats on a 50 fps grid, whose
+        median interval reads 128 BPM as 130.4 and 126 as 125. Matching on
+        those numbers drifted the two tracks half a beat apart within bars."""
+        def quantized(track_id: str, bpm: float) -> TrackAnalysis:
+            beats = tuple(round(beat * 50) / 50 for beat in _beats(bpm, 120.0))
+            skewed = 60.0 / sorted(b - a for a, b in zip(beats, beats[1:]))[len(beats) // 2]
+            return replace(_analysis(track_id, bpm, 120.0), bpm=skewed, beats=beats, downbeats=beats[0::4])
 
-        # The bug this fixes: without propagation, clip_c's rate would be
-        # computed against B's *raw* 124.0 BPM instead of the ~120.0 it is
-        # actually playing at by the time B->C happens.
-        self.assertAlmostEqual(clip_c.playback_rate, b_actual_bpm / 128.0)
-        self.assertNotAlmostEqual(clip_c.playback_rate, 124.0 / 128.0, places=4)
-
-    def test_first_clip_in_a_chain_is_unaffected(self) -> None:
-        """No prior transition exists for the first clip -- its own
-        analyzed BPM is already its effective BPM, propagation is a no-op."""
-        tracks = [_track("a", 60.0), _track("b", 60.0)]
-        analyses = {"a": _analysis("a", 120.0, 60.0), "b": _analysis("b", 124.0, 60.0)}
-        plan = compile_automix(tracks, analyses, ENABLED)
+        plan = compile_automix([_track("a", 120.0), _track("b", 120.0)],
+                               {"a": quantized("a", 128.0), "b": quantized("b", 126.0)}, ENABLED)
         clip_a, clip_b = plan.audio.clips
-        self.assertAlmostEqual(clip_b.playback_rate, 120.0 / 124.0)
+        (transition,) = plan.audio.transitions
+        cue = clip_a.source_at(transition.timeline_start)
+        first = round(cue / (60.0 / 128.0))  # the true beat the cue sits on
+        for k in range(int(transition.duration / (60.0 / 126.0)) - 1):
+            outgoing = clip_a.timeline_at((first + k) * 60.0 / 128.0)
+            incoming = clip_b.timeline_at(round(clip_b.source_in / (60.0 / 126.0)) * 60.0 / 126.0 + k * 60.0 / 126.0)
+            self.assertAlmostEqual(outgoing, incoming, delta=0.005)  # 5 ms, the whole window
 
-
-class TargetBpmUnificationTests(unittest.TestCase):
-    def test_applied_clip_rate_matches_the_winning_candidates_own_rate(self) -> None:
-        """Regression: planner.py used to recompute an independent rate
-        formula instead of using the candidate it had just selected --
-        this could silently diverge from what candidates.py scored."""
+    def test_the_ramp_is_exactly_the_winning_candidates_rate(self) -> None:
         outgoing = _analysis("a", 120.0, 60.0)
         incoming = _analysis("b", 124.0, 60.0)
         compatibility = evaluate_compatibility(outgoing, incoming, ENABLED)
         best = select_best_candidate(generate_candidates(outgoing, incoming, compatibility, ENABLED))
-        self.assertIsNotNone(best)
-
-        tracks = [_track("a", 60.0), _track("b", 60.0)]
-        plan = compile_automix(tracks, {"a": outgoing, "b": incoming}, ENABLED)
-        clip_b = plan.audio.clips[1]
-        self.assertAlmostEqual(clip_b.playback_rate, best.incoming_rate)
+        plan = compile_automix([_track("a", 60.0), _track("b", 60.0)], {"a": outgoing, "b": incoming}, ENABLED)
+        self.assertAlmostEqual(plan.audio.clips[0].tempo_ramp.end_rate, best.outgoing_rate)
+        self.assertEqual(best.incoming_rate, 1.0)
 
 
 def _structure(
@@ -398,28 +410,19 @@ class TransitionGeometryTests(unittest.TestCase):
             self.assertGreaterEqual(transition.duration, ENABLED.min_transition_seconds)
             self.assertLessEqual(transition.duration, ENABLED.max_transition_seconds)
 
-    def test_rate_above_one_needs_more_than_a_timeline_seconds_of_incoming_source(self) -> None:
-        """114 -> 120 BPM: incoming has to speed up (rate > 1) to catch up
-        to 120, so it needs *more* than duration_seconds of its own source
-        audio for the transition -- not duration_seconds directly."""
-        outgoing = _analysis("a", 120.0, 60.0)
-        incoming = _analysis("b", 114.0, 60.0)
-        compatibility = evaluate_compatibility(outgoing, incoming, ENABLED)
-        best = select_best_candidate(generate_candidates(outgoing, incoming, compatibility, ENABLED))
-        self.assertIsNotNone(best)
-        self.assertGreater(best.incoming_rate, 1.0)
-        self.assertGreater(best.duration_seconds * best.incoming_rate, best.duration_seconds)
-
-    def test_rate_below_one_needs_less_than_a_timeline_seconds_of_incoming_source(self) -> None:
-        """126 -> 120 BPM: incoming has to slow down (rate < 1), needs
-        *less* than duration_seconds of its own source audio."""
-        outgoing = _analysis("a", 120.0, 60.0)
-        incoming = _analysis("b", 126.0, 60.0)
-        compatibility = evaluate_compatibility(outgoing, incoming, ENABLED)
-        best = select_best_candidate(generate_candidates(outgoing, incoming, compatibility, ENABLED))
-        self.assertIsNotNone(best)
-        self.assertLess(best.incoming_rate, 1.0)
-        self.assertLess(best.duration_seconds * best.incoming_rate, best.duration_seconds)
+    def test_outgoing_source_span_follows_its_overlap_rate(self) -> None:
+        """120 -> 114 BPM slows the outgoing track (rate < 1), 120 -> 126
+        speeds it up: the tail it plays in the overlap is duration * rate."""
+        for incoming_bpm, slower in ((114.0, True), (126.0, False)):
+            with self.subTest(incoming_bpm=incoming_bpm):
+                outgoing = _analysis("a", 120.0, 60.0)
+                incoming = _analysis("b", incoming_bpm, 60.0)
+                compatibility = evaluate_compatibility(outgoing, incoming, ENABLED)
+                best = select_best_candidate(generate_candidates(outgoing, incoming, compatibility, ENABLED))
+                self.assertEqual(best.outgoing_rate < 1.0, slower)
+                self.assertEqual(best.incoming_rate, 1.0)
+                self.assertAlmostEqual(best.outgoing_source_out - best.outgoing_source_time,
+                                       best.duration_seconds * best.outgoing_rate)
 
     def test_preview_and_export_produce_identical_transition_geometry(self) -> None:
         """Both Preview and Export call this exact same compile_automix()
@@ -467,28 +470,60 @@ class SingleTrackAndEdgeCaseTests(unittest.TestCase):
         validate_compiled_render_plan(plan)
 
 
+class LightAnalysisPolicyTests(unittest.TestCase):
+    """What AutoMix does with only the light analyzer: bar phase and vocals unmeasured."""
+
+    def test_unknown_bar_phase_halves_the_preset_length(self) -> None:
+        tracks = [_track("a", 60.0), _track("b", 60.0)]
+        for meter_confidence, bars in ((0.8, 8), (0.3, 4)):
+            with self.subTest(meter_confidence=meter_confidence):
+                analyses = {i: _analysis(i, 120.0, 60.0, meter_confidence=meter_confidence) for i in "ab"}
+                (transition,) = compile_automix(tracks, analyses, ENABLED).audio.transitions
+                self.assertIn(("bars", bars), transition.details)
+                self.assertAlmostEqual(transition.duration, bars * 2.0, delta=0.5)  # 2 s per bar at 120 BPM
+
+    def test_outgoing_lyrics_keep_the_blend_after_the_last_sung_line(self) -> None:
+        tracks = [_track("a", 60.0), _track("b", 60.0)]
+        analyses = {i: _analysis(i, 120.0, 60.0, meter_confidence=0.3) for i in "ab"}
+        (plain,) = compile_automix(tracks, analyses, ENABLED).audio.transitions
+        self.assertLess(plain.timeline_start, 53.0)  # without lyrics the blend starts ~52 s
+
+        tracks[0].lyrics = [{"start": 50.0, "end": 55.0, "text": "last line"},
+                            {"start": 55.0, "end": 58.0, "text": ""}]
+        tracks[0].lyrics_timing_offset_seconds = 0.5  # lyric time = audio time + 0.5
+        plan = compile_automix(tracks, analyses, ENABLED)
+        (sung,) = plan.audio.transitions
+        cue = plan.audio.clips[0].source_at(sung.timeline_start)
+        self.assertGreaterEqual(cue, 54.5 - 0.1)  # the line ends at 55 - 0.5 in audio time
+        self.assertLess(cue, 55.5)
+        # Lyrics only say "still singing": they never prove the rest is silent.
+        self.assertIs(sung.dsp, TransitionDsp.VOCAL_SAFE_EQ)
+
+
 class TransitionDspSelectionTests(unittest.TestCase):
     """DSP Phase 2: the planner, not the renderer, decides each window's mix."""
 
     def test_reliable_beat_match_is_planned_as_bass_swap(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0)]
         analyses = {"a": _analysis("a", 120.0, 60.0), "b": _analysis("b", 120.0, 60.0)}
-        (transition,) = compile_automix(tracks, analyses, ENABLED).audio.transitions
+        # Vocals measured and nowhere near the junction: a clean bass swap.
+        measured = {"a": replace(analyses["a"], vocal_activity=((5.0, 20.0),)),
+                    "b": replace(analyses["b"], vocal_activity=((40.0, 50.0),))}
+        (transition,) = compile_automix(tracks, measured, ENABLED).audio.transitions
         self.assertIs(transition.type, TransitionType.BEAT_MATCH)
         self.assertIs(transition.dsp, TransitionDsp.BASS_SWAP)
+        # Vocals unknown (the light analyzer): the voice band hands over mid-window.
+        (transition,) = compile_automix(tracks, analyses, ENABLED).audio.transitions
+        self.assertIs(transition.dsp, TransitionDsp.VOCAL_SAFE_EQ)
 
-    def test_overlapping_vocals_change_only_the_style_not_the_geometry(self) -> None:
+    def test_singing_through_the_junction_is_never_mixed(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0)]
         plain = {"a": _analysis("a", 120.0, 60.0), "b": _analysis("b", 120.0, 60.0)}
         vocal = {key: replace(value, vocal_activity=((0.0, 60.0),)) for key, value in plain.items()}
-        # Vocal overlap also nudges candidate *scores*, but every candidate is
-        # penalized equally here, so the chosen window must stay the same.
-        plain_plan = compile_automix(tracks, plain, ENABLED)
-        vocal_plan = compile_automix(tracks, vocal, ENABLED)
-        self.assertIs(vocal_plan.audio.transitions[0].dsp, TransitionDsp.VOCAL_SAFE_EQ)
-        self.assertEqual(replace(vocal_plan.audio.transitions[0], dsp=None, dsp_reasons=(), details=()),
-                         replace(plain_plan.audio.transitions[0], dsp=None, dsp_reasons=(), details=()))
-        self.assertEqual(vocal_plan.audio.clips, plain_plan.audio.clips)
+        plan = compile_automix(tracks, vocal, ENABLED)
+        clip_a, clip_b = plan.audio.clips
+        self.assertEqual(plan.audio.transitions, ())
+        self.assertEqual(clip_b.timeline_start, clip_a.timeline_end)  # back to back, no overlap
 
     def test_fixed_crossfade_fallback_keeps_the_legacy_mix(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0)]
@@ -507,7 +542,7 @@ class TransitionDspSelectionTests(unittest.TestCase):
         plans = [compile_automix(tracks, analyses, ENABLED) for _ in range(5)]
         self.assertTrue(all(plan == plans[0] for plan in plans))
         self.assertEqual([t.dsp for t in plans[0].audio.transitions],
-                         [TransitionDsp.BASS_SWAP, TransitionDsp.BASS_SWAP])
+                         [TransitionDsp.VOCAL_SAFE_EQ, TransitionDsp.VOCAL_SAFE_EQ])  # vocals unknown
 
 if __name__ == "__main__":
     unittest.main()

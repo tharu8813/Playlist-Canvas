@@ -25,7 +25,7 @@ import threading
 from pathlib import Path
 from time import monotonic
 
-from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QObject, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
 from app.automix.progressive import (
     Action,
@@ -39,6 +39,7 @@ from app.automix.settings import AutoMixTransitionSettings
 from app.controllers.preview_audio_controller import PreviewAudioController
 from app.models.playlist import PlaylistTrack
 from app.renderer.ffmpeg_renderer import FFmpegRenderer
+from app.utils.qt_worker_lifecycle import stop_qthread_now
 from app.utils.subprocess_utils import hidden_process_kwargs
 
 LOGGER = logging.getLogger(__name__)
@@ -129,7 +130,7 @@ class _AnalysisWorker(QThread):
             from app.automix.structure.service import StructureAnalysisService
             from app.automix.structure.sonara import SonaraStructureProvider
 
-            StructureAnalysisService(SonaraStructureProvider()).analyze_tracks(
+            StructureAnalysisService(SonaraStructureProvider(self._executable)).analyze_tracks(
                 self._tracks, cancel_event=self._cancel_event,
                 on_result=lambda track_id, structure: self.structure_done.emit(self._generation, track_id, structure),
             )
@@ -190,31 +191,6 @@ class _PartialRenderWorker(QThread):
             self.ready.emit(self._generation, str(prepared.path), self._plan, covered_until, gain)
 
 
-def _stop_thread(worker: QThread | None) -> None:
-    """Wait out a cancelled worker without re-entering user input, then delete it now.
-
-    Same sequence (and for the same Windows fail-fast reasons) as
-    PreviewAudioController.shutdown().
-    """
-    if worker is None:
-        return
-    try:
-        running = worker.isRunning()
-    except RuntimeError:
-        return
-    if running:
-        loop = QEventLoop()
-        worker.finished.connect(loop.quit)
-        if worker.isRunning():
-            loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-    try:
-        worker.wait()
-    except RuntimeError:
-        return
-    worker.deleteLater()
-    QCoreApplication.sendPostedEvents(worker, QEvent.Type.DeferredDelete)
-
-
 class ProgressiveAutoMixController(QObject):
     """One progressive AutoMix preview run at a time (see module docstring)."""
 
@@ -243,6 +219,11 @@ class ProgressiveAutoMixController(QObject):
         self._shutting_down = False
         self.render_count = 0
         """Partial renders started (diagnostics/tests)."""
+        self.latest_partial: tuple[str, object, float, float] | None = None
+        """Last ``progressive_ready`` payload, for a Preview that adopts this run mid-way."""
+        self.last_progress: tuple[str, float, str] | None = None
+        """Last ``progress`` payload, so an adopting Preview continues from it."""
+        self.progress.connect(lambda *args: setattr(self, "last_progress", args))
 
     # -- public API (PreviewAudioController-compatible) ----------------------
 
@@ -266,6 +247,9 @@ class ProgressiveAutoMixController(QObject):
         self._state = ProgressiveAnalysis(self._tracks, structure_enabled=sonara_available())
         self._scheduler = RenderScheduler()
         self._frontier = -1
+        self._gain = None  # re-frozen by this run's first partial mix
+        self._progressive_enabled = True
+        self.latest_partial = None
         self._report_analysis()
         worker = _AnalysisWorker(
             self._renderer.executable, self._tracks, self._generation, self._cancel_event,
@@ -297,7 +281,7 @@ class ProgressiveAutoMixController(QObject):
         workers = (self._analysis_worker, self._render_worker)
         self._analysis_worker = self._render_worker = None
         for worker in workers:
-            _stop_thread(worker)
+            stop_qthread_now(worker)
         if self._final is not None:
             self._final.shutdown()
 
@@ -339,8 +323,11 @@ class ProgressiveAutoMixController(QObject):
             return
         now = monotonic()
         action = self._scheduler.decide(now)
-        if action is Action.RENDER and self._progressive_enabled:
-            self._start_partial_render()
+        if action is Action.RENDER:
+            # Partials disabled after a failure: the next analysis event or the
+            # final mix re-evaluates. Re-arming the timer here spun every 10 ms.
+            if self._progressive_enabled:
+                self._start_partial_render()
         elif action is Action.FINAL:
             self._start_final()
         else:
@@ -377,6 +364,7 @@ class ProgressiveAutoMixController(QObject):
             return
         self._scheduler.render_finished()
         self._gain = gain  # frozen: every partial mix shares one level
+        self.latest_partial = (path, plan, covered_until, gain)
         self.progressive_ready.emit(path, plan, covered_until, gain)
         self._emit(self._message(
             f"AutoMix 적용: {self._scheduler.rendered_frontier}번째 곡까지",

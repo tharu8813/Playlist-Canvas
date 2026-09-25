@@ -1,4 +1,4 @@
-"""Audible endings and real beat matching must survive conservative analysis."""
+﻿"""Audible endings and real beat matching must survive conservative analysis."""
 
 from dataclasses import replace
 import os
@@ -25,7 +25,8 @@ class TailProtectionTests(unittest.TestCase):
                 analyses = {name: _analysis(name, tempo, 60)
                             for name, tempo in zip(('a', 'b', 'c'), (120, 124, bpm))}
                 plan = compile_automix(tracks, analyses, ENABLED)
-                self.assertAlmostEqual(plan.audio.clips[1].playback_rate, 120 / 124)
+                self.assertEqual(plan.audio.clips[1].playback_rate, 1.0)  # b plays at its own tempo
+                self.assertAlmostEqual(plan.audio.clips[0].tempo_ramp.end_rate, 124 / 120)
                 self.assertEqual(plan.audio.transitions[1].type, TransitionType.CROSSFADE)
                 for clip, transition in zip(plan.audio.clips, plan.audio.transitions):
                     self.assertEqual(clip.source_out, 60)
@@ -41,9 +42,13 @@ class TailProtectionTests(unittest.TestCase):
                 }
                 plan = compile_automix(tracks, analyses, ENABLED,
                                        structures={"a": _structure("a", 200.3, outro_start=150)})
-                clip = plan.audio.clips[0]
-                transition = plan.audio.transitions[0]
+                clip, following = plan.audio.clips
                 self.assertEqual(clip.source_out, 200.3)
+                if vocals:  # sung to the very end: nothing may be mixed over it
+                    self.assertEqual(plan.audio.transitions, ())
+                    self.assertEqual(following.timeline_start, clip.timeline_end)
+                    continue
+                transition = plan.audio.transitions[0]
                 self.assertAlmostEqual(clip.timeline_end, transition.timeline_start + transition.duration)
                 self.assertLessEqual(transition.duration, ENABLED.max_transition_seconds)
 
@@ -55,21 +60,24 @@ class TailProtectionTests(unittest.TestCase):
         transition = plan.audio.transitions[0]
         outgoing, incoming = plan.audio.clips
         self.assertEqual(transition.type, TransitionType.BEAT_MATCH)
-        self.assertAlmostEqual(incoming.playback_rate, 120 / 124)
+        self.assertEqual(incoming.playback_rate, 1.0)
         self.assertEqual(outgoing.source_out, 60.3)
-        outgoing_cue = outgoing.source_in + transition.timeline_start * outgoing.playback_rate
-        self.assertIn(outgoing_cue, analyses["a"].beats)
-        self.assertIn(incoming.source_in, analyses["b"].beats)
-        out_times = [(b - outgoing_cue) / outgoing.playback_rate for b in analyses["a"].beats
-                     if outgoing_cue <= b < outgoing.source_out]
-        in_times = [(b - incoming.source_in) / incoming.playback_rate for b in analyses["b"].beats
-                    if incoming.source_in <= b < incoming.source_in + transition.duration * incoming.playback_rate]
+        outgoing_cue = outgoing.source_at(transition.timeline_start)
+        self.assertAlmostEqual(min(analyses["a"].beats, key=lambda b: abs(b - outgoing_cue)), outgoing_cue, delta=1e-5)
+        self.assertAlmostEqual(min(analyses["b"].beats, key=lambda b: abs(b - incoming.source_in)),
+                               incoming.source_in, delta=1e-5)
+        out_times = [outgoing.timeline_at(b) for b in analyses["a"].beats if outgoing_cue - 1e-5 <= b < outgoing.source_out]
+        in_times = [incoming.timeline_at(b) for b in analyses["b"].beats
+                    if incoming.source_in - 1e-5 <= b < incoming.source_in + transition.duration]
+        self.assertGreater(len(in_times), 8)
         for a, b in zip(out_times, in_times):
-            self.assertAlmostEqual(a, b, delta=2e-6)
+            self.assertAlmostEqual(a, b, delta=1e-4)
 
-    def test_key_or_energy_conflict_with_unknown_vocals_does_not_early_mute_mids(self):
+    def test_unknown_vocals_hand_the_outgoing_voice_band_over_mid_window(self):
+        # Two singers must never share the whole blend: with vocals unknown the
+        # outgoing mids (the voice) are gone well before the overlap ends.
         tracks = [_track("a", 60), _track("b", 60)]
-        for fields in ({"key": "F# major"}, {"energy": .9}):
+        for fields in ({}, {"key": "F# major"}, {"energy": .9}):
             with self.subTest(fields=fields):
                 analyses = {"a": replace(_analysis("a", 120, 60), key="C major", energy=.1),
                             "b": replace(_analysis("b", 120, 60), **fields)}
@@ -80,7 +88,7 @@ class TailProtectionTests(unittest.TestCase):
                     "mid", clip.duration, None, (transition.dsp, transition.duration, transition.vocal_handoff)
                 )[0]
                 self.assertEqual(fade, "out")
-                self.assertAlmostEqual(start + length, clip.duration)
+                self.assertLess(start + length, clip.duration - 0.3 * transition.duration)
                 self.assertTrue(any("unknown" in r for r in transition.dsp_reasons))
 
 
@@ -120,15 +128,16 @@ class RenderedBeatProtectionTests(unittest.TestCase):
             audio = np.frombuffer(decoded.stdout, dtype='<f4').reshape(-1, 2)
             self.assertAlmostEqual(len(audio) / sample_rate, plan.duration_seconds, delta=.05)
             transition = plan.audio.transitions[0]
-            # Check throughout the overlap, excluding nearly silent fade endpoints.
-            for offset in np.arange(2, transition.duration - 2, .5):
+            # Check every incoming beat (b keeps its own 124 BPM) through the
+            # overlap, excluding nearly silent fade endpoints.
+            for offset in np.arange(4, transition.duration - 2, 60 / 124):
                 start = round((transition.timeline_start + offset - .1) * sample_rate)
                 window = audio[start:start + round(.25 * sample_rate)]
                 # 5 ms energy bins resist carrier phase and atempo waveform changes.
                 energy = (window ** 2).reshape(-1, 240, 2).mean(axis=1)
                 self.assertTrue(np.all(energy.max(axis=0) > 1e-7))
                 peaks = energy.argmax(axis=0) * .005
-                self.assertLess(abs(peaks[0] - peaks[1]), .045)
+                self.assertLess(abs(peaks[0] - peaks[1]), .02)  # was .045 before the fitted grid + rubberband ramp
 
 
 if __name__ == "__main__":

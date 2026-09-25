@@ -38,11 +38,12 @@ that had none of it:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from app.automix.analysis.key import camelot_compatible
-from app.automix.compatibility import TransitionCompatibility, resolve_target_bpm
+from app.automix.beatgrid import fit_beat_grid
+from app.automix.compatibility import TransitionCompatibility
 from app.automix.models import RELIABLE_BPM_CONFIDENCE, TrackAnalysis
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
@@ -58,7 +59,19 @@ WEIGHT_PROXIMITY = 0.10
 
 WEIGHT_HARMONIC_BONUS = 0.06
 WEIGHT_ENERGY_CONTINUITY = 0.04
-WEIGHT_VOCAL_OVERLAP_PENALTY = 0.10
+
+MIN_AFTER_VOCAL_SECONDS = 1.0
+"""Shortest overlap allowed between the outgoing singer's last word and the
+track's end: many songs sing almost to the end, and a short blend there still
+beats a hard cut. Other overlaps keep ``settings.min_transition_seconds``."""
+
+VOCAL_EDGE_TOLERANCE_SECONDS = 0.1
+"""Vocal spans are measured in 100 ms frames (app/automix/analysis/vocals.py):
+a downbeat within one frame of the last word counts as "right after" it."""
+
+LOCAL_GRID_SECONDS = 60.0
+"""Beats this far into each side's mix region fit its local tempo: a live or
+drifting track is matched on the tempo it actually has around the cue."""
 
 # Commit C: structure-aware additions. Same discipline as the Phase 7 block
 # above -- additive bonuses/penalties applied only when the relevant
@@ -133,13 +146,15 @@ class TransitionCandidate:
     well before the track's natural end -- see planner.py's module
     docstring). ``outgoing_source_out`` and ``incoming_source_time`` are
     both in *source* (original media) seconds, same as
-    ``outgoing_source_time``; converting a timeline duration into how much
-    source audio either side actually consumes needs each side's own
-    playback rate (``outgoing_source_out - outgoing_source_time ==
-    duration_seconds * outgoing_playback_rate`` -- the rate already fixed
-    on the outgoing clip by whatever placed it, not this candidate's own
-    ``outgoing_rate``, which is always 1.0; see
-    ``app.automix.compatibility.resolve_target_bpm``).
+    ``outgoing_source_time``.
+
+    Rates: ``incoming_rate`` is always 1.0 -- the next track plays at its
+    own tempo from its first beat to its end. ``outgoing_rate`` is the rate
+    the outgoing track holds *inside* the overlap (BEAT_MATCH: its beat
+    period over the incoming one, so the beats coincide; 1.0 otherwise), so
+    ``outgoing_source_out - outgoing_source_time == duration_seconds *
+    outgoing_rate``. The planner eases the outgoing clip onto that rate
+    before the overlap with a TempoRamp.
     """
 
     from_track_id: str
@@ -240,9 +255,19 @@ def generate_candidates(
     else:
         strategy = TransitionStrategy.BEAT_ALIGNED_CROSSFADE
 
+    bar_lengths = BAR_LENGTHS
+    if not all(_has_reliable_downbeats(a) for a in (outgoing, incoming)):
+        # The bar phase is a guess (the light analyzer's normal case), so a
+        # blend may start mid-phrase: halve the preset's length (never below
+        # the shortest) to keep any misplaced phrase start brief.
+        shortest = min(BAR_LENGTHS)
+        cap = max(shortest, settings.preferred_bars // 2)
+        settings = replace(settings, preferred_bars=cap)
+        bar_lengths = tuple(bars for bars in BAR_LENGTHS if bars <= cap)
+
     candidates = [
         candidate
-        for bars in BAR_LENGTHS
+        for bars in bar_lengths
         if (candidate := _beat_based_candidate(
             outgoing, incoming, compatibility, bars, strategy, settings,
             outgoing_playback_rate=outgoing_playback_rate,
@@ -260,7 +285,7 @@ def generate_candidates(
         # than being trusted outright.
         candidates.extend(
             candidate
-            for bars in BAR_LENGTHS
+            for bars in bar_lengths
             if (candidate := _beat_based_candidate(
                 outgoing, incoming, compatibility, bars, strategy, settings,
                 outgoing_naive_override=outgoing_anchor, incoming_naive_override=incoming_anchor,
@@ -284,10 +309,11 @@ def _deduplicate_candidates(candidates: list[TransitionCandidate]) -> list[Trans
     geometry as a regular one (e.g. the structure anchor and the plain
     tail position land on the same downbeat) -- order-preserving (keeps
     the first occurrence) so this stays fully deterministic."""
-    seen: set[tuple[float, float, int, TransitionStrategy]] = set()
+    seen: set[tuple[float, float, TransitionStrategy]] = set()
     deduplicated: list[TransitionCandidate] = []
     for candidate in candidates:
-        key = (candidate.outgoing_source_time, candidate.incoming_source_time, candidate.bars, candidate.strategy)
+        # Bars excluded: several bar lengths can land on the same cue after a vocal.
+        key = (candidate.outgoing_source_time, candidate.incoming_source_time, candidate.strategy)
         if key in seen:
             continue
         seen.add(key)
@@ -334,16 +360,29 @@ def _beat_based_candidate(
 ) -> TransitionCandidate | None:
     assert outgoing.bpm is not None and incoming.bpm is not None and compatibility.incoming_effective_bpm is not None
 
+    # The incoming track always plays at its own tempo. For BEAT_MATCH the
+    # outgoing one is the one that moves: the planner ramps it onto the
+    # incoming beat before the overlap (TempoRamp) and it holds
+    # ``outgoing_rate`` through it. Periods come from grids fitted to each
+    # side's beats around its own cue, not from the frame-quantized BPM.
+    incoming_rate = 1.0
+    outgoing_grid = incoming_grid = None
     if strategy is TransitionStrategy.BEAT_MATCH:
-        target_bpm = resolve_target_bpm(outgoing)
-        outgoing_rate = target_bpm / outgoing.bpm
-        incoming_rate = target_bpm / compatibility.incoming_effective_bpm
-        seconds_per_bar = (outgoing.meter_numerator or DEFAULT_METER_NUMERATOR) * 60.0 / target_bpm
+        outgoing_grid = fit_beat_grid(outgoing.beats, audible_end(outgoing) - LOCAL_GRID_SECONDS, audible_end(outgoing))
+        incoming_grid = fit_beat_grid(incoming.beats, audible_start(incoming), audible_start(incoming) + LOCAL_GRID_SECONDS)
+        if outgoing_grid is None or incoming_grid is None:
+            return None
+        outgoing_rate = _nearest_octave_rate(outgoing_grid.period / incoming_grid.period, settings)
+        if abs(outgoing_rate - 1.0) * 100.0 > settings.max_tempo_change_percent + 1e-9:
+            return None
+        target_bpm = 60.0 / incoming_grid.period
+        seconds_per_bar = (incoming.meter_numerator or DEFAULT_METER_NUMERATOR) * incoming_grid.period
     else:
         target_bpm = None
         outgoing_rate = 1.0
-        incoming_rate = 1.0
         seconds_per_bar = (outgoing.meter_numerator or DEFAULT_METER_NUMERATOR) * 60.0 / outgoing.bpm
+    # Source seconds of the outgoing track per timeline second inside the overlap.
+    overlap_rate = outgoing_rate if strategy is TransitionStrategy.BEAT_MATCH else outgoing_playback_rate
 
     # Start with the requested bar length; after snapping, include the
     # remaining audible tail before scoring the final timeline duration.
@@ -351,7 +390,7 @@ def _beat_based_candidate(
     if not (settings.min_transition_seconds <= duration_seconds <= settings.max_transition_seconds):
         return None
 
-    outgoing_source_span = duration_seconds * outgoing_playback_rate
+    outgoing_source_span = duration_seconds * overlap_rate
     incoming_source_span = duration_seconds * incoming_rate
     if (outgoing_source_span > outgoing.duration_seconds
             or incoming_source_span > incoming.duration_seconds):
@@ -380,15 +419,31 @@ def _beat_based_candidate(
     # C.1 still renders exactly the duration that was scored. Early structure
     # hints requiring an overlong overlap are rejected, never used to cut audio.
     # Allow at most one extra bar for snapping, not an arbitrary long fade.
+    if strategy is TransitionStrategy.BEAT_MATCH and outgoing_source_time not in outgoing_anchors:
+        return None
+    # Never mix while the outgoing track sings: a cue inside its last phrase
+    # moves to the first beat after that phrase ends -- mixing starts right
+    # when the singer stops, even if that leaves only a short instrumental tail.
+    vocal_end = _last_vocal_end(outgoing, outgoing_source_time, outgoing_end)
+    after_vocals = vocal_end is not None
+    if after_vocals:
+        earliest = vocal_end - VOCAL_EDGE_TOLERANCE_SECONDS
+        later = ([anchor for anchor in outgoing_anchors if earliest <= anchor < outgoing_end]
+                 or [beat for beat in outgoing.beats if earliest <= beat < outgoing_end])  # no downbeat left: a beat
+        if not later:
+            return None  # sung to the very end: nothing to mix over
+        outgoing_source_time = min(later)
+    if strategy is TransitionStrategy.BEAT_MATCH:
+        # Detected beats sit on a ~20 ms frame grid; the fitted grid does not.
+        outgoing_source_time = min(outgoing_grid.snap(outgoing_source_time), outgoing_end)
     outgoing_source_out = outgoing_end
     outgoing_source_span = outgoing_end - outgoing_source_time
-    duration_seconds = outgoing_source_span / outgoing_playback_rate
+    duration_seconds = outgoing_source_span / overlap_rate
     incoming_source_span = duration_seconds * incoming_rate
-    if (not settings.min_transition_seconds <= duration_seconds <= settings.max_transition_seconds
+    shortest = MIN_AFTER_VOCAL_SECONDS if after_vocals else settings.min_transition_seconds
+    if (not shortest <= duration_seconds <= settings.max_transition_seconds
             or duration_seconds > (bars + 1) * seconds_per_bar + _DURATION_EPSILON_SECONDS
             or incoming_source_span > incoming.duration_seconds):
-        return None
-    if strategy is TransitionStrategy.BEAT_MATCH and outgoing_source_time not in outgoing_anchors:
         return None
 
     naive_incoming_time = (
@@ -400,8 +455,13 @@ def _beat_based_candidate(
     incoming_source_time, incoming_snap = _nearest_bounded_anchor(
         incoming_anchors, naive_incoming_time, incoming.duration_seconds - incoming_source_span,
     )
-    if strategy is TransitionStrategy.BEAT_MATCH and incoming_source_time not in incoming_anchors:
-        return None
+    if strategy is TransitionStrategy.BEAT_MATCH:
+        if incoming_source_time not in incoming_anchors:
+            return None
+        incoming_source_time = max(0.0, incoming_grid.snap(incoming_source_time))
+        if incoming_source_time + incoming_source_span > incoming.duration_seconds + _DURATION_EPSILON_SECONDS:
+            return None
+    # The incoming track may already sing here: the outgoing one no longer does.
 
     confidence = min(outgoing.bpm_confidence, incoming.bpm_confidence)
     score, reasons = _score_beat_candidate(
@@ -412,7 +472,12 @@ def _beat_based_candidate(
     )
     if strategy is TransitionStrategy.BEAT_MATCH:
         alignment = "downbeat" if all(_has_reliable_downbeats(a) for a in (outgoing, incoming)) else "beat (bar phase uncertain)"
-        reasons += (f"+ tempo matched at {alignment} cues",)
+        reasons += (f"+ outgoing eased to the incoming tempo ({(outgoing_rate - 1.0) * 100:+.1f}%), "
+                    f"aligned at {alignment} cues",)
+    if after_vocals:
+        reasons += (f"+ mixing starts after the outgoing vocals end ({vocal_end:.1f}s)",)
+    elif outgoing.vocal_activity:
+        reasons += ("+ outgoing track does not sing in the overlap",)
     reasons += ("+ audible outgoing ending preserved",)
     return TransitionCandidate(
         from_track_id=outgoing.track_id, to_track_id=incoming.track_id,
@@ -520,29 +585,8 @@ def _score_beat_candidate(
         if energy_similarity >= 0.8:
             reasons.append("+ similar energy level")
 
-    # Both windows are *source*-space spans (Commit C.1): duration_seconds
-    # is a timeline quantity, and beats/vocal_activity/structure timestamps
-    # are all source-space, so at any playback rate other than 1.0 "cue +
-    # duration_seconds" is the wrong window -- it must be "cue + this
-    # side's own source span" (duration_seconds * that side's rate).
-    # Falls back to duration_seconds itself when a caller doesn't pass a
-    # span (rate 1.0, source and timeline seconds coincide).
-    resolved_outgoing_span = outgoing_source_span if outgoing_source_span is not None else duration_seconds
-    resolved_incoming_span = incoming_source_span if incoming_source_span is not None else duration_seconds
-
-    if outgoing.vocal_activity and incoming.vocal_activity:
-        # Previously the outgoing side checked all the way to the track's
-        # own end, wider than the real overlap whenever a structure/other
-        # anchor placed the cue well before the natural tail.
-        outgoing_tail_has_vocals = _has_activity_in_range(
-            outgoing.vocal_activity, outgoing_source_time, outgoing_source_time + resolved_outgoing_span,
-        )
-        incoming_head_has_vocals = _has_activity_in_range(
-            incoming.vocal_activity, incoming_source_time, incoming_source_time + resolved_incoming_span,
-        )
-        if outgoing_tail_has_vocals and incoming_head_has_vocals:
-            score -= WEIGHT_VOCAL_OVERLAP_PENALTY
-            reasons.append("- vocal overlap likely during the transition")
+    # Vocals inside the window are not scored: _beat_based_candidate rejects
+    # them outright (``*_source_span`` stay accepted for existing callers).
 
     # -- Commit C: structure-aware bonuses/penalties, additive on top of the
     # above and each independently no-op without the relevant data (roadmap:
@@ -616,6 +660,21 @@ def _has_activity_in_range(spans: tuple[tuple[float, float], ...], start: float,
     return any(span_start < end and span_end > start for span_start, span_end in spans)
 
 
+def _nearest_octave_rate(rate: float, settings: AutoMixTransitionSettings) -> float:
+    """``rate``, or its double/half when that is closer to 1.0 (a half-time beat grid)."""
+    options = (rate, rate * 2.0, rate / 2.0) if settings.allow_half_double_tempo else (rate,)
+    return min(options, key=lambda option: abs(option - 1.0))
+
+
+def _last_vocal_end(analysis: TrackAnalysis, start: float, end: float) -> float | None:
+    """When the singing inside ``[start, end]`` stops for good; None if there is none.
+
+    Lyric lines count too: they can only say "still singing", never "silent"."""
+    ends = [min(b, end) for a, b in (*analysis.vocal_activity, *analysis.lyric_vocal_spans)
+            if a < end and b > start]
+    return max(ends) if ends else None
+
+
 def _fallback_candidates(
     outgoing: TrackAnalysis, incoming: TrackAnalysis, settings: AutoMixTransitionSettings,
     reasons: tuple[str, ...], outgoing_playback_rate: float = 1.0,
@@ -628,12 +687,19 @@ def _fallback_candidates(
     """
     outgoing_end, incoming_start = audible_end(outgoing), audible_start(incoming)
     available = min(outgoing_end / outgoing_playback_rate, incoming.duration_seconds - incoming_start)
+    shortest = settings.min_transition_seconds
+    # Never fade over the outgoing singer: the fade starts once it stops.
+    vocal_end = _last_vocal_end(outgoing, 0.0, outgoing_end)
+    if vocal_end is not None and (outgoing_end - vocal_end) / outgoing_playback_rate < available:
+        available = (outgoing_end - vocal_end) / outgoing_playback_rate
+        shortest = min(shortest, MIN_AFTER_VOCAL_SECONDS)
     duration_seconds = min(settings.fallback_crossfade_seconds, available)
-    if duration_seconds < settings.min_transition_seconds:
+    if duration_seconds < shortest:
+        # A cut still drops the silence between the two sounds.
         return [TransitionCandidate(
             from_track_id=outgoing.track_id, to_track_id=incoming.track_id,
-            outgoing_source_time=outgoing.duration_seconds, outgoing_source_out=outgoing.duration_seconds,
-            incoming_source_time=0.0,
+            outgoing_source_time=outgoing_end, outgoing_source_out=outgoing_end,
+            incoming_source_time=incoming_start,
             bars=0, duration_seconds=0.0,
             outgoing_bpm=outgoing.bpm, incoming_bpm=incoming.bpm, target_bpm=None,
             outgoing_rate=1.0, incoming_rate=1.0,

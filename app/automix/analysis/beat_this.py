@@ -54,6 +54,9 @@ import numpy as np
 from app.automix.analysis.basic import SAMPLE_RATE as BASIC_SAMPLE_RATE
 from app.automix.analysis.basic import BasicAnalysisProvider, normalize_tempo_octave
 from app.automix.analysis.provider import AnalysisCancelled
+from app.automix.analysis.vocals import ENGINE_ID as VOCAL_ENGINE_ID
+from app.automix.analysis.vocals import DemucsVocalDetector, vocal_detection_available
+from app.automix.beatgrid import fit_beat_grid
 from app.automix.models import TrackAnalysis
 from app.models.playlist import PlaylistTrack
 
@@ -107,7 +110,7 @@ class BeatThisAnalysisProvider:
     """
 
     provider_id = "beat_this"
-    version = "3"
+    version = "4"
     """This *implementation's* version: bump it if the confidence
     calibration or output mapping in this module changes in a way that
     should invalidate previously cached results, independent of the
@@ -119,7 +122,8 @@ class BeatThisAnalysisProvider:
     a manual version bump here. "2": the model reads the FFmpeg-decoded
     signal (any format FFmpeg reads, e.g. AAC/M4A) instead of loading the file
     itself, plus BasicAnalysisProvider "3"'s audible bounds. "3": basic "4" (no
-    voice-band vocal guess)."""
+    voice-band vocal guess). "4": BPM from a fitted beat grid, not the
+    frame-quantized median interval."""
 
     def __init__(
         self, ffmpeg_executable: Path, *,
@@ -136,6 +140,12 @@ class BeatThisAnalysisProvider:
         # metadata without importing/executing the package, so this never
         # eagerly loads torch just to compute a version string.
         self.version = f"{BeatThisAnalysisProvider.version}+{checkpoint}+pkg{_installed_beat_this_version()}"
+        # Optional time-resolved vocal activity (app/automix/analysis/vocals.py).
+        # Part of the cache identity: installing the engine later re-analyzes.
+        self._vocals = None
+        if vocal_detection_available():
+            self._vocals = DemucsVocalDetector(self._basic._decode_mono_pcm)
+            self.version += f"+vox-{VOCAL_ENGINE_ID}"
 
     def analyze(
         self, track: PlaylistTrack, *,
@@ -212,6 +222,7 @@ class BeatThisAnalysisProvider:
             meter_numerator = basic_result.meter_numerator
             meter_denominator = basic_result.meter_denominator
 
+        vocal_activity, analyzer_id = self._detect_vocals(track, basic_result.duration_seconds, cancel_event)
         return replace(
             basic_result,
             bpm=bpm,
@@ -221,9 +232,30 @@ class BeatThisAnalysisProvider:
             meter_numerator=meter_numerator,
             meter_denominator=meter_denominator,
             meter_confidence=meter_confidence,
-            analyzer_id=self.provider_id,
+            vocal_activity=vocal_activity,
+            analyzer_id=analyzer_id,
             analyzer_version=self.version,
         )
+
+    def _detect_vocals(
+        self, track: PlaylistTrack, duration: float, cancel_event: threading.Event,
+    ) -> tuple[tuple[tuple[float, float], ...], str]:
+        """(vocal spans, analyzer_id). A failed detection is stamped with another
+        analyzer_id, so AnalysisService treats it as a cache miss and retries it
+        later (e.g. once the model download succeeds) instead of caching "no vocals"."""
+        if self._vocals is None:
+            return (), self.provider_id
+        try:
+            spans = self._vocals.detect(Path(track.file_path), duration, cancel_event)
+        except AnalysisCancelled:
+            raise
+        except Exception as error:  # noqa: BLE001 - vocal detection must never break AutoMix
+            LOGGER.warning("AutoMix vocal detection unavailable for %s (%s); vocals stay unknown.",
+                           track.file_path, error)
+            return (), f"{self.provider_id}-novocals"
+        if cancel_event.is_set():
+            raise AnalysisCancelled("AutoMix analysis cancelled during vocal detection.")
+        return spans, self.provider_id
 
     def _run_inference(
         self, signal: np.ndarray, cancel_event: threading.Event,
@@ -330,7 +362,9 @@ def _bpm_from_beats(beats: np.ndarray) -> tuple[float | None, float]:
     median_interval = float(np.median(intervals))
     if median_interval <= 0.0:
         return None, 0.0
-    bpm = normalize_tempo_octave(60.0 / median_interval)
+    # The median of 50 fps timestamps is quantized (128 BPM reads 130.4); the fitted grid is not.
+    grid = fit_beat_grid(beats)
+    bpm = normalize_tempo_octave(grid.bpm if grid is not None else 60.0 / median_interval)
     deviation = float(np.median(np.abs(intervals - median_interval)))
     confidence = max(0.0, min(1.0, 1.0 - (deviation / median_interval) * 3.0))
     return bpm, confidence

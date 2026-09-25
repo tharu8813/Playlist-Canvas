@@ -1404,7 +1404,7 @@ class FFmpegRenderer:
             structures: dict = {}
             if sonara_available():
                 self._report(progress_callback, "Preparing audio", 0.15, "Analyzing track structure")
-                structure_result = StructureAnalysisService(SonaraStructureProvider()).analyze_tracks(
+                structure_result = StructureAnalysisService(SonaraStructureProvider(self.executable)).analyze_tracks(
                     active_tracks, cancel_event=cancel_event,
                 )
                 structures = structure_result.analyses
