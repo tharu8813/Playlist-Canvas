@@ -15,9 +15,15 @@ python -m pip install -r requirements-lock.txt
 python -m pip install -r requirements-packaging.txt
 ```
 
-설치본에는 AutoMix의 가벼운 분석기만 들어갑니다: librosa(박자·BPM·키·에너지)와 **Sonara**(곡 구조 분석, 약 2 MB Rust 확장). `playlist_canvas.spec`은 이 패키지들이 하나라도 없으면 빌드를 중단합니다(1.2.0.6은 빌드 환경에 librosa가 없어 AutoMix 분석이 빠진 채 배포되었습니다).
+설치본에 들어가는 AutoMix 분석기:
 
-PyTorch 기반 분석기(**Beat This!** 다운비트 모델, **Demucs** 보컬 분리)는 설치본에 넣지 않습니다. 설치본이 약 1 GB로 커지고 첫 분석 동안 CPU를 크게 점유했기 때문입니다. 빌드 환경에 설치돼 있어도 spec의 `excludes`로 제외됩니다. 코드(`app/automix/analysis/beat_this.py`, `vocals.py`)는 청감 평가 도구 등에서 명시적으로 요청할 때만 쓰입니다.
+- **Beat This! (ONNX)**: 기본 박자·다운비트 분석기. PyTorch 없이 `onnxruntime`(약 14 MB)으로 int8 양자화 모델(`app/automix/analysis/models/beat_this_final0_int8.onnx`, 약 23 MB, MIT)을 실행합니다. 실제 팝 31곡에서 librosa의 박자 일치도는 F 0.64였고 템포 옥타브 오류가 흔했습니다. ONNX 모델은 PyTorch 원본과 F 0.998(박자) / 0.994(다운비트)로 일치합니다. 모델은 `tools/export_beat_this_onnx.py`로 다시 만듭니다.
+- **librosa**: 키·에너지 분석, ONNX를 쓸 수 없을 때의 대체 박자 분석.
+- **Sonara**: 곡 구조 분석(약 2 MB Rust 확장).
+
+`playlist_canvas.spec`은 이 패키지나 모델 파일이 하나라도 없으면 빌드를 중단합니다(1.2.0.6은 빌드 환경에 librosa가 없어 AutoMix 분석이 빠진 채 배포되었습니다).
+
+PyTorch 기반 분석기(PyTorch판 **Beat This!**, **Demucs** 보컬 분리)는 설치본에 넣지 않습니다. 설치본이 약 1 GB로 커지고 첫 분석 동안 CPU를 크게 점유했기 때문입니다. 빌드 환경에 설치돼 있어도 spec의 `excludes`로 제외됩니다. 코드(`app/automix/analysis/beat_this.py`, `vocals.py`)는 청감 평가 도구 등에서 명시적으로 요청할 때만 쓰입니다.
 
 ## 2. Windows 배포본 빌드
 

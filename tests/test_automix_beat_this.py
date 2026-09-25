@@ -446,13 +446,14 @@ class AnalysisProviderRegistryTests(unittest.TestCase):
         self.assertEqual(provider.provider_id, "beat_this")
         self.assertIsInstance(provider, BeatThisAnalysisProvider)
 
-    def test_auto_is_the_light_analyzer_even_when_beat_this_is_installed(self) -> None:
+    def test_auto_is_the_onnx_model_else_the_light_analyzer_never_pytorch(self) -> None:
         # PyTorch analyzers are opt-in by explicit id only (too heavy by default).
-        for available in (False, True):
-            with self.subTest(beat_this_installed=available), patch(
-                "app.automix.analysis.registry.beat_this_available", return_value=available,
-            ):
-                self.assertEqual(create_analysis_provider("auto", Path("ffmpeg")).provider_id, "basic")
+        for onnx, expected in ((True, "beat_this_onnx"), (False, "basic")):
+            for torch in (False, True):
+                with self.subTest(onnx=onnx, beat_this_installed=torch), patch(
+                    "app.automix.analysis.registry.beat_this_available", return_value=torch,
+                ), patch("app.automix.analysis.beat_this_onnx.onnx_beats_available", return_value=onnx):
+                    self.assertEqual(create_analysis_provider("auto", Path("ffmpeg")).provider_id, expected)
 
     def test_beat_this_available_does_not_import_torch(self) -> None:
         """find_spec-based probing must not trigger the actual heavy import."""

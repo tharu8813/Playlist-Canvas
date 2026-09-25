@@ -7,14 +7,15 @@ numpy>=1.26,<3.0
 # over aubio/Essentia (GPL/AGPL) and Beat This!/Essentia's ML models
 # (PyTorch/TensorFlow cost, kept optional for a later phase instead).
 librosa>=1.0,<2.0
+# AutoMix's default rhythm analyzer: Beat This! exported to ONNX and run by
+# onnxruntime (app/automix/analysis/beat_this_onnx.py; the model file is in the
+# repository). Without it AutoMix falls back to the librosa analyzer above.
+onnxruntime>=1.20,<2.0
 
-# Beat This! (app/automix/analysis/beat_this.py) is an OPTIONAL advanced
-# AutoMix analyzer for real beat/downbeat detection, deliberately NOT listed
-# here: it pulls in torch (commonly 500 MB+) and its own model download.
-# Install separately if you want it -- `pip install beat-this` -- see
-# docs/automix-history/automix-phase1-dependency-evaluation.md's "AutoMix v3 outcome"
-# section. The app, its default install, and its test suite all work fully
-# without it; AutoMix falls back to the basic analyzer above per track.
+# The PyTorch Beat This! package (app/automix/analysis/beat_this.py) and Demucs
+# are NOT listed here: torch is commonly 500 MB+. Install them separately
+# (`pip install beat-this demucs`) only for tooling such as
+# tools/export_beat_this_onnx.py or tools/automix_listening_report.py.
 
 # Sonara (app/automix/structure/sonara.py) is an OPTIONAL structure analyzer
 # (intro/outro/sections/energy curve), also deliberately NOT listed here --

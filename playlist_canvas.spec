@@ -14,12 +14,14 @@ numpy_datas, numpy_binaries, numpy_hiddenimports = collect_all("numpy")
 # so PyInstaller finds their binaries/data even where a hooks-contrib entry
 # does not already cover them.
 #
-# Sonara (song structure) is a ~2 MB Rust extension and ships too. The
-# PyTorch-based analyzers (Beat This!, Demucs) do NOT: they made the installer
-# ~1 GB and pinned the CPU during first analysis, so AutoMix defaults to the
-# light analyzer (see app/automix/analysis/registry.py). They are excluded
-# below even when installed in the build venv, because PyInstaller would
-# otherwise follow their function-level imports.
+# Sonara (song structure) is a ~2 MB Rust extension and ships too, as does the
+# default rhythm analyzer: Beat This! exported to int8 ONNX (~23 MB model)
+# and run by onnxruntime (its PyInstaller hook collects the native runtime;
+# see app/automix/analysis/beat_this_onnx.py). The PyTorch-based analyzers
+# (Beat This!, Demucs) do NOT: they made the installer ~1 GB and pinned the
+# CPU during first analysis. They are excluded below even when installed in
+# the build venv, because PyInstaller would otherwise follow their
+# function-level imports.
 #
 # collect_all only *warns* for a package that is not installed, which is how
 # 1.2.0.6 shipped without librosa and silently lost AutoMix. A release build
@@ -30,7 +32,9 @@ AUTOMIX_PACKAGES = ("librosa", "numba", "llvmlite", "scipy", "sklearn", "soundfi
 HEAVY_ANALYZER_PACKAGES = (
     "torch", "torchaudio", "beat_this", "rotary_embedding_torch", "demucs", "julius",
 )
-_missing = [name for name in AUTOMIX_PACKAGES if importlib.util.find_spec(name) is None]
+BEAT_MODEL_DIRECTORY = project_root / "app" / "automix" / "analysis" / "models"
+_missing = [name for name in (*AUTOMIX_PACKAGES, "onnxruntime") if importlib.util.find_spec(name) is None]
+_missing += [str(path) for path in (BEAT_MODEL_DIRECTORY / "beat_this_final0_int8.onnx",) if not path.is_file()]
 if _missing:
     raise SystemExit(
         "Release build environment is missing AutoMix packages: " + ", ".join(_missing)
@@ -62,6 +66,8 @@ analysis = Analysis(
         (str(project_root / "app" / "assets" / "icons" / "spin_down.svg"), "assets/icons"),
         (str(project_root / "app" / "assets" / "icons" / "spin_up.svg"), "assets/icons"),
         (str(project_root / "LICENSE.txt"), "."),
+        (str(BEAT_MODEL_DIRECTORY / "beat_this_final0_int8.onnx"), "app/automix/analysis/models"),
+        (str(BEAT_MODEL_DIRECTORY / "BEAT_THIS_LICENSE.txt"), "app/automix/analysis/models"),
     ],
     hiddenimports=numpy_hiddenimports + automix_hiddenimports + [
         "PySide6.QtSvg", "PySide6.QtMultimedia", "PySide6.QtOpenGLWidgets",
