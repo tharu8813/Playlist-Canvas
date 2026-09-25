@@ -1,18 +1,23 @@
-"""Time-resolved vocal activity for AutoMix, from a Demucs (htdemucs) vocal stem.
+"""Time-resolved vocal activity for AutoMix, from a separated vocal stem.
 
 AutoMix never mixes over a singer (app/automix/candidates.py rejects any
 window containing TrackAnalysis.vocal_activity), so it needs to know *when*
 each track sings. Spectral heuristics were tried and removed: on real music
 the "voice band" share was higher in instrumental seconds than sung ones
-(basic.py's module docstring). Separating the vocal stem and measuring its
-level is the reliable signal.
+(basic.py's module docstring), and Sonara's vocalness scored AUC 0.55 on
+3 s windows. Separating the vocal stem and measuring its level is the
+reliable signal. Only the regions a transition can use are separated -- the
+first and last MIX_REGION_SECONDS of each track, once; results are cached
+with the rest of the analysis.
 
-Cost: htdemucs (Meta, MIT code and weights, ~84 MB) runs at about 0.5x
-real time on a 14-thread CPU, so only the regions a transition can use are
-separated -- the first and last MIX_REGION_SECONDS of each track (~40 s of
-work per track, once; results are cached with the rest of the analysis).
-``torch``/``demucs`` are optional like Beat This!: without them
-vocal_activity stays unknown (empty) and AutoMix behaves as before.
+Two separators share activity_spans:
+
+- OnnxVocalDetector (shipped, the default analyzer's): Open-Unmix ``umxhq``
+  (MIT) vocals network as int8 ONNX, ~9 MB, ~1.7 s per track. Against
+  htdemucs on 31 pop tracks' mix regions it agrees on 95 % of 100 ms frames
+  and finds 98 % of the sung ones.
+- DemucsVocalDetector: htdemucs (Meta, MIT, ~84 MB) through PyTorch, about
+  0.5x real time on a 14-thread CPU. Optional, for tooling only.
 """
 
 from __future__ import annotations
@@ -144,6 +149,63 @@ class DemucsVocalDetector:
             self._model.eval()
             LOGGER.info("Loaded Demucs %s for AutoMix vocal detection", ENGINE_ID)
         return self._model
+
+
+ONNX_ENGINE_ID = "umxhq"
+ONNX_MODEL_NAME = "umxhq_vocals_int8.onnx"
+UMX_SAMPLE_RATE = 44100
+UMX_N_FFT = 4096
+UMX_HOP = 1024
+
+
+class OnnxVocalDetector:
+    """Open-Unmix vocals (magnitude in, magnitude out) via onnxruntime; the stem keeps the mix phase.
+
+    Same call as DemucsVocalDetector. The session loads lazily and separation is
+    serialized, like Demucs: parallel passes only oversubscribe the CPU.
+    """
+
+    def __init__(self, decode: Callable[..., np.ndarray], model: Path) -> None:
+        self._decode = decode
+        self._model = model
+        self._session = None
+        self._lock = threading.Lock()
+
+    def detect(self, path: Path, duration: float, cancel_event: threading.Event) -> tuple[tuple[float, float], ...]:
+        spans: list[tuple[float, float]] = []
+        for start, length in mix_regions(duration):
+            if cancel_event.is_set():
+                break
+            pcm = self._decode(path, cancel_event, sample_rate=UMX_SAMPLE_RATE, channels=2,
+                               start=start, duration=length)
+            mix = pcm.reshape(-1, 2)
+            spans.extend(activity_spans(self._separate_vocals(mix), mix, UMX_SAMPLE_RATE, offset=start))
+        return merge_spans(spans, duration)
+
+    def _separate_vocals(self, mix: np.ndarray) -> np.ndarray:
+        import librosa
+
+        if len(mix) < UMX_N_FFT:
+            return np.zeros_like(mix)
+        spectrum = np.stack([librosa.stft(np.ascontiguousarray(mix[:, channel]), n_fft=UMX_N_FFT,
+                                          hop_length=UMX_HOP, window="hann", center=False) for channel in (0, 1)])
+        with self._lock:
+            magnitude = self._load().run(None, {"magnitude": np.abs(spectrum).astype(np.float32)[None]})[0][0]
+        stem = magnitude * np.exp(1j * np.angle(spectrum))
+        return np.stack([librosa.istft(stem[channel], hop_length=UMX_HOP, window="hann", center=False,
+                                       length=len(mix)) for channel in (0, 1)], axis=1)
+
+    def _load(self):
+        if self._session is None:
+            import os
+
+            import onnxruntime
+
+            options = onnxruntime.SessionOptions()
+            options.intra_op_num_threads = max(1, (os.cpu_count() or 2) // 2)
+            self._session = onnxruntime.InferenceSession(str(self._model), options, providers=["CPUExecutionProvider"])
+            LOGGER.info("Loaded Open-Unmix %s for AutoMix vocal detection", ONNX_ENGINE_ID)
+        return self._session
 
 
 if __name__ == "__main__":

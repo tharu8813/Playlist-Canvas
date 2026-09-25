@@ -17,7 +17,9 @@ python -m pip install -r requirements-packaging.txt
 
 설치본에 들어가는 AutoMix 분석기:
 
-- **Beat This! (ONNX)**: 기본 박자·다운비트 분석기. PyTorch 없이 `onnxruntime`(약 14 MB)으로 int8 양자화 모델(`app/automix/analysis/models/beat_this_final0_int8.onnx`, 약 23 MB, MIT)을 실행합니다. 실제 팝 31곡에서 librosa의 박자 일치도는 F 0.64였고 템포 옥타브 오류가 흔했습니다. ONNX 모델은 PyTorch 원본과 F 0.998(박자) / 0.994(다운비트)로 일치합니다. 모델은 `tools/export_beat_this_onnx.py`로 다시 만듭니다.
+- **Beat This! (ONNX)**: 기본 박자·다운비트 분석기. PyTorch 없이 `onnxruntime`(약 14 MB)으로 int8 양자화 모델(`app/automix/analysis/models/beat_this_final0_int8.onnx`, 약 23 MB, MIT)을 실행합니다. 실제 팝 31곡에서 librosa의 박자 일치도는 F 0.64였고 템포 옥타브 오류가 흔했습니다. ONNX 모델은 PyTorch 원본과 F 0.998(박자) / 0.994(다운비트)로 일치합니다.
+- **Open-Unmix `umxhq` (ONNX)**: 보컬 구간 감지(`umxhq_vocals_int8.onnx`, 약 9 MB, MIT, 곡당 약 1.7초). 곡의 앞뒤 45초만 분리해 노래하는 구간에서는 믹스하지 않습니다. `umxl`은 가중치가 비상업 전용이라 쓰지 않습니다.
+- 두 모델은 `tools/export_automix_onnx.py`로 다시 만듭니다.
 - **librosa**: 키·에너지 분석, ONNX를 쓸 수 없을 때의 대체 박자 분석.
 - **Sonara**: 곡 구조 분석(약 2 MB Rust 확장).
 
