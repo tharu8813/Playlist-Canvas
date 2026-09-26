@@ -23,7 +23,7 @@ from PySide6.QtCore import (
     QUrl,
 )
 from PySide6.QtGui import QColor, QContextMenuEvent, QDropEvent, QImage, QMouseEvent, QWheelEvent
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -856,9 +856,10 @@ class MainWindowWorkspaceTests(MainWindowTestCase):
                         max(300, vertical_total - 310), 310,
                     ])
                     self.application.processEvents()
+                    saved = QSignalSpy(first_window._workspace_settings_timer.timeout)
                     first_window.main_splitter.splitterMoved.emit(360, 1)
                     first_window.workspace_splitter.splitterMoved.emit(310, 1)
-                    QTest.qWait(280)
+                    self.assertTrue(saved.wait(3000), "Workspace settings save timed out")
 
                     stored = isolated_settings()
                     stored.sync()

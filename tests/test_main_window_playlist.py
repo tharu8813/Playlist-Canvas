@@ -868,7 +868,7 @@ class MainWindowPlaylistTests(MainWindowTestCase):
 
             dialog = captured[0]
             try:
-                self.assertEqual(dialog._content_lyrics, [("my song.lrc", str(lrc))])
+                self.assertEqual(dialog._content_lyrics, [("my song.lrc", str(lrc.resolve()))])
                 self.assertFalse(dialog.content_lyrics_button.isHidden())
                 self.assertTrue(dialog._apply_lyrics_from_path(str(lrc)))
                 self.assertEqual(dialog.selected_lyrics[0]["text"], "From content")

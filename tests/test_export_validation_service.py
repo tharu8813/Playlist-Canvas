@@ -16,8 +16,11 @@ class ExportValidationServiceTests(unittest.TestCase):
         self.assertEqual(EXPORT_FPS_OPTIONS, (24, 30, 50, 60))
 
     def test_work_mode_scales_with_export_cost(self) -> None:
-        self.assertEqual(select_export_work_mode(3840, 2160, 60), "stable")
-        self.assertEqual(select_export_work_mode(1920, 1080, 30), "max_speed")
+        with patch("app.services.export_validation_service.os.cpu_count", return_value=8):
+            self.assertEqual(select_export_work_mode(3840, 2160, 60), "stable")
+            self.assertEqual(select_export_work_mode(1920, 1080, 30), "max_speed")
+        with patch("app.services.export_validation_service.os.cpu_count", return_value=4):
+            self.assertEqual(select_export_work_mode(1920, 1080, 30), "auto")
 
     def test_probe_reports_mismatch_without_reencoding(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -1039,7 +1039,7 @@ class FunctionalRegressionTests(unittest.TestCase):
 
             final_command = next(command for command in commands if "-c:v" in command)
             output_staging = Path(final_command[-1])
-            self.assertEqual(output_staging.parent, output.parent)
+            self.assertEqual(output_staging.parent.resolve(), output.parent.resolve())
             self.assertTrue(output_staging.name.endswith(".rendering.mp4"))
             self.assertFalse(output_staging.exists())
 
