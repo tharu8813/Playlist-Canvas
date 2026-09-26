@@ -30,7 +30,6 @@ from app.preview.album_art import (
 from app.preview.frame_state import (
     MixJunction, resolve_edge_animation, resolve_lyrics_cue_state,
     resolve_now_playing_exit_state, resolve_timeline_window_phase,
-    source_animation_styles,
 )
 from app.preview.text_template import (
     TEXT_TEMPLATE_TOKEN_NAMES,
@@ -349,7 +348,7 @@ class CanvasSnapshot:
                 source.subtitle_previous_blur * 2.0 + 2.0
                 if source.source_type is SourceType.LYRICS else 0.0,
             ) * scale
-            animation_styles = source_animation_styles(source)
+            animation_styles = {source.animation_in, source.animation_out}
             if animation_styles & slide_styles:
                 padding += slide_distance(source.width, source.height) * scale
             if "rotate" in animation_styles:
@@ -457,7 +456,7 @@ class CanvasSnapshot:
         merely keeps the established sequential capture path, while a false
         positive could freeze a time-dependent element in the final video.
         """
-        if source_animation_styles(source) != {"none"}:
+        if source.animation_in != "none" or source.animation_out != "none":
             return False
         if source.personal_color_enabled:
             return False

@@ -404,16 +404,10 @@ class SourceInspector(QScrollArea):
                 combo.addItem(label, value)
         self.animation_in_duration_spin = self._spin(0.1, 3, 0.05)
         self.animation_out_duration_spin = self._spin(0.1, 3, 0.05)
-        # Crossfade/AutoMix only: what plays where the Canvas changes track in
-        # the middle of an audio overlap (see preview.frame_state.mix_animation).
+        # Crossfade/AutoMix only: stretch the entrance/exit over the audio mix
+        # where the Canvas changes track (see preview.frame_state.mix_animation).
         self._mix_transitions_active = False
-        self.mix_animation_in_combo = QComboBox()
-        self.mix_animation_out_combo = QComboBox()
-        for combo in (self.mix_animation_in_combo, self.mix_animation_out_combo):
-            combo.addItem("Same as track change", "same")
-            for index in range(self.animation_in_combo.count()):
-                combo.addItem(self.animation_in_combo.itemText(index), self.animation_in_combo.itemData(index))
-        self.mix_animation_duration_spin = self._spin(0.1, 6, 0.05)
+        self.animation_fit_mix_check = QCheckBox()
         self.animation_preview_button = QPushButton()
         self.animation_preview_button.setObjectName("primaryButton")
         self.z_spin = QSpinBox()
@@ -454,15 +448,10 @@ class SourceInspector(QScrollArea):
             ("animation_in_duration", self.animation_in_duration_spin),
             ("animation_out", self.animation_out_combo),
             ("animation_out_duration", self.animation_out_duration_spin),
+            ("animation_fit_mix", self.animation_fit_mix_check),
         ):
             self._add_labeled_row(animation_form, key, widget)
         animation_form.addRow("", self.animation_preview_button)
-        for key, widget in (
-            ("mix_animation_out", self.mix_animation_out_combo),
-            ("mix_animation_in", self.mix_animation_in_combo),
-            ("mix_animation_duration", self.mix_animation_duration_spin),
-        ):
-            self._add_labeled_row(animation_form, key, widget)
         self._add_labeled_row(other_form, "layer", self.z_spin)
         other_form.addRow(self.visible_check)
         other_form.addRow(self.locked_check)
@@ -502,9 +491,7 @@ class SourceInspector(QScrollArea):
             self.shadow_x_spin, self.shadow_y_spin,
             self.animation_in_combo, self.animation_in_duration_spin,
             self.animation_out_combo, self.animation_out_duration_spin,
-            self.animation_preview_button,
-            self.mix_animation_in_combo, self.mix_animation_out_combo,
-            self.mix_animation_duration_spin,
+            self.animation_fit_mix_check, self.animation_preview_button,
             self.visible_check, self.locked_check,
         ]
         self._editors.extend(self._linked_sliders.values())
@@ -635,17 +622,9 @@ class SourceInspector(QScrollArea):
             "animation_out": ("곡에서 이 요소가 사라질 때 재생할 종료 효과입니다.", "Exit effect played when this source disappears during a track."),
             "animation_in_duration": ("곡 시작 애니메이션이 재생되는 시간입니다.", "Duration of the track-start animation."),
             "animation_out_duration": ("곡 종료 애니메이션이 재생되는 시간입니다.", "Duration of the track-end animation."),
-            "mix_animation_out": (
-                "크로스페이드·AutoMix에서 두 곡이 겹치는 구간의 중간에 화면이 다음 곡으로 넘어갑니다. 이전 곡의 이 요소가 그 순간까지 재생할 퇴장 효과입니다.",
-                "With crossfade/AutoMix the Canvas moves to the next track in the middle of the overlap. The outgoing track's exit for this source, ending at that moment.",
-            ),
-            "mix_animation_in": (
-                "겹치는 구간의 중간에 화면이 다음 곡으로 넘어간 뒤 이 요소가 재생할 등장 효과입니다.",
-                "The incoming track's entrance for this source, starting where the Canvas moves to it mid-overlap.",
-            ),
-            "mix_animation_duration": (
-                "믹스 전환에서 직접 고른 등장·퇴장 효과의 길이입니다. ‘곡 시작/종료와 같게’는 원래 애니메이션 시간을 씁니다.",
-                "Length of the mix entrance/exit styles picked here. ‘Same as track start/end’ keeps those durations.",
+            "animation_fit_mix": (
+                "크로스페이드·AutoMix에서는 두 곡이 겹치는 구간의 중간에 화면이 다음 곡으로 넘어갑니다. 켜면 종료 효과가 겹침 앞 절반, 등장 효과가 뒤 절반 동안 재생되어 전환 길이가 믹스 길이에 자동으로 맞춰집니다. 끄면 위의 애니메이션 시간을 씁니다.",
+                "With crossfade/AutoMix the Canvas moves to the next track in the middle of the overlap. When on, the exit plays over the overlap's first half and the entrance over its second half, so the transition follows the mix length. When off, the durations above are used.",
             ),
             "layer": ("요소의 쌓임 순서입니다. 값이 큰 요소가 값이 작은 요소 위에 표시됩니다.", "Stacking order. Sources with larger values are drawn above sources with smaller values."),
         }
@@ -953,10 +932,8 @@ class SourceInspector(QScrollArea):
             "animation_in_duration": source.animation_in != "none",
             "animation_out_duration": source.animation_out != "none",
             # Only while the project mixes tracks (crossfade/AutoMix).
-            "mix_animation_in": self._mix_transitions_active,
-            "mix_animation_out": self._mix_transitions_active,
-            "mix_animation_duration": self._mix_transitions_active and bool(
-                {source.mix_animation_in, source.mix_animation_out} - {"same", "none"}
+            "animation_fit_mix": self._mix_transitions_active and (
+                source.animation_in != "none" or source.animation_out != "none"
             ),
         }
         for key, active in toggled_both_ways.items():
@@ -1100,12 +1077,6 @@ class SourceInspector(QScrollArea):
         self.animation_in_duration_spin.valueChanged.connect(
             lambda value: self._update("animation_in_duration", value)
         )
-        self.mix_animation_in_combo.currentIndexChanged.connect(
-            lambda _index: self._update("mix_animation_in", self.mix_animation_in_combo.currentData()))
-        self.mix_animation_out_combo.currentIndexChanged.connect(
-            lambda _index: self._update("mix_animation_out", self.mix_animation_out_combo.currentData()))
-        self.mix_animation_duration_spin.valueChanged.connect(
-            lambda value: self._update("mix_animation_duration", value))
         self.animation_out_duration_spin.valueChanged.connect(
             lambda value: self._update("animation_out_duration", value)
         )
@@ -1130,6 +1101,8 @@ class SourceInspector(QScrollArea):
         )
         self.font_add_button.clicked.connect(self._add_font_file)
         self.z_spin.valueChanged.connect(lambda _value: self._update("z_index", self.z_spin.value()))
+        self.animation_fit_mix_check.toggled.connect(
+            lambda value: self._update("animation_fit_mix", value))
         self.visible_check.toggled.connect(lambda value: self._update("visible", value))
         self.locked_check.toggled.connect(lambda value: self._update("locked", value))
         self.fill_color_button.clicked.connect(
@@ -1164,6 +1137,7 @@ class SourceInspector(QScrollArea):
         direct_checks = (
             ("background_ambient", self.background_ambient_check),
             ("background_track_transition", self.background_track_transition_check),
+            ("animation_fit_mix", self.animation_fit_mix_check),
             ("visible", self.visible_check), ("locked", self.locked_check),
         )
         for field, checkbox in direct_checks:
@@ -1498,9 +1472,7 @@ class SourceInspector(QScrollArea):
             "animation_out": ("곡 종료 애니메이션", "Track-end animation"),
             "animation_in_duration": ("시작 애니메이션 시간", "Entrance duration"),
             "animation_out_duration": ("종료 애니메이션 시간", "Exit duration"),
-            "mix_animation_out": ("믹스 전환 · 이전 곡 퇴장", "Mix handover · outgoing exit"),
-            "mix_animation_in": ("믹스 전환 · 다음 곡 등장", "Mix handover · incoming entrance"),
-            "mix_animation_duration": ("믹스 전환 애니메이션 시간", "Mix handover duration"),
+            "animation_fit_mix": ("믹스 전환 시간 자동", "Fit transition to mix"),
             "layer": ("레이어", "Layer"),
         }
         labels.update({
@@ -1583,10 +1555,6 @@ class SourceInspector(QScrollArea):
         )
         for combo in (self.animation_in_combo, self.animation_out_combo):
             for index, label in enumerate(animation_labels):
-                combo.setItemText(index, label)
-        for combo in (self.mix_animation_in_combo, self.mix_animation_out_combo):
-            combo.setItemText(0, "곡 시작/종료와 같게" if korean else "Same as track start/end")
-            for index, label in enumerate(animation_labels, start=1):
                 combo.setItemText(index, label)
         self.track_list.retranslate(korean)
         self.now_playing.retranslate(korean)
@@ -1825,8 +1793,6 @@ class SourceInspector(QScrollArea):
             "font_weight": self.font_weight_combo,
             "animation_in": self.animation_in_combo,
             "animation_out": self.animation_out_combo,
-            "mix_animation_in": self.mix_animation_in_combo,
-            "mix_animation_out": self.mix_animation_out_combo,
         })
         add("spin", {
             "x": self.x_spin, "y": self.y_spin, "width": self.width_spin,
@@ -1842,7 +1808,6 @@ class SourceInspector(QScrollArea):
             "text_stroke_width": self.text_stroke_width_spin,
             "animation_in_duration": self.animation_in_duration_spin,
             "animation_out_duration": self.animation_out_duration_spin,
-            "mix_animation_duration": self.mix_animation_duration_spin,
             "shadow.opacity": self.shadow_opacity_spin,
             "shadow.blur_radius": self.shadow_blur_spin,
             "shadow.offset_x": self.shadow_x_spin,
@@ -1851,6 +1816,7 @@ class SourceInspector(QScrollArea):
         add("check", {
             "background_ambient": self.background_ambient_check,
             "background_track_transition": self.background_track_transition_check,
+            "animation_fit_mix": self.animation_fit_mix_check,
             "visible": self.visible_check, "locked": self.locked_check,
             "gradient.enabled": self.gradient_check,
             "shadow.enabled": self.shadow_check,
@@ -1957,11 +1923,7 @@ class SourceInspector(QScrollArea):
             self.animation_out_combo.setCurrentIndex(max(0, self.animation_out_combo.findData(source.animation_out)))
             self.animation_in_duration_spin.setValue(source.animation_in_duration)
             self.animation_out_duration_spin.setValue(source.animation_out_duration)
-            self.mix_animation_in_combo.setCurrentIndex(
-                max(0, self.mix_animation_in_combo.findData(source.mix_animation_in)))
-            self.mix_animation_out_combo.setCurrentIndex(
-                max(0, self.mix_animation_out_combo.findData(source.mix_animation_out)))
-            self.mix_animation_duration_spin.setValue(source.mix_animation_duration)
+            self.animation_fit_mix_check.setChecked(source.animation_fit_mix)
             self.z_spin.setValue(source.z_index)
             self.visible_check.setChecked(source.visible)
             self.locked_check.setChecked(source.locked)

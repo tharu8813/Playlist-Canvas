@@ -1511,6 +1511,7 @@ class ExportOrchestrator:
                 animation_out=source.animation_out,
                 animation_in_duration=source.animation_in_duration,
                 animation_out_duration=source.animation_out_duration,
+                animation_fit_mix=source.animation_fit_mix,
             ))
         # FFmpeg overlays later inputs on top.  Preserve the Canvas stacking
         # order when two reactive sources overlap.

@@ -22,7 +22,9 @@ from PySide6.QtGui import QImage, QImageReader
 
 from app.models.playlist import PlaylistTrack
 from app.timeline.compiler import compile_playlist
-from app.timeline.render_plan import CompiledRenderPlan, build_presentation_and_metadata
+from app.timeline.render_plan import (
+    CompiledRenderPlan, build_presentation_and_metadata, visual_segments,
+)
 from app.renderer import loudness
 from app.renderer.ffmpeg import filter_graph
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
@@ -197,6 +199,7 @@ class VisualizerOverlay:
     animation_out: str = "none"
     animation_in_duration: float = 0.45
     animation_out_duration: float = 0.45
+    animation_fit_mix: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,9 +485,15 @@ class FFmpegRenderer:
                                  message)
 
                 try:
+                    # The drawn spans (render_plan.visual_segments), so reactive
+                    # layers enter/exit and switch personal color at the same mix
+                    # handover as Canvas; a plain end still stops at the audio end.
+                    clips = compiled_plan.audio.clips
                     track_windows = [
-                        (clip.timeline_start, clip.duration)
-                        for clip in compiled_plan.audio.clips
+                        (segment.start,
+                         min(segment.end, clips[segment.window_index].timeline_end) - segment.start,
+                         segment.mix_in_seconds, segment.mix_out_seconds)
+                        for segment in visual_segments(compiled_plan)
                     ]
                     visualizer_paths = PythonVisualizerRenderer(self.executable).render_layers(
                         audio_path, visualizers, selected_settings.fps, temporary, cancel_event,

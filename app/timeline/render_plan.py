@@ -237,8 +237,10 @@ class VisualSegment:
     """The span one track owns the Canvas, as drawn (see ``visual_segments``).
 
     ``mixed_in``/``mixed_out``: this track takes/hands over the Canvas in the
-    middle of a crossfade/AutoMix overlap, where elements play their "mix"
-    entrance/exit instead of the ones at a plain track start/end.
+    middle of a crossfade/AutoMix overlap, where elements time their
+    entrance/exit from the handover itself. ``mix_in_seconds``/``mix_out_seconds``:
+    the part of that overlap after/before the handover (what a "fit to the mix"
+    entrance/exit lasts).
     """
 
     window_index: int
@@ -247,6 +249,8 @@ class VisualSegment:
     end: float
     mixed_in: bool = False
     mixed_out: bool = False
+    mix_in_seconds: float = 0.0
+    mix_out_seconds: float = 0.0
 
 
 def visual_segments(plan: CompiledRenderPlan) -> tuple[VisualSegment, ...]:
@@ -262,7 +266,8 @@ def visual_segments(plan: CompiledRenderPlan) -> tuple[VisualSegment, ...]:
         (transition.clip_a, transition.clip_b): transition
         for transition in plan.audio.transitions if transition.duration > 0.0
     }
-    handovers: list[tuple[float, bool]] = []
+    # (handover, mixed, overlap seconds before it, overlap seconds after it)
+    handovers: list[tuple[float, bool, float, float]] = []
     for index in range(len(windows) - 1):
         outgoing, incoming = windows[index], windows[index + 1]
         transition = (
@@ -272,15 +277,20 @@ def visual_segments(plan: CompiledRenderPlan) -> tuple[VisualSegment, ...]:
         overlap_end = min(outgoing.timeline_end, incoming.timeline_start + (
             transition.duration if transition is not None else 0.0))
         if transition is None or overlap_end <= incoming.timeline_start:
-            handovers.append((incoming.timeline_start, False))
+            handovers.append((incoming.timeline_start, False, 0.0, 0.0))
             continue
         middle = transition.timeline_start + transition.duration / 2
-        handovers.append((min(max(middle, incoming.timeline_start), overlap_end), True))
+        handover = min(max(middle, incoming.timeline_start), overlap_end)
+        handovers.append((handover, True, handover - incoming.timeline_start, overlap_end - handover))
     segments = []
     for index, window in enumerate(windows):
-        start, mixed_in = (handovers[index - 1] if index else (window.timeline_start, False))
-        end, mixed_out = (handovers[index] if index < len(handovers) else (plan.duration_seconds, False))
-        segments.append(VisualSegment(index, window.track_id, start, end, mixed_in, mixed_out))
+        start, mixed_in, _before, mix_in = (
+            handovers[index - 1] if index else (window.timeline_start, False, 0.0, 0.0))
+        end, mixed_out, mix_out, _after = (
+            handovers[index] if index < len(handovers) else (plan.duration_seconds, False, 0.0, 0.0))
+        segments.append(VisualSegment(
+            index, window.track_id, start, end, mixed_in, mixed_out, mix_in, mix_out,
+        ))
     return tuple(segments)
 
 

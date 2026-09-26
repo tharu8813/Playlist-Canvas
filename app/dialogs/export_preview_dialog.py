@@ -63,7 +63,7 @@ from app.timeline.render_plan import (
     AudioRenderTransition, CompiledRenderPlan, visual_segment_at, visual_segments,
 )
 from app.preview.frame_state import (
-    MixJunction, resolve_mix_phase, segment_junction, source_animation_styles,
+    MixJunction, resolve_mix_phase, segment_junction,
 )
 from app.preview.album_art import extract_track_cover
 from app.video.timeline import resolve_video_position, source_video_paths
@@ -1769,7 +1769,7 @@ class ExportPreviewDialog(QDialog):
                     or source.timeline_duration > 0.0
                     or any(token in source.text.lower() for token in time_tokens)):
                 always_dynamic_ids.add(source.id)
-            if source_animation_styles(source) != {"none"}:
+            if source.animation_in != "none" or source.animation_out != "none":
                 animated_source_ids.add(source.id)
         self._cached_audio_dynamic_ids = frozenset(audio_dynamic_ids)
         self._cached_always_dynamic_ids = frozenset(always_dynamic_ids)
@@ -2724,7 +2724,10 @@ class ExportPreviewDialog(QDialog):
 
     def _trim_overlay_frame_cache(self, active_track_id: str) -> None:
         """Bound cached QImages so a long playlist never accumulates frame memory."""
-        selected = self._track_at(self.timeline.value() / TIMELINE_SCALE)
+        # The drawn track, not the audible one: across a mix overlap they differ,
+        # and trimming around the other track's time discarded every frame just
+        # stored, freezing visualizers/meters until the handover.
+        selected, _junction = self._visual_track_at(self.timeline.value() / TIMELINE_SCALE)
         current_frame = round(selected[2] * self.preview_fps) if selected else 0
         minimum = max(0, current_frame - 3)
         maximum = current_frame + self._overlay_prefetch_count * 3

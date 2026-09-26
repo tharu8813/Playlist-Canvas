@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -14,6 +15,7 @@ from app.inspector.source_inspector import SourceInspector  # noqa: E402
 from app.models.source import Source, SourceType  # noqa: E402
 from app.preview.frame_state import MixJunction, resolve_edge_animation  # noqa: E402
 from app.renderer.export_timeline import ExportTimelinePlanner  # noqa: E402
+from app.renderer.python_visualizer import PythonVisualizerRenderer  # noqa: E402
 from app.services.source_store import SourceStore  # noqa: E402
 from app.timeline.models import TransitionType  # noqa: E402
 from app.timeline.render_plan import (  # noqa: E402
@@ -34,9 +36,10 @@ def _crossfaded_plan() -> CompiledRenderPlan:
 
 def _fading_text() -> Source:
     source = Source(SourceType.TEXT, "Title")
-    source.mix_animation_in = "fade"
-    source.mix_animation_out = "fade"
-    source.mix_animation_duration = 1.0
+    source.animation_in = "fade"
+    source.animation_out = "fade"
+    source.animation_in_duration = 1.0
+    source.animation_out_duration = 1.0
     return source
 
 
@@ -52,28 +55,68 @@ class MixVisualTransitionTests(unittest.TestCase):
         self.assertAlmostEqual(second.start, 56.0)
         self.assertTrue(first.mixed_out and second.mixed_in)
         self.assertFalse(first.mixed_in or second.mixed_out)
+        self.assertAlmostEqual(first.mix_out_seconds, 4.0)
+        self.assertAlmostEqual(second.mix_in_seconds, 4.0)
         # Chapters keep the audible start.
         self.assertAlmostEqual(plan.metadata.chapters[1].start, 52.0)
 
-    def test_mix_animation_uses_its_own_style_and_the_handover_clock(self) -> None:
+    def test_track_animation_runs_from_the_handover_clock(self) -> None:
         source = _fading_text()
         source.animation_in = "slide_up"
         kwargs = dict(elapsed_seconds=4.0, track_duration=60.0, phase_duration=0.45)
         self.assertEqual(
             resolve_edge_animation(source, "in", junction=MixJunction(0.25, None), **kwargs),
-            ("in", "fade", 0.25),
+            ("in", "slide_up", 0.25),
         )
         self.assertEqual(
             resolve_edge_animation(source, None, junction=MixJunction(None, 0.25), **kwargs),
             ("out", "fade", 0.75),
         )
-        # After the mix entrance, the plain track-start animation never plays there.
+        # After the entrance, the plain track-start phase never replays there.
         self.assertIsNone(resolve_edge_animation(source, "in", junction=MixJunction(2.0, None), **kwargs))
-        source.mix_animation_in = "same"
-        self.assertEqual(
-            resolve_edge_animation(source, None, junction=MixJunction(0.0, None), **kwargs)[:2],
-            ("in", "slide_up"),
+
+    def test_fit_to_mix_stretches_over_each_half_of_the_overlap(self) -> None:
+        source = _fading_text()
+        junction = MixJunction(2.0, 1.0, mix_in_seconds=4.0, mix_out_seconds=8.0)
+        kwargs = dict(elapsed_seconds=0.0, track_duration=60.0)
+        self.assertIsNone(resolve_edge_animation(source, None, junction=junction, **kwargs))
+        source.animation_fit_mix = True
+        self.assertEqual(resolve_edge_animation(source, None, junction=junction, **kwargs),
+                         ("in", "fade", 0.5))
+        exit_only = MixJunction(None, 2.0, mix_out_seconds=8.0)
+        self.assertEqual(resolve_edge_animation(source, None, junction=exit_only, **kwargs),
+                         ("out", "fade", 0.75))
+
+    def test_visualizer_layers_follow_the_handover_and_fit(self) -> None:
+        overlay = SimpleNamespace(animation_in="fade", animation_out="fade",
+                                  animation_in_duration=1.0, animation_out_duration=1.0,
+                                  animation_fit_mix=True)
+        windows = [(0.0, 56.0, 0.0, 4.0), (56.0, 56.0, 4.0, 0.0)]
+        self.assertEqual(PythonVisualizerRenderer._animation_state(54.0, windows, overlay),
+                         ("fade", 0.5, False))
+        self.assertEqual(PythonVisualizerRenderer._animation_state(57.0, windows, overlay),
+                         ("fade", 0.25, True))
+        self.assertEqual(PythonVisualizerRenderer._track_index_at(55.9, windows), 0)
+        self.assertEqual(PythonVisualizerRenderer._track_index_at(56.1, windows), 1)
+
+    def test_legacy_mix_style_keys_still_load(self) -> None:
+        data = _fading_text().to_dict()
+        data.update(mix_animation_in="zoom", mix_animation_out="same", mix_animation_duration=0.8)
+        self.assertFalse(Source.from_dict(data).animation_fit_mix)
+
+    def test_preview_keeps_visualizer_frames_of_the_drawn_track(self) -> None:
+        plan = _crossfaded_plan()
+        tracks = [_track("a", 60), _track("b", 60)]
+        fps = 30
+        preview = SimpleNamespace(
+            tracks=tracks, _compiled_plan=plan, preview_fps=fps, _overlay_prefetch_count=6,
+            timeline=SimpleNamespace(value=lambda: round(54.0 * 1000)),
+            _overlay_frame_cache={("a", (0,), 54 * fps): (), ("b", (0,), 2 * fps): ()},
         )
+        preview._visual_track_at = lambda seconds: ExportPreviewDialog._visual_track_at(preview, seconds)
+        with patch("app.dialogs.export_preview_dialog.TIMELINE_SCALE", 1000):
+            ExportPreviewDialog._trim_overlay_frame_cache(preview, "a")
+        self.assertIn(("a", (0,), 54 * fps), preview._overlay_frame_cache)
 
     def test_export_and_preview_share_the_handover(self) -> None:
         plan = _crossfaded_plan()
@@ -110,12 +153,13 @@ class MixVisualTransitionTests(unittest.TestCase):
         inspector = SourceInspector(store, Translator())
         try:
             inspector.set_source(source)
-            self.assertFalse(inspector._field_visibility.get("mix_animation_in", False))
+            self.assertFalse(inspector._field_visibility.get("animation_fit_mix", False))
             inspector.set_mix_transitions_active(True)
-            self.assertTrue(inspector._field_visibility["mix_animation_in"])
-            self.assertTrue(inspector._field_visibility["mix_animation_duration"])
+            self.assertTrue(inspector._field_visibility["animation_fit_mix"])
+            inspector.animation_fit_mix_check.setChecked(True)
+            self.assertTrue(source.animation_fit_mix)
             inspector.set_mix_transitions_active(False)
-            self.assertFalse(inspector._field_visibility["mix_animation_out"])
+            self.assertFalse(inspector._field_visibility["animation_fit_mix"])
         finally:
             inspector.close()
             inspector.deleteLater()

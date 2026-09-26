@@ -200,7 +200,6 @@ class ExportTimelinePlanner:
         """
         track_by_id = {track.id: track for track in tracks}
         windows = plan.presentation.windows
-        mix_intro, mix_outro = mix_phase_durations(sources)
         result: list[ExportFrameSample] = []
         cursor = 0.0
         for segment in visual_segments(plan):
@@ -229,6 +228,9 @@ class ExportTimelinePlanner:
                 return source_in + (point - window_start) * rate
 
             # Timeline ranges sampled densely instead of by the source-time schedule.
+            mix_intro, mix_outro = mix_phase_durations(
+                sources, segment_junction(segment, segment.start),
+            )
             dense: list[tuple[float, float]] = []
             if segment.mixed_in:
                 dense.append((start, start + mix_intro))

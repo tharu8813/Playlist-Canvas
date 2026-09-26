@@ -45,7 +45,7 @@ class PythonVisualizerRenderer:
         directory: Path,
         cancel_event: threading.Event,
         progress_callback: Callable[[float, str], None] | None = None,
-        track_windows: Sequence[tuple[float, float]] = (),
+        track_windows: Sequence[tuple[float, ...]] = (),
     ) -> list[Path]:
         """Create one alpha-preserving video layer for every configured source."""
         if not overlays:
@@ -381,7 +381,7 @@ class PythonVisualizerRenderer:
         cancel_event: threading.Event,
         progress_callback: Callable[[float, int, int], None] | None,
         stereo_levels: tuple[np.ndarray, np.ndarray] | None = None,
-        track_windows: Sequence[tuple[float, float]] = (),
+        track_windows: Sequence[tuple[float, ...]] = (),
     ) -> None:
         """Stream local RGBA frames into an alpha-capable MOV file."""
         width = max(8, int(getattr(overlay, "width")))
@@ -513,17 +513,27 @@ class PythonVisualizerRenderer:
     @staticmethod
     def _animation_state(
         seconds: float,
-        track_windows: Sequence[tuple[float, float]],
+        track_windows: Sequence[tuple[float, ...]],
         overlay: object,
     ) -> tuple[str, float, bool] | None:
-        """Resolve one reactive source's per-track entrance or exit state."""
+        """Resolve one reactive source's per-track entrance or exit state.
+
+        A window may carry ``(start, duration, mix_in, mix_out)``: the audio mix
+        after its start / before its end, which ``animation_fit_mix`` animations
+        last instead of their own durations (see frame_state.mix_animation).
+        """
         if not track_windows:
             return None
         animation_in = str(getattr(overlay, "animation_in", "none"))
         animation_out = str(getattr(overlay, "animation_out", "none"))
-        in_duration = max(0.001, float(getattr(overlay, "animation_in_duration", 0.45)))
-        out_duration = max(0.001, float(getattr(overlay, "animation_out_duration", 0.45)))
-        for index, (start, duration) in enumerate(track_windows):
+        configured_in = max(0.001, float(getattr(overlay, "animation_in_duration", 0.45)))
+        configured_out = max(0.001, float(getattr(overlay, "animation_out_duration", 0.45)))
+        fit_mix = bool(getattr(overlay, "animation_fit_mix", False))
+        for index, window in enumerate(track_windows):
+            start, duration = window[0], window[1]
+            mix_in, mix_out = (window[2], window[3]) if len(window) > 3 else (0.0, 0.0)
+            in_duration = mix_in if fit_mix and mix_in > 0.0 else configured_in
+            out_duration = mix_out if fit_mix and mix_out > 0.0 else configured_out
             end = start + duration
             if seconds < start:
                 if index == 0 and animation_in != "none":
@@ -543,10 +553,10 @@ class PythonVisualizerRenderer:
 
     @staticmethod
     def _track_index_at(
-        seconds: float, track_windows: Sequence[tuple[float, float]],
+        seconds: float, track_windows: Sequence[tuple[float, ...]],
     ) -> int:
         """Return the active track index, or -1 while the timeline is in a gap."""
-        for index, (start, duration) in enumerate(track_windows):
+        for index, (start, duration, *_mix) in enumerate(track_windows):
             if start <= seconds < start + duration:
                 return index
         return -1

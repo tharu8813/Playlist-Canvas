@@ -217,11 +217,9 @@ class Source:
     animation_in_duration: float = 0.45
     animation_out_duration: float = 0.45
     # Crossfade/AutoMix: the Canvas changes track in the middle of each audio
-    # overlap. These play there instead of animation_in/out ("same": reuse
-    # those, with their own durations; see preview.frame_state.mix_animation).
-    mix_animation_in: str = "same"
-    mix_animation_out: str = "same"
-    mix_animation_duration: float = 0.8
+    # overlap, where animation_in/out play. True stretches them over the mix:
+    # the exit over the overlap's first half, the entrance over its second.
+    animation_fit_mix: bool = False
     timeline_start: float = 0.0
     timeline_duration: float = 0.0
     id: str = field(default_factory=lambda: str(uuid4()))
@@ -284,6 +282,10 @@ class Source:
         legacy_animation_duration = source_data.get("animation_duration", 0.45)
         source_data.setdefault("animation_in_duration", legacy_animation_duration)
         source_data.setdefault("animation_out_duration", legacy_animation_duration)
+        # A short-lived build had separate mix-handover styles; they now reuse
+        # animation_in/out, so drop them instead of failing to load.
+        for legacy_key in ("mix_animation_in", "mix_animation_out", "mix_animation_duration"):
+            source_data.pop(legacy_key, None)
         source_data["shadow"] = Shadow(**source_data.get("shadow", {}))
         source_data["gradient"] = Gradient(**source_data.get("gradient", {}))
         source = cls(**source_data)
