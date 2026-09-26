@@ -15,11 +15,13 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QGuiApplication, QMouseEvent, QPainter, QPainterPath, QPen,
+    QBrush, QColor, QFont, QGuiApplication, QKeySequence, QMouseEvent, QPainter, QPainterPath,
+    QPen, QShortcut,
 )
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget,
-    QPushButton, QScrollArea, QSplitter, QToolTip, QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QMenu,
+    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSplitter, QStyle, QStyledItemDelegate,
+    QStyleOptionSlider, QStyleOptionViewItem, QToolButton, QToolTip, QVBoxLayout, QWidget,
 )
 
 from app.automix.diagnostics import rows_to_json
@@ -533,11 +535,87 @@ class TransitionDiagram(QWidget):
 
 # -- window -------------------------------------------------------------------------
 
+class _TransitionItemDelegate(QStyledItemDelegate):
+    """Transition list rows as small cards: number and time, how it mixes, which songs.
+
+    The item's text stays the plain one-line description (accessibility, search);
+    ``ROLE`` holds ``{"title", "style", "songs", "playing"}`` for drawing.
+    """
+
+    ROLE = Qt.ItemDataRole.UserRole
+
+    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
+        return QSize(max(0, option.rect.width()), 70)
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
+        data = index.data(self.ROLE) or {}
+        palette = option.palette
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        card = QRectF(option.rect).adjusted(2, 3, -4, -3)
+        highlight = palette.highlight().color()
+        fill = QColor(highlight) if selected else QColor(palette.base().color())
+        if selected:
+            fill.setAlpha(46)
+        elif hovered:
+            fill = QColor(palette.alternateBase().color())
+        painter.setBrush(fill)
+        painter.setPen(QPen(highlight if selected else palette.mid().color(), 1.6 if selected else 1.0))
+        painter.drawRoundedRect(card, 7, 7)
+        if selected:
+            painter.fillRect(QRectF(card.left() + 1, card.top() + 8, 3, card.height() - 16), highlight)
+        text, muted = palette.text().color(), palette.placeholderText().color()
+        left, width = card.left() + 12, card.width() - 24
+        bold = QFont(option.font)
+        bold.setBold(True)
+        painter.setFont(bold)
+        painter.setPen(text)
+        painter.drawText(QRectF(left, card.top() + 6, width, 20), Qt.AlignmentFlag.AlignVCenter,
+                         str(data.get("title", "")))
+        if data.get("playing"):
+            painter.setPen(PLAYHEAD_COLOR)
+            painter.drawText(QRectF(left, card.top() + 6, width, 20),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, str(data["playing"]))
+        painter.setFont(option.font)
+        painter.setPen(text)
+        metrics = painter.fontMetrics()
+        painter.drawText(QRectF(left, card.top() + 26, width, 18), Qt.AlignmentFlag.AlignVCenter,
+                         metrics.elidedText(str(data.get("style", "")), Qt.TextElideMode.ElideRight, int(width)))
+        small = QFont(option.font)
+        small.setPointSizeF(max(7.0, small.pointSizeF() - 1.0))
+        painter.setFont(small)
+        painter.setPen(muted)
+        painter.drawText(QRectF(left, card.top() + 44, width, 18), Qt.AlignmentFlag.AlignVCenter,
+                         painter.fontMetrics().elidedText(str(data.get("songs", "")),
+                                                          Qt.TextElideMode.ElideMiddle, int(width)))
+        painter.restore()
+
+
+class _SeekSlider(QSlider):
+    """A playback bar: clicking the groove jumps there instead of paging toward it."""
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            option = QStyleOptionSlider()
+            self.initStyleOption(option)
+            handle = self.style().subControlRect(
+                QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderHandle, self)
+            if not handle.contains(event.position().toPoint()):
+                self.setValue(QStyle.sliderValueFromPosition(
+                    self.minimum(), self.maximum(), round(event.position().x() - handle.width() / 2),
+                    max(1, self.width() - handle.width())))
+        super().mousePressEvent(event)
+
+
 class TransitionInspectorWindow(QDialog):
     """A larger, drawn view of AutoMixDetailsPanel's transitions, kept in sync with it."""
 
     seek_requested = Signal(float)
     play_requested = Signal(float)
+    playing_toggled = Signal(bool)
+    volume_changed = Signal(int)
 
     def __init__(self, panel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -552,51 +630,90 @@ class TransitionInspectorWindow(QDialog):
         self._rows = None
         self._language: bool | None = None
 
+        # Header: what this is and how far the mix is -- nothing else competes here.
         self.title_label = QLabel()
         self.title_label.setObjectName("dialogTitle")
         self.status_label = QLabel()
         self.status_label.setObjectName("previewStatusChip")
-        self.follow_check = QCheckBox()
-        self.follow_check.setChecked(True)
-        self.copy_text_button = QPushButton()
-        self.copy_json_button = QPushButton()
-        self.copy_text_button.clicked.connect(lambda: QGuiApplication.clipboard().setText(panel.as_text()))
-        self.copy_json_button.clicked.connect(lambda: QGuiApplication.clipboard().setText(rows_to_json(panel.rows)))
+        self.export_button = QToolButton()
+        self.export_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        export_menu = QMenu(self.export_button)
+        self.copy_text_action = export_menu.addAction("")
+        self.copy_json_action = export_menu.addAction("")
+        self.copy_text_action.triggered.connect(lambda: QGuiApplication.clipboard().setText(panel.as_text()))
+        self.copy_json_action.triggered.connect(
+            lambda: QGuiApplication.clipboard().setText(rows_to_json(panel.rows)))
+        self.export_button.setMenu(export_menu)
         header = QHBoxLayout()
+        header.setSpacing(10)
         header.addWidget(self.title_label)
         header.addWidget(self.status_label)
         header.addStretch(1)
-        header.addWidget(self.follow_check)
-        header.addWidget(self.copy_text_button)
-        header.addWidget(self.copy_json_button)
+        header.addWidget(self.export_button)
 
-        self.overview_label = QLabel()
-        self.overview_label.setObjectName("mutedLabel")
+        self.overview_title = QLabel()
+        self.overview_title.setObjectName("panelTitle")
+        self.overview_hint = QLabel()
+        self.overview_hint.setObjectName("mutedLabel")
         self.overview = MixOverviewStrip()
         self.overview.selected.connect(self._user_select)
         self.overview.seek_requested.connect(self.seek_requested)
+        overview_header = QHBoxLayout()
+        overview_header.addWidget(self.overview_title)
+        overview_header.addStretch(1)
+        overview_header.addWidget(self.overview_hint)
 
+        # Left: the transitions as small cards, with "follow playback" beside them.
+        self.list_title = QLabel()
+        self.list_title.setObjectName("panelTitle")
+        self.follow_check = QCheckBox()
+        self.follow_check.setChecked(True)
         self.list = QListWidget()
         self.list.setObjectName("automixTransitionList")
-        self.list.setMinimumWidth(230)
-        self.list.setWordWrap(True)
-        self.list.setSpacing(3)
+        self.list.setItemDelegate(_TransitionItemDelegate(self.list))
+        self.list.setMouseTracking(True)
+        self.list.setFrameShape(QFrame.Shape.NoFrame)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.currentRowChanged.connect(self._on_row_changed)
-        self.list.itemDoubleClicked.connect(lambda _item: self._seek_to_selected(play=False))
+        self.list.itemDoubleClicked.connect(lambda _item: self._seek_to_selected(play=True))
+        self._sounding = -1
+        list_header = QHBoxLayout()
+        list_header.addWidget(self.list_title)
+        list_header.addStretch(1)
+        list_header.addWidget(self.follow_check)
+        list_pane = QWidget()
+        list_pane.setMinimumWidth(240)
+        list_layout = QVBoxLayout(list_pane)
+        list_layout.setContentsMargins(0, 0, 6, 0)
+        list_layout.setSpacing(6)
+        list_layout.addLayout(list_header)
+        list_layout.addWidget(self.list, 1)
 
+        # Right: what happens (plain words, key facts), then how (graph), then numbers.
         self.heading_label = QLabel()
         heading_font = QFont(self.heading_label.font())
-        heading_font.setPointSizeF(heading_font.pointSizeF() + 3)
+        heading_font.setPointSizeF(heading_font.pointSizeF() + 4)
         heading_font.setBold(True)
         self.heading_label.setFont(heading_font)
         self.heading_label.setWordWrap(True)
-        self.subheading_label = QLabel()
-        self.subheading_label.setObjectName("mutedLabel")
-        self.subheading_label.setWordWrap(True)
         self.description_label = QLabel()
-        self.description_label.setObjectName("infoCallout")
         self.description_label.setWordWrap(True)
+        self.description_label.setTextFormat(Qt.TextFormat.RichText)
+        self.fact_labels = [QLabel() for _ in range(4)]
+        for label in self.fact_labels:
+            label.setObjectName("previewStatusChip")
+        self.listen_button = QPushButton()
+        self.listen_button.setObjectName("primaryButton")
+        self.listen_button.clicked.connect(lambda: self._seek_to_selected(play=True))
+        self.jump_button = QPushButton()
+        self.jump_button.clicked.connect(lambda: self._seek_to_selected(play=False))
+        facts = QHBoxLayout()
+        facts.setSpacing(6)
+        for label in self.fact_labels:
+            facts.addWidget(label)
+        facts.addStretch(1)
+        facts.addWidget(self.jump_button)
+        facts.addWidget(self.listen_button)
         self.diagram = TransitionDiagram()
         self.diagram.seek_requested.connect(self.seek_requested)
         self.legend_label = QLabel()
@@ -608,41 +725,45 @@ class TransitionInspectorWindow(QDialog):
         self.metrics_grid = QGridLayout()
         self.metrics_grid.setHorizontalSpacing(10)
         self.metrics_grid.setVerticalSpacing(10)
+        # Planner internals stay folded away until asked for.
+        self.details_button = QToolButton()
+        self.details_button.setCheckable(True)
+        self.details_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.details_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.details_button.toggled.connect(self._set_details_visible)
         self.reasons_title = QLabel()
         self.reasons_title.setObjectName("panelTitle")
         self.reasons_label = QLabel()
         self.reasons_label.setWordWrap(True)
         self.reasons_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.play_button = QPushButton()
-        self.play_button.setObjectName("primaryButton")
-        self.play_button.clicked.connect(lambda: self._seek_to_selected(play=True))
-        self.jump_button = QPushButton()
-        self.jump_button.clicked.connect(lambda: self._seek_to_selected(play=False))
-        self.previous_button = QPushButton("◀")
-        self.next_button = QPushButton("▶")
-        self.previous_button.clicked.connect(lambda: self._user_select(self._selected - 1))
-        self.next_button.clicked.connect(lambda: self._user_select(self._selected + 1))
-        actions = QHBoxLayout()
-        actions.addWidget(self.previous_button)
-        actions.addWidget(self.next_button)
-        actions.addStretch(1)
-        actions.addWidget(self.jump_button)
-        actions.addWidget(self.play_button)
+        self.all_values_title = QLabel()
+        self.all_values_title.setObjectName("panelTitle")
+        self.all_values = QPlainTextEdit()
+        self.all_values.setReadOnly(True)
+        self.all_values.setMinimumHeight(220)
+        self.details_box = QWidget()
+        details_layout = QVBoxLayout(self.details_box)
+        details_layout.setContentsMargins(18, 0, 0, 0)
+        details_layout.setSpacing(6)
+        for widget in (self.reasons_title, self.reasons_label, self.all_values_title, self.all_values):
+            details_layout.addWidget(widget)
+        self.details_box.hide()
 
         detail = QWidget()
         detail_layout = QVBoxLayout(detail)
-        detail_layout.setContentsMargins(4, 0, 8, 8)
+        detail_layout.setContentsMargins(10, 0, 8, 8)
         detail_layout.setSpacing(10)
         detail_layout.addWidget(self.heading_label)
-        detail_layout.addWidget(self.subheading_label)
-        detail_layout.addLayout(actions)
+        detail_layout.addWidget(self.description_label)
+        detail_layout.addLayout(facts)
         detail_layout.addWidget(self.diagram)
         detail_layout.addWidget(self.legend_label)
-        detail_layout.addWidget(self.description_label)
+        detail_layout.addSpacing(4)
         detail_layout.addWidget(self.metrics_title)
         detail_layout.addLayout(self.metrics_grid)
-        detail_layout.addWidget(self.reasons_title)
-        detail_layout.addWidget(self.reasons_label)
+        detail_layout.addSpacing(4)
+        detail_layout.addWidget(self.details_button)
+        detail_layout.addWidget(self.details_box)
         detail_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -650,22 +771,154 @@ class TransitionInspectorWindow(QDialog):
         scroll.setWidget(detail)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self.list)
+        splitter.addWidget(list_pane)
         splitter.addWidget(scroll)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([260, 860])
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([270, 850])
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(8)
         layout.addLayout(header)
-        layout.addWidget(self.overview_label)
+        layout.addSpacing(4)
+        layout.addLayout(overview_header)
         layout.addWidget(self.overview)
+        layout.addSpacing(6)
         layout.addWidget(splitter, 1)
+        layout.addWidget(self._build_transport())
 
         panel.changed.connect(self.refresh)
         panel.playhead_changed.connect(self.set_playhead)
+        self._install_shortcuts()
         self.refresh()
+
+    # -- transport ------------------------------------------------------------------
+
+    def _build_transport(self) -> QFrame:
+        """Media controls mirroring Preview's: they drive the same playback."""
+        self._playing = False
+        self._playhead = 0.0
+        self._syncing = False
+        bar = QFrame()
+        bar.setObjectName("previewControlCard")
+        self.transport_play_button = QPushButton()
+        self.transport_play_button.setObjectName("previewPlayButton")
+        self.transport_play_button.setCheckable(True)
+        self.transport_play_button.setMinimumWidth(110)
+        self.transport_play_button.toggled.connect(self._on_play_toggled)
+        self.previous_button = QPushButton()
+        self.rewind_button = QPushButton("−5s")
+        self.forward_button = QPushButton("+5s")
+        self.next_button = QPushButton()
+        for button in (self.previous_button, self.rewind_button, self.forward_button, self.next_button):
+            button.setObjectName("previewTransportButton")
+        self.previous_button.clicked.connect(lambda: self._user_select(self._selected - 1, seek=True))
+        self.next_button.clicked.connect(lambda: self._user_select(self._selected + 1, seek=True))
+        self.rewind_button.clicked.connect(lambda: self._seek_relative(-5.0))
+        self.forward_button.clicked.connect(lambda: self._seek_relative(5.0))
+        self.position_slider = _SeekSlider(Qt.Orientation.Horizontal)
+        self.position_slider.setObjectName("previewTimeline")
+        self.position_slider.valueChanged.connect(self._on_position_changed)
+        self.time_label = QLabel("0:00.0 / 0:00")
+        self.time_label.setObjectName("previewTimeLabel")
+        self.time_label.setMinimumWidth(118)
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.loop_check = QCheckBox()
+        self.volume_label = QLabel("🔊")
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setFixedWidth(110)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        self.volume_value_label = QLabel("100%")
+        self.volume_value_label.setObjectName("previewValueLabel")
+        self.volume_value_label.setMinimumWidth(38)
+
+        seek_row = QHBoxLayout()
+        seek_row.addWidget(self.position_slider, 1)
+        seek_row.addWidget(self.time_label)
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+        controls.addWidget(self.previous_button)
+        controls.addWidget(self.rewind_button)
+        controls.addWidget(self.transport_play_button)
+        controls.addWidget(self.forward_button)
+        controls.addWidget(self.next_button)
+        controls.addSpacing(12)
+        controls.addWidget(self.loop_check)
+        controls.addStretch(1)
+        controls.addWidget(self.volume_label)
+        controls.addWidget(self.volume_slider)
+        controls.addWidget(self.volume_value_label)
+        layout = QVBoxLayout(bar)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(6)
+        layout.addLayout(seek_row)
+        layout.addLayout(controls)
+        return bar
+
+    def _install_shortcuts(self) -> None:
+        for sequence, callback in (
+            ("Space", self.transport_play_button.toggle),
+            ("Left", lambda: self._seek_relative(-5.0)),
+            ("Right", lambda: self._seek_relative(5.0)),
+            ("Shift+Left", self.previous_button.click),
+            ("Shift+Right", self.next_button.click),
+            ("L", self.loop_check.toggle),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(callback)
+
+    def set_playing(self, playing: bool) -> None:
+        """Preview's play state (its own button, a shortcut or this window)."""
+        self._playing = bool(playing)
+        self.transport_play_button.blockSignals(True)
+        self.transport_play_button.setChecked(self._playing)
+        self.transport_play_button.blockSignals(False)
+        self._set_play_text()
+
+    def set_volume(self, value: int) -> None:
+        self.volume_slider.blockSignals(True)
+        self.volume_slider.setValue(int(value))
+        self.volume_slider.blockSignals(False)
+        self.volume_value_label.setText(f"{int(value)}%")
+
+    def _on_play_toggled(self, playing: bool) -> None:
+        self._playing = playing
+        self._set_play_text()
+        self.playing_toggled.emit(playing)
+
+    def _on_volume_changed(self, value: int) -> None:
+        self.volume_value_label.setText(f"{value}%")
+        self.volume_changed.emit(value)
+
+    def _on_position_changed(self, value: int) -> None:
+        if not self._syncing:
+            self.seek_requested.emit(value / 1000.0)
+
+    def _seek_relative(self, seconds: float) -> None:
+        duration = self._plan.duration_seconds if self._plan is not None else 0.0
+        self.seek_requested.emit(min(max(0.0, self._playhead + seconds), duration))
+
+    def _loop_range(self, junction: Junction) -> tuple[float, float]:
+        """The selected transition with a run-up before it and a little after."""
+        return max(0.0, junction.start - 4.0), max(junction.end, junction.start) + 2.0
+
+    def _set_play_text(self) -> None:
+        korean = self._korean()
+        self.transport_play_button.setText(
+            ("Ⅱ  일시정지" if korean else "Ⅱ  Pause") if self._playing
+            else ("▶  재생" if korean else "▶  Play")
+        )
+
+    def _update_position(self, seconds: float) -> None:
+        duration = self._plan.duration_seconds if self._plan is not None else 0.0
+        if not self.position_slider.isSliderDown():
+            self._syncing = True
+            self.position_slider.setValue(round(seconds * 1000))
+            self._syncing = False
+        self.time_label.setText(f"{_clock(seconds, precise=True)} / {_clock(duration)}")
 
     # -- sync with the panel ----------------------------------------------------------
 
@@ -685,6 +938,10 @@ class TransitionInspectorWindow(QDialog):
             self.junctions = plan_junctions(plan) if plan is not None else []
             self.overview.plan = plan
             self.overview.junctions = self.junctions
+            self._syncing = True
+            self.position_slider.setRange(0, max(1, round((plan.duration_seconds if plan else 0.0) * 1000)))
+            self._syncing = False
+            self._update_position(self._playhead)
         rows = self.panel.rows
         self._retranslate(korean)
         if rows is self._rows and korean == self._language:
@@ -694,15 +951,33 @@ class TransitionInspectorWindow(QDialog):
         self.list.blockSignals(True)
         self.list.clear()
         self.list.addItems([self._list_text(row) for row in rows])
+        for index, row in enumerate(rows):
+            self._set_card(index, row)
         self.list.blockSignals(False)
+        self.list_title.setText(f"{'전환' if korean else 'Transitions'} {len(rows)}")
         if rows:
             self._select(min(max(selected, 0), len(rows) - 1), force=True)
         else:
             self._select(-1, force=True)
 
     def set_playhead(self, seconds: float) -> None:
+        self._playhead = seconds
         self.overview.playhead = seconds
         self.diagram.playhead = seconds
+        self._update_position(seconds)
+        junction = self.junction
+        if self.loop_check.isChecked() and self._playing and junction is not None:
+            loop_start, loop_end = self._loop_range(junction)
+            if seconds >= loop_end:
+                self.seek_requested.emit(loop_start)
+                return
+        sounding = self.panel.current_index
+        if sounding != self._sounding:
+            previous, self._sounding = self._sounding, sounding
+            rows = self.panel.rows
+            for index in (previous, sounding):
+                if 0 <= index < len(rows) and index < self.list.count():
+                    self._set_card(index, rows[index])
         if self.follow_check.isChecked() and self.junctions:
             # The transition playing now, else the next one coming up.
             upcoming = next((index for index, junction in enumerate(self.junctions)
@@ -725,10 +1000,32 @@ class TransitionInspectorWindow(QDialog):
         if row != self._selected:
             self._user_select(row)
 
-    def _user_select(self, index: int) -> None:
-        """A choice made by hand: stop following the playhead so it is not undone next frame."""
+    def _user_select(self, index: int, *, seek: bool = False) -> None:
+        """A choice made by hand: stop following the playhead so it is not undone next frame.
+
+        ``seek``: the transport's previous/next buttons also move playback to the
+        run-up of that transition, like a media player's track skip.
+        """
         self.follow_check.setChecked(False)
         self._select(index)
+        if seek and self.junction is not None:
+            self.seek_requested.emit(self._loop_range(self.junction)[0])
+
+    def _set_details_visible(self, visible: bool) -> None:
+        self.details_box.setVisible(visible)
+        self.details_button.setArrowType(Qt.ArrowType.DownArrow if visible else Qt.ArrowType.RightArrow)
+
+    def _set_card(self, index: int, row: dict[str, object]) -> None:
+        """The drawn card of one list row (see _TransitionItemDelegate)."""
+        korean = self._korean()
+        duration = float(row["duration"])
+        length = f"{duration:.1f}s" if duration else ("겹침 없음" if korean else "no overlap")
+        self.list.item(index).setData(_TransitionItemDelegate.ROLE, {
+            "title": f"{int(row['index']):02d} → {int(row['index']) + 1:02d}    {_clock(float(row['timeline_start']))}",
+            "style": f"{self.panel._style(row)} · {length}",
+            "songs": f"{row['from']} → {row['to']}",
+            "playing": ("● 재생 중" if korean else "● Playing") if index == self._sounding else "",
+        })
 
     def _select(self, index: int, *, force: bool = False) -> None:
         rows = self.panel.rows
@@ -757,46 +1054,64 @@ class TransitionInspectorWindow(QDialog):
         korean = self._korean()
         duration = float(row["duration"])
         length = f"{duration:.1f}s" if duration else ("겹침 없음" if korean else "no overlap")
-        return (f"{int(row['index']):02d} → {int(row['index']) + 1:02d}   {_clock(float(row['timeline_start']))}"
-                f"\n{self.panel._style(row)} · {length}\n{row['from']} → {row['to']}")
+        return (f"{int(row['index']):02d} → {int(row['index']) + 1:02d} {_clock(float(row['timeline_start']))} · "
+                f"{self.panel._style(row)} · {length} · {row['from']} → {row['to']}")
 
     def _show_selected(self) -> None:
         korean = self._korean()
         rows = self.panel.rows
         junction = self.junction
         self.diagram.set_junction(junction)
-        for button in (self.play_button, self.jump_button, self.previous_button, self.next_button):
-            button.setEnabled(junction is not None)
+        has_junction = junction is not None and 0 <= self._selected < len(rows)
+        for widget in (self.listen_button, self.jump_button, self.loop_check, self.details_button, self.diagram):
+            widget.setEnabled(has_junction)
+        for widget in (self.diagram, self.legend_label, self.details_button, *self.fact_labels,
+                       self.listen_button, self.jump_button):
+            widget.setVisible(has_junction)
         self.previous_button.setEnabled(self._selected > 0)
         self.next_button.setEnabled(0 <= self._selected < len(rows) - 1)
         self._clear_metrics()
-        if junction is None or not 0 <= self._selected < len(rows):
-            self.heading_label.setText("이 미리보기에는 곡 사이 전환이 없습니다." if korean
-                                       else "This preview has no transitions between tracks.")
-            for label in (self.subheading_label, self.description_label, self.reasons_label, self.legend_label):
+        if not has_junction:
+            self.heading_label.setText("곡 사이 전환이 없습니다" if korean else "No transitions between tracks")
+            self.description_label.setText(
+                "플레이리스트에 곡이 두 곡 이상 있어야 전환이 생깁니다." if korean
+                else "Transitions appear once the playlist has two or more songs.")
+            for label in (self.reasons_label, self.legend_label):
                 label.clear()
+            self.all_values.clear()
             self.metrics_title.hide()
-            self.reasons_title.hide()
-            self.description_label.hide()
+            self.details_button.setChecked(False)
             return
+        self.all_values.setPlainText(self.panel.detail_text(self._selected, korean))
         row = rows[self._selected]
         self.heading_label.setText(f"{row['from']}  →  {row['to']}")
         duration = float(row["duration"])
-        parts = [f"{'전환' if korean else 'Transition'} {int(row['index']):02d}/{len(rows):02d}",
-                 f"{'시작' if korean else 'Starts'} {_clock(junction.start, precise=True)}",
-                 (f"{'길이' if korean else 'Length'} {duration:.1f}s" if duration
-                  else ("겹침 없음" if korean else "No overlap")),
-                 f"{'화면 전환' if korean else 'Canvas switch'} {_clock(junction.handover, precise=True)}",
-                 self.panel._style(row)]
-        self.subheading_label.setText("   ·   ".join(parts))
+        facts = (
+            (f"{'시작' if korean else 'Starts'} {_clock(junction.start, precise=True)}",
+             "두 곡이 겹치기 시작하는 시각" if korean else "When the two songs start to overlap"),
+            ((f"{'믹스' if korean else 'Mix'} {duration:.1f}s" if duration
+              else ("겹침 없음" if korean else "No overlap")),
+             "두 곡이 함께 들리는 길이" if korean else "How long both songs play together"),
+            (f"▣ {'화면 전환' if korean else 'Canvas switch'} {_clock(junction.handover, precise=True)}",
+             "영상이 다음 곡으로 넘어가는 시각 (겹침의 가운데)" if korean
+             else "When the video moves to the next song (middle of the overlap)"),
+            (f"{int(row['index']):02d} / {len(rows):02d}",
+             "전체 전환 중 순서" if korean else "Position among all transitions"),
+        )
+        for label, (text, tip) in zip(self.fact_labels, facts):
+            label.setText(text)
+            label.setToolTip(tip)
         key = str(row["dsp"] or row["type"])
         description = _STYLE_DESCRIPTIONS.get(key)
         if key == "sequential" and self.panel.automix:
             description = (self.panel._back_to_back_reason(True), self.panel._back_to_back_reason(False))
-        self.description_label.setVisible(description is not None)
-        if description is not None:
-            self.description_label.setText(description[0 if korean else 1])
+        style = self.panel._style(row)
+        self.description_label.setText(
+            f"<b>{style}</b> — {description[0 if korean else 1]}" if description is not None else f"<b>{style}</b>")
         self.legend_label.setText(self._legend(korean))
+        self.legend_label.setToolTip(
+            "곡선은 대역별로 두 곡의 음량(0–100%)입니다. 실선은 나가는 곡, 점선은 들어오는 곡입니다." if korean
+            else "Curves are each song's level (0–100%) per band: solid is outgoing, dashed is incoming.")
         self._fill_metrics(row, korean)
         reasons = [reason for reason in str(row.get("reasons") or "").split("; ") if reason]
         self.reasons_title.setVisible(bool(reasons) or duration > 0.0)
@@ -812,18 +1127,15 @@ class TransitionInspectorWindow(QDialog):
             return f"<span style='color:{color.name()}'>{symbol}</span> {text}"
 
         items = [
-            swatch(OUTGOING_COLOR, "나가는 곡 (실선)" if korean else "Outgoing (solid)"),
-            swatch(INCOMING_COLOR, "들어오는 곡 (점선)" if korean else "Incoming (dashed)"),
-            swatch(self.palette().highlight().color(),
-                   "화면 전환: 캔버스가 다음 곡으로 넘어가는 지점" if korean
-                   else "Canvas switch: where the video moves to the next track", "▣"),
+            swatch(OUTGOING_COLOR, "나가는 곡" if korean else "Outgoing"),
+            swatch(INCOMING_COLOR, "들어오는 곡" if korean else "Incoming"),
+            swatch(self.palette().highlight().color(), "화면 전환" if korean else "Canvas switch", "▣"),
             swatch(PLAYHEAD_COLOR, "재생 위치" if korean else "Playhead", "▼"),
         ]
         if self.junction is not None and self.junction.ramp is not None:
-            items.append(("▨ 빗금: 템포를 맞추는 구간" if korean else "▨ Hatched: tempo matching"))
-        hint = ("그래프를 클릭하면 그 위치로 이동합니다. 곡선은 각 대역에서 두 곡의 음량(0–100%)입니다." if korean
-                else "Click the graph to seek. Curves show each track's level (0–100%) per band.")
-        return "&nbsp;&nbsp;&nbsp;".join(items) + f"<br>{hint}"
+            items.append("▨ " + ("템포 맞춤" if korean else "Tempo matching"))
+        items.append("· " + ("그래프를 클릭하면 그 위치로 이동" if korean else "Click the graph to seek"))
+        return "&nbsp;&nbsp;&nbsp;".join(items)
 
     def _clear_metrics(self) -> None:
         while self.metrics_grid.count():
@@ -917,22 +1229,51 @@ class TransitionInspectorWindow(QDialog):
         self.title_label.setText("전환 상세" if korean else "Transition details")
         self.status_label.setText(self.panel.status_label.text())
         self.status_label.setToolTip(self.panel.status_label.toolTip())
-        self.follow_check.setText("재생 위치 따라가기" if korean else "Follow playhead")
+        self.follow_check.setText("자동 선택" if korean else "Auto-select")
         self.follow_check.setToolTip(
-            "재생 중인 전환이나 다음 전환을 자동으로 선택합니다." if korean
-            else "Selects the transition playing now, or the next one, automatically."
+            "재생 중이거나 곧 나올 전환을 자동으로 선택합니다. 직접 고르면 꺼집니다." if korean
+            else "Selects the transition playing now or coming up next. Picking one yourself turns it off."
         )
-        self.copy_text_button.setText("텍스트 복사" if korean else "Copy text")
-        self.copy_json_button.setText("JSON 복사" if korean else "Copy JSON")
-        self.overview_label.setText(
-            "전체 믹스 · 강조된 구간이 두 곡이 겹치는 전환입니다. 클릭하면 선택, 더블클릭하면 그 위치로 이동합니다." if korean
-            else "Whole mix · highlighted spans are overlaps. Click to select, double-click to seek."
-        )
+        self.export_button.setText("복사 ▾" if korean else "Copy ▾")
+        self.export_button.setToolTip("전환 정보를 클립보드로 복사합니다." if korean
+                                      else "Copy the transition information to the clipboard.")
+        self.copy_text_action.setText("모든 전환을 텍스트로 복사" if korean else "Copy all transitions as text")
+        self.copy_json_action.setText("모든 전환을 JSON으로 복사" if korean else "Copy all transitions as JSON")
+        self.overview_title.setText("전체 믹스" if korean else "Whole mix")
+        self.overview_hint.setText("색칠된 구간이 전환 · 클릭: 선택 · 더블클릭: 이동" if korean
+                                   else "Shaded spans are transitions · Click: select · Double-click: seek")
         self.metrics_title.setText("분석 수치" if korean else "Analysis")
-        self.reasons_title.setText("이 방식을 고른 이유" if korean else "Why this mix")
-        self.play_button.setText("▶ 4초 전부터 듣기" if korean else "▶ Listen from 4 s before")
-        self.play_button.setToolTip("전환이 시작되기 4초 전부터 재생합니다." if korean
-                                    else "Plays from 4 seconds before the transition starts.")
-        self.jump_button.setText("전환 시작으로 이동" if korean else "Go to transition")
-        self.previous_button.setToolTip("이전 전환" if korean else "Previous transition")
-        self.next_button.setToolTip("다음 전환" if korean else "Next transition")
+        self.details_button.setText("자세한 정보 · 선택 근거와 전체 수치" if korean
+                                    else "More details · reasons and all values")
+        self.reasons_title.setText("이 방식을 고른 이유 (플래너 기록)" if korean else "Why this mix (planner notes)")
+        self.all_values_title.setText("전체 수치" if korean else "All values")
+        self.list.setToolTip("클릭: 선택 · 더블클릭: 4초 전부터 재생" if korean
+                             else "Click: select · Double-click: play from 4 s before")
+        self.listen_button.setText("▶ 4초 전부터 듣기" if korean else "▶ Listen from 4 s before")
+        self.listen_button.setToolTip("전환이 시작되기 4초 전부터 재생합니다." if korean
+                                      else "Plays from 4 seconds before the transition starts.")
+        self.jump_button.setText("시작점으로 이동" if korean else "Go to start")
+        self.jump_button.setToolTip("재생 위치를 전환이 시작되는 지점으로 옮깁니다." if korean
+                                    else "Moves the playhead to where the transition starts.")
+        self.details_button.setToolTip(
+            "플래너가 이 방식을 고른 근거와, 큐·속도·보컬·구조 위치 등 기록된 모든 값을 봅니다." if korean
+            else "Why the planner chose this mix, and every value it recorded (cues, rates, vocal and structure times).")
+        self.previous_button.setText("‹  이전 전환" if korean else "‹  Previous")
+        self.next_button.setText("다음 전환  ›" if korean else "Next  ›")
+        self.previous_button.setToolTip(
+            "이전 전환을 선택하고 4초 전부터 재생 위치를 옮깁니다 (Shift+←)" if korean
+            else "Select the previous transition and move to 4 s before it (Shift+←)")
+        self.next_button.setToolTip(
+            "다음 전환을 선택하고 4초 전부터 재생 위치를 옮깁니다 (Shift+→)" if korean
+            else "Select the next transition and move to 4 s before it (Shift+→)")
+        self.rewind_button.setToolTip("5초 뒤로 (←)" if korean else "Back 5 s (←)")
+        self.forward_button.setToolTip("5초 앞으로 (→)" if korean else "Forward 5 s (→)")
+        self.transport_play_button.setToolTip("재생 / 일시정지 (Space)" if korean else "Play / Pause (Space)")
+        self._set_play_text()
+        self.loop_check.setText("🔁 선택한 전환 반복" if korean else "🔁 Loop selected transition")
+        self.loop_check.setToolTip(
+            "선택한 전환의 4초 전부터 끝난 뒤 2초까지를 반복 재생합니다 (L)" if korean
+            else "Repeats from 4 s before the selected transition to 2 s after it (L)")
+        self.position_slider.setToolTip(
+            "재생바 · 클릭하거나 끌어서 이동합니다" if korean else "Playback bar · click or drag to seek")
+        self.volume_slider.setToolTip("볼륨" if korean else "Volume")

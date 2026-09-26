@@ -1,21 +1,18 @@
-"""Preview's collapsible "AutoMix details": why each transition sounds the way it does.
+"""Preview's mix status line and the "Transition details" entry point.
 
-Read-only: it shows ``app.automix.diagnostics.transition_rows`` of the plan
-Preview is playing and never analyzes, plans or renders anything itself.
+Read-only: it holds ``app.automix.diagnostics.transition_rows`` of the plan
+Preview is playing (and the plan itself) for TransitionInspectorWindow, which
+draws them, and never analyzes, plans or renders anything itself.
 """
 
 from __future__ import annotations
 
 import math
 
-from PySide6.QtGui import QFont, QGuiApplication
-from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QListWidget, QPlainTextEdit, QPushButton,
-    QToolButton, QVBoxLayout, QWidget,
-)
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import Signal
 
-from app.automix.diagnostics import rows_to_json, transition_rows
+from app.automix.diagnostics import transition_rows
 from app.utils.i18n import Language, Translator
 
 _STYLE_LABELS = {
@@ -72,11 +69,12 @@ def _clock(seconds: float) -> str:
 
 
 class AutoMixDetailsPanel(QFrame):
-    """Transitions of the playing plan, the one under the playhead marked.
+    """The mix status line plus a "Transition details" button; the data source of
+    TransitionInspectorWindow.
 
-    Also the data source of the larger TransitionInspectorWindow: ``changed``
-    fires whenever the plan, status or language changes, ``playhead_changed``
-    on every playhead update, and ``open_requested`` asks Preview to show it.
+    ``changed`` fires whenever the plan, status or language changes,
+    ``playhead_changed`` on every playhead update, and ``open_requested`` asks
+    Preview to show the window.
     """
 
     changed = Signal()
@@ -99,50 +97,23 @@ class AutoMixDetailsPanel(QFrame):
         self._state = ("waiting", None)
         self._progress_message = ""
         self._failed = False
-        self.toggle_button = QToolButton()
-        self.toggle_button.setCheckable(True)
-        self.toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.toggle_button.setArrowType(Qt.ArrowType.RightArrow)
-        self.toggle_button.toggled.connect(self._set_expanded)
-        self.open_window_button = QToolButton()
-        self.open_window_button.setAutoRaise(True)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("panelTitle")
+        self.open_window_button = QPushButton()
         self.open_window_button.clicked.connect(self.open_requested)
         self.status_label = QLabel()
         self.status_label.setObjectName("mutedLabel")
         self.status_label.setWordWrap(True)
-        self.body = QWidget()
-        self.list = QListWidget()
-        self.list.setObjectName("automixTransitionList")
-        self.list.setMaximumHeight(140)
-        self.list.currentRowChanged.connect(lambda _row: self._show_details())
-        self.details = QPlainTextEdit()
-        self.details.setReadOnly(True)
-        self.details.setMaximumHeight(170)
-        self.copy_text_button = QPushButton()
-        self.copy_json_button = QPushButton()
-        self.copy_text_button.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.as_text()))
-        self.copy_json_button.clicked.connect(lambda: QGuiApplication.clipboard().setText(rows_to_json(self.rows)))
-        body_layout = QVBoxLayout(self.body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(4)
-        body_layout.addWidget(self.list)
-        body_layout.addWidget(self.details)
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.copy_text_button)
-        buttons.addWidget(self.copy_json_button)
-        body_layout.addLayout(buttons)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(4)
         header = QHBoxLayout()
-        header.setSpacing(4)
-        header.addWidget(self.toggle_button)
+        header.setSpacing(6)
+        header.addWidget(self.title_label)
         header.addStretch(1)
         header.addWidget(self.open_window_button)
         layout.addLayout(header)
         layout.addWidget(self.status_label)
-        layout.addWidget(self.body)
-        self.body.setVisible(False)
         self.retranslate()
 
     # -- state ---------------------------------------------------------------
@@ -157,17 +128,7 @@ class AutoMixDetailsPanel(QFrame):
             for row in self.rows
         ]
         self._state = (state, ready_through)
-        selected = self.list.currentRow()
-        self.list.blockSignals(True)
-        self.list.clear()
-        # Items Qt creates itself: clear() of Python-created QListWidgetItems runs shiboken's
-        # per-item wrapper teardown, which intermittently crashed (access violation) in here.
-        self.list.addItems([self._row_title(row) for row in self.rows])
-        self.list.blockSignals(False)
         self._current = -1
-        if self.rows:
-            self.list.setCurrentRow(min(max(selected, 0), len(self.rows) - 1))
-        self._show_details()
         self._update_status()
 
     def set_progress_message(self, message: str) -> None:
@@ -182,18 +143,9 @@ class AutoMixDetailsPanel(QFrame):
 
     def set_playhead(self, seconds: float) -> None:
         """Mark the transition sounding at ``seconds`` (cheap: called every frame)."""
+        self._current = next((index for index, (start, end) in enumerate(self._windows)
+                              if start <= seconds < end), -1)
         self.playhead_changed.emit(seconds)
-        current = next((index for index, (start, end) in enumerate(self._windows)
-                        if start <= seconds < end), -1)
-        if current == self._current:
-            return
-        for index, bold in ((self._current, False), (current, True)):
-            item = self.list.item(index) if index >= 0 else None
-            if item is not None:
-                font = QFont(item.font())
-                font.setBold(bold)
-                item.setFont(font)
-        self._current = current
 
     @property
     def current_index(self) -> int:
@@ -201,10 +153,7 @@ class AutoMixDetailsPanel(QFrame):
 
     def as_text(self) -> str:
         korean = self._korean()
-        blocks = []
-        for index in range(len(self.rows)):
-            blocks.append(self._detail_text(index, korean))
-        return "\n\n".join(blocks)
+        return "\n\n".join(self.detail_text(index, korean) for index in range(len(self.rows)))
 
     # -- presentation ----------------------------------------------------------
 
@@ -216,13 +165,8 @@ class AutoMixDetailsPanel(QFrame):
         korean, english = _STYLE_LABELS.get(key, (key, key))
         return korean if self._korean() else english
 
-    def _row_title(self, row: dict[str, object]) -> str:
-        index = int(row["index"])
-        duration = float(row["duration"])
-        length = f" · {duration:.1f}s" if duration else ""
-        return f"{index:02d}→{index + 1:02d}  {_clock(float(row['timeline_start']))}{length} · {self._style(row)}"
-
-    def _detail_text(self, index: int, korean: bool) -> str:
+    def detail_text(self, index: int, korean: bool) -> str:
+        """Every recorded fact of one junction as plain text (copy text, "All values")."""
         row = self.rows[index]
         lines = [f"{row['from']} → {row['to']}",
                  f"{'시작' if korean else 'Start'}: {_clock(float(row['timeline_start']))}"
@@ -247,16 +191,6 @@ class AutoMixDetailsPanel(QFrame):
                 "앞 곡의 마지막 소리 바로 뒤에 다음 곡을 이어 재생합니다." if korean
                 else "A track without analysis, or too short to blend, is not mixed: "
                      "the next track starts right after its last sound.")
-
-    def _show_details(self) -> None:
-        row = self.list.currentRow()
-        if not self.rows:
-            self.details.setPlainText(
-                "이 미리보기에는 곡 사이 전환이 없습니다." if self._korean()
-                else "This preview has no transitions between tracks."
-            )
-        elif 0 <= row < len(self.rows):
-            self.details.setPlainText(self._detail_text(row, self._korean()))
 
     def _update_status(self) -> None:
         """One status line, symbol + text (never color alone): ● preparing, ◐ partial, ✓ final, ! fallback."""
@@ -306,27 +240,16 @@ class AutoMixDetailsPanel(QFrame):
         self.status_label.setAccessibleDescription(explanation)
         self.changed.emit()
 
-    def _set_expanded(self, expanded: bool) -> None:
-        self.body.setVisible(expanded)
-        self.toggle_button.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-
     def retranslate(self) -> None:
         korean = self._korean()
-        self.toggle_button.setText("전환 상세" if korean else "Transition details")
-        self.toggle_button.setToolTip(
-            "각 전환의 위치, 방식, 선택 근거를 봅니다." if korean
-            else "See where each transition sits, how it is mixed, and why."
-        )
-        self.open_window_button.setText("⤢ 크게 보기" if korean else "⤢ Open window")
+        self.title_label.setText("믹스" if korean else "Mix")
+        self.open_window_button.setText("⤢ 전환 상세" if korean else "⤢ Transition details")
         self.open_window_button.setToolTip(
-            "새 창에서 전체 믹스와 각 전환의 대역별 음량 변화, 화면 전환 지점을 그래프로 봅니다." if korean
-            else "Open a window that graphs the whole mix, each transition's per-band levels and the Canvas switch."
+            "새 창에서 전체 믹스와 각 전환의 위치·방식·선택 근거, 대역별 음량 변화, 화면 전환 지점을 "
+            "그래프로 보고 재생할 수 있습니다." if korean
+            else "Open a window that graphs the whole mix and each transition -- where it sits, how it is "
+                 "mixed and why, per-band levels and the Canvas switch -- with playback controls."
         )
-        self.copy_text_button.setText("텍스트 복사" if korean else "Copy text")
-        self.copy_json_button.setText("JSON 복사" if korean else "Copy JSON")
-        for index, row in enumerate(self.rows):
-            self.list.item(index).setText(self._row_title(row))
-        self._show_details()
         self._update_status()
 
 

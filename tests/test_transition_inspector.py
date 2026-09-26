@@ -73,8 +73,70 @@ class TransitionWindowTests(unittest.TestCase):
         self.assertEqual(window.list.currentRow(), 0)  # a manual choice sticks
         requested = []
         window.play_requested.connect(requested.append)
-        window.play_button.click()
+        window.listen_button.click()
         self.assertAlmostEqual(requested[0], window.junctions[0].start - 4.0)
+
+    def test_transport_drives_and_follows_preview_playback(self) -> None:
+        tracks = [_track("a", 200), _track("b", 180), _track("c", 210)]
+        analyses = {t.id: _analysis(t.id, 120, t.duration_seconds) for t in tracks}
+        panel, window = self._window(compile_automix(tracks, analyses, ENABLED), tracks)
+        toggled, seeks, volumes = [], [], []
+        window.playing_toggled.connect(toggled.append)
+        window.seek_requested.connect(seeks.append)
+        window.volume_changed.connect(volumes.append)
+
+        window.set_playing(True)  # Preview started: mirror it, do not echo it back
+        self.assertEqual(toggled, [])
+        self.assertTrue(window.transport_play_button.isChecked())
+        window.transport_play_button.click()
+        self.assertEqual(toggled, [False])
+
+        panel.set_playhead(30.0)  # following the playhead never seeks
+        self.assertEqual(window.position_slider.value(), 30000)
+        self.assertIn("0:30.0", window.time_label.text())
+        window.position_slider.setValue(45000)
+        window.forward_button.click()
+        self.assertEqual(seeks, [45.0, 35.0])
+
+        window.set_volume(40)
+        self.assertEqual(volumes, [])
+        window.volume_slider.setValue(55)
+        self.assertEqual(volumes, [55])
+
+        seeks.clear()
+        window.next_button.click()  # like a track skip: next transition, from its run-up
+        self.assertEqual(window.list.currentRow(), 1)
+        self.assertAlmostEqual(seeks[-1], window.junctions[1].start - 4.0)
+
+    def test_details_fold_away_and_the_playing_card_is_marked(self) -> None:
+        tracks = [_track("a", 200), _track("b", 180), _track("c", 210)]
+        analyses = {t.id: _analysis(t.id, 120, t.duration_seconds) for t in tracks}
+        panel, window = self._window(compile_automix(tracks, analyses, ENABLED), tracks)
+        self.assertTrue(window.details_box.isHidden())  # planner internals only on request
+        window.details_button.setChecked(True)
+        self.assertFalse(window.details_box.isHidden())
+        self.assertIn("vocal_safe_eq", window.reasons_label.text())
+        role = window.list.itemDelegate().ROLE
+        panel.set_playhead(window.junctions[1].start + 0.5)
+        self.assertTrue(window.list.item(1).data(role)["playing"])
+        self.assertFalse(window.list.item(0).data(role)["playing"])
+        panel.set_playhead(window.junctions[1].end + 5.0)
+        self.assertFalse(window.list.item(1).data(role)["playing"])
+
+    def test_loop_replays_the_selected_transition(self) -> None:
+        tracks = [_track("a", 200), _track("b", 180), _track("c", 210)]
+        analyses = {t.id: _analysis(t.id, 120, t.duration_seconds) for t in tracks}
+        panel, window = self._window(compile_automix(tracks, analyses, ENABLED), tracks)
+        seeks = []
+        window.seek_requested.connect(seeks.append)
+        window._user_select(0)
+        window.loop_check.setChecked(True)
+        window.set_playing(True)
+        junction = window.junctions[0]
+        panel.set_playhead(junction.end + 1.0)
+        self.assertEqual(seeks, [])
+        panel.set_playhead(junction.end + 2.1)
+        self.assertAlmostEqual(seeks[0], junction.start - 4.0)
 
     def test_reselecting_replaces_the_metric_cards(self) -> None:
         tracks = [_track("a", 200), _track("b", 180), _track("c", 210)]

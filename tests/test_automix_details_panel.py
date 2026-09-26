@@ -34,20 +34,19 @@ class AutoMixDetailsPanelTests(unittest.TestCase):
 
     def test_final_plan_lists_every_transition_with_its_style_and_reasons(self) -> None:
         self.panel.set_plan(self.plan, self.tracks, state="final")
-        self.assertEqual(self.panel.list.count(), 2)
-        self.assertIn("Vocal-safe EQ", self.panel.list.item(0).text())  # vocals unknown
+        self.assertEqual(len(self.panel.rows), 2)
+        self.assertEqual(self.panel._style(self.panel.rows[0]), "Vocal-safe EQ")  # vocals unknown
         self.assertIn("Final plan · 2 transition(s)", self.panel.status_label.text())
-        details = self.panel.details.toPlainText()
+        details = self.panel.detail_text(0, korean=False)
         self.assertIn("a → b", details)
         self.assertIn("Outgoing BPM: 120.00", details)
         self.assertIn("* vocal_safe_eq: vocal activity unknown", details)
 
     def test_empty_and_sequential_plans_say_so(self) -> None:
         self.panel.set_plan(compile_playlist(self.tracks[:1]), self.tracks[:1], state="waiting")
-        self.assertEqual(self.panel.list.count(), 0)
-        self.assertIn("no transitions", self.panel.details.toPlainText())
+        self.assertEqual(self.panel.rows, [])
         self.panel.set_plan(compile_playlist(self.tracks), self.tracks, state="waiting")
-        self.assertIn("Back to back", self.panel.list.item(0).text())
+        self.assertEqual(self.panel._style(self.panel.rows[0]), "Back to back")
         self.assertIn("Preparing the mix", self.panel.status_label.text())
 
     def test_a_transition_without_reasons_falls_back_gracefully(self) -> None:
@@ -59,8 +58,8 @@ class AutoMixDetailsPanelTests(unittest.TestCase):
                           presentation=plan.presentation, metadata=plan.metadata,
                           duration_seconds=plan.duration_seconds)
         self.panel.set_plan(plan, self.tracks[:2], state="final")
-        self.assertIn("Plain crossfade", self.panel.list.item(0).text())
-        self.assertIn("No selection reasons recorded", self.panel.details.toPlainText())
+        self.assertEqual(self.panel._style(self.panel.rows[0]), "Plain crossfade")
+        self.assertIn("No selection reasons recorded", self.panel.detail_text(0, korean=False))
 
     def test_provisional_state_reports_how_far_automix_is_ready(self) -> None:
         state = ProgressiveAnalysis(self.tracks, structure_enabled=False)
@@ -71,7 +70,7 @@ class AutoMixDetailsPanelTests(unittest.TestCase):
         self.assertEqual(ready_through(partial, covered), 2)
         self.panel.set_plan(partial, self.tracks, state="provisional", ready_through=2)
         self.assertIn("AutoMix through track 2", self.panel.status_label.text())
-        self.assertIn("Back to back", self.panel.list.item(1).text())  # the unanalyzed tail
+        self.assertEqual(self.panel._style(self.panel.rows[1]), "Back to back")  # the unanalyzed tail
 
     def test_status_shows_progress_fallbacks_and_failure_with_symbol_and_text(self) -> None:
         panel = AutoMixDetailsPanel(self.translator, automix=True)
@@ -106,11 +105,10 @@ class AutoMixDetailsPanelTests(unittest.TestCase):
         plan = compile_automix(self.tracks, analyses, ENABLED)
         panel = AutoMixDetailsPanel(self.translator, automix=True)
         panel.set_plan(plan, self.tracks, state="final")
-        self.assertIn("Back to back", panel.list.item(1).text())
+        self.assertEqual(panel._style(panel.rows[1]), "Back to back")
         self.assertTrue(panel.status_label.text().endswith("· 1 back to back"), panel.status_label.text())
         self.assertIn("without analysis", panel.status_label.toolTip())
-        panel.list.setCurrentRow(1)
-        self.assertIn("starts right after its last sound", panel.details.toPlainText())
+        self.assertIn("starts right after its last sound", panel.detail_text(1, korean=False))
         # The provisional plan's unanalyzed tail is back to back too, but not yet planned.
         panel.set_plan(plan, self.tracks, state="provisional", ready_through=2)
         self.assertNotIn("back to back", panel.status_label.text())
@@ -122,36 +120,37 @@ class AutoMixDetailsPanelTests(unittest.TestCase):
         analyses = {key: replace(value, analyzer_id="basic") for key, value in self.analyses.items()}
         panel.set_plan(compile_automix(self.tracks, analyses, ENABLED), self.tracks, state="final")
         self.assertNotIn("!", panel.status_label.text())  # the light analyzer is the normal case
-        self.assertIn("Outgoing analyzer: basic", panel.details.toPlainText())
+        self.assertIn("Outgoing analyzer: basic", panel.detail_text(0, korean=False))
 
     def test_playhead_marks_the_sounding_transition_only(self) -> None:
         self.panel.set_plan(self.plan, self.tracks, state="final")
         first = self.plan.audio.transitions[0]
         self.panel.set_playhead(first.timeline_start + 0.5)
         self.assertEqual(self.panel.current_index, 0)
-        self.assertTrue(self.panel.list.item(0).font().bold())
         self.panel.set_playhead(first.timeline_start - 1.0)
         self.assertEqual(self.panel.current_index, -1)
-        self.assertFalse(self.panel.list.item(0).font().bold())
 
-    def test_copy_json_and_text_and_reopen_keep_working(self) -> None:
+    def test_the_button_opens_the_window_whose_copy_buttons_keep_working(self) -> None:
+        from app.widgets.transition_inspector import TransitionInspectorWindow
+
         self.panel.set_plan(self.plan, self.tracks, state="final")
-        self.panel.copy_json_button.click()
+        opened = []
+        self.panel.open_requested.connect(lambda: opened.append(True))
+        self.panel.open_window_button.click()
+        self.assertEqual(opened, [True])
+        window = TransitionInspectorWindow(self.panel)
+        self.addCleanup(window.deleteLater)
+        window.copy_json_action.trigger()
         self.assertEqual(json.loads(QGuiApplication.clipboard().text())[0]["dsp"], "vocal_safe_eq")
-        self.panel.copy_text_button.click()
+        window.copy_text_action.trigger()
         self.assertIn("b → c", QGuiApplication.clipboard().text())
-        self.panel.toggle_button.setChecked(True)
-        self.assertFalse(self.panel.body.isHidden())
-        self.panel.toggle_button.setChecked(False)
-        self.panel.toggle_button.setChecked(True)  # collapse and reopen
-        self.panel.set_plan(self.plan, self.tracks, state="final")
-        self.assertEqual(self.panel.list.count(), 2)
+        self.assertEqual(window.list.count(), 2)
 
     def test_language_switch_relabels_in_place(self) -> None:
         self.panel.set_plan(self.plan, self.tracks, state="final")
         self.translator.language = Language.KOREAN
         self.panel.retranslate()
-        self.assertIn("보컬 보호 EQ", self.panel.list.item(0).text())
+        self.assertEqual(self.panel._style(self.panel.rows[0]), "보컬 보호 EQ")
         self.assertIn("최종 계획", self.panel.status_label.text())
 
 

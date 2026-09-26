@@ -797,7 +797,7 @@ class ExportPreviewDialog(QDialog):
         track_panel_header.addWidget(self.track_list_count_label)
         track_panel_layout.addLayout(track_panel_header)
         track_panel_layout.addWidget(self.track_list, 1)
-        # Read-only "why does this transition sound like that" for blended previews.
+        # Mix status, and the "Transition details" window for blended previews.
         self.automix_details: AutoMixDetailsPanel | None = None
         if self._transition_mode != "none":
             self.automix_details = AutoMixDetailsPanel(
@@ -1204,6 +1204,13 @@ class ExportPreviewDialog(QDialog):
             window = self._transition_window = TransitionInspectorWindow(self.automix_details, self)
             window.seek_requested.connect(self._seek_to_seconds)
             window.play_requested.connect(self._play_from_seconds)
+            # Its transport drives, and follows, Preview's own play button and volume.
+            window.playing_toggled.connect(self.play_button.setChecked)
+            window.volume_changed.connect(self.volume_slider.setValue)
+            self.play_button.toggled.connect(window.set_playing)
+            self.volume_slider.valueChanged.connect(window.set_volume)
+            window.set_playing(self.play_button.isChecked())
+            window.set_volume(self.volume_slider.value())
             self.finished.connect(window.close)
             window.set_playhead(self.timeline.value() / TIMELINE_SCALE)
         window.show()
