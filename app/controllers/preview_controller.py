@@ -258,13 +258,18 @@ class PreviewController:
         def on_progress(_stage: str, fraction: float, message: str) -> None:
             # The live state ("Analyzing 3 / 12 ...", "AutoMix ready through track 4")
             # is the detail line of the status-bar popup; the title stays the task's name.
-            window.activity_progress.update(PREVIEW_MIX_ACTIVITY, fraction, detail=message or None)
+            # AutoMix also lists its stages (analysis, preview mix, final mix) with their own progress.
+            window.activity_progress.update(
+                PREVIEW_MIX_ACTIVITY, fraction, detail=message or None,
+                steps=getattr(controller, "progress_steps", None) or None,
+            )
 
         def on_ready(*_args: object) -> None:
             window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)
             window.statusBar().showMessage(
-                "미리보기 믹스가 준비되어 재생 중인 위치에서 전환했습니다." if korean else
-                "Preview mix ready; switched over at the current position.",
+                getattr(controller, "fallback_message", None) or (
+                    "미리보기 믹스가 준비되어 재생 중인 위치에서 전환했습니다." if korean else
+                    "Preview mix ready; switched over at the current position."),
                 4000,
             )
 

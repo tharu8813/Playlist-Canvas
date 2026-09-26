@@ -494,7 +494,10 @@ class ExportPreviewDialog(QDialog):
         # after it at _per_track_gain so the level matches the mix. New mixes
         # wait in _pending_swap until progressive.swap_is_safe() allows them.
         self._blended_audio_until = math.inf
-        self._per_track_gain = 1.0
+        # Before any mix lands too: per-track audio at 1.0 was the originals'
+        # level, and every song then dropped by the normalization gain the
+        # moment the mix swapped in (~7 dB on loud masters).
+        self._per_track_gain = getattr(blended_audio_controller, "playback_gain", None) or 1.0
         if latest_partial is not None:
             path_str, _plan, self._blended_audio_until, self._per_track_gain = latest_partial
             self._blended_audio_path = Path(path_str)
@@ -521,6 +524,9 @@ class ExportPreviewDialog(QDialog):
             if progressive_ready is not None:
                 self._progressive = True
                 progressive_ready.connect(self._on_progressive_audio_ready)
+                level_ready = getattr(blended_audio_controller, "level_ready", None)
+                if level_ready is not None:
+                    level_ready.connect(self._on_playback_level)
                 # Attach right away (paused at 0), so the first transition renders before Play.
                 QTimer.singleShot(0, self, lambda: self._report_playhead(force=True))
         elif self._transition_mode != "none" and self._preview_proxy_ffmpeg is not None and self.tracks:
@@ -3436,6 +3442,13 @@ class ExportPreviewDialog(QDialog):
             self._try_apply_pending_swap()
             return
         self._apply_blended_audio(Path(path_str), plan)
+
+    def _on_playback_level(self, gain: float) -> None:
+        """The mix's level is known: per-track audio plays at it from now on."""
+        if self._closing:
+            return
+        self._per_track_gain = gain
+        self._apply_output_volume()
 
     def _on_progressive_audio_ready(self, path_str: str, plan, covered_until: float, gain: float) -> None:
         if self._closing:

@@ -128,7 +128,7 @@ class RenderPrefixAndGainTests(unittest.TestCase):
 
     def test_preview_gain_targets_export_loudness_and_peak_ceiling(self) -> None:
         durations = {"a": 100.0, "b": 100.0}
-        self.assertAlmostEqual(20 * math.log10(preview_gain({"a": (-10.0, -8.0), "b": (-10.0, -8.0)}, durations)), -6.0)
+        self.assertAlmostEqual(20 * math.log10(preview_gain({"a": (-10.0, -8.0), "b": (-10.0, -8.0)}, durations)), -4.0)
         # A hot peak caps the gain like linear loudnorm's true-peak limit would.
         self.assertAlmostEqual(20 * math.log10(preview_gain({"a": (-20.0, -1.0)}, {"a": 100.0})), -0.5)
         self.assertEqual(preview_gain({"a": (-math.inf, -math.inf)}, {"a": 1.0}), 1.0)

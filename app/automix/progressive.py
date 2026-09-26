@@ -34,6 +34,7 @@ from app.automix.planner import compile_automix
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
 from app.models.playlist import PlaylistTrack
+from app.renderer import loudness
 from app.timeline.render_plan import AudioRenderPlan, CompiledRenderPlan
 
 URGENT_HORIZON_SECONDS = 60.0
@@ -44,9 +45,9 @@ RENDER_MAX_DELAY_SECONDS = 2.0
 """...but never delay an urgent render longer than this after the first pending event."""
 SWAP_MARGIN_SECONDS = 2.0
 """While playing, a swap must land this far before any change point or transition."""
-PREVIEW_LOUDNESS_TARGET_LUFS = -16.0
-PREVIEW_PEAK_CEILING_DBFS = -1.5
-"""Same targets as the export loudnorm pass, so partial -> final swaps stay level."""
+PREVIEW_LOUDNESS_TARGET_LUFS = loudness.TARGET_LUFS
+PREVIEW_PEAK_CEILING_DBFS = loudness.TRUE_PEAK_DBTP
+"""Same targets as the export's normalization, so partial -> final swaps stay level."""
 
 
 class ProgressiveAnalysis:
@@ -77,6 +78,16 @@ class ProgressiveAnalysis:
 
     def completed_count(self) -> int:
         return sum(1 for track_id in self.track_ids if self._done(track_id))
+
+    def rhythm_count(self) -> int:
+        return len(self._rhythm_done)
+
+    def structure_count(self) -> int:
+        return len(self._structure_done)
+
+    def failed_count(self) -> int:
+        """Tracks whose rhythm analysis finished without a result: they join with a plain transition."""
+        return len(self._rhythm_done - self.rhythm.keys())
 
     def frontier(self) -> int:
         """How many leading tracks are fully analyzed (the prefix a plan can use)."""

@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor, QImage
 
 from app.automix.renderer import AutoMixRenderError
 from app.models.playlist import PlaylistTrack
+from app.renderer import loudness
 from app.renderer.ffmpeg_renderer import FFmpegRenderer, RenderSettings
 from app.utils.subprocess_utils import hidden_process_kwargs
 
@@ -311,7 +312,7 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             # measurement pass (which made loudnorm's own JSON stats
             # invisible in stderr, so every measurement looked like a
             # failure and normalization silently never applied).
-            self.assertAlmostEqual(_measured_lufs(executable, output_path), -16.0, delta=1.0)
+            self.assertAlmostEqual(_measured_lufs(executable, output_path), loudness.TARGET_LUFS, delta=1.0)
 
     def test_crossfade_export_uses_the_actual_mix_duration(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
@@ -392,7 +393,7 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             self.assertTrue(output_path.is_file())
             self.assertAlmostEqual(result.validation.duration_seconds, 18.0, delta=0.5)
             self.assertEqual(_audio_codec(executable, output_path), "aac")
-            self.assertAlmostEqual(_measured_lufs(executable, output_path), -16.0, delta=1.0)
+            self.assertAlmostEqual(_measured_lufs(executable, output_path), loudness.TARGET_LUFS, delta=1.0)
 
     def test_full_render_with_sequential_mode_encodes_audio_once_too(self) -> None:
         """transition_mode="none" must keep working exactly like before --
@@ -423,7 +424,7 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             self.assertTrue(output_path.is_file())
             self.assertAlmostEqual(result.validation.duration_seconds, 20.0, delta=0.5)
             self.assertEqual(_audio_codec(executable, output_path), "aac")
-            self.assertAlmostEqual(_measured_lufs(executable, output_path), -16.0, delta=1.0)
+            self.assertAlmostEqual(_measured_lufs(executable, output_path), loudness.TARGET_LUFS, delta=1.0)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ from app.services.export_storage_service import (
     ExportStorageSnapshot,
     format_bytes,
 )
+from app.renderer.progress_text import audio_progress_text
 from app.utils.time_format import format_clock
 
 
@@ -824,6 +825,9 @@ class ExportProgressDialog(QDialog):
                 "Converting visual elements into video · "
                 f"{english_buffer.group(1)} frames · {english_buffer.group(2)}%"
             )
+        audio = audio_progress_text(message, self._korean)
+        if audio is not None:
+            return audio
         if not self._korean:
             return message
         translated = {
