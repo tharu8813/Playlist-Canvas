@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.dialogs.export_preview_dialog import ExportPreviewDialog  # noqa: E402
@@ -98,6 +99,22 @@ class MixVisualTransitionTests(unittest.TestCase):
                          ("fade", 0.25, True))
         self.assertEqual(PythonVisualizerRenderer._track_index_at(55.9, windows), 0)
         self.assertEqual(PythonVisualizerRenderer._track_index_at(56.1, windows), 1)
+
+    def test_preview_animates_reactive_layers_at_the_handover(self) -> None:
+        overlay = SimpleNamespace(animation_in="fade", animation_out="fade",
+                                  animation_in_duration=1.0, animation_out_duration=1.0)
+        image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(255, 255, 255, 255))
+        preview = SimpleNamespace(_compiled_plan=_crossfaded_plan())
+
+        def alpha(seconds: float) -> int:
+            (result,) = ExportPreviewDialog._animated_overlay_images(preview, [overlay], (image,), seconds)
+            return result.pixelColor(4, 4).alpha()
+
+        self.assertEqual(alpha(30.0), 255)          # mid-track: untouched
+        self.assertLess(alpha(55.8), 128)           # outgoing exit, just before the handover
+        self.assertLess(alpha(56.2), 128)           # incoming entrance, just after it
+        self.assertEqual(alpha(58.0), 255)
 
     def test_legacy_mix_style_keys_still_load(self) -> None:
         data = _fading_text().to_dict()

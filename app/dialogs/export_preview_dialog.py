@@ -60,7 +60,8 @@ from app.services.playlist_service import PlaylistService
 from app.timeline.compiler import compile_playlist
 from app.timeline.models import TransitionType
 from app.timeline.render_plan import (
-    AudioRenderTransition, CompiledRenderPlan, visual_segment_at, visual_segments,
+    AudioRenderTransition, CompiledRenderPlan, reactive_layer_windows, visual_segment_at,
+    visual_segments,
 )
 from app.preview.frame_state import (
     MixJunction, resolve_mix_phase, segment_junction,
@@ -2324,7 +2325,37 @@ class ExportPreviewDialog(QDialog):
         # positions cannot be paired with the wrong image.
         if len(images) != len(active_overlays):
             return [], ()
-        return active_overlays, images
+        return active_overlays, self._animated_overlay_images(
+            active_overlays, images, timeline_seconds,
+        )
+
+    def _animated_overlay_images(
+        self, overlays: list[VisualizerOverlay], images: tuple[QImage, ...],
+        timeline_seconds: float,
+    ) -> tuple[QImage, ...]:
+        """Apply export's per-track entrance/exit to audio-reactive layers.
+
+        Same state function and windows as PythonVisualizerRenderer in export,
+        so visualizers/meters enter and exit at every track change, and at a
+        crossfade/AutoMix handover, exactly as the rendered video does.
+        """
+        plan = getattr(self, "_compiled_plan", None)
+        if plan is None or not plan.presentation.windows:
+            return images
+        cached = getattr(self, "_reactive_windows_cache", None)
+        if cached is None or cached[0] is not plan:
+            cached = self._reactive_windows_cache = (plan, reactive_layer_windows(plan))
+        animated = []
+        for overlay, image in zip(overlays, images, strict=True):
+            state = PythonVisualizerRenderer._animation_state(timeline_seconds, cached[1], overlay)
+            if state is not None and not image.isNull():
+                style, progress, entering = state
+                image = PythonVisualizerRenderer._apply_animation(
+                    image, style, progress, entering,
+                    float(image.width()), float(image.height()),
+                )
+            animated.append(image)
+        return tuple(animated)
 
     def _gpu_audio_layers(
         self, overlays: list[VisualizerOverlay], images: tuple[QImage, ...],
@@ -2436,6 +2467,7 @@ class ExportPreviewDialog(QDialog):
             )
             if not layers:
                 return
+            layers = self._animated_overlay_images(active_overlays, layers, timeline_seconds)
             if self._requires_z_band_composition(active_overlays):
                 if self._composite_overlays_in_canvas_order(
                     track, elapsed, active_overlays, layers,

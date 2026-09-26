@@ -294,6 +294,22 @@ def visual_segments(plan: CompiledRenderPlan) -> tuple[VisualSegment, ...]:
     return tuple(segments)
 
 
+def reactive_layer_windows(plan: CompiledRenderPlan) -> list[tuple[float, float, float, float]]:
+    """``(start, duration, mix_in, mix_out)`` per drawn track for audio-reactive layers.
+
+    The visual segments, so visualizers/meters enter, exit and switch personal
+    color at the same mix handover as Canvas; a plain end still stops at the
+    audio end. Shared by export (PythonVisualizerRenderer) and Preview.
+    """
+    clips = plan.audio.clips
+    return [
+        (segment.start,
+         min(segment.end, clips[segment.window_index].timeline_end) - segment.start,
+         segment.mix_in_seconds, segment.mix_out_seconds)
+        for segment in visual_segments(plan)
+    ]
+
+
 def visual_segment_at(segments: Sequence[VisualSegment], global_seconds: float) -> VisualSegment | None:
     """The segment drawn at ``global_seconds`` (the first before it starts, the last after it ends)."""
     if not segments:
