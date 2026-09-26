@@ -558,7 +558,8 @@ class ExportOrchestrator:
         )
         export_dialog.update_progress(stage, overall, message)
         window.activity_progress.update(
-            "export", overall, f"{stage} · {message}",
+            "export", overall, export_dialog.status_line(stage, message),
+            steps=export_dialog.step_progress(stage),
         )
         window._notify_export_stage(stage)
 
@@ -725,7 +726,9 @@ class ExportOrchestrator:
         window._export_dialog.update_progress(
             "Preparing visual frames", fraction, detail,
         )
-        window.activity_progress.update("export", fraction, detail)
+        window.activity_progress.update(
+            "export", fraction, detail, steps=window._export_dialog.step_progress("Preparing visual frames"),
+        )
 
     def cancel_active_session(self) -> None:
         """Stop the running export session's encoders and PNG pipeline, if any."""

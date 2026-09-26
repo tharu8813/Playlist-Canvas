@@ -2018,7 +2018,7 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 self.assertIn("preview_mix", activity.active_keys)
                 preview._blended_audio_controller.progress.emit("Combining mix", 0.4, "Combining mix 12.0s / 30.0s")
                 self.assertEqual(activity.progress_bar.value(), 400)
-                self.assertIn("Combining mix 12.0s / 30.0s", activity.toolTip())
+                self.assertIn("Combining mix 12.0s / 30.0s", activity.details_text())
 
                 # Seek near the end and start playing, then simulate the
                 # adopted controller's render finishing -- same regression
@@ -2081,7 +2081,7 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 start.assert_called_once()  # adopted, not restarted
                 activity = self.window.activity_progress
                 self.assertEqual(activity.progress_bar.value(), 400)  # continues from the popup
-                self.assertIn("Analyzing 2 / 5", activity.toolTip())
+                self.assertIn("Analyzing 2 / 5", activity.details_text())
             finally:
                 self.window._finish_inline_preview()
 

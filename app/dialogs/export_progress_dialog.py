@@ -621,18 +621,37 @@ class ExportProgressDialog(QDialog):
                 "Hide detailed status" if visible else "Show detailed status"
             )
 
-    def _refresh_steps(self, stage: str) -> None:
-        """Show completed, active, and upcoming export phases at a glance."""
-        stage_key = self._stage_key(stage)
+    def _active_step(self, stage: str) -> int:
         try:
-            active_index = self._EXPORT_STEPS.index(stage_key)
+            return self._EXPORT_STEPS.index(self._stage_key(stage))
         except ValueError:
-            active_index = 0
-        names = (
+            return 0
+
+    def _step_names(self) -> tuple[str, ...]:
+        return (
             ("화면 준비", "오디오 준비", "효과 준비", "영상 만들기", "완료")
             if self._korean else
             ("Visuals", "Audio", "Effects", "Create video", "Done")
         )
+
+    def status_line(self, stage: str, message: str) -> str:
+        """``stage · message`` in the dialog's language, for the status-bar progress details."""
+        return f"{self._stage_text(stage)} · {self._detail_text(message)}"
+
+    def step_progress(self, stage: str) -> list[tuple[str, float | None]]:
+        """The phases before "Done" as (name, progress): 1 done, None running, 0 waiting.
+
+        The same steps the dialog shows, for the status-bar progress details."""
+        active_index = self._active_step(stage)
+        return [
+            (name, 1.0 if index < active_index else None if index == active_index else 0.0)
+            for index, name in enumerate(self._step_names()[:-1])
+        ]
+
+    def _refresh_steps(self, stage: str) -> None:
+        """Show completed, active, and upcoming export phases at a glance."""
+        active_index = self._active_step(stage)
+        names = self._step_names()
         for index, (label, name) in enumerate(zip(self.step_labels, names, strict=True)):
             if index < active_index:
                 symbol, color, state = "✓", "#35A56F", "completed"

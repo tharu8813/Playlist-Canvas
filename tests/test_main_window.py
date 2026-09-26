@@ -69,21 +69,50 @@ class MainWindowWorkspaceTests(MainWindowTestCase):
 
         progress.begin("save", "프로젝트 저장", detail="example.pvsproj")
         self.assertFalse(progress.isHidden())
+        self.assertEqual(progress.label.text(), "프로젝트 저장")  # one operation: its own title
         self.assertEqual(progress.progress_bar.minimum(), 0)
         self.assertEqual(progress.progress_bar.maximum(), 0)
-        self.assertIn("프로젝트 저장", progress.toolTip())
-        self.assertIn("example.pvsproj", progress.toolTip())
+        self.assertIn("example.pvsproj", progress.details_text())
 
         progress.begin("update", "업데이트 다운로드", 0.42, "Setup 다운로드 중")
-        self.assertEqual(progress.label.text(), "업데이트 다운로드")
-        self.assertEqual(progress.progress_bar.value(), 420)
-        self.assertIn("42%", progress.toolTip())
-        self.assertIn("프로젝트 저장", progress.toolTip())
+        self.assertEqual(progress.label.text(), "작업 중...")  # several: the combined bar
+        self.assertEqual(progress.progress_bar.value(), 420)  # the only measurable one
+        self.assertIn("업데이트 다운로드 — 42%", progress.details_text())
+        self.assertIn("프로젝트 저장", progress.details_text())
+        self.assertEqual(progress.toolTip(), "")  # the live popup replaces the static tooltip
 
         progress.finish("update")
         self.assertEqual(progress.label.text(), "프로젝트 저장")
         progress.finish("save")
         self.assertTrue(progress.isHidden())
+
+    def test_background_automix_analysis_shows_its_stages_after_a_short_delay(self) -> None:
+        from pathlib import Path
+
+        from app.controllers.automix_analysis_controller import _AutoMixAnalysisWorker
+        from app.models.playlist import PlaylistTrack
+
+        controller = self.window.automix_analysis_controller
+        progress = self.window.activity_progress
+        worker = _AutoMixAnalysisWorker([PlaylistTrack("a.mp3", "A", duration_seconds=30.0)], Path("ffmpeg"))
+        controller._worker = worker
+        self.addCleanup(lambda: setattr(controller, "_worker", None))
+        controller.running_changed.emit(True)
+        controller._report(worker, "rhythm", 0, 4)
+        controller._report(worker, "structure", 0, 4)
+        self.assertNotIn("automix_analysis", progress.active_keys)  # a cached pass ends before this
+        self.assertTrue(self.window._automix_activity_timer.isActive())
+
+        self.window._automix_activity_timer.timeout.emit()
+        controller._report(worker, "rhythm", 2, 4)
+        self.assertIn("automix_analysis", progress.active_keys)
+        self.assertEqual(progress.progress_bar.value(), 250)  # 2 of 8 track-stages
+        text = progress.details_text()
+        self.assertIn("박자·보컬 분석 — 50% (2 / 4곡)", text)
+        self.assertIn("곡 구조 분석 — 0%", text)
+
+        controller.running_changed.emit(False)
+        self.assertNotIn("automix_analysis", progress.active_keys)
 
     def test_menu_bar_is_grouped_and_fully_localized(self) -> None:
         original_language = self.window.translator.language

@@ -1411,6 +1411,12 @@ class MainWindowExportTests(MainWindowTestCase):
                 "음악 반응 효과 준비",
             )
             self.assertEqual(dialog._stage_text("Downloading FFmpeg"), "FFmpeg 다운로드")
+            # The status-bar progress details show the same localized line and phases.
+            self.assertEqual(dialog.status_line("Encoding video", "Encoding 12.0s / 60.0s"),
+                             "최종 영상 만들기 · 영상 인코딩 중 · 12.0s / 60.0s")
+            self.assertEqual(dialog.step_progress("Preparing audio"), [
+                ("화면 준비", 1.0), ("오디오 준비", None), ("효과 준비", 0.0), ("영상 만들기", 0.0),
+            ])
             combined = dialog._detail_text(
                 "Visualizer 1/2 · frame 12/30 · 40.0%\n"
                 "Visualizer 2/2 · frame 6/30 · 20.0%\n"

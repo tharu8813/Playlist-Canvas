@@ -83,6 +83,43 @@ class AutoMixAnalysisWorkerTests(unittest.TestCase):
         self.assertEqual(created, [BACKGROUND_ANALYSIS_WORKERS])
         self.assertLess(BACKGROUND_ANALYSIS_WORKERS, 4)  # below the foreground pool
 
+    def test_run_reports_both_stages_up_front_then_each_track(self) -> None:
+        tracks = [_track("a.mp3"), _track("b.mp3")]
+        with (
+            patch("app.automix.analysis.basic.BasicAnalysisProvider", _StubProvider),
+            patch("app.automix.structure.sonara.sonara_available", return_value=True),
+            patch("app.automix.structure.service.StructureAnalysisService.analyze_tracks") as structure,
+        ):
+            structure.side_effect = lambda tracks, cancel_event, progress: (
+                progress(len(tracks), len(tracks), "done"), type("R", (), {"analyses": {}})())[1]
+            worker = _AutoMixAnalysisWorker(tracks, Path("ffmpeg"), enable_structure_analysis=True)
+            reports: list[tuple[str, int, int]] = []
+            worker.progress.connect(lambda *report: reports.append(report))
+            worker.run()
+        self.assertEqual(reports[:2], [("rhythm", 0, 2), ("structure", 0, 2)])
+        self.assertIn(("rhythm", 2, 2), reports)
+        self.assertEqual(reports[-1], ("structure", 2, 2))
+
+    def test_controller_reports_stages_and_running_state_of_the_current_pass_only(self) -> None:
+        controller = AutoMixAnalysisController()
+        worker = _AutoMixAnalysisWorker([_track("a.mp3")], Path("ffmpeg"), controller)
+        controller._worker = worker
+        changes: list[dict] = []
+        running: list[bool] = []
+        controller.progress_changed.connect(changes.append)
+        controller.running_changed.connect(running.append)
+        controller._report(worker, "rhythm", 1, 3)
+        self.assertEqual(changes, [{"rhythm": (1, 3)}])
+        self.assertTrue(controller.is_running)
+        stale = _AutoMixAnalysisWorker([_track("b.mp3")], Path("ffmpeg"), controller)
+        controller._report(stale, "rhythm", 3, 3)  # a superseded pass
+        self.assertEqual(len(changes), 1)
+        controller.cancel()
+        self.assertEqual(running, [False])  # hidden at once, not after the worker drains
+        self.assertEqual(controller.stages, {})
+        controller._report(worker, "rhythm", 2, 3)  # cancelled: ignored
+        self.assertEqual(len(changes), 1)
+
     def test_default_provider_id_is_basic(self) -> None:
         track = _track("a.mp3")
         worker = _AutoMixAnalysisWorker([track], Path("ffmpeg"))

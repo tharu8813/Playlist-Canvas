@@ -295,10 +295,9 @@ class PreviewController:
         )
 
         def on_progress(_stage: str, fraction: float, message: str) -> None:
-            # The progressive controller's messages are the live state itself
-            # ("Analyzing 3 / 12 ...", "AutoMix ready through track 4"): show them as the label.
-            label = message if hasattr(controller, "progressive_ready") and message else None
-            window.activity_progress.update(PREVIEW_MIX_ACTIVITY, fraction, detail=message or None, label=label)
+            # The live state ("Analyzing 3 / 12 ...", "AutoMix ready through track 4")
+            # is the detail line of the status-bar popup; the title stays the task's name.
+            window.activity_progress.update(PREVIEW_MIX_ACTIVITY, fraction, detail=message or None)
 
         def on_ready(*_args: object) -> None:
             window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)

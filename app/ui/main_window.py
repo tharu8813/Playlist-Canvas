@@ -311,6 +311,16 @@ class MainWindow(QMainWindow):
         self.automix_analysis_controller.structures_updated.connect(
             self._automix_structures_received
         )
+        self.automix_analysis_controller.progress_changed.connect(
+            lambda _stages: self._update_automix_analysis_activity()
+        )
+        self.automix_analysis_controller.running_changed.connect(self._automix_analysis_running_changed)
+        # A pass over cached files ends within a moment of every playlist edit;
+        # only a pass still running after this delay is worth a progress bar.
+        self._automix_activity_timer = QTimer(self)
+        self._automix_activity_timer.setSingleShot(True)
+        self._automix_activity_timer.setInterval(600)
+        self._automix_activity_timer.timeout.connect(lambda: self._update_automix_analysis_activity(show=True))
         self._automix_analysis_timer = QTimer(self)
         self._automix_analysis_timer.setSingleShot(True)
         self._automix_analysis_timer.setInterval(500)
@@ -411,6 +421,7 @@ class MainWindow(QMainWindow):
                 self.translator.language is Language.KOREAN
             )
         )
+        self.translator.language_changed.connect(lambda: self._update_automix_analysis_activity())
         self.translator.language_changed.connect(self._sync_language_actions)
         self.translator.packs_changed.connect(self._rebuild_language_menu)
         self.theme_service.theme_changed.connect(self._on_theme_changed)
@@ -2278,6 +2289,48 @@ class MainWindow(QMainWindow):
         # change AutoMix's actual transition choices.
         self.automix_analysis_controller.start(
             tracks, ffmpeg_executable, provider_id="auto", enable_structure_analysis=True,
+        )
+
+    AUTOMIX_ANALYSIS_ACTIVITY = "automix_analysis"
+
+    def _automix_analysis_running_changed(self, running: bool) -> None:
+        if running:
+            self._automix_activity_timer.start()
+        else:
+            self._automix_activity_timer.stop()
+            self.activity_progress.finish(self.AUTOMIX_ANALYSIS_ACTIVITY)
+
+    def _update_automix_analysis_activity(self, show: bool = False) -> None:
+        """Mirror the background AutoMix analysis pass in the status-bar progress.
+
+        ``show`` adds it (after the pass outlived _automix_activity_timer);
+        otherwise only an already shown entry is refreshed.
+        """
+        key = self.AUTOMIX_ANALYSIS_ACTIVITY
+        controller = self.automix_analysis_controller
+        if not controller.is_running or not (show or key in self.activity_progress.active_keys):
+            return
+        from app.controllers.automix_analysis_controller import RHYTHM_STAGE, STRUCTURE_STAGE
+
+        korean = self.translator.language is Language.KOREAN
+        stages = controller.stages
+        names = {
+            RHYTHM_STAGE: "박자·보컬 분석" if korean else "Beats & vocals",
+            STRUCTURE_STAGE: "곡 구조 분석" if korean else "Song structure",
+        }
+        steps = [
+            (names[stage], completed / total if total else 1.0,
+             f"{completed} / {total}{'곡' if korean else ''}")
+            for stage, (completed, total) in stages.items()
+        ]
+        done = sum(completed for completed, _total in stages.values())
+        total = sum(count for _completed, count in stages.values())
+        self.activity_progress.update(
+            key, done / total if total else None,
+            detail=("편집은 계속할 수 있습니다. 결과는 저장되어 미리보기와 내보내기에서 다시 쓰입니다."
+                    if korean else "You can keep editing; results are cached for Preview and Export."),
+            label="AutoMix 곡 분석" if korean else "AutoMix track analysis",
+            steps=steps,
         )
 
     def _automix_analyses_received(self, analyses: dict[str, TrackAnalysis]) -> None:

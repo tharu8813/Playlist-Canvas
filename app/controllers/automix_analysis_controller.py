@@ -35,6 +35,11 @@ BACKGROUND_ANALYSIS_WORKERS = 2
 """Files analyzed at once while the user edits: half of Preview/Export's
 foreground pool, so warming the cache never takes over the machine."""
 
+RHYTHM_STAGE = "rhythm"
+"""Beats, downbeats and vocals (one provider pass per track)."""
+STRUCTURE_STAGE = "structure"
+"""Sonara song structure, after the rhythm pass (only when enabled and installed)."""
+
 
 class _AutoMixAnalysisWorker(QThread):
     analyzed = Signal(dict)
@@ -42,6 +47,9 @@ class _AutoMixAnalysisWorker(QThread):
     structures_analyzed = Signal(dict)
     """Emits track_id -> TrackStructureAnalysis, only when enable_structure_analysis
     was requested and the optional Sonara dependency is actually available."""
+    progress = Signal(str, int, int)
+    """(stage, completed tracks, total tracks); stage is RHYTHM_STAGE or STRUCTURE_STAGE.
+    Both stages report 0 up front, so combined progress never moves backwards."""
 
     def __init__(
         self, tracks: list[PlaylistTrack], ffmpeg_executable: Path, parent: QObject | None = None,
@@ -75,11 +83,25 @@ class _AutoMixAnalysisWorker(QThread):
         workflow = AutoMixWorkflow(
             provider, analysis_settings=AutoMixAnalysisSettings(max_workers=BACKGROUND_ANALYSIS_WORKERS),
         )
-        result = workflow.analyze(self._tracks, cancel_event=self._cancel_event)
+        total = len(self._tracks)
+        self.progress.emit(RHYTHM_STAGE, 0, total)
+        if self._structure_available():
+            self.progress.emit(STRUCTURE_STAGE, 0, total)
+        result = workflow.analyze(
+            self._tracks, cancel_event=self._cancel_event,
+            progress=lambda completed, count, _message: self.progress.emit(RHYTHM_STAGE, completed, count),
+        )
         if self._cancel_event.is_set():
             return
         self.analyzed.emit(result.analyses)
         self._run_structure_analysis()
+
+    def _structure_available(self) -> bool:
+        if not self._enable_structure_analysis:
+            return False
+        from app.automix.structure.sonara import sonara_available
+
+        return sonara_available()
 
     def _run_structure_analysis(self) -> None:
         """Structure analysis runs sequentially, after rhythm analysis, still
@@ -104,7 +126,10 @@ class _AutoMixAnalysisWorker(QThread):
         service = StructureAnalysisService(
             SonaraStructureProvider(self._ffmpeg_executable), max_workers=BACKGROUND_ANALYSIS_WORKERS,
         )
-        result = service.analyze_tracks(self._tracks, cancel_event=self._cancel_event)
+        result = service.analyze_tracks(
+            self._tracks, cancel_event=self._cancel_event,
+            progress=lambda completed, count, _message: self.progress.emit(STRUCTURE_STAGE, completed, count),
+        )
         if not self._cancel_event.is_set():
             self.structures_analyzed.emit(result.analyses)
 
@@ -118,12 +143,26 @@ class AutoMixAnalysisController(QObject):
     """track_id -> TrackStructureAnalysis for the tracks whose structure just
     finished analyzing. Only emitted when enable_structure_analysis was
     requested and the optional Sonara dependency is actually available."""
+    progress_changed = Signal(dict)
+    """stage -> (completed, total) for the running pass (see RHYTHM_STAGE/STRUCTURE_STAGE)."""
+    running_changed = Signal(bool)
+    """True when a pass starts, False when it ends (finished or cancelled)."""
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._worker: _AutoMixAnalysisWorker | None = None
         self._pending = None
         self._shutting_down = False
+        self._stages: dict[str, tuple[int, int]] = {}
+
+    @property
+    def is_running(self) -> bool:
+        return self._worker is not None
+
+    @property
+    def stages(self) -> dict[str, tuple[int, int]]:
+        """The running pass's stage -> (completed, total), empty before its first report."""
+        return dict(self._stages)
 
     def start(
         self, tracks: list[PlaylistTrack], ffmpeg_executable: Path, *, provider_id: str = "basic",
@@ -165,6 +204,7 @@ class AutoMixAnalysisController(QObject):
             lambda result: self.structures_updated.emit(result)
             if not worker._cancel_event.is_set() else None
         )
+        worker.progress.connect(lambda stage, completed, total: self._report(worker, stage, completed, total))
         # Clear our reference *before* scheduling deletion: a worker that
         # finishes on its own (not via cancel()) would otherwise leave
         # self._worker pointing at a QThread whose C++ object deleteLater()
@@ -172,11 +212,21 @@ class AutoMixAnalysisController(QObject):
         # touches it ("libshiboken: ... already deleted").
         worker.finished.connect(lambda: self._forget(worker))
         self._worker = worker
+        self._stages = {}
         worker.start()
+        self.running_changed.emit(True)
+
+    def _report(self, worker: "_AutoMixAnalysisWorker", stage: str, completed: int, total: int) -> None:
+        if worker is not self._worker or worker._cancel_event.is_set():
+            return  # a superseded or cancelled pass
+        self._stages[stage] = (completed, total)
+        self.progress_changed.emit(dict(self._stages))
 
     def _forget(self, worker: "_AutoMixAnalysisWorker") -> None:
         if self._worker is worker:
             self._worker = None
+            self._stages = {}
+            self.running_changed.emit(False)
         if self._shutting_down:
             # shutdown() takes exclusive ownership of this worker's
             # wait()/deleteLater() sequence once shutdown has started (see
@@ -207,6 +257,9 @@ class AutoMixAnalysisController(QObject):
             worker.cancel()  # Suppress even results already queued for delivery.
         except RuntimeError:
             self._worker = None
+        # The worker may still drain an uninterruptible step; the UI stops showing it now.
+        self._stages = {}
+        self.running_changed.emit(False)
 
     def shutdown(self) -> None:
         """Finish cancellation before the owner or its temporary files are deleted.

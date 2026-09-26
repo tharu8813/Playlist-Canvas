@@ -32,6 +32,14 @@ QStatusBar QToolButton { background: transparent; border: 1px solid transparent;
 QStatusBar QToolButton:hover { background: @hover; border-color: @border; color: @text; }
 QProgressBar#activityProgressBar { background: @field; color: @text; border: 1px solid @border; border-radius: 4px; text-align: center; font-size: 10px; }
 QProgressBar#activityProgressBar::chunk { background: @accent; border-radius: 4px; }
+/* Live details popup above the status-bar progress (hover; click pins it). */
+QFrame#activityPopup { background: @panel; border: 1px solid @border; border-radius: 6px; }
+QLabel#activityPopupHeading { color: @muted; font-size: 11px; font-weight: 600; }
+QLabel#activityPopupTitle { color: @text; font-weight: 600; }
+QLabel#activityPopupPercent { color: @muted; font-size: 11px; }
+QLabel#activityPopupDetail, QLabel#activityPopupStep { color: @muted; font-size: 11px; }
+QProgressBar#activityPopupBar { background: @field; border: 0; border-radius: 2px; }
+QProgressBar#activityPopupBar::chunk { background: @accent; border-radius: 2px; }
 
 /* --- Buttons -------------------------------------------------------- */
 QPushButton, QToolButton {
