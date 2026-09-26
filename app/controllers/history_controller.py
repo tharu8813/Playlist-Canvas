@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 from PySide6.QtWidgets import QMessageBox
 
 from app.models.project import ProjectDocument
-from app.utils.i18n import Language
 from app.utils.logging_setup import report_unexpected_error
 
 if TYPE_CHECKING:
@@ -104,7 +103,7 @@ class HistoryController:
             report_unexpected_error("Undo/redo restore", error)
             QMessageBox.critical(
                 window,
-                "실행 취소 오류" if window.translator.language is Language.KOREAN else "Undo/redo error",
+                "실행 취소 오류" if window.translator.is_korean else "Undo/redo error",
                 str(error),
             )
         finally:

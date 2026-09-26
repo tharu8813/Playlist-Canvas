@@ -20,7 +20,7 @@ from app.models.project import (
     ProjectSettings,
 )
 from app.dialogs.new_project_dialog import CANVAS_PRESETS
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 class ProjectSettingsDialog(QDialog):
@@ -243,12 +243,12 @@ class ProjectSettingsDialog(QDialog):
         ratio = f"{width // divisor}:{height // divisor}"
         self.canvas_summary.setText(
             f"캔버스 {width} × {height} · 화면 비율 {ratio}"
-            if self.translator.language is Language.KOREAN else
+            if self.translator.is_korean else
             f"Canvas {width} × {height} · Aspect ratio {ratio}"
         )
 
     def retranslate(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("프로젝트 설정" if korean else "Project settings")
         self.identity_group.setTitle("프로젝트 정보" if korean else "Project information")
         self.title_label.setText("이름" if korean else "Name")
@@ -321,7 +321,7 @@ class ProjectSettingsDialog(QDialog):
     def _choose_thumbnail(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
             self,
-            "썸네일 선택" if self.translator.language is Language.KOREAN else "Choose thumbnail",
+            "썸네일 선택" if self.translator.is_korean else "Choose thumbnail",
             "",
             "Images (*.jpg *.jpeg *.png *.webp)",
         )
@@ -347,7 +347,7 @@ class ProjectSettingsDialog(QDialog):
 
     def _accept(self) -> None:
         if self.selected_canvas_size != self.original_canvas_size:
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             answer = QMessageBox.warning(
                 self,
                 "캔버스 크기 변경" if korean else "Change canvas size",

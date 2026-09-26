@@ -662,7 +662,7 @@ class LiveCanvas(QGraphicsView):
 
     def _create_context_menu(self, item: SourceItem | None) -> QMenu:
         """Build a localized Canvas context menu with stable command identifiers."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         menu = QMenu(self)
         if item is None:
             self._add_context_action(

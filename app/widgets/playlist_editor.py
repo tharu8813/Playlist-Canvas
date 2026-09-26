@@ -394,6 +394,7 @@ class PlaylistEditor(QFrame):
     files_dropped = Signal(list)
     lyrics_dropped = Signal(str, str)
     track_double_clicked = Signal(str)
+    tracks_removed = Signal(int)
 
     def __init__(self, service: PlaylistService, translator: Translator,
                  parent: QWidget | None = None) -> None:
@@ -483,7 +484,7 @@ class PlaylistEditor(QFrame):
 
     def retranslate(self) -> None:
         """Refresh static playlist chrome in the selected language."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.title.setText(self.translator.text("playlist"))
         self.search_edit.setPlaceholderText(
             "제목, 아티스트 또는 앨범 검색…" if korean
@@ -546,7 +547,7 @@ class PlaylistEditor(QFrame):
                 item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, track.id)
                 row = TrackRow(
-                    number, track, self.translator.language.value == "ko",
+                    number, track, self.translator.is_korean,
                     analysis=self._analyses.get(track.id),
                 )
                 item.setSizeHint(row.sizeHint())
@@ -560,7 +561,7 @@ class PlaylistEditor(QFrame):
             self.empty_state.setVisible(not tracks)
             self.empty_add_button.setVisible(not query)  # "no search results" needs no add button
             enabled = sum(track.enabled for track in all_tracks)
-            korean = self.translator.language.value == "ko"
+            korean = self.translator.is_korean
             filtered = f" · {len(tracks)}곡 표시" if korean and query else (
                 f" · {len(tracks)} shown" if query else ""
             )
@@ -595,7 +596,12 @@ class PlaylistEditor(QFrame):
         self.service.duplicate(self._selected_ids())
 
     def remove_selected(self) -> None:
-        self.service.remove(self._selected_ids())
+        selected = self._selected_ids()
+        before = len(self.service.tracks)
+        self.service.remove(selected)
+        removed = before - len(self.service.tracks)
+        if removed:
+            self.tracks_removed.emit(removed)
 
     def _sync_order(self) -> None:
         if self._ignore_order_signal:
@@ -638,7 +644,7 @@ class PlaylistEditor(QFrame):
         selected = self._selected_ids()
         if not selected:
             return
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         tracks = [track for track in self.service.tracks if track.id in selected]
         menu = QMenu(self)
         if len(selected) == 1:

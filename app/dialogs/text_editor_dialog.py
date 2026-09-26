@@ -16,7 +16,7 @@ class TextEditorDialog(QDialog):
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.translator = translator
-        korean = translator.language.value == "ko"
+        korean = translator.is_korean
         self.setWindowTitle("텍스트 확장 입력" if korean else "Expanded text editor")
         self.setModal(True)
         self.resize(680, 460)

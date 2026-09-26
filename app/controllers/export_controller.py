@@ -82,7 +82,6 @@ from app.services.video_encoder_service import (
     NVIDIA_H264_ENCODER,
     VideoEncoderAdvisor,
 )
-from app.utils.i18n import Language
 from app.utils.logging_setup import report_unexpected_error
 from app.video.timeline import build_video_occurrences
 
@@ -490,7 +489,7 @@ class ExportOrchestrator:
             settings, step, application_active,
         ):
             return
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         names = {
             "visuals": "화면 준비" if korean else "Visual preparation",
             "audio": "오디오 준비" if korean else "Audio preparation",
@@ -529,7 +528,7 @@ class ExportOrchestrator:
             settings, "failures", application_active,
         ):
             return
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         if cancelled:
             title = "내보내기 취소" if korean else "Export cancelled"
             detail = (
@@ -751,7 +750,7 @@ class ExportOrchestrator:
         cancelled or the preflight failed (a dialog was already shown).
         """
         window = self.window
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         automatic_encoder = (
             requested_app_settings.video_codec == AUTO_VIDEO_ENCODER
         )
@@ -865,12 +864,12 @@ class ExportOrchestrator:
     def export_video(self) -> None:
         """Render the static Canvas and enabled playlist tracks to an MP4 file."""
         window = self.window
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         try:
             configured_path = window.settings_service.current.ffmpeg_path or None
             renderer = FFmpegRenderer(configured_path)
         except FFmpegNotFoundError:
-            QMessageBox.warning(
+            answer = QMessageBox.warning(
                 window,
                 "FFmpeg 필요" if korean else "FFmpeg required",
                 (
@@ -883,13 +882,20 @@ class ExportOrchestrator:
                     "Click OK to open the FFmpeg setup page. Use automatic "
                     "installation or select an existing ffmpeg executable."
                 ),
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
             )
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
             window._show_settings(focus_ffmpeg=True)
             return
         active_tracks = [track for track in window.playlist_service.tracks if track.enabled]
         if not active_tracks:
-            QMessageBox.warning(window, "Export error", "Select at least one music track to export.")
-            return
+            if not window._offer_music_for_empty_playlist(
+                "영상 내보내기" if korean else "Export video"
+            ):
+                return
+            active_tracks = [track for track in window.playlist_service.tracks if track.enabled]
         invalid_track = next(
             (track for track in active_tracks if track.duration_seconds <= 0.0), None
         )
@@ -1668,7 +1674,7 @@ class ExportOrchestrator:
         if window._export_dialog:
             window._export_dialog.complete(True)
             window._export_dialog = None
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         message = f"영상 생성 완료: {result.output_path}" if korean else f"Video created: {result.output_path}"
         window.statusBar().showMessage(message, 7000)
         window._active_export_output_path = result.output_path
@@ -1682,7 +1688,7 @@ class ExportOrchestrator:
         if window._export_dialog:
             window._export_dialog.complete(False)
             window._export_dialog = None
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         window._pending_export_result = None
         self.notify_problem(message)
         QMessageBox.critical(window, "내보내기 오류" if korean else "Export error", message)
@@ -1694,7 +1700,7 @@ class ExportOrchestrator:
         if window._export_dialog:
             window._export_dialog.complete(False)
             window._export_dialog = None
-        message = "내보내기를 취소했습니다." if window.translator.language is Language.KOREAN else "Export cancelled."
+        message = "내보내기를 취소했습니다." if window.translator.is_korean else "Export cancelled."
         window._pending_export_result = None
         self.notify_problem(message, cancelled=True)
         window.statusBar().showMessage(message, 5000)

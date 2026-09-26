@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.utils.time_format import format_clock
+
 
 class FFmpegInstallProgressDialog(QDialog):
     """Show live download, verification, extraction, and installation progress."""
@@ -208,9 +210,4 @@ class FFmpegInstallProgressDialog(QDialog):
 
     @staticmethod
     def _format_time(seconds: float) -> str:
-        total = max(0, round(seconds))
-        hours, remainder = divmod(total, 3600)
-        minutes, seconds_part = divmod(remainder, 60)
-        if hours:
-            return f"{hours:02d}:{minutes:02d}:{seconds_part:02d}"
-        return f"{minutes:02d}:{seconds_part:02d}"
+        return format_clock(round(seconds))

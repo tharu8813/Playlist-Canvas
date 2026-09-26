@@ -33,6 +33,7 @@ from app.services.export_storage_service import (
     ExportStorageSnapshot,
     format_bytes,
 )
+from app.utils.time_format import format_clock
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,10 +751,7 @@ class ExportProgressDialog(QDialog):
 
     @staticmethod
     def _format_time(seconds: float) -> str:
-        total = max(0, round(seconds))
-        hours, remainder = divmod(total, 3600)
-        minutes, seconds_part = divmod(remainder, 60)
-        return f"{hours:02d}:{minutes:02d}:{seconds_part:02d}" if hours else f"{minutes:02d}:{seconds_part:02d}"
+        return format_clock(round(seconds))
 
     def _stage_text(self, stage: str) -> str:
         """Translate known renderer stages while preserving diagnostic custom stages."""

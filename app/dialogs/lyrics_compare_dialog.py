@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.lyrics_service import LyricsService
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 class LyricsCompareDialog(QDialog):
@@ -25,7 +25,7 @@ class LyricsCompareDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.replace_requested = False
-        korean = translator.language is Language.KOREAN
+        korean = translator.is_korean
         self.setWindowTitle("가사 비교 및 교체" if korean else "Compare and replace lyrics")
         self.setModal(True)
         self.resize(900, 590)

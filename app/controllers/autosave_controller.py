@@ -18,7 +18,6 @@ from PySide6.QtWidgets import QMessageBox
 
 from app.services.autosave_worker import AutosaveWorker
 from app.services.project_service import ProjectError
-from app.utils.i18n import Language
 
 if TYPE_CHECKING:
     from app.ui.main_window import MainWindow
@@ -42,7 +41,7 @@ class AutosaveController:
                 or window.project_controller.saving
                 or window._autosave_worker is not None):
             return
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         try:
             document_data = window._project_document().to_dict()
         except (TypeError, ValueError) as error:
@@ -65,7 +64,7 @@ class AutosaveController:
         window = self.window
         window._update_project_status()
         message = (
-            "자동 저장됨" if window.translator.language is Language.KOREAN else "Autosaved"
+            "자동 저장됨" if window.translator.is_korean else "Autosaved"
         )
         window.statusBar().showMessage(message, 2500)
 
@@ -111,7 +110,7 @@ class AutosaveController:
             return False
         if snapshot is None:
             return False
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         answer = QMessageBox.question(
             window,
             "자동 저장 복구" if korean else "Autosave recovery",

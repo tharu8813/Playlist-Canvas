@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, ClassVar
 
 from app.automix.models import TrackAnalysis
 
@@ -128,8 +128,24 @@ class _FileFingerprint:
                 and record.get("size") == self.size)
 
 
-class AnalysisCache:
-    """Reads and writes one JSON envelope per (file, analyzer) combination."""
+class VersionedAnalysisCache:
+    """Reads and writes one JSON envelope per (file, analyzer) combination.
+
+    Shared by the rhythm cache (``AnalysisCache``) and the structure cache
+    (``app.automix.structure.cache.StructureAnalysisCache``). They stay
+    separate caches -- own root directory, schema version and logger -- so
+    invalidating one never touches the other; only the envelope handling is
+    shared. A subclass sets the class attributes below.
+    """
+
+    SCHEMA_VERSION: ClassVar[int]
+    ANALYSIS_TYPE: ClassVar[Any]
+    """Result type; needs ``from_cache_fields`` (validation) and ``to_cache_fields``."""
+    DIRECTORY_NAME: ClassVar[str]
+    """Folder under ``%LOCALAPPDATA%/PlaylistCanvas`` holding the entries."""
+    LOG_LABEL: ClassVar[str]
+    """Prefix of every log message, e.g. ``"AutoMix structure"``."""
+    LOGGER: ClassVar[logging.Logger]
 
     def __init__(
         self, root: Path | None = None, *,
@@ -139,15 +155,17 @@ class AnalysisCache:
         self.analyzer_id = analyzer_id
         self.analyzer_version = analyzer_version
 
-    @staticmethod
-    def default_root() -> Path:
-        """Return the per-user folder AutoMix analysis results are cached in."""
+    @classmethod
+    def default_root(cls) -> Path:
+        """Return the per-user folder this cache's entries live in."""
         local_app_data = os.environ.get("LOCALAPPDATA")
         base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
-        return base / "PlaylistCanvas" / "automix-cache"
+        return base / "PlaylistCanvas" / cls.DIRECTORY_NAME
 
     def _entry_path(self, fingerprint: _FileFingerprint) -> Path:
-        return self.root / fingerprint.entry_name(self.analyzer_id, self.analyzer_version, str(SCHEMA_VERSION))
+        return self.root / fingerprint.entry_name(
+            self.analyzer_id, self.analyzer_version, str(self.SCHEMA_VERSION),
+        )
 
     def load(self, source_path: str) -> dict[str, Any] | None:
         """Return cached analysis fields for ``source_path``, or None on any miss.
@@ -156,6 +174,7 @@ class AnalysisCache:
         different analyzer/schema are all treated the same way: a cache
         miss to be recomputed, never a crash.
         """
+        label, logger = self.LOG_LABEL, self.LOGGER
         try:
             fingerprint = _FileFingerprint.of(source_path)
         except OSError:
@@ -164,37 +183,37 @@ class AnalysisCache:
         try:
             envelope = json.loads(entry_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            LOGGER.debug("AutoMix cache miss: %s", fingerprint.canonical_path)
+            logger.debug("%s cache miss: %s", label, fingerprint.canonical_path)
             return None
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            LOGGER.info("AutoMix cache invalidated: malformed entry for %s", fingerprint.canonical_path)
+            logger.info("%s cache invalidated: malformed entry for %s", label, fingerprint.canonical_path)
             return None
         if not self._envelope_matches(envelope, fingerprint):
-            LOGGER.info("AutoMix cache invalidated: stale entry for %s", fingerprint.canonical_path)
+            logger.info("%s cache invalidated: stale entry for %s", label, fingerprint.canonical_path)
             return None
         try:
             fields = envelope["analysis"]
             if not isinstance(fields, dict):
                 raise TypeError("analysis field must be an object")
-            # Round-trip through TrackAnalysis to reject a cache entry whose
+            # Round-trip through the result type to reject a cache entry whose
             # fields no longer pass validation (e.g. hand-edited or from a
             # future schema variant this version does not fully understand).
-            TrackAnalysis.from_cache_fields("cache-check", fingerprint.canonical_path, fields)
+            self.ANALYSIS_TYPE.from_cache_fields("cache-check", fingerprint.canonical_path, fields)
         except (KeyError, TypeError, ValueError) as error:
-            LOGGER.info(
-                "AutoMix cache invalidated: invalid fields for %s (%s)",
-                fingerprint.canonical_path, error,
+            logger.info(
+                "%s cache invalidated: invalid fields for %s (%s)",
+                label, fingerprint.canonical_path, error,
             )
             return None
-        LOGGER.debug("AutoMix cache hit: %s", fingerprint.canonical_path)
+        logger.debug("%s cache hit: %s", label, fingerprint.canonical_path)
         return fields
 
-    def store(self, source_path: str, analysis: TrackAnalysis) -> None:
+    def store(self, source_path: str, analysis: Any) -> None:
         """Atomically write ``analysis`` for ``source_path``, replacing any prior entry."""
         fingerprint = _FileFingerprint.of(source_path)
         entry_path = self._entry_path(fingerprint)
         envelope = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": self.SCHEMA_VERSION,
             "analyzer_id": self.analyzer_id,
             "analyzer_version": self.analyzer_version,
             "file": fingerprint.record(),
@@ -211,17 +230,27 @@ class AnalysisCache:
                 os.fsync(temporary.fileno())
                 temporary_path = Path(temporary.name)
             temporary_path.replace(entry_path)
-        except OSError as error:
+        except OSError:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
             raise
         else:
-            LOGGER.debug("AutoMix analysis cached: %s", fingerprint.canonical_path)
+            self.LOGGER.debug("%s analysis cached: %s", self.LOG_LABEL, fingerprint.canonical_path)
 
     def _envelope_matches(self, envelope: object, fingerprint: _FileFingerprint) -> bool:
-        if not isinstance(envelope, dict) or envelope.get("schema_version") != SCHEMA_VERSION:
+        if not isinstance(envelope, dict) or envelope.get("schema_version") != self.SCHEMA_VERSION:
             return False
         if (envelope.get("analyzer_id") != self.analyzer_id
                 or envelope.get("analyzer_version") != self.analyzer_version):
             return False
         return fingerprint.matches(envelope.get("file"))
+
+
+class AnalysisCache(VersionedAnalysisCache):
+    """The rhythm (BPM/beat/key/vocal) analysis cache: ``TrackAnalysis`` entries."""
+
+    SCHEMA_VERSION = SCHEMA_VERSION
+    ANALYSIS_TYPE = TrackAnalysis
+    DIRECTORY_NAME = "automix-cache"
+    LOG_LABEL = "AutoMix"
+    LOGGER = LOGGER

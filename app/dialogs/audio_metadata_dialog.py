@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from app.models.playlist import PlaylistTrack
 from app.services.playlist_service import AudioImportCandidate
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 class AudioMetadataDialog(QDialog):
@@ -113,7 +113,7 @@ class AudioMetadataDialog(QDialog):
         return tracks
 
     def retranslate(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle(
             "누락된 오디오 정보 입력" if korean else "Complete missing audio information"
         )

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 from app.services.export_validation_service import ExportValidationResult
 
 
@@ -39,7 +39,7 @@ class ExportCompleteDialog(QDialog):
         self.setMinimumSize(640, 300)
         self.resize(700, 330)
 
-        korean = translator.language is Language.KOREAN
+        korean = translator.is_korean
         self.setWindowTitle("내보내기 완료" if korean else "Export complete")
         title = QLabel("영상 내보내기를 완료했습니다" if korean else "Your video is ready")
         title.setObjectName("dialogTitle")
@@ -150,7 +150,7 @@ class ExportCompleteDialog(QDialog):
             return
         self._show_open_error(
             "영상을 재생할 수 없습니다. 기본 동영상 앱과 파일 위치를 확인해 주세요."
-            if self.translator.language is Language.KOREAN else
+            if self.translator.is_korean else
             "The video could not be opened. Check the file and the default video app."
         )
 
@@ -162,14 +162,14 @@ class ExportCompleteDialog(QDialog):
             return
         self._show_open_error(
             "내보내기 폴더를 열 수 없습니다."
-            if self.translator.language is Language.KOREAN else
+            if self.translator.is_korean else
             "The export folder could not be opened."
         )
 
     def _copy_path(self) -> None:
         QApplication.clipboard().setText(str(self.output_path))
         self.copy_path_button.setText(
-            "복사됨" if self.translator.language is Language.KOREAN else "Copied"
+            "복사됨" if self.translator.is_korean else "Copied"
         )
 
     def _request_export_again(self) -> None:
@@ -180,7 +180,7 @@ class ExportCompleteDialog(QDialog):
         QMessageBox.warning(
             self,
             "파일 열기 실패"
-            if self.translator.language is Language.KOREAN else
+            if self.translator.is_korean else
             "Could not open file",
             message,
         )

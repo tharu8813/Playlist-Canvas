@@ -88,7 +88,7 @@ class ColorEditorDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.translator = translator
-        self._korean = translator.language.value == "ko"
+        self._korean = translator.is_korean
         self._tracks = list(tracks or [])
         self._initial_color = QColor(initial_color)
         if not self._initial_color.isValid():
