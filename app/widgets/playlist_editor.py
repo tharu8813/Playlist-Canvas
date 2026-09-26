@@ -577,8 +577,8 @@ class PlaylistEditor(QFrame):
                 QAbstractItemView.DragDropMode.DropOnly if query else
                 QAbstractItemView.DragDropMode.DragDrop
             )
-            QTimer.singleShot(
-                0, lambda value=scroll_position: self.list_widget.verticalScrollBar().setValue(value)
+            QTimer.singleShot(  # ``self`` as context: dropped if the editor is deleted first
+                0, self, lambda value=scroll_position: self.list_widget.verticalScrollBar().setValue(value)
             )
         finally:
             self._ignore_order_signal = False

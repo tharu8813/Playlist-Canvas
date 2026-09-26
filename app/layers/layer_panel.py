@@ -216,7 +216,7 @@ class LayerPanel(QFrame):
             self._refresh_pending = False
             self.refresh()
 
-        QTimer.singleShot(0, perform_refresh)
+        QTimer.singleShot(0, self, perform_refresh)  # dropped if the panel is deleted first
 
     _LOCKED_FOREGROUND = QBrush(QColor("#E0603A"))
 

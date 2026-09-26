@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QSettings, QStandardPaths, QTimer
+from PySide6.QtCore import QEvent, QSettings, QStandardPaths, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
@@ -120,6 +120,8 @@ def main() -> int:
         return application.exec()
     if not open_initial_workspace(window, launch_project):
         window.close()
+        # No exec() will run its cleanup, so delete the closed window here, not at exit.
+        application.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         return 0
     window.schedule_automatic_update_check()
     return application.exec()

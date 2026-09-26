@@ -259,6 +259,10 @@ class MainWindow(QMainWindow):
         self.project_settings = ProjectSettings()
         self.playlist_export_service = PlaylistExportService()
         self.settings_service = AppSettingsService(self)
+        # Signal lambdas that capture self keep this wrapper alive forever, so without
+        # this PySide destroyed the whole window tree during interpreter shutdown, which
+        # could crash at exit (0xC0000409). Deleted on close, it goes while Qt still runs.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         # Renderer selection is process-scoped. Saving a different backend does
         # not mutate an already-created OpenGL/widget hierarchy mid-session.
         self._preview_backend_for_session = (
@@ -745,6 +749,9 @@ class MainWindow(QMainWindow):
         enabled = self._canvas_shortcut_scope_active(current)
         for action in self._canvas_shortcut_actions:
             action.setEnabled(enabled)
+    def _sync_canvas_shortcut_actions_to_focus(self) -> None:
+        self._sync_canvas_shortcut_actions(None, QApplication.focusWidget())
+
         if hasattr(self, "duplicate_action"):
             editing_text = bool(
                 current is not None
@@ -1257,11 +1264,9 @@ class MainWindow(QMainWindow):
         self.clear_selection_action = QAction(self)
         self.clear_selection_action.triggered.connect(self._clear_canvas_selection)
         self.edit_menu.addAction(self.clear_selection_action)
-        QApplication.clipboard().dataChanged.connect(
-            lambda: self._sync_canvas_shortcut_actions(
-                None, QApplication.focusWidget()
-            )
-        )
+        # A bound method, not a lambda: the app-wide clipboard outlives this window,
+        # and only a method connection is dropped when the window is destroyed.
+        QApplication.clipboard().dataChanged.connect(self._sync_canvas_shortcut_actions_to_focus)
 
         self.insert_menu = menu_bar.addMenu("")
         source_categories = (
@@ -3016,7 +3021,7 @@ class MainWindow(QMainWindow):
 
     def schedule_automatic_update_check(self) -> None:
         """Check once after startup without delaying project selection or first paint."""
-        QTimer.singleShot(1200, lambda: self._check_for_updates(manual=False))
+        QTimer.singleShot(1200, self, lambda: self._check_for_updates(manual=False))
 
     def _check_for_updates(self, manual: bool) -> None:
         """Request the latest stable GitHub Release on a background thread."""
