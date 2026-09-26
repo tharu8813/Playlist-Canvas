@@ -27,13 +27,13 @@ from app.models.playlist import PlaylistTrack
 from app.preview.album_art import extract_track_cover
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.utils.i18n import Translator
+from app.utils.time_format import format_clock
 
 _COVER_PX = 46
 
 
 def _clock(milliseconds: int) -> str:
-    total = max(0, milliseconds) // 1000
-    return f"{total // 60:02d}:{total % 60:02d}"
+    return format_clock(milliseconds // 1000, hours=False)
 
 
 class _ReorderList(QListWidget):
@@ -196,7 +196,7 @@ class TrackOrderDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.translator = translator
-        korean = translator.language.value == "ko"
+        korean = translator.is_korean
         self._tracks_by_id: dict[str, PlaylistTrack] = {t.id: t for t in tracks}
         self._original_ids: list[str] = [t.id for t in tracks]
         self.new_order: list[str] = list(self._original_ids)
@@ -312,7 +312,7 @@ class TrackOrderDialog(QDialog):
     # ---- row management -------------------------------------------------
 
     def _rebuild_rows(self) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
         for track_id in self.new_order:
@@ -400,7 +400,7 @@ class TrackOrderDialog(QDialog):
         if not path.is_file():
             self.media_player.stop()
             self.time_label.setText(
-                "파일 없음" if self.translator.language.value == "ko"
+                "파일 없음" if self.translator.is_korean
                 else "File missing"
             )
             return
@@ -452,7 +452,7 @@ class TrackOrderDialog(QDialog):
     def _save(self) -> None:
         order = self._current_ids()
         self.new_order = order
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         if order == self._original_ids:
             self.reject()
             return

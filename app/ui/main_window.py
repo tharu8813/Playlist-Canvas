@@ -427,19 +427,19 @@ class MainWindow(QMainWindow):
         self._build_canvas_edit_actions()
         self._build_menu_bar()
         self.activity_progress = ActivityProgressWidget(
-            self.translator.language is Language.KOREAN, self,
+            self.translator.is_korean, self,
         )
         self.statusBar().addPermanentWidget(self.activity_progress)
         self._build_zoom_controls()
         self._apply_style()
         self._add_welcome_sources()
         self.canvas.scene_model.set_placeholder_language(
-            self.translator.language is Language.KOREAN
+            self.translator.is_korean
         )
         self.translator.language_changed.connect(self.retranslate)
         self.translator.language_changed.connect(
             lambda: self.activity_progress.set_korean(
-                self.translator.language is Language.KOREAN
+                self.translator.is_korean
             )
         )
         self.translator.language_changed.connect(lambda: self._update_automix_analysis_activity())
@@ -630,7 +630,7 @@ class MainWindow(QMainWindow):
         self.project_status_label = QLabel()
         self.project_status_label.setObjectName("projectStatusChip")
         self.project_status_label.setToolTip(
-            "현재 프로젝트 이름과 저장 상태" if self.translator.language is Language.KOREAN
+            "현재 프로젝트 이름과 저장 상태" if self.translator.is_korean
             else "Current project name and save state"
         )
         toolbar.addWidget(self.project_status_label)
@@ -835,7 +835,7 @@ class MainWindow(QMainWindow):
             copied.z_index = highest_z + index
             self.store.add(copied)
         self.statusBar().showMessage(
-            "선택한 요소를 복제했습니다." if self.translator.language is Language.KOREAN
+            "선택한 요소를 복제했습니다." if self.translator.is_korean
             else "Duplicated selected sources.", 2500
         )
 
@@ -867,7 +867,7 @@ class MainWindow(QMainWindow):
         self._clipboard_paste_serial = 0
         self.statusBar().showMessage(
             f"요소 {len(sources)}개를 복사했습니다."
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else f"Copied {len(sources)} source(s).",
             2500,
         )
@@ -882,7 +882,7 @@ class MainWindow(QMainWindow):
             self.store.remove(source.id)
         self.statusBar().showMessage(
             f"요소 {len(sources)}개를 잘라냈습니다."
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else f"Cut {len(sources)} source(s).",
             2500,
         )
@@ -926,7 +926,7 @@ class MainWindow(QMainWindow):
         if not payloads:
             self.statusBar().showMessage(
                 "붙여넣을 요소가 없습니다."
-                if self.translator.language is Language.KOREAN
+                if self.translator.is_korean
                 else "There are no copied sources to paste.",
                 2500,
             )
@@ -942,7 +942,7 @@ class MainWindow(QMainWindow):
                 copied = Source.from_dict(payload)
                 copied.name = (
                     f"{copied.name} 복사본"
-                    if self.translator.language is Language.KOREAN
+                    if self.translator.is_korean
                     else f"{copied.name} copy"
                 )
                 copied.x += offset
@@ -953,7 +953,7 @@ class MainWindow(QMainWindow):
             LOGGER.warning("Rejected invalid source clipboard payload: %s", error)
             self.statusBar().showMessage(
                 "복사된 요소 데이터가 올바르지 않습니다."
-                if self.translator.language is Language.KOREAN
+                if self.translator.is_korean
                 else "The copied source data is invalid.",
                 3500,
             )
@@ -964,7 +964,7 @@ class MainWindow(QMainWindow):
         self.store.select_many(pasted_ids, pasted_ids[-1] if pasted_ids else None)
         self.statusBar().showMessage(
             f"요소 {len(pasted)}개를 붙여넣었습니다."
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else f"Pasted {len(pasted)} source(s).",
             2500,
         )
@@ -1119,7 +1119,7 @@ class MainWindow(QMainWindow):
         """Clear the lock flag on every locked source, from any entry point."""
         unlocked = self.store.unlock_all()
         if unlocked:
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             self.statusBar().showMessage(
                 f"{unlocked}개 요소의 잠금을 해제했습니다." if korean
                 else f"Unlocked {unlocked} source(s).",
@@ -1392,7 +1392,7 @@ class MainWindow(QMainWindow):
         if not isinstance(menu, QMenu):
             return
         menu.clear()
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         projects = self.recent_projects.projects()
         if not projects:
             empty_action = menu.addAction(
@@ -1420,7 +1420,7 @@ class MainWindow(QMainWindow):
 
     def _confirm_clear_recent_projects(self) -> bool:
         """Clear only the MRU history after an explicit user confirmation."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         response = QMessageBox.question(
             self,
             "최근 프로젝트 목록 지우기" if korean else "Clear recent projects",
@@ -1447,7 +1447,7 @@ class MainWindow(QMainWindow):
     def _open_recent_project(self, path: Path) -> bool:
         """Open one MRU entry through the same guarded workflow as File > Open."""
         project_path = Path(path).expanduser()
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if not project_path.is_file():
             self.recent_projects.remove(project_path)
             QMessageBox.warning(
@@ -1617,7 +1617,7 @@ class MainWindow(QMainWindow):
         self.playlist_editor.tracks_removed.connect(
             lambda count: self._show_undo_hint(
                 f"플레이리스트에서 {count}곡을 삭제했습니다."
-                if self.translator.language is Language.KOREAN else
+                if self.translator.is_korean else
                 f"Removed {count} track(s) from the Playlist."
             )
         )
@@ -1998,7 +1998,7 @@ class MainWindow(QMainWindow):
                 for source_type, group in self._source_card_groups.items()
                 if self._source_type_categories.get(source_type) == category
             ))
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.source_result_label.setText(
             f"{matched_count}개 결과" if korean and normalized else
             f"{matched_count}개" if korean else
@@ -2030,7 +2030,7 @@ class MainWindow(QMainWindow):
 
     def _source_hover_help(self, source_type: SourceType) -> tuple[str, str]:
         """Return a concise purpose and Inspector-setting summary for a source."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         korean_help = {
             SourceType.IMAGE: (
                 "사진이나 그래픽 파일을 캔버스에 표시합니다.",
@@ -2124,7 +2124,7 @@ class MainWindow(QMainWindow):
 
     def _source_palette_summary(self, source_type: SourceType) -> str:
         """Return a short secondary line sized for the narrow source palette."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         summaries = {
             SourceType.IMAGE: ("사진과 그래픽", "Photos and graphics"),
             SourceType.VIDEO: ("영상 클립 재생", "Play video clips"),
@@ -2149,7 +2149,7 @@ class MainWindow(QMainWindow):
 
     def _source_type_label(self, source_type: SourceType) -> str:
         """Return the same localized source name for menus and palette buttons."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         try:
             return self.translator.text(source_type.value)
         except KeyError:
@@ -2169,7 +2169,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Install localized rich hover help without changing the compact layout."""
         description, settings = self._source_hover_help(source_type)
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         settings_heading = "추가 후 설정" if korean else "Settings after adding"
         click_hint = (
             "클릭하거나 캔버스로 드래그하면 추가됩니다."
@@ -2351,7 +2351,7 @@ class MainWindow(QMainWindow):
             return
         from app.controllers.automix_analysis_controller import RHYTHM_STAGE, STRUCTURE_STAGE
 
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         stages = controller.stages
         names = {
             RHYTHM_STAGE: "박자·보컬 분석" if korean else "Beats & vocals",
@@ -2393,7 +2393,7 @@ class MainWindow(QMainWindow):
         track = next((entry for entry in self.playlist_service.tracks if entry.id == track_id), None)
         if track is None:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         try:
             ffmpeg_executable = FFmpegRenderer(self.settings_service.current.ffmpeg_path or None).executable
         except FFmpegNotFoundError:
@@ -2423,7 +2423,7 @@ class MainWindow(QMainWindow):
 
         if track_id != self._analyzing_track_id:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         name = STEP_NAMES[step][0 if korean else 1] if step in STEPS else (
             "저장된 결과 불러오기" if korean else "Loading the stored result")
         self.activity_progress.update(
@@ -2432,7 +2432,7 @@ class MainWindow(QMainWindow):
 
     def _track_analysis_failed(self, failures: dict[str, str]) -> None:
         if self._analyzing_track_id in failures:
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             self.statusBar().showMessage(
                 f"곡을 분석하지 못했습니다: {failures[self._analyzing_track_id]}" if korean
                 else f"Could not analyze the track: {failures[self._analyzing_track_id]}",
@@ -2447,7 +2447,7 @@ class MainWindow(QMainWindow):
         track = next((entry for entry in self.playlist_service.tracks if entry.id == track_id), None)
         if track is not None and track_id in self.automix_analyses:
             self.statusBar().showMessage(
-                f"'{track.title}' 분석을 마쳤습니다." if self.translator.language is Language.KOREAN
+                f"'{track.title}' 분석을 마쳤습니다." if self.translator.is_korean
                 else f"Finished analyzing '{track.title}'.",
                 5000,
             )
@@ -2493,7 +2493,7 @@ class MainWindow(QMainWindow):
 
     def _choose_audio_files(self) -> None:
         """Let the user select audio files or M3U8 playlists for the playlist."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "음악 파일 추가" if korean else "Add music files",
@@ -2510,7 +2510,7 @@ class MainWindow(QMainWindow):
 
         Returns True once the Playlist has an enabled track again.
         """
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if self.playlist_service.tracks:
             # Songs exist but every one is excluded: adding more is not the fix.
             QMessageBox.warning(
@@ -2540,7 +2540,7 @@ class MainWindow(QMainWindow):
 
     def _choose_m3u_playlist(self) -> None:
         """File menu: add the songs of one M3U8 playlist."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         path, _ = QFileDialog.getOpenFileName(
             self,
             "M3U8 플레이리스트 가져오기" if korean else "Import M3U8 playlist",
@@ -2560,7 +2560,7 @@ class MainWindow(QMainWindow):
         )
         self.project_content_service.add_paths([*accepted, *playlist_accepted])
         self._notify_sidecar_lyrics([*notes, *playlist_notes])
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if playlist_count:
             self.statusBar().showMessage(
                 f"플레이리스트 파일에서 음악 {playlist_count}곡을 추가했습니다."
@@ -2583,7 +2583,7 @@ class MainWindow(QMainWindow):
         The playlist file itself is never returned, so it never becomes project content.
         """
         added, accepted, notes = 0, [], []
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         for path in paths:
             try:
                 entries = read_m3u(path)
@@ -2630,7 +2630,7 @@ class MainWindow(QMainWindow):
         """
         if not paths:
             return 0, [], []
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.activity_progress.begin(
             "content_add", "콘텐츠 추가" if korean else "Adding content",
             detail=(f"오디오 {len(paths)}개 분석 중" if korean
@@ -2676,7 +2676,7 @@ class MainWindow(QMainWindow):
         mode = self.settings_service.current.lyrics_auto_attach_mode
         if mode == "never":
             return []
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         notes: list[str] = []
         for track in tracks:
             if track.lyrics or track.lyrics_path:
@@ -2736,7 +2736,7 @@ class MainWindow(QMainWindow):
         """Show a transient status-bar note for auto-attached lyric files."""
         if not notes:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if len(notes) == 1:
             message = (
                 f"가사·자막 파일을 자동으로 연결했습니다 · {notes[0]}"
@@ -2757,7 +2757,7 @@ class MainWindow(QMainWindow):
         if not content_path.is_file():
             QMessageBox.warning(
                 self,
-                "콘텐츠를 찾을 수 없음" if self.translator.language is Language.KOREAN else "Content not found",
+                "콘텐츠를 찾을 수 없음" if self.translator.is_korean else "Content not found",
                 str(content_path),
             )
             return
@@ -2791,9 +2791,9 @@ class MainWindow(QMainWindow):
             if target is None:
                 QMessageBox.information(
                     self,
-                    "가사 연결" if self.translator.language is Language.KOREAN else "Attach lyrics",
+                    "가사 연결" if self.translator.is_korean else "Attach lyrics",
                     "플레이리스트에서 가사를 연결할 곡 하나를 선택해 주세요."
-                    if self.translator.language is Language.KOREAN else
+                    if self.translator.is_korean else
                     "Select one playlist track, then add this lyrics file again.",
                 )
                 return
@@ -2801,7 +2801,7 @@ class MainWindow(QMainWindow):
 
     def _handle_lyrics_drop(self, path: str, track_id: str) -> None:
         """Attach a dropped lyrics file to the exact playlist row under the pointer."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if not track_id:
             QMessageBox.information(
                 self,
@@ -2814,7 +2814,7 @@ class MainWindow(QMainWindow):
 
     def _attach_lyrics_to_track(self, content_path: Path, track_id: str) -> bool:
         """Load, compare, and attach lyrics without silently replacing existing work."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         target = next(
             (track for track in self.playlist_service.tracks if track.id == track_id),
             None,
@@ -2977,7 +2977,7 @@ class MainWindow(QMainWindow):
             [*image_paths, *video_paths, *accepted_audio_paths, *playlist_audio_paths]
         )
         if image_count or video_count or audio_count:
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             message = (
                 f"이미지 {image_count}개, 영상 {video_count}개, 음악 {audio_count}개를 추가했습니다."
                 if korean else f"Added {image_count} image(s), {video_count} video source(s), and {audio_count} music file(s)."
@@ -2992,7 +2992,7 @@ class MainWindow(QMainWindow):
             return
         if playlist_paths:
             return  # the playlist review was cancelled or already explained why nothing was added
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.statusBar().showMessage(
             "지원되는 이미지, 영상, 음악, 플레이리스트(M3U8) 또는 프로젝트 파일을 놓아 주세요."
             if korean else "Drop supported image, video, music, playlist (M3U8), or project files.",
@@ -3003,7 +3003,7 @@ class MainWindow(QMainWindow):
         """Create Canvas image sources at the drop point while preserving aspect ratio."""
         if not paths:
             return 0
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.activity_progress.begin(
             "content_add", "콘텐츠 추가" if korean else "Adding content",
             detail=(f"이미지 {len(paths)}개 처리 중" if korean
@@ -3054,7 +3054,7 @@ class MainWindow(QMainWindow):
 
     def _confirm_and_load_dropped_project(self, path: Path) -> None:
         """Ask before replacing the active work with a dropped project document."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if self._project_dirty:
             previous_project_path = self.current_project_path
             if (self._confirm_unsaved_changes()
@@ -3325,7 +3325,7 @@ class MainWindow(QMainWindow):
             if manual:
                 self.statusBar().showMessage(
                     "이미 업데이트를 확인하고 있습니다."
-                    if self.translator.language is Language.KOREAN else
+                    if self.translator.is_korean else
                     "An update check is already in progress.",
                     4000,
                 )
@@ -3337,7 +3337,7 @@ class MainWindow(QMainWindow):
         if manual:
             self.statusBar().showMessage(
                 "GitHub에서 최신 버전을 확인하는 중입니다…"
-                if self.translator.language is Language.KOREAN else
+                if self.translator.is_korean else
                 "Checking GitHub for the latest version…"
             )
         worker = UpdateCheckWorker(self._update_service)
@@ -3345,7 +3345,7 @@ class MainWindow(QMainWindow):
         worker.release_found.connect(self._update_release_found)
         worker.failed.connect(self._update_check_failed)
         worker.finished.connect(self._update_check_finished)
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.activity_progress.begin(
             "update_check",
             "업데이트 확인" if korean else "Checking for updates",
@@ -3356,7 +3356,7 @@ class MainWindow(QMainWindow):
     def _update_release_found(self, release: ReleaseInfo) -> None:
         """Compare versions, honor automatic dismissal, and show release notes."""
         manual = self._update_check_manual
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         try:
             release_version = normalized_version(release.version)
             current_version = normalized_version(__version__)
@@ -3405,7 +3405,7 @@ class MainWindow(QMainWindow):
         """Keep automatic network failures quiet but explain manual failures."""
         LOGGER.warning("Update check failed: %s", message)
         if self._update_check_manual:
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             QMessageBox.warning(
                 self,
                 "업데이트 확인 실패" if korean else "Update check failed",
@@ -3429,7 +3429,7 @@ class MainWindow(QMainWindow):
             QStandardPaths.StandardLocation.AppLocalDataLocation
         )
         target = Path(data_root or Path.cwd() / ".app-data") / "updates"
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         dialog = UpdateDownloadDialog(release, korean, self)
         worker = UpdateDownloadWorker(self._update_service, release, target)
         self._update_download_dialog = dialog
@@ -3468,7 +3468,7 @@ class MainWindow(QMainWindow):
         if self._update_download_dialog:
             self._update_download_dialog.complete(False)
             self._update_download_dialog = None
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         QMessageBox.critical(
             self,
             "업데이트 다운로드 실패" if korean else "Update download failed",
@@ -3482,7 +3482,7 @@ class MainWindow(QMainWindow):
             self._update_download_dialog = None
         self.statusBar().showMessage(
             "업데이트 다운로드를 취소했습니다."
-            if self.translator.language is Language.KOREAN else
+            if self.translator.is_korean else
             "Update download cancelled.",
             5000,
         )
@@ -3499,7 +3499,7 @@ class MainWindow(QMainWindow):
 
     def _launch_update_setup(self, installer: Path) -> None:
         """Resolve unsaved work, start the verified Setup, and close the old version."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if self._animation_preview_active:
             self.animation_preview_controller.cancel()
         if ((self._render_worker and self._render_worker.isRunning())
@@ -3602,7 +3602,7 @@ class MainWindow(QMainWindow):
         self.theme_service.set_preference(dialog.selected_theme)
         self.translator.set_language(dialog.selected_language)
         self._settings_dialog = None
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         renderer_changed = (
             selected_settings.preview_backend != self._preview_backend_for_session
         )
@@ -3680,7 +3680,7 @@ class MainWindow(QMainWindow):
         if self._ffmpeg_install_worker and self._ffmpeg_install_worker.isRunning():
             return
         release = release or settings_dialog.selected_ffmpeg_release
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if release is None:
             QMessageBox.warning(
                 settings_dialog,
@@ -3742,7 +3742,7 @@ class MainWindow(QMainWindow):
         self, parent: QWidget, release: FFmpegReleaseOption, operation: str,
     ) -> bool:
         """Warn for non-recommended or destructive version operations with notes."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         box = QMessageBox(parent)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle(
@@ -3781,7 +3781,7 @@ class MainWindow(QMainWindow):
         ), None)
         if current is None or release is None:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         response = QMessageBox.question(
             settings_dialog,
             "FFmpeg 재설치" if korean else "Reinstall FFmpeg",
@@ -3800,7 +3800,7 @@ class MainWindow(QMainWindow):
         current = settings_dialog.managed_installation
         if current is None:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         response = QMessageBox.warning(
             settings_dialog,
             "FFmpeg 삭제" if korean else "Delete FFmpeg",
@@ -3864,7 +3864,7 @@ class MainWindow(QMainWindow):
             self._ffmpeg_catalog_cache = (
                 (releases, installation) if releases else None
             )
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         message = (
             f"FFmpeg {installation.version} 설치 및 검증 완료"
             if korean else f"FFmpeg {installation.version} installed and verified"
@@ -3883,7 +3883,7 @@ class MainWindow(QMainWindow):
             self._ffmpeg_install_dialog = None
         if self._settings_dialog:
             self._settings_dialog.set_ffmpeg_install_error(message)
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         QMessageBox.warning(
             self._settings_dialog or self,
             "FFmpeg 설치 오류" if korean else "FFmpeg installation error", message
@@ -3898,7 +3898,7 @@ class MainWindow(QMainWindow):
             self._settings_dialog.set_ffmpeg_installing(False)
         self.statusBar().showMessage(
             "FFmpeg 설치를 취소했습니다."
-            if self.translator.language is Language.KOREAN else "FFmpeg installation cancelled.",
+            if self.translator.is_korean else "FFmpeg installation cancelled.",
             5000,
         )
 
@@ -3922,7 +3922,7 @@ class MainWindow(QMainWindow):
         dialog = PlaylistExportDialog(default_directory, self.translator, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         existing = [
             path.name for path in (
                 dialog.output_directory / "description.txt",
@@ -4008,7 +4008,7 @@ class MainWindow(QMainWindow):
 
     def _export_m3u_playlist(self) -> None:
         """Save the enabled tracks, in Playlist order, as an M3U8 file."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         tracks = [track for track in self.playlist_service.tracks if track.enabled]
         if not tracks:
             QMessageBox.information(
@@ -4069,7 +4069,7 @@ class MainWindow(QMainWindow):
         if not dialog.exec() or dialog.selected_preset is None:
             return
         preset = dialog.selected_preset
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         answer = QMessageBox.warning(
             self,
             "프리셋 적용 경고" if korean else "Apply preset warning",
@@ -4105,7 +4105,7 @@ class MainWindow(QMainWindow):
 
     def _save_current_as_preset(self) -> None:
         """Save every current canvas source as a reusable user preset."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         sources = self.store.sources()
         if not sources:
             QMessageBox.information(
@@ -4603,7 +4603,7 @@ class MainWindow(QMainWindow):
         if dialog.saved_paths and dialog.add_saved_files_to_project:
             added = self.project_content_service.add_paths(dialog.saved_paths)
             if added:
-                korean = self.translator.language is Language.KOREAN
+                korean = self.translator.is_korean
                 self.statusBar().showMessage(
                     f"저장한 LRC 파일 {added}개를 프로젝트 콘텐츠에 추가했습니다."
                     if korean else
@@ -4628,16 +4628,16 @@ class MainWindow(QMainWindow):
     def retranslate(self) -> None:
         """Refresh all user-interface strings for the active language."""
         text = self.translator.text
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle(text("app_title"))
         self.new_action.setText(text("new"))
         self.open_action.setText(text("open"))
         self.save_action.setText(text("save"))
         self.save_as_action.setText(
-            "다른 이름으로 저장" if self.translator.language is Language.KOREAN else "Save As"
+            "다른 이름으로 저장" if self.translator.is_korean else "Save As"
         )
-        self.undo_action.setText("실행 취소" if self.translator.language is Language.KOREAN else "Undo")
-        self.redo_action.setText("다시 실행" if self.translator.language is Language.KOREAN else "Redo")
+        self.undo_action.setText("실행 취소" if self.translator.is_korean else "Undo")
+        self.redo_action.setText("다시 실행" if self.translator.is_korean else "Redo")
         self.center_horizontal_action.setText("가로 중앙" if korean else "Center H")
         self.center_vertical_action.setText("세로 중앙" if korean else "Center V")
         horizontal_help = (
@@ -4667,22 +4667,22 @@ class MainWindow(QMainWindow):
         self.copy_action.setText("복사" if korean else "Copy")
         self.paste_action.setText("붙여넣기" if korean else "Paste")
         self.duplicate_action.setText(
-            "복제" if self.translator.language is Language.KOREAN else "Duplicate"
+            "복제" if self.translator.is_korean else "Duplicate"
         )
         self.select_all_action.setText(
-            "전체 선택" if self.translator.language is Language.KOREAN else "Select all"
+            "전체 선택" if self.translator.is_korean else "Select all"
         )
         self.presets_action.setText(
-            "디자인 프리셋" if self.translator.language is Language.KOREAN
+            "디자인 프리셋" if self.translator.is_korean
             else "Design Presets"
         )
         self.save_preset_action.setText(
             "현재 캔버스를 프리셋으로 저장…"
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else "Save current canvas as preset…"
         )
         self.ai_project_builder_action.setText(
-            "AI 프로젝트 빌더" if self.translator.language is Language.KOREAN
+            "AI 프로젝트 빌더" if self.translator.is_korean
             else "AI Project Builder"
         )
         self.fit_action.setText(text("fit_canvas"))
@@ -4690,57 +4690,57 @@ class MainWindow(QMainWindow):
         self.canvas.scene_model.set_placeholder_language(korean)
         self.delete_action.setText(text("delete"))
         self.export_action.setText(text("export"))
-        self.preview_action.setText("미리보기" if self.translator.language is Language.KOREAN else "Preview")
-        self.settings_action.setText("설정" if self.translator.language is Language.KOREAN else "Settings")
+        self.preview_action.setText("미리보기" if self.translator.is_korean else "Preview")
+        self.settings_action.setText("설정" if self.translator.is_korean else "Settings")
         self.lrc_generator_action.setText(
-            "LRC 파일 생성기" if self.translator.language is Language.KOREAN
+            "LRC 파일 생성기" if self.translator.is_korean
             else "LRC File Generator"
         )
-        self.file_menu.setTitle("파일" if self.translator.language is Language.KOREAN else "File")
+        self.file_menu.setTitle("파일" if self.translator.is_korean else "File")
         self.recent_projects_menu.setTitle(
             "최근 프로젝트" if korean else "Recent projects"
         )
         self._rebuild_recent_projects_menu()
-        self.project_menu.setTitle("프로젝트" if self.translator.language is Language.KOREAN else "Project")
-        self.edit_menu.setTitle("편집" if self.translator.language is Language.KOREAN else "Edit")
-        self.insert_menu.setTitle("추가" if self.translator.language is Language.KOREAN else "Add")
-        self.view_menu.setTitle("보기" if self.translator.language is Language.KOREAN else "View")
-        self.tools_menu.setTitle("도구" if self.translator.language is Language.KOREAN else "Tools")
-        self.help_menu.setTitle("도움말" if self.translator.language is Language.KOREAN else "Help")
-        self.exit_action.setText("종료" if self.translator.language is Language.KOREAN else "Exit")
+        self.project_menu.setTitle("프로젝트" if self.translator.is_korean else "Project")
+        self.edit_menu.setTitle("편집" if self.translator.is_korean else "Edit")
+        self.insert_menu.setTitle("추가" if self.translator.is_korean else "Add")
+        self.view_menu.setTitle("보기" if self.translator.is_korean else "View")
+        self.tools_menu.setTitle("도구" if self.translator.is_korean else "Tools")
+        self.help_menu.setTitle("도움말" if self.translator.is_korean else "Help")
+        self.exit_action.setText("종료" if self.translator.is_korean else "Exit")
         self.clear_selection_action.setText(
-            "선택 해제" if self.translator.language is Language.KOREAN else "Clear selection"
+            "선택 해제" if self.translator.is_korean else "Clear selection"
         )
         self.help_action.setText(
-            "사용 설명서" if self.translator.language is Language.KOREAN
+            "사용 설명서" if self.translator.is_korean
             else "User Guide"
         )
         self.shortcuts_action.setText(
-            "단축키 안내" if self.translator.language is Language.KOREAN else "Keyboard shortcuts"
+            "단축키 안내" if self.translator.is_korean else "Keyboard shortcuts"
         )
         self.check_updates_action.setText(
-            "업데이트 확인" if self.translator.language is Language.KOREAN
+            "업데이트 확인" if self.translator.is_korean
             else "Check for updates"
         )
         self.about_action.setText(
-            "프로그램 정보" if self.translator.language is Language.KOREAN
+            "프로그램 정보" if self.translator.is_korean
             else "About Playlist Canvas"
         )
         self.project_settings_action.setText(
-            "프로젝트 설정" if self.translator.language is Language.KOREAN else "Project settings"
+            "프로젝트 설정" if self.translator.is_korean else "Project settings"
         )
         self.upgrade_project_action.setText(
             "레거시 프로젝트 업그레이드…"
-            if self.translator.language is Language.KOREAN else "Upgrade legacy project…"
+            if self.translator.is_korean else "Upgrade legacy project…"
         )
         self.show_playlist_action.setText(
-            "플레이리스트 열기" if self.translator.language is Language.KOREAN else "Show Playlist"
+            "플레이리스트 열기" if self.translator.is_korean else "Show Playlist"
         )
         self.show_timeline_action.setText(
-            "타임라인 열기" if self.translator.language is Language.KOREAN else "Show Timeline"
+            "타임라인 열기" if self.translator.is_korean else "Show Timeline"
         )
         self.playlist_files_action.setText(
-            "목록 파일" if self.translator.language is Language.KOREAN else "Playlist files"
+            "목록 파일" if self.translator.is_korean else "Playlist files"
         )
         self.import_m3u_action.setText(
             "M3U8 플레이리스트 가져오기…" if korean else "Import M3U8 playlist…"
@@ -4804,13 +4804,13 @@ class MainWindow(QMainWindow):
         )
         self.sidebar_title.setText(text("add_to_canvas"))
         self.left_tabs.setTabText(
-            0, "요소" if self.translator.language is Language.KOREAN else "Sources"
+            0, "요소" if self.translator.is_korean else "Sources"
         )
         self.left_tabs.setTabText(
-            1, "프로젝트 콘텐츠" if self.translator.language is Language.KOREAN else "Project content"
+            1, "프로젝트 콘텐츠" if self.translator.is_korean else "Project content"
         )
         self.left_tabs.setTabText(
-            2, "레이어" if self.translator.language is Language.KOREAN else "Layers"
+            2, "레이어" if self.translator.is_korean else "Layers"
         )
         self.left_tabs.setTabToolTip(
             0, "캔버스에 추가할 요소" if korean else "Sources to add to the Canvas"
@@ -4822,13 +4822,13 @@ class MainWindow(QMainWindow):
             2, "캔버스 레이어와 그룹" if korean else "Canvas layers and groups"
         )
         self.bottom_tabs.setTabText(
-            0, "플레이리스트" if self.translator.language is Language.KOREAN else "Playlist"
+            0, "플레이리스트" if self.translator.is_korean else "Playlist"
         )
         self.bottom_tabs.setTabText(
-            1, "타임라인" if self.translator.language is Language.KOREAN else "Timeline"
+            1, "타임라인" if self.translator.is_korean else "Timeline"
         )
         self.bottom_tabs.setTabText(
-            2, "미리보기" if self.translator.language is Language.KOREAN else "Preview"
+            2, "미리보기" if self.translator.is_korean else "Preview"
         )
         for index, tooltip in enumerate((
             ("곡 추가·순서·포함 여부 편집 (Ctrl+Alt+1)" if korean
@@ -4885,22 +4885,22 @@ class MainWindow(QMainWindow):
         self._update_project_status()
         self.snap_action.setToolTip(
             "객체를 그리드와 정렬 가이드에 맞춥니다."
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else "Snap objects to the grid and alignment guides."
         )
         self.grid_action.setToolTip(
             "캔버스 작업 공간 전체에 40px 간격의 그리드를 표시합니다. 영상에는 포함되지 않습니다."
-            if self.translator.language is Language.KOREAN else
+            if self.translator.is_korean else
             "Show a 40 px grid across the complete Canvas workspace. It is not included in video output."
         )
         self.export_action.setToolTip(
             "현재 Canvas와 Playlist를 MP4 파일로 렌더링합니다. (Ctrl+E)"
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else "Render the current Canvas and Playlist as an MP4 file. (Ctrl+E)"
         )
         self.preview_action.setToolTip(
             "하단 미리보기 탭에서 전체 플레이리스트를 실제 음원과 함께 확인합니다. (Ctrl+Alt+3)"
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else "Open the bottom Preview tab with the complete playlist and actual audio. (Ctrl+Alt+3)"
         )
         # Icon-only toolbar buttons: the tooltip is the only place their shortcut shows.
@@ -4912,12 +4912,12 @@ class MainWindow(QMainWindow):
             action.setToolTip(f"{action.text()} ({shortcut})" if shortcut else action.text())
         self.playlist_files_action.setToolTip(
             "YouTube 설명문과 CSV 목록 파일을 만듭니다."
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else "Create YouTube description and playlist CSV files."
         )
         self.settings_action.setToolTip(
             "FFmpeg, 출력, 렌더링 기본값을 설정합니다."
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else "Configure FFmpeg, output, and rendering defaults."
         )
 
@@ -4938,13 +4938,13 @@ class MainWindow(QMainWindow):
         if selected_ids:
             self._show_undo_hint(
                 f"요소 {len(selected_ids)}개를 삭제했습니다."
-                if self.translator.language is Language.KOREAN else
+                if self.translator.is_korean else
                 f"Deleted {len(selected_ids)} source(s)."
             )
 
     def _show_undo_hint(self, message: str) -> None:
         """Confirm a removal in the status bar and name the way back."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.statusBar().showMessage(
             f"{message} 실행 취소(Ctrl+Z)로 되돌릴 수 있습니다." if korean
             else f"{message} Undo (Ctrl+Z) brings it back.",
@@ -4978,7 +4978,7 @@ class MainWindow(QMainWindow):
         if self.project_controller.saving:
             message = (
                 "프로젝트 저장이 완료된 후 종료해 주세요."
-                if self.translator.language is Language.KOREAN
+                if self.translator.is_korean
                 else "Wait for the project save to finish before closing."
             )
             self.statusBar().showMessage(message, 5000)
@@ -5000,7 +5000,7 @@ class MainWindow(QMainWindow):
                 self._close_after_export_cancel = True
                 message = (
                     "내보내기를 안전하게 취소한 뒤 종료합니다."
-                    if self.translator.language is Language.KOREAN else
+                    if self.translator.is_korean else
                     "Closing after export is cancelled safely..."
                 )
                 self.statusBar().showMessage(message, 5000)
@@ -5019,7 +5019,7 @@ class MainWindow(QMainWindow):
                 self._close_after_export_cancel = True
                 message = (
                     "내보내기를 안전하게 취소한 뒤 종료합니다."
-                    if self.translator.language is Language.KOREAN else
+                    if self.translator.is_korean else
                     "Closing after export is cancelled safely..."
                 )
                 self.statusBar().showMessage(message, 5000)
@@ -5027,7 +5027,7 @@ class MainWindow(QMainWindow):
             return
         if self._ffmpeg_install_worker and self._ffmpeg_install_worker.isRunning():
             self._ffmpeg_install_worker.cancel()
-            message = "FFmpeg 다운로드를 취소하는 중입니다." if self.translator.language is Language.KOREAN else "Cancelling FFmpeg download..."
+            message = "FFmpeg 다운로드를 취소하는 중입니다." if self.translator.is_korean else "Cancelling FFmpeg download..."
             self.statusBar().showMessage(message, 5000)
             event.ignore()
             return
@@ -5036,7 +5036,7 @@ class MainWindow(QMainWindow):
             self._close_after_ffmpeg_catalog_cancel = True
             message = (
                 "FFmpeg 버전 확인을 중단한 뒤 종료합니다."
-                if self.translator.language is Language.KOREAN else
+                if self.translator.is_korean else
                 "Closing after the FFmpeg version check stops..."
             )
             self.statusBar().showMessage(message, 5000)
@@ -5044,12 +5044,12 @@ class MainWindow(QMainWindow):
             return
         if self._update_download_worker and self._update_download_worker.isRunning():
             self._update_download_worker.cancel()
-            message = "업데이트 다운로드를 취소하는 중입니다." if self.translator.language is Language.KOREAN else "Cancelling update download..."
+            message = "업데이트 다운로드를 취소하는 중입니다." if self.translator.is_korean else "Cancelling update download..."
             self.statusBar().showMessage(message, 5000)
             event.ignore()
             return
         if self._project_dirty and not self._update_install_authorized:
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             response = QMessageBox.warning(
                 self,
                 "저장되지 않은 변경 사항" if korean else "Unsaved changes",

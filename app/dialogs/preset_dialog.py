@@ -91,7 +91,7 @@ class DesignPresetDialog(QDialog):
     # -- population -----------------------------------------------------------
 
     def _rebuild_list(self, select_id: str | None) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self._presets = all_presets()
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
@@ -118,7 +118,7 @@ class DesignPresetDialog(QDialog):
 
     def retranslate(self) -> None:
         """Refresh translated strings while keeping the current selection."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         selected = self.selected_preset.identifier if self.selected_preset else None
         self.setWindowTitle("디자인 프리셋" if korean else "Design Presets")
         self.heading.setText("디자인 프리셋 선택" if korean else "Choose a design preset")
@@ -184,7 +184,7 @@ class DesignPresetDialog(QDialog):
     # -- user preset management -------------------------------------------
 
     def _import_preset(self) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         path, _ = QFileDialog.getOpenFileName(
             self,
             "프리셋 가져오기" if korean else "Import preset",
@@ -206,7 +206,7 @@ class DesignPresetDialog(QDialog):
         preset = self.selected_preset
         if preset is None or not preset.editable:
             return
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         path, _ = QFileDialog.getSaveFileName(
             self,
             "프리셋 내보내기" if korean else "Export preset",
@@ -226,7 +226,7 @@ class DesignPresetDialog(QDialog):
         preset = self.selected_preset
         if preset is None or not preset.editable:
             return
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         confirm = QMessageBox.question(
             self,
             "프리셋 삭제" if korean else "Delete preset",

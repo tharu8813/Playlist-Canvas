@@ -8,11 +8,19 @@ A per-type editor here instead: hides every type-conditional field first
 applies the handful of fields every type applies the same way
 (apply_shared_fields), then runs the same closing steps the legacy
 function did (finish).
+
+Every editor follows that same frame, so it is written once as the
+``editing`` context manager; an editor only fills in the middle step::
+
+    def edit(inspector, source):
+        with editing(inspector, source):
+            show_fields(inspector, ("shape",))
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, ClassVar
 
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QPushButton, QWidget
@@ -181,10 +189,15 @@ _ALWAYS_VISIBLE_FIELD_KEYS: tuple[str, ...] = (
 )
 
 
+def show_fields(inspector: "SourceInspector", keys: Iterable[str], visible: bool = True) -> None:
+    """Set the same visibility on every field in ``keys``."""
+    for key in keys:
+        inspector._set_field_visible(key, visible)
+
+
 def hide_type_specific_fields(inspector: "SourceInspector") -> None:
     """Hide every field a per-type editor might show, before it shows its own."""
-    for key in TYPE_SPECIFIC_FIELD_KEYS:
-        inspector._set_field_visible(key, False)
+    show_fields(inspector, TYPE_SPECIFIC_FIELD_KEYS, False)
 
 
 def apply_shared_fields(inspector: "SourceInspector", source: Source) -> None:
@@ -194,8 +207,7 @@ def apply_shared_fields(inspector: "SourceInspector", source: Source) -> None:
     it, and the shadow group is visible for any selected source.
     """
     inspector._set_field_visible("text_color", inspector._uses_primary_text_color(source))
-    for key in _ALWAYS_VISIBLE_FIELD_KEYS:
-        inspector._set_field_visible(key, True)
+    show_fields(inspector, _ALWAYS_VISIBLE_FIELD_KEYS)
 
 
 def apply_image_backed_fields(inspector: "SourceInspector", source: Source, *, show_file: bool) -> None:
@@ -203,12 +215,24 @@ def apply_image_backed_fields(inspector: "SourceInspector", source: Source, *, s
     (image_fit/blur/brightness/contrast), plus file (whose own visibility
     condition differs per type, e.g. BACKGROUND gates it on background_mode)."""
     inspector._set_field_visible("file", show_file)
-    inspector._set_field_visible("image_fit", True)
-    for key in ("blur", "brightness", "contrast"):
-        inspector._set_field_visible(key, True)
+    show_fields(inspector, ("image_fit", "blur", "brightness", "contrast"))
 
 
 def finish(inspector: "SourceInspector", source: Source) -> None:
     """Run the same closing steps _update_legacy_source_specific_fields did."""
     inspector._hide_inactive_dependent_fields(source)
     inspector._refresh_property_tabs([source])
+
+
+@contextmanager
+def editing(inspector: "SourceInspector", source: Source) -> Iterator[None]:
+    """Frame one per-type edit: hide every type-specific field on entry, then
+    apply the shared fields and run ``finish`` on exit.
+
+    The body only shows the fields its own type owns. Like the flat legacy
+    pass it replaces, an exception in the body skips the closing steps.
+    """
+    hide_type_specific_fields(inspector)
+    yield
+    apply_shared_fields(inspector, source)
+    finish(inspector, source)

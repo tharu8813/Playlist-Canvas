@@ -123,7 +123,7 @@ class LayerPanel(QFrame):
 
     def retranslate(self) -> None:
         """Refresh panel text using the active app language."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.title.setText("레이어" if korean else "Layers")
         self.tree.setHeaderLabels(
             ["이름" if korean else "Name", "표시" if korean else "Show", "잠금" if korean else "Lock"]
@@ -177,7 +177,7 @@ class LayerPanel(QFrame):
                 item.setFirstColumnSpanned(False)
                 self.tree.addTopLevelItem(item)
                 group_items[group.id] = item
-            ungrouped_label = "미분류" if self.translator.language.value == "ko" else "Ungrouped"
+            ungrouped_label = "미분류" if self.translator.is_korean else "Ungrouped"
             ungrouped = QTreeWidgetItem([ungrouped_label, "", ""])
             ungrouped.setData(0, self._kind_role, "root")
             ungrouped.setFlags(
@@ -414,7 +414,7 @@ class LayerPanel(QFrame):
                 if source.id in selected
             )
         )
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.summary_label.setText(
             f"{len(ordered)}개 · {len(selected)}개 선택"
             if korean else f"{len(ordered)} layers · {len(selected)} selected"
@@ -422,7 +422,7 @@ class LayerPanel(QFrame):
 
     def _create_group(self) -> None:
         selected = self.selected_source_ids()
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         label = "그룹 이름" if korean else "Group name"
         title = "새 레이어 그룹" if korean else "New layer group"
         name, accepted = QInputDialog.getText(self, title, label)

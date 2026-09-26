@@ -36,7 +36,6 @@ from app.services.export_storage_service import format_bytes
 from app.services.project_load_worker import ProjectLoadWorker
 from app.services.project_save_worker import ProjectSaveWorker
 from app.services.project_service import ProjectError, ProjectLoadCancelled, ProjectService
-from app.utils.i18n import Language
 from app.utils.logging_setup import log_directory
 from app import __version__
 
@@ -124,7 +123,7 @@ class ProjectController:
         window = self.window
         if not hasattr(window, "project_status_label"):
             return
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         title = window.project_settings.title
         # "Untitled Project" is the model's stored default, not a name the user chose.
         name = title if title and title != "Untitled Project" else (
@@ -173,7 +172,7 @@ class ProjectController:
         LOGGER.error("Project operation failed: %s", error)
         QMessageBox.critical(
             window,
-            "프로젝트 오류" if window.translator.language is Language.KOREAN else "Project error",
+            "프로젝트 오류" if window.translator.is_korean else "Project error",
             str(error),
         )
 
@@ -282,7 +281,7 @@ class ProjectController:
         if active_worker is not None:
             window.statusBar().showMessage(
                 "이미 프로젝트를 저장하고 있습니다."
-                if window.translator.language is Language.KOREAN
+                if window.translator.is_korean
                 else "The project is already being saved.",
                 3000,
             )
@@ -295,7 +294,7 @@ class ProjectController:
             default = str(default_project_path(window.project_settings.title))
             selected, _ = QFileDialog.getSaveFileName(
                 window,
-                "프로젝트 저장" if window.translator.language is Language.KOREAN else "Save project",
+                "프로젝트 저장" if window.translator.is_korean else "Save project",
                 default,
                 "Playlist Canvas Project (*.pvsproj);;Legacy JSON Project (*.project.json *.json)",
             )
@@ -325,10 +324,10 @@ class ProjectController:
         window.save_as_action.setEnabled(False)
         window._autosave_debounce_timer.stop()
         window.statusBar().showMessage(
-            "프로젝트 저장 중..." if window.translator.language is Language.KOREAN
+            "프로젝트 저장 중..." if window.translator.is_korean
             else "Saving project..."
         )
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         window.activity_progress.begin(
             "project_save", "프로젝트 저장" if korean else "Saving project",
             detail=Path(target).name,
@@ -371,7 +370,7 @@ class ProjectController:
             else:
                 window._autosave_debounce_timer.start()
             window._update_project_status()
-            korean = window.translator.language is Language.KOREAN
+            korean = window.translator.is_korean
             message = (
                 "프로젝트를 저장했습니다. 저장 중 변경된 내용은 아직 저장되지 않았습니다."
                 if korean and not unchanged_since_snapshot else
@@ -411,7 +410,7 @@ class ProjectController:
         window = self.window
         selected, _ = QFileDialog.getOpenFileName(
             window,
-            "프로젝트 열기" if window.translator.language is Language.KOREAN else "Open project",
+            "프로젝트 열기" if window.translator.is_korean else "Open project",
             "",
             "Playlist Canvas Project (*.pvsproj *.project.json *.json)",
         )
@@ -447,7 +446,7 @@ class ProjectController:
             window._wait_for_project_save(self.save_worker)
         if not window._project_dirty:
             return True
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         response = QMessageBox.warning(
             window,
             "저장되지 않은 변경 사항" if korean else "Unsaved changes",
@@ -466,7 +465,7 @@ class ProjectController:
     def load_path(self, path: Path) -> bool:
         """Restore a selected project path through the normal safe load workflow."""
         window = self.window
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         stage = "프로젝트 파일 읽기" if korean else "Reading project file"
         window.activity_progress.begin(
             "project_load", "프로젝트 불러오기" if korean else "Loading project",
@@ -482,7 +481,7 @@ class ProjectController:
         try:
             document = self._load_document_off_gui_thread(path)
             if document.app_version and document.app_version != __version__:
-                korean = window.translator.language is Language.KOREAN
+                korean = window.translator.is_korean
                 QMessageBox.warning(
                     window,
                     "프로젝트 버전 차이" if korean else "Project version differs",
@@ -527,7 +526,7 @@ class ProjectController:
             window.recent_projects.add(window.current_project_path)
             window._project_dirty = False
             window._update_project_status()
-            message = "프로젝트를 불러왔습니다." if window.translator.language is Language.KOREAN else "Project loaded."
+            message = "프로젝트를 불러왔습니다." if window.translator.is_korean else "Project loaded."
             window.statusBar().showMessage(message, 4000)
             if window._legacy_project_path is not None:
                 QTimer.singleShot(0, window._offer_legacy_upgrade)
@@ -577,7 +576,7 @@ class ProjectController:
         dialog with Cancel appears; its modality keeps blocking the editor.
         """
         window = self.window
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         worker = ProjectLoadWorker(path)
         loop = QEventLoop()
         dialog: QProgressDialog | None = None
@@ -650,7 +649,7 @@ class ProjectController:
         cause: BaseException = error
         while cause.__cause__ is not None:
             cause = cause.__cause__
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         guidance = window._project_load_guidance(cause, korean)
         traceback_text = "".join(
             traceback_module.format_exception(type(error), error, error.__traceback__)
@@ -731,7 +730,7 @@ class ProjectController:
         if (window._legacy_project_path is None
                 or window.current_project_path != window._legacy_project_path):
             return
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         response = QMessageBox.question(
             window,
             "레거시 프로젝트" if korean else "Legacy project",
@@ -758,7 +757,7 @@ class ProjectController:
         selected, _ = QFileDialog.getSaveFileName(
             window,
             "업그레이드 프로젝트 저장"
-            if window.translator.language is Language.KOREAN else "Save upgraded project",
+            if window.translator.is_korean else "Save upgraded project",
             str(default),
             "Playlist Canvas Project (*.pvsproj)",
         )
@@ -784,10 +783,10 @@ class ProjectController:
             window._update_project_status()
             QMessageBox.information(
                 window,
-                "업그레이드 완료" if window.translator.language is Language.KOREAN
+                "업그레이드 완료" if window.translator.is_korean
                 else "Upgrade complete",
                 f"새 프로젝트 패키지를 저장했습니다.\n{upgraded}"
-                if window.translator.language is Language.KOREAN else
+                if window.translator.is_korean else
                 f"Saved the upgraded project package.\n{upgraded}",
             )
         except ProjectError as error:

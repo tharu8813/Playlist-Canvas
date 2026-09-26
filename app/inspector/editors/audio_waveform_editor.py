@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from app.inspector.editors.base import apply_shared_fields, finish, hide_type_specific_fields
+from app.inspector.editors.base import editing
 from app.models.source import Source
 
 if TYPE_CHECKING:
@@ -13,7 +13,5 @@ if TYPE_CHECKING:
 
 
 def edit(inspector: "SourceInspector", source: Source) -> None:
-    hide_type_specific_fields(inspector)
-    inspector._set_field_visible("waveform_style", True)
-    apply_shared_fields(inspector, source)
-    finish(inspector, source)
+    with editing(inspector, source):
+        inspector._set_field_visible("waveform_style", True)

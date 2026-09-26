@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from app.services.recent_projects_service import RecentProjectsService
 from app.services.project_service import ProjectError, ProjectService, ProjectSummary
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 class _RecentProjectRow(QWidget):
@@ -180,7 +180,7 @@ class StartupDialog(QDialog):
 
     def retranslate(self) -> None:
         """Refresh all visible startup text."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("프로젝트 시작" if korean else "Start a project")
         self.title.setText("Playlist Canvas")
         self.description.setText(
@@ -213,7 +213,7 @@ class StartupDialog(QDialog):
         selected_path = self._selected_recent_path()
         self.recent_list.clear()
         projects = self.recent.projects()
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if not projects:
             empty = QListWidgetItem(
                 "최근 프로젝트가 없습니다." if korean else "No recent projects yet."
@@ -263,7 +263,7 @@ class StartupDialog(QDialog):
         self.accept()
 
     def _browse_project(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         selected, _ = QFileDialog.getOpenFileName(
             self,
             "프로젝트 열기" if korean else "Open project",
@@ -289,7 +289,7 @@ class StartupDialog(QDialog):
             self.recent.remove(path)
 
     def _clear_recent(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         answer = QMessageBox.question(
             self,
             "최근 프로젝트 목록 지우기" if korean else "Clear recent projects",

@@ -548,7 +548,7 @@ class SettingsDialog(QDialog):
         self.ffmpeg_refresh_versions_button.setEnabled(False)
         self.ffmpeg_release_info.setText(
             "사용 가능한 FFmpeg 버전을 확인하고 있습니다…"
-            if self.translator.language is Language.KOREAN else
+            if self.translator.is_korean else
             "Checking available FFmpeg versions…"
         )
         self.catalog_requested.emit(force)
@@ -560,7 +560,7 @@ class SettingsDialog(QDialog):
         self._ffmpeg_catalog_loaded = bool(releases)
         self.ffmpeg_version_combo.blockSignals(True)
         self.ffmpeg_version_combo.clear()
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         for release in releases:
             suffix = "(권장)" if korean and release.recommended else (
                 " (Recommended)" if release.recommended else ""
@@ -584,7 +584,7 @@ class SettingsDialog(QDialog):
         self.ffmpeg_refresh_versions_button.setEnabled(True)
         self.ffmpeg_release_info.setText(
             ("버전 목록을 불러오지 못했습니다. 새로고침을 눌러 다시 시도하세요.\n"
-             if self.translator.language is Language.KOREAN else
+             if self.translator.is_korean else
              "Could not load the version list. Select Refresh to try again.\n")
             + message
         )
@@ -605,7 +605,7 @@ class SettingsDialog(QDialog):
         release = self.selected_ffmpeg_release
         if release is None:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         kind = (
             "Playlist Canvas 권장 버전" if korean else "Recommended for Playlist Canvas"
         ) if release.recommended else (
@@ -697,7 +697,7 @@ class SettingsDialog(QDialog):
         self.language_combo.blockSignals(False)
 
     def _import_language_pack(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         path, _ = QFileDialog.getOpenFileName(
             self,
             "언어팩 가져오기" if korean else "Import language pack",
@@ -729,7 +729,7 @@ class SettingsDialog(QDialog):
         pack = self.translator.pack_service.packs.get(locale)
         if pack is None:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         response = QMessageBox.question(
             self,
             "언어팩 제거" if korean else "Remove language pack",
@@ -754,7 +754,7 @@ class SettingsDialog(QDialog):
         self._update_language_pack_ui()
 
     def _open_language_pack_folder(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         directory = self.translator.pack_service.directory
         try:
             directory.mkdir(parents=True, exist_ok=True)
@@ -780,7 +780,7 @@ class SettingsDialog(QDialog):
     def _update_language_pack_ui(self, _index: int = -1) -> None:
         locale = str(self.language_combo.currentData() or "")
         pack = self.translator.pack_service.packs.get(locale)
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.language_pack_remove_button.setEnabled(pack is not None)
         if pack is not None:
             self.language_pack_status.setText(
@@ -854,7 +854,7 @@ class SettingsDialog(QDialog):
         """Reject a visibly broken executable path instead of saving silent failure."""
         raw_path = self.ffmpeg_edit.text().strip()
         if raw_path and not Path(raw_path).is_file():
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             QMessageBox.warning(
                 self,
                 "FFmpeg 경로 확인" if korean else "Check FFmpeg path",
@@ -872,7 +872,7 @@ class SettingsDialog(QDialog):
         self.smooth_scroll_duration_slider.setEnabled(enabled)
         self.smooth_scroll_duration_value.setEnabled(enabled)
         duration = self.smooth_scroll_duration_slider.value()
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         feel = (
             "빠름" if korean and duration <= 130 else
             "균형" if korean and duration <= 240 else
@@ -894,7 +894,7 @@ class SettingsDialog(QDialog):
             self._ffmpeg_status_override = (
                 True,
                 "FFmpeg를 다운로드하고 검증하는 중입니다. 진행 창에서 상태를 확인하세요."
-                if self.translator.language is Language.KOREAN else
+                if self.translator.is_korean else
                 "Downloading and verifying FFmpeg. Follow progress in the install window.",
             )
         else:
@@ -910,7 +910,7 @@ class SettingsDialog(QDialog):
         self._refresh_ffmpeg_status()
 
     def _refresh_ffmpeg_status(self, *_args: object) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         path = Path(self.ffmpeg_edit.text().strip()) if self.ffmpeg_edit.text().strip() else None
         if self._ffmpeg_status_override is not None:
             positive, detail = self._ffmpeg_status_override
@@ -949,7 +949,7 @@ class SettingsDialog(QDialog):
         self.ffmpeg_status_detail.setText(detail)
 
     def _show_test_result(self, success: bool, detail: str) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         QMessageBox.information(
             self,
             "FFmpeg 확인" if korean else "FFmpeg check",
@@ -960,7 +960,7 @@ class SettingsDialog(QDialog):
 
     def retranslate(self) -> None:
         """Set all labels for the currently active language."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("설정" if korean else "Settings")
         self.title_label.setText("애플리케이션 설정" if korean else "Application settings")
         self.subtitle_label.setText(
@@ -1236,7 +1236,7 @@ class SettingsDialog(QDialog):
 
     def _update_work_mode_hint(self, _index: int = -1) -> None:
         """Explain the resource and stability trade-off of preparation modes."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         mode = str(self.work_mode_combo.currentData() or WORK_MODE_AUTO)
         if mode == WORK_MODE_STABLE:
             text = (
@@ -1270,7 +1270,7 @@ class SettingsDialog(QDialog):
     def _refresh_automix_cache_usage(self) -> None:
         from app.automix.cache import cache_usage
 
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         entries, size = cache_usage()
         megabytes = size / (1024 * 1024)
         self.automix_cache_usage_label.setText(
@@ -1285,7 +1285,7 @@ class SettingsDialog(QDialog):
         self._refresh_automix_cache_usage()
 
     def _ffmpeg_browse_title(self) -> str:
-        return "FFmpeg 실행 파일 선택" if self.translator.language is Language.KOREAN else "Choose FFmpeg executable"
+        return "FFmpeg 실행 파일 선택" if self.translator.is_korean else "Choose FFmpeg executable"
 
     def _output_browse_title(self) -> str:
-        return "기본 출력 폴더 선택" if self.translator.language is Language.KOREAN else "Choose default output folder"
+        return "기본 출력 폴더 선택" if self.translator.is_korean else "Choose default output folder"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from app.models.playlist import PlaylistTrack
+from app.utils.time_format import format_clock
 
 
 # Keep the editor's completion list and the renderer's replacement contract in
@@ -96,7 +97,4 @@ def expand_placeholder_labels(template: str, korean: bool = False) -> str:
 
 def format_timestamp(seconds: float) -> str:
     """Format a duration as MM:SS or HH:MM:SS for display templates."""
-    total = max(0, int(seconds))
-    hours, remainder = divmod(total, 3600)
-    minutes, seconds_part = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{seconds_part:02d}" if hours else f"{minutes:02d}:{seconds_part:02d}"
+    return format_clock(int(seconds))

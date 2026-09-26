@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QSplitter, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +86,7 @@ class HelpDialog(QDialog):
         self.retranslate()
 
     def retranslate(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         current_id = self.current_topic_id
         self.setWindowTitle("Playlist Canvas 도움말" if korean else "Playlist Canvas Help")
         self.title_label.setText("사용 설명서" if korean else "User Guide")
@@ -139,7 +139,7 @@ class HelpDialog(QDialog):
         if self.topic_list.currentItem() is not None:
             self._show_topic(self.topic_list.currentItem(), None)
         else:
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             self.browser.setHtml(
                 "<h1>검색 결과 없음</h1><p>다른 검색어를 입력해 보세요.</p>"
                 if korean else

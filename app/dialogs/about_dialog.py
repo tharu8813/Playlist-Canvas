@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from app import __version__
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 REPOSITORY_URL = "https://github.com/tharu8813/Playlist-Canvas"
@@ -156,11 +156,11 @@ class AboutDialog(QDialog):
 
     def _copy_diagnostics(self) -> None:
         QApplication.clipboard().setText(self.diagnostic_text())
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.copy_button.setText("복사됨" if korean else "Copied")
 
     def _open_logs(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         try:
             self.log_directory.mkdir(parents=True, exist_ok=True)
         except OSError as error:
@@ -179,7 +179,7 @@ class AboutDialog(QDialog):
 
     def _open_license(self) -> None:
         """Open the bundled application license in the user's default text viewer."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if not self.license_path.is_file() or not QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self.license_path))
         ):
@@ -191,7 +191,7 @@ class AboutDialog(QDialog):
             )
 
     def retranslate(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("프로그램 정보" if korean else "About Playlist Canvas")
         self.description_label.setText(
             "음악 재생목록을 시각적인 영상으로 구성하고 MP4로 내보내는 데스크톱 스튜디오입니다.\n"

@@ -25,6 +25,7 @@ from app.models.source import Source
 from app.services.playlist_service import PlaylistService
 from app.services.source_store import SourceStore
 from app.utils.i18n import Translator
+from app.utils.time_format import format_clock
 
 
 class TimelineSpinBox(QDoubleSpinBox):
@@ -41,12 +42,7 @@ class TimelineSpinBox(QDoubleSpinBox):
     @staticmethod
     def format_timecode(value: float) -> str:
         """Format seconds without allocating a temporary QWidget."""
-        seconds = max(0, round(value))
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours:
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:02d}:{seconds:02d}"
+        return format_clock(round(value))
 
     def textFromValue(self, value: float) -> str:
         return self.format_timecode(value)
@@ -177,7 +173,7 @@ class TimelinePanel(QFrame):
 
     def retranslate(self) -> None:
         """Refresh static labels in the current language."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.title.setText("타임라인" if korean else "Timeline")
         self.track_table.setHorizontalHeaderLabels(
             ["#", "트랙" if korean else "Track", "시작" if korean else "Start",
@@ -222,7 +218,7 @@ class TimelinePanel(QFrame):
                 start_editor.setValue(max(start, minimum_start))
                 start_editor.setToolTip(
                     f"최소 시작 {TimelineSpinBox.format_timecode(minimum_start)}"
-                    if self.translator.language.value == "ko" else
+                    if self.translator.is_korean else
                     f"Minimum {TimelineSpinBox.format_timecode(minimum_start)}"
                 )
                 start_editor.valueChanged.connect(
@@ -261,7 +257,7 @@ class TimelinePanel(QFrame):
             total_label = TimelineSpinBox.format_timecode(total)
             self.summary.setText(
                 f"{len(timeline_tracks)}곡 · 총 {total_label}"
-                if self.translator.language.value == "ko" else
+                if self.translator.is_korean else
                 f"{len(timeline_tracks)} tracks · {total_label}"
             )
             self._restore_row_selection(

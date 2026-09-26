@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 class ShortcutsDialog(QDialog):
@@ -50,7 +50,7 @@ class ShortcutsDialog(QDialog):
 
     def retranslate(self) -> None:
         """Populate the reference table in the selected application language."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("단축키 안내" if korean else "Keyboard shortcuts")
         self.buttons.button(QDialogButtonBox.StandardButton.Close).setText(
             "닫기" if korean else "Close"
