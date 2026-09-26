@@ -63,7 +63,8 @@ class ProgressiveControllerTests(unittest.TestCase):
         self.assertEqual(len(self.partials), 1)
         self.assertEqual(self.partials[0]._track_count, 5)
         self.assertEqual(len(self.partials[0]._plan.audio.transitions), 4)
-        self.assertIn("Analyzing 5 / 6 · Planning transitions 4 / 5", self.messages)
+        self.assertTrue(any("Analyzing beats & vocals · 5/6 done" in message
+                            and "transitions planned 4/5" in message for message in self.messages), self.messages)
 
     def test_nothing_renders_until_preview_attaches(self) -> None:
         self.analyze("t0", "t1", "t2")
@@ -90,7 +91,7 @@ class ProgressiveControllerTests(unittest.TestCase):
         self.assertEqual(received, [])
         worker.ready.emit(worker._generation, "mix.flac", worker._plan, 480.0, 0.5)
         self.assertEqual(received, [("mix.flac", worker._plan, 480.0, 0.5)])
-        self.assertIn("AutoMix ready through track 2", self.messages)
+        self.assertIn("AutoMix playable through track 2", self.messages[-1])
 
     def test_results_from_a_cancelled_run_never_reach_the_next_one(self) -> None:
         old_generation = self.controller._generation
@@ -132,6 +133,66 @@ class ProgressiveControllerTests(unittest.TestCase):
         self.analyze(*(t.id for t in self.tracks[2:]))
         self.partials[-1].ready.emit(self.partials[-1]._generation, "mix.flac", self.partials[-1]._plan, 1.0, 1.0)
         self.assertIs(self.finals[-1][2]["automix_settings"], energetic)  # Preview final == Export settings
+
+    def test_the_playlist_level_reaches_preview_before_any_mix(self) -> None:
+        levels = []
+        self.controller.level_ready.connect(levels.append)
+        worker = self.controller._analysis_worker
+        worker.level_done.emit(self.controller._generation - 1, 0.9)  # a cancelled run's
+        worker.level_done.emit(self.controller._generation, 0.5)
+        self.assertEqual(levels, [0.5])
+        self.assertEqual(self.controller.playback_gain, 0.5)
+        self.controller.report_playhead(0.0, True)
+        self.analyze("t0", "t1")
+        self.settle()
+        self.assertEqual(self.partials[0]._gain, 0.5)  # partial mixes share the per-track level
+
+    def test_a_restarted_run_ignores_the_old_final_mix(self) -> None:
+        ready = []
+        self.controller.audio_ready.connect(lambda path, plan: ready.append(path))
+        self.analyze(*(t.id for t in self.tracks))
+        old_final = self.finals[0][0]
+        self.controller.start(self.tracks, Path("unused"), "automix", 3.0)
+        self.messages.clear()
+        old_final.progress.emit("Combining audio", 0.55, "Measuring loudness 5.0s / 10.0s · 50%")
+        old_final.audio_ready.emit("old.flac", "plan")
+        self.assertEqual(ready, [])
+        self.assertFalse(any("loudness" in message for message in self.messages))
+
+    def test_progress_is_monotonic_and_names_the_final_stages(self) -> None:
+        fractions = []
+        self.controller.progress.connect(lambda _stage, fraction, _message: fractions.append(fraction))
+        self.analyze(*(t.id for t in self.tracks))
+        final_controller = self.finals[0][0]
+        final_controller.progress.emit("Combining audio", 0.54, "Measuring loudness 30.0s / 600.0s · 5%")
+        self.settle()  # coalesced redraw
+        self.assertIn("Final mix · Measuring the mix loudness · 00:30 / 10:00", self.messages[-1])
+        final_controller.progress.emit("Combining audio", 0.64, "Normalizing loudness and saving audio 600.0s / 600.0s · 100%")
+        self.settle()
+        self.assertLess(fractions[-1], 1.0)  # not complete before the mix is playable
+        from app.automix.planner import compile_automix
+        from app.automix.settings import AUTOMIX_SETTINGS
+        final_controller.audio_ready.emit("final.flac", compile_automix(self.tracks, self.analyses, AUTOMIX_SETTINGS))
+        self.assertEqual(fractions, sorted(fractions))
+        self.assertEqual(fractions[-1], 1.0)
+        self.assertEqual(self.messages[-1], "AutoMix ready")
+
+    def test_a_final_mix_without_transitions_is_not_reported_as_automix(self) -> None:
+        from app.timeline.compiler import compile_playlist
+
+        self.analyze(*(t.id for t in self.tracks))
+        self.finals[0][0].audio_ready.emit("final.flac", compile_playlist(self.tracks))
+        self.assertIn("back to back", self.controller.fallback_message)
+        self.assertIn("back to back", self.messages[-1])
+
+    def test_several_tracks_analyzing_at_once_are_all_shown(self) -> None:
+        worker = self.controller._analysis_worker
+        for track_id, step in (("t0", "vocals"), ("t1", "beat_model"), ("t2", "decode")):
+            worker.rhythm_step.emit(self.controller._generation, track_id, step)
+        worker.rhythm_step.emit(self.controller._generation, "t3", "cached")
+        self.settle()
+        self.assertIn("now: t0(vocals), t1(beat model) +1 more · 1 from cache", self.messages[-1])
+
 
 def _loudness(executable: Path, path: Path, seconds: float) -> float:
     """Integrated LUFS of the first ``seconds`` of ``path``."""
@@ -180,7 +241,7 @@ class RealProgressiveRenderTests(unittest.TestCase):
             plan = partial_plan(tracks, state, settings)
             ready = []
             worker = module._PartialRenderWorker(
-                executable, plan, 2, tracks, directory / "partial", 1, threading.Event(), None, {},
+                executable, plan, 2, tracks, directory / "partial", 1, threading.Event(), None,
             )
             worker.ready.connect(lambda *args: ready.append(args))
             worker.run()  # synchronously, in this thread

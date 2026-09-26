@@ -69,10 +69,14 @@ _SIGNAL = np.zeros(22050, dtype=np.float32)
 
 @contextmanager
 def _basic(return_value=None, side_effect=None):
-    """Stub BasicAnalysisProvider's decode + signal analysis (what the hybrid provider calls)."""
+    """Stub BasicAnalysisProvider's decode + signal analysis (what the hybrid provider calls).
+
+    ``return_value`` is the basic analyzer's complete result: what the provider
+    falls back to (``with_rhythm``) when the model cannot deliver."""
     with (
         patch.object(BasicAnalysisProvider, "_decode_mono_pcm", return_value=_SIGNAL),
         patch.object(BasicAnalysisProvider, "analyze_signal", return_value=return_value, side_effect=side_effect),
+        patch.object(BasicAnalysisProvider, "with_rhythm", side_effect=lambda analysis, _signal: return_value),
     ):
         yield
 

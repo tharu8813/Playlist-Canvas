@@ -23,6 +23,7 @@ from PySide6.QtGui import QImage, QImageReader
 from app.models.playlist import PlaylistTrack
 from app.timeline.compiler import compile_playlist
 from app.timeline.render_plan import CompiledRenderPlan, build_presentation_and_metadata
+from app.renderer import loudness
 from app.renderer.ffmpeg import filter_graph
 from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualizerRenderer
 from app.utils.subprocess_utils import hidden_process_kwargs
@@ -37,10 +38,6 @@ WORK_MODE_AUTO = "auto"
 WORK_MODE_MAX_SPEED = "max_speed"
 WORK_MODES = (WORK_MODE_STABLE, WORK_MODE_AUTO, WORK_MODE_MAX_SPEED)
 
-LOUDNESS_TARGET_LUFS = -16.0
-LOUDNESS_TRUE_PEAK_DBTP = -1.5
-LOUDNESS_RANGE_LU = 11.0
-"""The export loudness policy, loudnorm's ``I=-16:TP=-1.5:LRA=11``."""
 _EBUR128_SUMMARY = re.compile(
     r"Integrated loudness:\s+I:\s+(?P<i>-?(?:[\d.]+|inf)) LUFS\s+Threshold:\s+(?P<threshold>-?[\d.]+) LUFS"
     r".*?LRA:\s+(?P<lra>-?[\d.]+) LU"
@@ -1328,14 +1325,13 @@ class FFmpegRenderer:
     ) -> str | None:
         """Measure this exact combined audio and build the filter that normalizes it.
 
-        The policy is loudnorm's two-pass ``I=-16:TP=-1.5:LRA=11``. When
-        loudnorm would run in linear mode it applies one constant gain
-        (``target - measured I``) and nothing else, so that gain is applied
-        with ``volume``: bit-identical output (measured on FFmpeg 9), measured
-        with ``ebur128`` in ~1/10 of the time of loudnorm's own analysis pass,
-        which resamples to 192 kHz (40 min of audio: 4.6 s vs 43.7 s). Only
-        a mix loudnorm would normalize dynamically goes through its full
-        two-pass measurement, exactly as before.
+        The policy is ``app.renderer.loudness``: one linear gain, plus an
+        oversampled true-peak limiter only where that gain lifts a peak over
+        the ceiling. Measured with ``ebur128`` in ~1/10 of the time of
+        loudnorm's analysis pass (40 min of audio: 4.6 s vs 43.7 s); a plain
+        gain is bit-identical to loudnorm's linear mode (checked on FFmpeg 9).
+        Only a mix ebur128 cannot measure still goes through loudnorm's own
+        two passes.
 
         Returns ``None`` (never raises, except on cancellation) whenever a
         usable measurement can't be produced -- a failed measurement pass,
@@ -1352,15 +1348,10 @@ class FFmpegRenderer:
                     "Input measured %.1f LUFS (near-silent); skipping loudness normalization", integrated,
                 )
                 return None
-            gain = LOUDNESS_TARGET_LUFS - integrated
-            # loudnorm's own linear-mode test (af_loudnorm.c): the gain must keep
-            # the true peak under the ceiling and the range within the target.
-            if (threshold != -70.0 and loudness_range != 0.0 and integrated != 0.0
-                    and true_peak + gain <= LOUDNESS_TRUE_PEAK_DBTP
-                    and loudness_range <= LOUDNESS_RANGE_LU):
-                LOGGER.info("Loudness: %.1f LUFS, %.1f dBTP, LRA %.1f -> linear gain %+.2f dB",
-                            integrated, true_peak, loudness_range, gain)
-                return f"volume={gain:.2f}dB"
+            chain = loudness.normalization_filter(integrated, true_peak)
+            LOGGER.info("Loudness: %.1f LUFS, %.1f dBTP, LRA %.1f -> %s",
+                        integrated, true_peak, loudness_range, chain)
+            return chain
         stderr_lines: list[str] = []
         try:
             self._run(
@@ -1373,7 +1364,7 @@ class FFmpegRenderer:
                     # of two repeated global options, so this "-loglevel
                     # info" wins over the earlier "-loglevel error".
                     "-loglevel", "info",
-                    "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+                    "-af", f"{loudness.LOUDNORM}:print_format=json",
                     "-f", "null", "-",
                 ],
                 cancel_event=cancel_event, capture_stderr=stderr_lines,
@@ -1411,7 +1402,7 @@ class FFmpegRenderer:
             )
             return None
         return (
-            "loudnorm=I=-16:TP=-1.5:LRA=11:"
+            f"{loudness.LOUDNORM}:"
             f"measured_I={measured_i}:measured_TP={measured_tp}:"
             f"measured_LRA={measured_lra}:measured_thresh={measured_thresh}:"
             f"offset={target_offset}:linear=true"
@@ -1478,7 +1469,13 @@ class FFmpegRenderer:
         try:
             self._report(progress_callback, "Preparing audio", 0.05, "Analyzing tracks for AutoMix")
             workflow = AutoMixWorkflow(provider)
-            analysis_result = workflow.analyze(active_tracks, cancel_event=cancel_event)
+            analysis_result = workflow.analyze(
+                active_tracks, cancel_event=cancel_event,
+                progress=lambda done, total, _message: self._report(
+                    progress_callback, "Preparing audio", 0.05 + 0.1 * done / max(1, total),
+                    f"Analyzing beats and vocals {done}/{total}",
+                ),
+            )
 
             # Structure analysis (Commit C): the same StructureAnalysisService
             # + persistent StructureAnalysisCache Commit B already built for
@@ -1495,6 +1492,10 @@ class FFmpegRenderer:
                 self._report(progress_callback, "Preparing audio", 0.15, "Analyzing track structure")
                 structure_result = StructureAnalysisService(SonaraStructureProvider(self.executable)).analyze_tracks(
                     active_tracks, cancel_event=cancel_event,
+                    progress=lambda done, total, _message: self._report(
+                        progress_callback, "Preparing audio", 0.15 + 0.05 * done / max(1, total),
+                        f"Analyzing track structure {done}/{total}",
+                    ),
                 )
                 structures = structure_result.analyses
 

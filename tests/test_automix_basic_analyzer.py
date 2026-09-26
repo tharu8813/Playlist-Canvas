@@ -107,6 +107,17 @@ class BasicAnalysisProviderTests(unittest.TestCase):
                 self.assertGreater(result.bpm_confidence, 0.5)
                 self.assertTrue(result.beats)
 
+    def test_rhythm_added_later_is_the_rhythm_computed_up_front(self) -> None:
+        """Beat This skips librosa's beats and adds them only on fallback: same result either way."""
+        provider = BasicAnalysisProvider(Path("ffmpeg"))
+        signal = _click_signal(128.0, duration=8.0)
+        track = _track(Path("stub.wav"), 8.0)
+        full = provider.analyze_signal(track, signal, cancel_event=threading.Event())
+        light = provider.analyze_signal(track, signal, cancel_event=threading.Event(), rhythm=False)
+        self.assertIsNone(light.bpm)
+        self.assertEqual(light.beats, ())
+        self.assertEqual(provider.with_rhythm(light, signal), full)
+
     def test_silence_returns_no_bpm_not_false_confidence(self) -> None:
         provider = BasicAnalysisProvider(Path("ffmpeg"))
         signal = np.zeros(int(8.0 * SAMPLE_RATE), dtype=np.float32)

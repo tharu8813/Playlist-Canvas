@@ -768,19 +768,27 @@ class FunctionalRegressionTests(unittest.TestCase):
         return commands
 
     def test_a_linear_normalization_is_the_measured_gain_and_nothing_else(self) -> None:
-        # -8.6 LUFS -> -16: -7.4 dB; the true peak lands at -1.8 dBTP, the LRA fits.
-        commands = self._normalization_commands(self._ebur128_summary("-8.6", "9.9", "5.6"))
+        # -8.6 LUFS -> -14: -5.4 dB; the true peak lands at -2.0 dBTP, the LRA fits.
+        commands = self._normalization_commands(self._ebur128_summary("-8.6", "9.9", "3.4"))
         self.assertFalse(any("print_format=json" in " ".join(command) for command in commands))
         final = commands[-1]
-        self.assertEqual(final[final.index("-af") + 1], "volume=-7.40dB")
+        self.assertEqual(final[final.index("-af") + 1], "volume=-5.40dB")
 
-    def test_a_mix_loudnorm_would_normalize_dynamically_keeps_its_two_passes(self) -> None:
-        for integrated, lra, true_peak in (("-20.0", "9.9", "-1.0"), ("-8.6", "14.0", "-1.0")):
-            with self.subTest(true_peak=true_peak, lra=lra):
+    def test_peaks_over_the_ceiling_are_limited_without_riding_the_gain(self) -> None:
+        limiter = ",aresample=192000,alimiter=limit=0.8414:attack=1:release=60:level=0:latency=1,aresample=48000"
+        for (integrated, lra, true_peak), expected in (
+            # Loud blends peaking at +5.1 dBTP: the full gain, the few overs limited.
+            (("-8.6", "9.9", "5.1"), "volume=-5.40dB" + limiter),
+            # A wide loudness range is not compressed: no per-song leveling.
+            (("-8.6", "14.0", "-3.0"), "volume=-5.40dB"),
+            # Quiet and peaky: at most 3 dB of limiting, so it stays under the target.
+            (("-22.0", "9.9", "-1.0"), "volume=2.50dB" + limiter),
+        ):
+            with self.subTest(integrated=integrated, lra=lra, true_peak=true_peak):
                 commands = self._normalization_commands(self._ebur128_summary(integrated, lra, true_peak))
-                self.assertIn("print_format=json", " ".join(commands[-2]))
+                self.assertFalse(any("loudnorm" in " ".join(command) for command in commands))
                 final = commands[-1]
-                self.assertIn("loudnorm=", final[final.index("-af") + 1])
+                self.assertEqual(final[final.index("-af") + 1], expected)
 
     def test_prepare_playlist_audio_skips_normalization_for_near_silent_input(self) -> None:
         renderer = object.__new__(FFmpegRenderer)

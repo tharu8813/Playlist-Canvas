@@ -164,7 +164,14 @@ class BeatThisAnalysisProvider:
         signal = self._basic._decode_mono_pcm(Path(track.file_path), cancel_event)
         # The basic steps take the first half; the beat model and vocals follow.
         basic_progress = (lambda fraction, step: progress(fraction * 0.5, step)) if progress is not None else None
-        basic_result = self._basic.analyze_signal(track, signal, cancel_event=cancel_event, progress=basic_progress)
+        # Without librosa's beats: they are only needed where the model fails,
+        # via fallback() -- the result is identical either way.
+        basic_result = self._basic.analyze_signal(
+            track, signal, cancel_event=cancel_event, progress=basic_progress, rhythm=False)
+
+        def fallback() -> TrackAnalysis:
+            return self._basic.with_rhythm(basic_result, signal)
+
         if cancel_event.is_set():
             raise AnalysisCancelled("AutoMix analysis cancelled before Beat This inference.")
         if basic_result.energy is None:
@@ -190,16 +197,16 @@ class BeatThisAnalysisProvider:
                 "Beat This analysis unavailable for %s (%s); using the basic beat/downbeat estimate instead.",
                 track.file_path, error,
             )
-            return basic_result
+            return fallback()
         if cancel_event.is_set():
             raise AnalysisCancelled("AutoMix analysis cancelled after Beat This inference.")
 
         beats = _sanitize_timestamps(raw_beats, basic_result.duration_seconds)
         if not beats:
-            return basic_result
+            return fallback()
         bpm, bpm_confidence = _bpm_from_beats(np.array(beats))
         if bpm is None:
-            return basic_result
+            return fallback()
 
         downbeats = _sanitize_timestamps(raw_downbeats, basic_result.duration_seconds)
         if downbeats:
@@ -219,10 +226,11 @@ class BeatThisAnalysisProvider:
             # basic analyzer's own provisional bar guess (already
             # deliberately low-confidence, see PROVISIONAL_METER_CONFIDENCE)
             # rather than reporting an empty meter.
-            downbeats = basic_result.downbeats
-            meter_confidence = basic_result.meter_confidence
-            meter_numerator = basic_result.meter_numerator
-            meter_denominator = basic_result.meter_denominator
+            provisional = fallback()
+            downbeats = provisional.downbeats
+            meter_confidence = provisional.meter_confidence
+            meter_numerator = provisional.meter_numerator
+            meter_denominator = provisional.meter_denominator
 
         if progress is not None and self._vocals is not None:
             progress(0.8, STEP_VOCALS)

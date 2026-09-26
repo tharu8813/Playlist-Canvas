@@ -500,9 +500,13 @@ def _beat_based_candidate(
             return None
     if over_intro and not _instrumental(incoming, incoming_source_time, incoming_source_time + incoming_source_span):
         return None  # the snapped window reaches the incoming singer
-    if incoming_source_time > audible_start(incoming) + VOCAL_EDGE_TOLERANCE_SECONDS and any(
+    if incoming_naive_override is not None and any(
             a + MID_PHRASE_SECONDS < incoming_source_time < b for a, b in sung_spans(incoming)):
-        return None  # a trimmed-in cue (structure anchor) would enter mid-phrase, cutting the line's first words
+        # A cue a structure anchor moved into the song would enter mid-phrase,
+        # cutting the line's first words. Not applied to the regular cue near
+        # the start: its first downbeat can sit inside a quiet sung pickup, and
+        # refusing it left a -45 LUFS hole between a decayed tail and the pickup.
+        return None
     # Otherwise the incoming track may already sing here: the outgoing one no longer does.
 
     confidence = min(outgoing.bpm_confidence, incoming.bpm_confidence)
