@@ -8,7 +8,9 @@ from string import Formatter
 from typing import NamedTuple
 
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QSettings, QTimer, Signal
+from PySide6.QtCore import (
+    QCoreApplication, QEvent, QLibraryInfo, QObject, QSettings, QTimer, QTranslator, Signal,
+)
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -80,6 +82,38 @@ _TEXT: dict[str, dict[Language, str]] = {
 }
 
 
+_QT_TRANSLATORS: list[QTranslator] = []
+_QT_TRANSLATION_STATE: tuple[int, str] | None = None  # (application id, language)
+
+
+def install_qt_translations(locale: str) -> None:
+    """Load Qt's own strings (standard buttons, file dialogs, edit menus) for ``locale``.
+
+    Without this, every QMessageBox showed "Yes / No / Save / Discard / Cancel" and every
+    file dialog stayed English in the Korean UI. A missing catalog keeps Qt's English.
+    """
+    global _QT_TRANSLATION_STATE
+    application = QCoreApplication.instance()
+    if application is None:
+        return
+    language = locale.replace("_", "-").split("-")[0].lower()
+    state = (id(application), language)
+    if state == _QT_TRANSLATION_STATE:
+        return
+    for translator in _QT_TRANSLATORS:
+        if shiboken6.isValid(translator):
+            application.removeTranslator(translator)
+    _QT_TRANSLATORS.clear()
+    _QT_TRANSLATION_STATE = state
+    if not language or language == "en":
+        return
+    directory = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    translator = QTranslator(application)
+    if translator.load(f"qtbase_{language}", directory):
+        application.installTranslator(translator)
+        _QT_TRANSLATORS.append(translator)
+
+
 class Translator(QObject):
     """Persist locale selection and layer external translations over English UI."""
 
@@ -102,6 +136,7 @@ class Translator(QObject):
             tuple[re.Pattern[str], list[str], str]
         ] = []
         self._sync_event_filter()
+        install_qt_translations(self.locale)
 
     @property
     def language(self) -> LanguageSelection:
@@ -142,6 +177,7 @@ class Translator(QObject):
         self._clear_override_cache()
         QSettings().setValue("language", normalized.value)
         self._sync_event_filter()
+        install_qt_translations(self.locale)
         self.language_changed.emit()
         self._schedule_apply()
 
@@ -151,6 +187,7 @@ class Translator(QObject):
         if isinstance(self._language, ExternalLanguage) and self.locale not in self.pack_service.packs:
             self._language = Language.ENGLISH
             QSettings().setValue("language", Language.ENGLISH.value)
+            install_qt_translations(self.locale)
             self.language_changed.emit()
         self._sync_event_filter()
         self.packs_changed.emit()

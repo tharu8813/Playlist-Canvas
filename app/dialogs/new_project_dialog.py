@@ -8,7 +8,9 @@ from math import gcd
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor, QDragEnterEvent, QDropEvent, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -68,6 +70,8 @@ class NewProjectDialog(QDialog):
         self.music_paths: list[Path] = []
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
         self.setMinimumWidth(820)
+        # Music files and playlists dragged from Explorer join the starting songs.
+        self.setAcceptDrops(True)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 20, 22, 18)
@@ -208,7 +212,13 @@ class NewProjectDialog(QDialog):
         )
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
+        create_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if create_button is not None:
+            create_button.setProperty("primary", True)
         root.addWidget(self.buttons)
+        remove_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Delete), self.music_list)
+        remove_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        remove_shortcut.activated.connect(self._remove_music)
 
         self.preset_combo.currentIndexChanged.connect(self._preset_changed)
         self.design_preset_combo.currentIndexChanged.connect(self._design_preset_changed)
@@ -372,8 +382,13 @@ class NewProjectDialog(QDialog):
             ("음악 파일 및 플레이리스트" if korean else "Audio files and playlists")
             + " (*.mp3 *.wav *.flac *.aac *.m4a *.ogg *.m3u8 *.m3u)",
         )
+        self._add_music_files(paths)
+
+    def _add_music_files(self, paths: list[str]) -> int:
+        """Append supported, not-yet-listed music files or playlists; return how many."""
         addable = AUDIO_EXTENSIONS | PLAYLIST_FILE_EXTENSIONS
         known = {str(path).casefold() for path in self.music_paths}
+        added = 0
         for raw in paths:
             path = Path(raw)
             if path.suffix.lower() in addable and str(path).casefold() not in known:
@@ -381,7 +396,33 @@ class NewProjectDialog(QDialog):
                 known.add(str(path).casefold())
                 self.music_list.addItem(path.name)
                 self.music_list.item(self.music_list.count() - 1).setToolTip(str(path))
+                added += 1
         self._update_music()
+        return added
+
+    @staticmethod
+    def _dropped_music(event: QDragEnterEvent | QDropEvent) -> list[str]:
+        if not event.mimeData().hasUrls():
+            return []
+        addable = AUDIO_EXTENSIONS | PLAYLIST_FILE_EXTENSIONS
+        return [
+            url.toLocalFile() for url in event.mimeData().urls()
+            if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in addable
+        ]
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 - Qt API name
+        if self._dropped_music(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 - Qt API name
+        paths = self._dropped_music(event)
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._add_music_files([path for path in paths if Path(path).is_file()])
 
     def _remove_music(self) -> None:
         for row in sorted((self.music_list.row(item) for item in self.music_list.selectedItems()), reverse=True):
@@ -454,8 +495,9 @@ class NewProjectDialog(QDialog):
         self.storage_combo.setItemText(0, "프로젝트에 포함" if korean else "Include in the project")
         self.storage_combo.setItemText(1, "원본 위치 참조" if korean else "Reference original files")
         self.music_empty.setText(
-            "만들면서 플레이리스트에 넣을 음악 파일이나 M3U8 플레이리스트를 고를 수 있습니다."
-            if korean else "Pick music files or an M3U8 playlist to put in the Playlist right away."
+            "만들면서 플레이리스트에 넣을 음악 파일이나 M3U8 플레이리스트를 고르거나 이 창으로 끌어오세요."
+            if korean else
+            "Pick music files or an M3U8 playlist to put in the Playlist right away, or drop them here."
         )
         self.add_music_button.setText("음악 추가…" if korean else "Add music…")
         self.remove_music_button.setText("선택 제거" if korean else "Remove selected")

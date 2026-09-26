@@ -59,7 +59,10 @@ QPushButton[primary="true"]:hover, QToolButton#exportButton:hover {
 }
 QPushButton:default { background: @button; color: @text; border-color: @border; font-weight: normal; }
 QPushButton:default:hover { background: @hover; border-color: @accent; }
-QPushButton:disabled, QPushButton:default:disabled,
+/* A focused dialog button becomes :default; a primary one must keep its accent. */
+QPushButton[primary="true"]:default { background: @accent; color: @window; border-color: @accent; font-weight: 600; }
+QPushButton[primary="true"]:default:hover { background: @accent_hover; color: @window; border-color: @accent_hover; }
+QPushButton:disabled, QPushButton:default:disabled, QPushButton[primary="true"]:default:disabled,
 QToolButton:disabled, QToolButton#exportButton:disabled {
     background: @disabled; color: @disabled_text; border-color: @disabled;
 }
