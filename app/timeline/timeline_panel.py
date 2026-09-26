@@ -173,7 +173,7 @@ class TimelinePanel(QFrame):
 
     def retranslate(self) -> None:
         """Refresh static labels in the current language."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.title.setText("타임라인" if korean else "Timeline")
         self.track_table.setHorizontalHeaderLabels(
             ["#", "트랙" if korean else "Track", "시작" if korean else "Start",
@@ -218,7 +218,7 @@ class TimelinePanel(QFrame):
                 start_editor.setValue(max(start, minimum_start))
                 start_editor.setToolTip(
                     f"최소 시작 {TimelineSpinBox.format_timecode(minimum_start)}"
-                    if self.translator.language.value == "ko" else
+                    if self.translator.is_korean else
                     f"Minimum {TimelineSpinBox.format_timecode(minimum_start)}"
                 )
                 start_editor.valueChanged.connect(
@@ -257,7 +257,7 @@ class TimelinePanel(QFrame):
             total_label = TimelineSpinBox.format_timecode(total)
             self.summary.setText(
                 f"{len(timeline_tracks)}곡 · 총 {total_label}"
-                if self.translator.language.value == "ko" else
+                if self.translator.is_korean else
                 f"{len(timeline_tracks)} tracks · {total_label}"
             )
             self._restore_row_selection(

@@ -1753,7 +1753,7 @@ class LrcGeneratorDialog(QDialog):
 
     @property
     def _korean(self) -> bool:
-        return self.translator.language.value == "ko"
+        return self.translator.is_korean
 
     @staticmethod
     def _clock(milliseconds: int) -> str:

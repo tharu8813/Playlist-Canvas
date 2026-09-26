@@ -203,7 +203,7 @@ class AIProjectBuilderDialog(QDialog):
         self.custom_instructions_edit.textChanged.connect(self._setting_changed)
 
     def retranslate(self) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.setWindowTitle("AI 프로젝트 빌더" if korean else "AI Project Builder")
         self.heading.setText(
             "AI 프로젝트 빌더 프롬프트" if korean else "AI Project Builder prompt"
@@ -361,6 +361,6 @@ class AIProjectBuilderDialog(QDialog):
         QApplication.clipboard().setText(prompt)
         self.copy_status.setText(
             "클립보드에 복사했습니다. 다른 AI에게 그대로 붙여 넣으세요."
-            if self.translator.language.value == "ko" else
+            if self.translator.is_korean else
             "Copied to the clipboard. Paste it directly into another AI agent."
         )

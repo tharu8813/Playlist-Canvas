@@ -35,7 +35,7 @@ from app.presets.preset_service import PresetDefinition
 from app.presets.user_preset_service import all_presets
 from app.services.m3u_playlist import PLAYLIST_FILE_EXTENSIONS
 from app.services.playlist_service import AUDIO_EXTENSIONS
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 CANVAS_PRESETS: tuple[tuple[str, int, int], ...] = (
@@ -254,7 +254,7 @@ class NewProjectDialog(QDialog):
     # -- behavior ---------------------------------------------------------------------
 
     def _korean(self) -> bool:
-        return self.translator.language is Language.KOREAN
+        return self.translator.is_korean
 
     def _preset_changed(self, index: int) -> None:
         size = self.preset_combo.itemData(index)

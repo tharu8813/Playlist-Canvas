@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.playlist_export_service import TimestampFormat
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 class PlaylistExportDialog(QDialog):
@@ -102,7 +102,7 @@ class PlaylistExportDialog(QDialog):
 
     def retranslate(self) -> None:
         """Refresh static dialog text when the application language changes."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("플레이리스트 파일 만들기" if korean else "Create playlist files")
         self._heading_label.setText("YouTube 업로드 파일" if korean else "YouTube upload files")
         self._description_label.setText(
@@ -137,4 +137,4 @@ class PlaylistExportDialog(QDialog):
         return self._description_label
 
     def _choose_folder_title(self) -> str:
-        return "저장 폴더 선택" if self.translator.language is Language.KOREAN else "Choose output folder"
+        return "저장 폴더 선택" if self.translator.is_korean else "Choose output folder"

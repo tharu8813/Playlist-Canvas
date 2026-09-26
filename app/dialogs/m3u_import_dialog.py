@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from app.preview.album_art import extract_track_cover
 from app.preview.text_template import format_timestamp
 from app.services.playlist_service import AudioImportCandidate
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 _ART_SIZE = 44
 
@@ -108,7 +108,7 @@ class M3uImportDialog(QDialog):
                 self.table.setItem(row, column, item)
 
     def retranslate(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         name = self.playlist_path.name
         count = len(self.candidates)
         self.setWindowTitle("M3U8 플레이리스트 가져오기" if korean else "Import M3U8 playlist")

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.lyrics_service import LyricsService
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 from app.utils.time_format import format_clock
 
 
@@ -104,7 +104,7 @@ class LrcLivePreviewDialog(QDialog):
             self.previous_lyric.clear()
             self.current_lyric.setText(
                 "재생 위치에 가사가 없습니다."
-                if self.translator.language is Language.KOREAN
+                if self.translator.is_korean
                 else "No lyric at the current position."
             )
             self.next_lyric.setText(
@@ -127,19 +127,19 @@ class LrcLivePreviewDialog(QDialog):
         )
         self.status_label.setText(
             f"기록된 가사 {len(cues)}줄"
-            if self.translator.language is Language.KOREAN
+            if self.translator.is_korean
             else f"{len(cues)} timed lyric line(s)"
         )
 
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         self.play_button.setText(
-            ("일시정지" if self.translator.language is Language.KOREAN else "Pause")
+            ("일시정지" if self.translator.is_korean else "Pause")
             if state == QMediaPlayer.PlaybackState.PlayingState
-            else ("재생" if self.translator.language is Language.KOREAN else "Play")
+            else ("재생" if self.translator.is_korean else "Play")
         )
 
     def retranslate(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("LRC 실시간 가사 미리보기" if korean else "LRC Live Lyrics Preview")
         self.restart_button.setText("처음부터 재생" if korean else "Play from start")
         self.close_button.setText("닫기" if korean else "Close")

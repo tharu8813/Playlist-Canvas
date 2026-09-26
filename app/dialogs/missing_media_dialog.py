@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.project_media_service import MissingMedia
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 class MissingMediaDialog(QDialog):
@@ -110,7 +110,7 @@ class MissingMediaDialog(QDialog):
 
     @property
     def _korean(self) -> bool:
-        return self.translator.language is Language.KOREAN
+        return self.translator.is_korean
 
     def retranslate(self) -> None:
         """Refresh all labels without losing paths selected by the user."""

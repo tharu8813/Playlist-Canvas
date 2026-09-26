@@ -65,7 +65,7 @@ from app.video.timeline import resolve_video_position, source_video_paths
 from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
 from app.video.decoder_backpressure import VideoDecoderBackpressure
 from app.video.preview_proxy import PreviewProxyCache, PreviewProxyWorker
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 from app.widgets.automix_details_panel import AutoMixDetailsPanel, ready_through
 
 TIMELINE_SCALE = 100
@@ -1054,7 +1054,7 @@ class ExportPreviewDialog(QDialog):
     def _populate_track_list(self) -> None:
         """Build a read-only navigator for the complete preview playlist."""
         current = self._highlighted_track_index
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.track_list.clear()
         for index, track in enumerate(self.tracks):
             title = track.title or Path(track.file_path).stem or (
@@ -1533,7 +1533,7 @@ class ExportPreviewDialog(QDialog):
         """Cache successful and failed probes so neither is repeated per frame."""
         self._video_duration_cache[path] = max(0.0, float(duration))
         if duration <= 0.0:
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             self._show_preview_error(
                 "영상 정보를 확인할 수 없습니다" if korean else "Video information unavailable",
                 (f"영상 길이를 읽지 못했습니다: {path}" if korean else
@@ -1637,7 +1637,7 @@ class ExportPreviewDialog(QDialog):
         key = self._video_proxy_key(original_path)
         self._video_proxy_failures.add(key)
         self._video_proxy_paths[key] = original_path
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self._show_preview_error(
             "저화질 미리보기를 만들지 못했습니다"
             if korean else "Could not create low-resolution preview",
@@ -2220,7 +2220,7 @@ class ExportPreviewDialog(QDialog):
                 "GPU preview layer preparation failed; using flattened CPU frame",
                 exc_info=True,
             )
-            korean = self.translator.language is Language.KOREAN
+            korean = self.translator.is_korean
             self._show_preview_error(
                 "GPU 합성을 일부 사용할 수 없습니다" if korean else "GPU composition partially unavailable",
                 str(error) or (
@@ -2393,7 +2393,7 @@ class ExportPreviewDialog(QDialog):
             if not self._overlay_error_reported:
                 LOGGER.warning("Preview overlay compositing failed", exc_info=True)
                 self._overlay_error_reported = True
-                korean = self.translator.language is Language.KOREAN
+                korean = self.translator.is_korean
                 self._show_preview_error(
                     "비주얼라이저를 표시하지 못했습니다" if korean else "Visualizer could not be displayed",
                     str(error) or (
@@ -2515,7 +2515,7 @@ class ExportPreviewDialog(QDialog):
     def _preview_worker_failed(self, message: str) -> None:
         """Retain a nonfatal worker error for diagnostics without closing playback."""
         LOGGER.warning("Preview background worker failed: %s", message)
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self._show_preview_error(
             "미리보기 일부를 처리하지 못했습니다" if korean else "Part of the preview could not be processed",
             message,
@@ -2816,7 +2816,7 @@ class ExportPreviewDialog(QDialog):
         if not self.gpu_preview_enabled:
             self._gpu_refresh_deferred = False
         self.preview_stack.setCurrentIndex(1 if self.gpu_preview_enabled else 0)
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.preview_mode_label.setText(
             ("GPU 레이어 · 시작 중" if korean else "GPU layers · Starting")
             if self.gpu_preview_enabled else ("CPU 모드" if korean else "CPU mode")
@@ -2827,7 +2827,7 @@ class ExportPreviewDialog(QDialog):
     def _gpu_backend_ready(self, info: object) -> None:
         if not isinstance(info, GpuBackendInfo) or not self.gpu_preview_enabled:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.preview_mode_label.setText(
             f"GPU 레이어 · {info.label}" if korean else
             f"GPU layers · {info.label}"
@@ -2854,7 +2854,7 @@ class ExportPreviewDialog(QDialog):
         self._gpu_refresh_deferred = False
         self.preview_stack.setCurrentIndex(0)
         self.refresh_preview()
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.preview_mode_label.setText(
             "CPU 폴백" if korean else "CPU fallback"
         )
@@ -3211,7 +3211,7 @@ class ExportPreviewDialog(QDialog):
         self._clear_overlay_frames()
 
     def _update_frame_rate_label(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         actual = "--" if self._actual_preview_fps <= 0 else f"{self._actual_preview_fps:.0f}"
         self.frame_rate_label.setText(
             f"FPS {actual} / {self.preview_fps}"
@@ -3315,7 +3315,7 @@ class ExportPreviewDialog(QDialog):
         return ""
 
     def _set_play_text(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.play_button.setText(
             "Ⅱ  일시정지" if self._playing and korean else
             "Ⅱ  Pause" if self._playing else
@@ -3519,7 +3519,7 @@ class ExportPreviewDialog(QDialog):
         worker.finished.connect(worker.deleteLater)
 
     def retranslate(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("전체 재생 미리보기" if korean else "Playlist playback preview")
         self.dialog_title_label.setText(
             ("캔버스 미리보기" if korean else "Canvas Preview")

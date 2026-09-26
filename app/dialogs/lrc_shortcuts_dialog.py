@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 class LrcShortcutsDialog(QDialog):
@@ -42,7 +42,7 @@ class LrcShortcutsDialog(QDialog):
         self.retranslate()
 
     def retranslate(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("LRC 편집기 단축키" if korean else "LRC Editor Shortcuts")
         self.buttons.button(QDialogButtonBox.StandardButton.Close).setText(
             "닫기" if korean else "Close"

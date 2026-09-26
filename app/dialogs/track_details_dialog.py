@@ -485,7 +485,7 @@ class TrackDetailsDialog(QDialog):
     def _refresh_header(self, *_args: object) -> None:
         if not hasattr(self, "video_list"):
             return  # still building the tabs the header summarizes
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.header_title.setText(self.title_edit.text().strip() or Path(self.track.file_path).stem)
         self.header_subtitle.setText(" · ".join(
             value for value in (self.artist_edit.text().strip(), self.album_edit.text().strip()) if value
@@ -591,7 +591,7 @@ class TrackDetailsDialog(QDialog):
         self.timing_offset_spin.setValue(self.timing_offset_spin.value() + delta)
 
     def _add_track_videos(self) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "곡 영상 추가" if korean else "Add track videos",
@@ -632,7 +632,7 @@ class TrackDetailsDialog(QDialog):
 
     def _update_track_video_ui(self, *_args: object) -> None:
         count = self.video_list.count()
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.video_count_label.setText(
             f"{count}개 영상" if korean else f"{count} video{'s' if count != 1 else ''}"
         )
@@ -651,7 +651,7 @@ class TrackDetailsDialog(QDialog):
         self._refresh_header()
 
     def _load_lyrics(self) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         path, _ = QFileDialog.getOpenFileName(
             self,
             "가사/자막 불러오기" if korean else "Load lyrics/subtitles",
@@ -696,7 +696,7 @@ class TrackDetailsDialog(QDialog):
         self._refresh_preview()
 
     def _choose_cover(self) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         path, _ = QFileDialog.getOpenFileName(
             self,
             "앨범 커버 선택" if korean else "Choose album cover",
@@ -723,7 +723,7 @@ class TrackDetailsDialog(QDialog):
         self._refresh_cover()
 
     def _refresh_cover(self) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         pixmap = extract_track_cover(self.track.file_path, self.selected_cover_path)
         has_cover = not pixmap.isNull()
         if not has_cover:
@@ -784,7 +784,7 @@ class TrackDetailsDialog(QDialog):
 
     def _export_current_lyrics_as_lrc(self) -> None:
         """Convert the attached/embedded cues to LRC with this track's offset applied."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         if not self.selected_lyrics:
             QMessageBox.warning(
                 self,
@@ -876,7 +876,7 @@ class TrackDetailsDialog(QDialog):
         self._playback_position_changed(self.media_player.position())
 
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         if playing:
             self.play_button.setText("일시정지" if korean else "Pause")
@@ -888,14 +888,14 @@ class TrackDetailsDialog(QDialog):
     ) -> None:
         if not message:
             return
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.playback_status.setText(
             f"오디오 재생 오류: {message}" if korean else f"Audio playback error: {message}"
         )
 
     def _update_live_lyrics(self, position_ms: int | None = None) -> None:
         """Display the cue synchronized to audio and the unsaved timing offset."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         if not self.selected_lyrics:
             self.previous_lyric.clear()
             self.next_lyric.clear()
@@ -935,7 +935,7 @@ class TrackDetailsDialog(QDialog):
         return f"{minutes:02d}:{whole_seconds:02d}.{fraction:03d}"
 
     def _refresh_preview(self, _value: float = 0.0) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         offset = self.timing_offset_spin.value()
         self.lyrics_path.setText(
             self.selected_lyrics_path
@@ -971,7 +971,7 @@ class TrackDetailsDialog(QDialog):
         self.preview.setPlainText("\n".join(lines))
 
     def _accept(self) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         if (self.selected_cover_path
                 and extract_track_cover("", self.selected_cover_path).isNull()):
             QMessageBox.warning(
@@ -1007,7 +1007,7 @@ class TrackDetailsDialog(QDialog):
         super().done(result)
 
     def retranslate(self) -> None:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.setWindowTitle("곡 정보/설정" if korean else "Track information/settings")
         self.tabs.setTabText(0, "곡 정보" if korean else "Track information")
         self.tabs.setTabText(1, "분석" if korean else "Analysis")

@@ -266,7 +266,7 @@ class ExportSettingsDialog(QDialog):
 
     def _populate_quality_modes(self, selected: str | None = None) -> None:
         """Create localized, purpose-first choices without exposing encoder jargon."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         current = selected or str(self.quality_mode_combo.currentData() or "balanced")
         labels = (
             (
@@ -334,7 +334,7 @@ class ExportSettingsDialog(QDialog):
         self._update_quality_description()
 
     def _update_quality_description(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         profile = str(self.quality_mode_combo.currentData() or "balanced")
         descriptions = {
             "balanced": (
@@ -373,7 +373,7 @@ class ExportSettingsDialog(QDialog):
         except ValueError:
             fps = 30
         work = width * height * fps
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if work > 3840 * 2160 * 35:
             level = "매우 높음" if korean else "Very high"
             detail = (
@@ -416,7 +416,7 @@ class ExportSettingsDialog(QDialog):
             self.crf_spin.value(), self.audio_bitrate_combo.currentText(),
             self.estimated_layer_count,
         )
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.storage_estimate_label.setText(
             (
                 f"화면·프레임 준비: 약 {format_bytes(estimate.visual_files)}\n"
@@ -457,7 +457,7 @@ class ExportSettingsDialog(QDialog):
         self.storage_group.setVisible(visible)
         self.storage_button.setText(
             ("예상 저장공간 숨기기" if visible else "예상 저장공간 보기")
-            if self.translator.language is Language.KOREAN else
+            if self.translator.is_korean else
             ("Hide storage estimate" if visible else "Show storage estimate")
         )
 
@@ -528,7 +528,7 @@ class ExportSettingsDialog(QDialog):
         if (exact_width, exact_height) not in existing:
             label = (
                 f"{exact_width} × {exact_height} (프로젝트 캔버스)"
-                if self.translator.language is Language.KOREAN else
+                if self.translator.is_korean else
                 f"{exact_width} × {exact_height} (Project canvas)"
             )
             self.resolution_combo.addItem(
@@ -550,7 +550,7 @@ class ExportSettingsDialog(QDialog):
         return path.resolve()
 
     def _browse_output_path(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         selected, _filter = QFileDialog.getSaveFileName(
             self,
             "출력 파일 선택" if korean else "Choose output file",
@@ -565,7 +565,7 @@ class ExportSettingsDialog(QDialog):
 
     def _accept_if_valid(self) -> None:
         """Validate the destination before expensive frame preparation begins."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         if not self.output_path_edit.text().strip():
             QMessageBox.warning(
                 self,
@@ -601,7 +601,7 @@ class ExportSettingsDialog(QDialog):
 
     def retranslate(self) -> None:
         """Refresh dialog wording for the currently selected app language."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.setWindowTitle("내보내기 설정" if korean else "Export settings")
         selected_profile = str(self.quality_mode_combo.currentData() or "balanced")
         self._populate_quality_modes(selected_profile)

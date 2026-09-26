@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from app.services.project_content_service import ProjectContentService
 from app.dialogs.content_preview_dialog import ContentPreviewDialog
-from app.utils.i18n import Language, Translator
+from app.utils.i18n import Translator
 
 
 class ContentListWidget(QListWidget):
@@ -222,7 +222,7 @@ class ContentLibraryPanel(QWidget):
         return self._filter
 
     def retranslate(self) -> None:
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         self.help_label.setText(
             "프로젝트에서 재사용할 이미지·영상·음원·폰트·가사 파일입니다. "
             "이미지·영상은 캔버스로, 음원은 플레이리스트로 드래그하세요. "
@@ -331,7 +331,7 @@ class ContentLibraryPanel(QWidget):
     def refresh(self) -> None:
         selected_id = self._selected_id()
         self.list.clear()
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         labels = {
             "image": "이미지" if korean else "Image",
             "video": "영상" if korean else "Video",
@@ -545,7 +545,7 @@ class ContentLibraryPanel(QWidget):
     def _import_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "콘텐츠 가져오기" if self.translator.language is Language.KOREAN else "Import content",
+            "콘텐츠 가져오기" if self.translator.is_korean else "Import content",
             "",
             "Supported content (*.jpg *.jpeg *.png *.webp *.svg *.mp4 *.mov *.mkv *.webm *.avi *.m4v *.mp3 *.wav *.flac "
             "*.aac *.m4a *.ogg *.ttf *.otf *.woff *.woff2 *.lrc *.srt *.vtt)",
@@ -580,7 +580,7 @@ class ContentLibraryPanel(QWidget):
         dialog = ContentPreviewDialog(
             str(item.data(Qt.ItemDataRole.UserRole + 1)),
             str(item.data(Qt.ItemDataRole.UserRole + 2)),
-            self.translator.language is Language.KOREAN,
+            self.translator.is_korean,
             self,
         )
         dialog.exec()
@@ -605,7 +605,7 @@ class ContentLibraryPanel(QWidget):
 
     def _create_context_menu(self, item: QListWidgetItem | None) -> QMenu:
         """Build the content menu separately so its availability is testable."""
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         menu = QMenu(self)
         if item is not None:
             preview_action = menu.addAction(
@@ -639,7 +639,7 @@ class ContentLibraryPanel(QWidget):
         item = self.list.currentItem()
         if item is None:
             return
-        korean = self.translator.language is Language.KOREAN
+        korean = self.translator.is_korean
         path = Path(str(item.data(Qt.ItemDataRole.UserRole + 1)))
         media_type = str(item.data(Qt.ItemDataRole.UserRole + 2))
         type_names = {

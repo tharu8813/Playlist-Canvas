@@ -565,7 +565,7 @@ class SourceInspector(QScrollArea):
 
     def _property_help_text(self, key: str) -> str:
         """Return localized, user-facing guidance for one Inspector property."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         common = {
             "name": ("레이어와 캔버스에서 이 요소를 구분하는 이름입니다. 영상에는 직접 표시되지 않습니다.", "Identifies this source in Layers and on the Canvas. It is not rendered into the video."),
             "text": ("표시할 문구입니다. %title%, %artist%, %album% 같은 토큰은 재생 중인 곡 정보로 자동 교체됩니다.", "Text to display. Tokens such as %title%, %artist%, and %album% are replaced with current-track data."),
@@ -660,7 +660,7 @@ class SourceInspector(QScrollArea):
 
     def _install_property_tooltips(self) -> None:
         """Apply rich, localized hover help to labels and their editor controls."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         for key, label in self._form_labels.items():
             widget = self._field_widgets[key]
             description = self._property_help_text(key)
@@ -727,7 +727,7 @@ class SourceInspector(QScrollArea):
         }
 
     def _source_type_display_name(self, source_type: SourceType | None) -> str:
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         names = {
             SourceType.IMAGE: ("이미지", "Image"),
             SourceType.VIDEO: ("비디오", "Video"),
@@ -1202,7 +1202,7 @@ class SourceInspector(QScrollArea):
         """Register a user font and bind its primary family to the selected source."""
         if not self._source_id:
             return
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         path, _ = QFileDialog.getOpenFileName(
             self,
             "글꼴 파일 추가" if korean else "Add font file",
@@ -1232,7 +1232,7 @@ class SourceInspector(QScrollArea):
             return
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "이미지 선택" if self.translator.language.value == "ko" else "Choose image",
+            "이미지 선택" if self.translator.is_korean else "Choose image",
             self.file_path_edit.text(),
             "Images (*.jpg *.jpeg *.png *.webp *.svg)",
         )
@@ -1244,14 +1244,14 @@ class SourceInspector(QScrollArea):
         if source is None or source.source_type is not SourceType.VIDEO:
             return
         dialog = VideoSourceDialog(
-            source, self.translator.language.value == "ko", self,
+            source, self.translator.is_korean, self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._apply_updates(dialog.values)
 
     def _update_video_settings_button(self, source: Source | None) -> None:
         """Summarize the video's scope before opening its detailed settings."""
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         if source is None or source.source_type is not SourceType.VIDEO:
             self.video_settings_button.setText(
                 "영상 재생 설정…" if korean else "Video playback settings…"
@@ -1293,7 +1293,7 @@ class SourceInspector(QScrollArea):
         source = self.store.get(self._source_id)
         if source is None:
             return
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         dialog = ColorEditorDialog(
             QColor(str(getattr(source, field))),
             source,
@@ -1312,7 +1312,7 @@ class SourceInspector(QScrollArea):
         source = self.store.get(self._source_id)
         if source is None:
             return
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         dialog = ColorEditorDialog(
             QColor(str(getattr(source.gradient, field))),
             source,
@@ -1345,7 +1345,7 @@ class SourceInspector(QScrollArea):
         source = self.store.get(self._source_id)
         if source is None:
             return
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         dialog = ColorEditorDialog(
             QColor(source.shadow.color),
             source,
@@ -1462,7 +1462,7 @@ class SourceInspector(QScrollArea):
         labels.update(TrackListSection.LABELS)
         labels.update(NowPlayingSection.LABELS)
         labels.update(ParticleSection.LABELS)
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         for key, label in self._form_labels.items():
             label.setText(labels[key][0 if korean else 1])
         tab_labels = {
@@ -1627,7 +1627,7 @@ class SourceInspector(QScrollArea):
             self.animation_preview_button.setVisible(True)
             self._fill(source)
             return
-        korean = self.translator.language.value == "ko"
+        korean = self.translator.is_korean
         self.title.setText(
             f"요소 {len(sources)}개 선택" if korean else f"{len(sources)} sources selected"
         )
@@ -1918,7 +1918,7 @@ class SourceInspector(QScrollArea):
         serialized = self._serialized_color(color)
         if color.alpha() == 0:
             button.setText(
-                "투명" if self.translator.language.value == "ko" else "Transparent"
+                "투명" if self.translator.is_korean else "Transparent"
             )
         elif color.alpha() < 255:
             button.setText(f"{serialized} · {round(color.alphaF() * 100)}%")

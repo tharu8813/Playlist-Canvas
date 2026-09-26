@@ -26,7 +26,6 @@ from PySide6.QtWidgets import QMessageBox, QWidget
 
 from app.dialogs.export_preview_dialog import ExportPreviewDialog
 from app.renderer.ffmpeg_renderer import FFmpegNotFoundError, FFmpegRenderer
-from app.utils.i18n import Language
 
 if TYPE_CHECKING:
     from app.ui.main_window import MainWindow
@@ -57,10 +56,10 @@ class PreviewController:
         if not tracks:
             QMessageBox.warning(
                 window,
-                "미리보기" if window.translator.language is Language.KOREAN else "Preview",
+                "미리보기" if window.translator.is_korean else "Preview",
                 (
                     "미리보기를 시작하려면 활성화된 곡을 한 개 이상 추가해 주세요."
-                    if window.translator.language is Language.KOREAN else
+                    if window.translator.is_korean else
                     "Add at least one enabled track before opening Preview."
                 ),
             )
@@ -159,7 +158,7 @@ class PreviewController:
         window.inspector_stack.setCurrentWidget(window.preview_track_inspector)
         window.statusBar().showMessage(
             "캔버스에서 전체 미리보기를 재생합니다 · 편집 기능이 잠겼습니다."
-            if window.translator.language is Language.KOREAN else
+            if window.translator.is_korean else
             "Playing the full preview on the Canvas · Editing is locked."
         )
         self._track_background_mix_progress(preview)
@@ -201,7 +200,7 @@ class PreviewController:
 
             controller = ProgressiveAutoMixController(
                 FFmpegRenderer(executable), window,
-                korean=window.translator.language is Language.KOREAN,
+                korean=window.translator.is_korean,
             )
         else:
             controller = PreviewAudioController(FFmpegRenderer(executable), window)
@@ -248,7 +247,7 @@ class PreviewController:
         if controller is None:
             return
         window = self.window
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         window.activity_progress.begin(
             PREVIEW_MIX_ACTIVITY,
             "미리보기 믹스 준비" if korean else "Preparing preview mix",
@@ -362,7 +361,7 @@ class PreviewController:
         window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)  # render cancelled with Preview
         window.statusBar().showMessage(
             "미리보기를 종료하고 캔버스 편집으로 돌아왔습니다."
-            if window.translator.language is Language.KOREAN else
+            if window.translator.is_korean else
             "Preview closed; returned to Canvas editing.",
             2500,
         )
@@ -426,7 +425,7 @@ class PreviewController:
             window.animation_preview_controller.cancel()
         window._animation_preview_active = True
         window._animation_preview_cancel_armed = False
-        korean = window.translator.language is Language.KOREAN
+        korean = window.translator.is_korean
         window.statusBar().showMessage(
             "애니메이션 미리보기 재생 중 · 다른 동작을 하면 중단됩니다."
             if korean else
