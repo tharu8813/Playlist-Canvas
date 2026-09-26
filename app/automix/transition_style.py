@@ -17,7 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.automix.analysis.key import camelot_compatible, key_to_camelot
-from app.automix.candidates import TransitionCandidate, TransitionStrategy
+from app.automix.analysis.vocals import merge_spans
+from app.automix.candidates import TransitionCandidate, TransitionStrategy, sung_spans, vocals_measured
 from app.automix.compatibility import TransitionCompatibility
 from app.automix.models import TrackAnalysis
 from app.automix.structure.models import TrackStructureAnalysis
@@ -189,15 +190,18 @@ class VocalMap:
 
 
 def vocal_map(candidate: TransitionCandidate, outgoing: TrackAnalysis, incoming: TrackAnalysis) -> VocalMap | None:
-    """Each side's vocal coverage across the window; ``None`` if either side is unknown."""
-    if not outgoing.vocal_activity or not incoming.vocal_activity:
-        return None  # "no spans" cannot be told apart from "not analyzed"
+    """Each side's vocal coverage across the window; ``None`` if either side was not measured there.
+
+    A measured instrumental window is all zeros, not unknown: that is what
+    tells a fully instrumental track apart from a failed detection."""
     # Source-space windows, exactly the audio each side plays in the overlap.
-    return VocalMap(
-        _coverage(outgoing.vocal_activity, candidate.outgoing_source_time, candidate.outgoing_source_out),
-        _coverage(incoming.vocal_activity, candidate.incoming_source_time,
-                  candidate.incoming_source_time + candidate.duration_seconds * candidate.incoming_rate),
-    )
+    windows = ((outgoing, candidate.outgoing_source_time, candidate.outgoing_source_out),
+               (incoming, candidate.incoming_source_time,
+                candidate.incoming_source_time + candidate.duration_seconds * candidate.incoming_rate))
+    if not all(vocals_measured(analysis, start, end) for analysis, start, end in windows):
+        return None
+    return VocalMap(*(_coverage(merge_spans(list(sung_spans(analysis)), analysis.duration_seconds), start, end)
+                      for analysis, start, end in windows))
 
 
 def _coverage(spans: tuple[tuple[float, float], ...], start: float, end: float) -> tuple[float, ...]:

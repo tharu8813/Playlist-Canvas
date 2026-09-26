@@ -23,8 +23,8 @@ unavailable"):
     Cue proximity to the ideal anchor (beat/downbeat) 0.10     +
     Compatible key (Camelot wheel), if both known     0.06     + (bonus only, never a penalty -- section 3)
     Similar energy level, if both known               0.04     +
-    Vocal activity on both sides of the overlap,      0.10     - (if both tracks have vocal_activity data)
-      if both known
+    Neither side sings in the overlap (outro over     0.08     + (only where both are *measured*;
+      intro)                                                   two voices are rejected, not scored)
 
 Commit C adds five more, same discipline -- additive, and each independently
 a no-op without the relevant structure/trim data, never changing a result
@@ -69,6 +69,15 @@ VOCAL_EDGE_TOLERANCE_SECONDS = 0.1
 """Vocal spans are measured in 100 ms frames (app/automix/analysis/vocals.py):
 a downbeat within one frame of the last word counts as "right after" it."""
 
+MID_PHRASE_SECONDS = 0.5
+"""An incoming cue this far into a sung span enters the line mid-phrase."""
+
+WEIGHT_INSTRUMENTAL_OVERLAP = 0.08
+"""Bonus when both sides are measured not to sing anywhere in the overlap: the
+outgoing outro under the incoming intro, the most natural blend there is. It
+favours the bar length that ends before the incoming singer instead of one that
+reaches into the first line."""
+
 HANDOFF_BARS = (2, 1)
 HANDOFF_MAX_SECONDS = 4.0
 """When both tracks sing across the junction -- the outgoing one to its last
@@ -86,13 +95,13 @@ drifting track is matched on the tempo it actually has around the cue."""
 # above -- additive bonuses/penalties applied only when the relevant
 # structure data actually exists, so a candidate's score is identical to
 # the pre-Commit-C result whenever no TrackStructureAnalysis is available
-# for either side (roadmap: "structure가 없으면 기존 planner 결과 유지").
+# for either side (roadmap: "structure媛 ?놁쑝硫?湲곗〈 planner 寃곌낵 ?좎?").
 WEIGHT_STRUCTURE_ANCHOR_BONUS = 0.06
 """Bonus when a candidate's cue lands near a structure anchor (outro/
 section boundary for outgoing, intro_end/section boundary for incoming) --
 a hint the anchor was actually musically meaningful for this candidate,
-never a requirement (roadmap: "structure anchor를 무조건 transition point로
-쓰지 말고 candidate bonus/hint로만 사용")."""
+never a requirement (roadmap: "structure anchor瑜?臾댁“嫄?transition point濡?
+?곗? 留먭퀬 candidate bonus/hint濡쒕쭔 ?ъ슜")."""
 WEIGHT_LOCAL_ENERGY_CONTINUITY = 0.05
 """Local (structure energy_curve, time-resolved) energy continuity bonus,
 additive on top of WEIGHT_ENERGY_CONTINUITY's existing global-scalar
@@ -235,7 +244,7 @@ def generate_candidates(
     penalties (see _score_beat_candidate) -- never a replacement for them,
     and never a forced transition point. With neither given, the result is
     byte-for-byte identical to calling this without the keyword arguments
-    at all (roadmap: "structure가 없으면 기존 planner 결과 유지").
+    at all (roadmap: "structure媛 ?놁쑝硫?湲곗〈 planner 寃곌낵 ?좎?").
     """
     if outgoing.bpm is None or incoming.bpm is None:
         return _fallback_candidates(
@@ -491,6 +500,9 @@ def _beat_based_candidate(
             return None
     if over_intro and not _instrumental(incoming, incoming_source_time, incoming_source_time + incoming_source_span):
         return None  # the snapped window reaches the incoming singer
+    if incoming_source_time > audible_start(incoming) + VOCAL_EDGE_TOLERANCE_SECONDS and any(
+            a + MID_PHRASE_SECONDS < incoming_source_time < b for a, b in sung_spans(incoming)):
+        return None  # a trimmed-in cue (structure anchor) would enter mid-phrase, cutting the line's first words
     # Otherwise the incoming track may already sing here: the outgoing one no longer does.
 
     confidence = min(outgoing.bpm_confidence, incoming.bpm_confidence)
@@ -619,13 +631,18 @@ def _score_beat_candidate(
         if energy_similarity >= 0.8:
             reasons.append("+ similar energy level")
 
-    # Vocals inside the window are not scored: _beat_based_candidate rejects
-    # them outright (``*_source_span`` stay accepted for existing callers).
+    # Vocals inside the window are otherwise not scored: _beat_based_candidate
+    # rejects two voices outright.
+    if (outgoing_source_span is not None and incoming_source_span is not None
+            and _instrumental(outgoing, outgoing_source_time, outgoing_source_time + outgoing_source_span)
+            and _instrumental(incoming, incoming_source_time, incoming_source_time + incoming_source_span)):
+        score += WEIGHT_INSTRUMENTAL_OVERLAP
+        reasons.append("+ outro over intro: neither track sings in the overlap")
 
     # -- Commit C: structure-aware bonuses/penalties, additive on top of the
     # above and each independently no-op without the relevant data (roadmap:
-    # "structure가 없으면 기존 planner 결과 유지", "one-sided structure도
-    # 안전하게 사용").
+    # "structure媛 ?놁쑝硫?湲곗〈 planner 寃곌낵 ?좎?", "one-sided structure??
+    # ?덉쟾?섍쾶 ?ъ슜").
     outgoing_anchor = _structure_outgoing_anchor(outgoing_structure)
     if outgoing_anchor is not None and abs(outgoing_source_time - outgoing_anchor) <= STRUCTURE_ANCHOR_PROXIMITY_TOLERANCE_SECONDS:
         score += WEIGHT_STRUCTURE_ANCHOR_BONUS
@@ -709,15 +726,60 @@ def _last_vocal_end(analysis: TrackAnalysis, start: float, end: float) -> float 
     return max(ends) if ends else None
 
 
+def measured_vocal_regions(analysis: TrackAnalysis) -> tuple[tuple[float, float], ...]:
+    """Where ``analysis`` actually measured vocal activity (see TrackAnalysis.vocal_coverage)."""
+    if analysis.vocal_coverage is not None:
+        return analysis.vocal_coverage
+    return ((0.0, analysis.duration_seconds),) if analysis.vocal_activity else ()
+
+
+def vocals_measured(analysis: TrackAnalysis, start: float, end: float) -> bool:
+    """Whether vocal activity was measured over all of ``[start, end]``."""
+    return any(a <= start + VOCAL_EDGE_TOLERANCE_SECONDS and b >= end - VOCAL_EDGE_TOLERANCE_SECONDS
+               for a, b in measured_vocal_regions(analysis))
+
+
+def sung_spans(analysis: TrackAnalysis) -> tuple[tuple[float, float], ...]:
+    """Measured singing plus synced-lyric lines (which can only ever add singing)."""
+    return (*analysis.vocal_activity, *analysis.lyric_vocal_spans)
+
+
 def _instrumental(analysis: TrackAnalysis, start: float, end: float) -> bool:
     """Whether ``analysis`` is known not to sing in ``[start, end]``.
 
-    Only measured vocal activity can say so ("no spans" cannot be told apart
-    from "not analyzed"); lyric lines only ever add singing."""
-    if not analysis.vocal_activity:
-        return False
-    return not any(a < end - VOCAL_EDGE_TOLERANCE_SECONDS and b > start
-                   for a, b in (*analysis.vocal_activity, *analysis.lyric_vocal_spans))
+    Only a measured span can say so: an unmeasured stretch, a failed detection
+    and a light analyzer's empty result are all "unknown", never "silent"."""
+    return vocals_measured(analysis, start, end) and not any(
+        a < end - VOCAL_EDGE_TOLERANCE_SECONDS and b > start for a, b in sung_spans(analysis))
+
+
+def vocal_intro_end(analysis: TrackAnalysis) -> float | None:
+    """Where the first singing starts (the instrumental intro's end); None if unknown.
+
+    The whole track when it is measured end to end without a sung second."""
+    start = audible_start(analysis)
+    head = next(((a, b) for a, b in measured_vocal_regions(analysis) if a <= start + VOCAL_EDGE_TOLERANCE_SECONDS), None)
+    if head is None:
+        return None
+    first = min((a for a, b in sung_spans(analysis) if b > start), default=None)
+    if first is not None and first < head[1]:
+        return float(max(start, first))
+    return head[1] if head[1] >= audible_end(analysis) - VOCAL_EDGE_TOLERANCE_SECONDS else None
+
+
+def vocal_outro_start(analysis: TrackAnalysis) -> float | None:
+    """Where the last singing ends, confirmed silent from there to the end; None if unknown.
+
+    A gap mid-song is not an outro: only a measured stretch that runs to the
+    track's last sound can show that no voice comes back."""
+    end = audible_end(analysis)
+    tail = next(((a, b) for a, b in measured_vocal_regions(analysis) if b >= end - VOCAL_EDGE_TOLERANCE_SECONDS), None)
+    if tail is None:
+        return None
+    last = max((min(b, end) for a, b in sung_spans(analysis) if a < end), default=None)
+    if last is not None and last > tail[0]:
+        return float(last)
+    return tail[0] if tail[0] <= audible_start(analysis) + VOCAL_EDGE_TOLERANCE_SECONDS else None
 
 
 def _sings_to_end(analysis: TrackAnalysis) -> bool:

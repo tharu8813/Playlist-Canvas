@@ -68,6 +68,12 @@ class TrackAnalysis:
 
     energy: float | None = None
     vocal_activity: tuple[tuple[float, float], ...] = ()
+    vocal_coverage: tuple[tuple[float, float], ...] | None = None
+    """Where vocal activity was actually measured (source seconds): a detector
+    only separates each track's head and tail. Outside these spans singing is
+    unknown, never "none"; ``()`` = nothing measured (detection failed).
+    ``None`` (results from before this field): a non-empty ``vocal_activity``
+    stands for the whole track, an empty one for "unknown"."""
     lyric_vocal_spans: tuple[tuple[float, float], ...] = ()
     """Where the track's synced lyrics say it is being sung (audio seconds).
     A lower bound only -- LRC files routinely omit ad-libs and outro vocals --
@@ -126,6 +132,12 @@ class TrackAnalysis:
             if start < previous_end:
                 raise ValueError("TrackAnalysis.vocal_activity spans must be sorted and non-overlapping.")
             previous_end = end
+        previous_end = float("-inf")
+        for start, end in self.vocal_coverage or ():
+            if not (_is_finite_number(start) and _is_finite_number(end)
+                    and previous_end <= start < end <= self.duration_seconds):
+                raise ValueError("TrackAnalysis.vocal_coverage spans must be sorted, disjoint and within the track.")
+            previous_end = end
         for name in ("audible_start_seconds", "audible_end_seconds", "decay_start_seconds"):
             value = getattr(self, name)
             if value is not None and (not _is_finite_number(value) or not 0.0 <= value <= self.duration_seconds):
@@ -174,6 +186,7 @@ class TrackAnalysis:
             "key_confidence": self.key_confidence,
             "energy": self.energy,
             "vocal_activity": [list(span) for span in self.vocal_activity],
+            "vocal_coverage": None if self.vocal_coverage is None else [list(span) for span in self.vocal_coverage],
             "audible_start_seconds": self.audible_start_seconds,
             "audible_end_seconds": self.audible_end_seconds,
             "decay_start_seconds": self.decay_start_seconds,
@@ -199,6 +212,8 @@ class TrackAnalysis:
             key_confidence=fields.get("key_confidence", 0.0),
             energy=fields.get("energy"),
             vocal_activity=tuple(tuple(span) for span in fields.get("vocal_activity", ())),
+            vocal_coverage=(None if fields.get("vocal_coverage") is None
+                            else tuple(tuple(span) for span in fields["vocal_coverage"])),
             audible_start_seconds=fields.get("audible_start_seconds"),
             audible_end_seconds=fields.get("audible_end_seconds"),
             decay_start_seconds=fields.get("decay_start_seconds"),

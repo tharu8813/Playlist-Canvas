@@ -140,7 +140,7 @@ class MixTimingTests(unittest.TestCase):
 
         self.assertEqual(len(inner_commands), 1)
         self.assertNotIn('aac', inner_commands[0])
-        self.assertIn('pcm_s16le', inner_commands[0])
+        self.assertIn('pcm_f32le', inner_commands[0])
         aac_encodes = [command for command in outer_commands if 'aac' in command]
         self.assertEqual(len(aac_encodes), 1)
 

@@ -424,7 +424,7 @@ class AutoMixMixIntermediateCodecTests(unittest.TestCase):
         command = captured[0]
         self.assertNotIn("aac", command)
         self.assertNotIn("192k", command)
-        self.assertIn("pcm_s16le", command)
+        self.assertIn("pcm_f32le", command)
         self.assertIn("nut", command)
         self.assertEqual(result.path.suffix, ".nut")
 

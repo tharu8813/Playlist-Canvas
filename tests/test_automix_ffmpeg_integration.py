@@ -275,7 +275,8 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
                 # The intermediate AutoMix mix must be lossless PCM, not a
                 # second lossy AAC encode -- the final combine step already
                 # encodes to AAC exactly once, after loudness normalization.
-                self.assertEqual(_audio_codec(executable, path), "pcm_s16le")
+                # Float, so blending/stretching over full scale is not clipped.
+                self.assertEqual(_audio_codec(executable, path), "pcm_f32le")
 
     def test_full_render_with_automix_enabled_uses_mix_duration(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
@@ -338,7 +339,7 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(segment_durations[0], 37.0, delta=0.1)
             # Lossless intermediate, same as AutoMix -- see the equivalent
             # assertion in test_automix_export_uses_the_actual_mix_duration.
-            self.assertEqual(_audio_codec(executable, segment_paths[0]), "pcm_s16le")
+            self.assertEqual(_audio_codec(executable, segment_paths[0]), "pcm_f32le")
 
     def test_crossfade_preserves_an_explicit_gap(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())

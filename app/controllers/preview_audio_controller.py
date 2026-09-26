@@ -62,9 +62,11 @@ class _PreviewAudioWorker(QThread):
         self, renderer: FFmpegRenderer, tracks: list[PlaylistTrack], output_directory: Path,
         transition_mode: str, crossfade_seconds: float, parent: QObject | None = None,
         *, settings=None, cancel_event: threading.Event | None = None, automix_settings=None,
+        audio_codec: str = "aac",
     ) -> None:
         super().__init__(parent)
         self._automix_settings = automix_settings
+        self._audio_codec = audio_codec
         self._renderer = renderer
         self._tracks = tracks
         self._output_directory = output_directory
@@ -92,6 +94,7 @@ class _PreviewAudioWorker(QThread):
                 plan_callback=self._accept_plan,
                 progress_callback=self.progress.emit,
                 automix_settings=self._automix_settings,
+                audio_codec=self._audio_codec,
             )
         except RenderCancelledError:
             return
@@ -135,9 +138,11 @@ class PreviewAudioController(QObject):
         if self._worker is not None:
             self._pending = (tracks, output_directory, transition_mode, crossfade_seconds, automix_settings)
             return
+        # Preview plays the export's audio before its AAC encode: same mix, same
+        # loudness, lossless, and without the encode (27 s per 40 min of audio).
         worker = _PreviewAudioWorker(
             self._renderer, tracks, output_directory, transition_mode, crossfade_seconds, self,
-            automix_settings=automix_settings,
+            automix_settings=automix_settings, audio_codec="flac",
         )
         worker.ready.connect(
             lambda path, plan: self.audio_ready.emit(path, plan)

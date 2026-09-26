@@ -45,8 +45,9 @@ jobs:
       - name: Run packaged application smoke test
         shell: pwsh
         run: |
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "playlist-canvas-smoke-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $executable = Join-Path $PWD 'dist\Playlist Canvas\Playlist Canvas.exe'
-          $process = Start-Process -FilePath $executable -ArgumentList '--smoke-test' -PassThru
+          $process = Start-Process -FilePath $executable -ArgumentList '--smoke-test' -WindowStyle Hidden -PassThru
           if (-not $process.WaitForExit(30000)) {
             $process.Kill()
             throw 'Packaged application smoke test timed out after 30 seconds.'

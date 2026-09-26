@@ -13,6 +13,11 @@ REQUIRED_FILES = (
     Path("app/ui/studio.qss"),
     Path("assets/icons/check.svg"),
     Path("LICENSE.txt"),
+    Path("python312.dll"),
+    Path("app/automix/analysis/models/beat_this_final0_int8.onnx"),
+    Path("app/automix/analysis/models/umxhq_vocals_int8.onnx"),
+    Path("app/automix/analysis/models/BEAT_THIS_LICENSE.txt"),
+    Path("app/automix/analysis/models/OPEN_UNMIX_LICENSE.txt"),
 )
 
 
@@ -27,6 +32,8 @@ def main() -> int:
     numpy_core = internal / "numpy" / "_core"
     if not numpy_core.is_dir() or not list(numpy_core.glob("_multiarray_umath*.pyd")):
         missing.append("_internal/numpy/_core/_multiarray_umath*.pyd")
+    if not list((internal / "onnxruntime" / "capi").glob("onnxruntime_pybind11_state*.pyd")):
+        missing.append("_internal/onnxruntime/capi/onnxruntime_pybind11_state*.pyd")
     if missing:
         print("Missing distribution files:")
         print("\n".join(f"- {path}" for path in missing))

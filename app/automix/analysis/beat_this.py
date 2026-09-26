@@ -55,7 +55,7 @@ from app.automix.analysis.basic import SAMPLE_RATE as BASIC_SAMPLE_RATE
 from app.automix.analysis.basic import BasicAnalysisProvider, normalize_tempo_octave
 from app.automix.analysis.provider import AnalysisCancelled
 from app.automix.analysis.vocals import ENGINE_ID as VOCAL_ENGINE_ID
-from app.automix.analysis.vocals import DemucsVocalDetector, vocal_detection_available
+from app.automix.analysis.vocals import DemucsVocalDetector, measured_regions, vocal_detection_available
 from app.automix.beatgrid import fit_beat_grid
 from app.automix.models import TrackAnalysis
 from app.models.playlist import PlaylistTrack
@@ -110,7 +110,7 @@ class BeatThisAnalysisProvider:
     """
 
     provider_id = "beat_this"
-    version = "5"
+    version = "6"
     """This *implementation's* version: bump it if the confidence
     calibration or output mapping in this module changes in a way that
     should invalidate previously cached results, independent of the
@@ -123,7 +123,7 @@ class BeatThisAnalysisProvider:
     signal (any format FFmpeg reads, e.g. AAC/M4A) instead of loading the file
     itself, plus BasicAnalysisProvider "3"'s audible bounds. "3": basic "4" (no
     voice-band vocal guess). "4": BPM from a fitted beat grid, not the
-    frame-quantized median interval. "5": basic "6" (decay start)."""
+    frame-quantized median interval. "5": basic "6" (decay start). "6": vocal_coverage."""
 
     def __init__(
         self, ffmpeg_executable: Path, *,
@@ -222,7 +222,8 @@ class BeatThisAnalysisProvider:
             meter_numerator = basic_result.meter_numerator
             meter_denominator = basic_result.meter_denominator
 
-        vocal_activity, analyzer_id = self._detect_vocals(track, basic_result.duration_seconds, cancel_event)
+        vocal_activity, vocal_coverage, analyzer_id = self._detect_vocals(
+            track, basic_result.duration_seconds, cancel_event)
         return replace(
             basic_result,
             bpm=bpm,
@@ -233,18 +234,20 @@ class BeatThisAnalysisProvider:
             meter_denominator=meter_denominator,
             meter_confidence=meter_confidence,
             vocal_activity=vocal_activity,
+            vocal_coverage=vocal_coverage,
             analyzer_id=analyzer_id,
             analyzer_version=self.version,
         )
 
     def _detect_vocals(
         self, track: PlaylistTrack, duration: float, cancel_event: threading.Event,
-    ) -> tuple[tuple[tuple[float, float], ...], str]:
-        """(vocal spans, analyzer_id). A failed detection is stamped with another
-        analyzer_id, so AnalysisService treats it as a cache miss and retries it
-        later (e.g. once the model download succeeds) instead of caching "no vocals"."""
+    ) -> tuple[tuple[tuple[float, float], ...], tuple[tuple[float, float], ...] | None, str]:
+        """(vocal spans, measured spans, analyzer_id). A failed detection measured
+        nothing (so "no spans" there means unknown, not "no vocals") and is stamped
+        with another analyzer_id, so AnalysisService treats it as a cache miss and
+        retries it later (e.g. once the model download succeeds)."""
         if self._vocals is None:
-            return (), self.provider_id
+            return (), None, self.provider_id
         try:
             spans = self._vocals.detect(Path(track.file_path), duration, cancel_event)
         except AnalysisCancelled:
@@ -252,10 +255,10 @@ class BeatThisAnalysisProvider:
         except Exception as error:  # noqa: BLE001 - vocal detection must never break AutoMix
             LOGGER.warning("AutoMix vocal detection unavailable for %s (%s); vocals stay unknown.",
                            track.file_path, error)
-            return (), f"{self.provider_id}-novocals"
+            return (), (), f"{self.provider_id}-novocals"
         if cancel_event.is_set():
             raise AnalysisCancelled("AutoMix analysis cancelled during vocal detection.")
-        return spans, self.provider_id
+        return spans, measured_regions(duration), self.provider_id
 
     def _run_inference(
         self, signal: np.ndarray, cancel_event: threading.Event,

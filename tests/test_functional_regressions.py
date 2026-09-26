@@ -741,6 +741,47 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertIn("offset=0.4", combine_filter)
         self.assertIn("linear=true", combine_filter)
 
+    @staticmethod
+    def _ebur128_summary(integrated: str, lra: str, true_peak: str) -> str:
+        return (
+            "[Parsed_ebur128_0 @ 0000] Summary:\n\n  Integrated loudness:\n"
+            f"    I:         {integrated} LUFS\n    Threshold: -18.9 LUFS\n\n  Loudness range:\n"
+            f"    LRA:         {lra} LU\n    Threshold:  -28.9 LUFS\n\n  True peak:\n"
+            f"    Peak:        {true_peak} dBFS\n"
+        )
+
+    def _normalization_commands(self, summary: str) -> list[list[str]]:
+        renderer = object.__new__(FFmpegRenderer)
+        commands: list[list[str]] = []
+
+        def fake_run(arguments: list[str], **kwargs: object) -> None:
+            commands.append(arguments)
+            capture_stderr = kwargs.get("capture_stderr")
+            if capture_stderr is not None:
+                joined = " ".join(arguments)
+                capture_stderr.append(summary if "ebur128" in joined else self._LOUDNORM_STATS_JSON)
+
+        renderer._run = fake_run  # type: ignore[method-assign]
+        track = PlaylistTrack("song.mp3", "Song", duration_seconds=2.0)
+        with TemporaryDirectory() as directory:
+            renderer.prepare_playlist_audio([track], Path(directory), RenderSettings())
+        return commands
+
+    def test_a_linear_normalization_is_the_measured_gain_and_nothing_else(self) -> None:
+        # -8.6 LUFS -> -16: -7.4 dB; the true peak lands at -1.8 dBTP, the LRA fits.
+        commands = self._normalization_commands(self._ebur128_summary("-8.6", "9.9", "5.6"))
+        self.assertFalse(any("print_format=json" in " ".join(command) for command in commands))
+        final = commands[-1]
+        self.assertEqual(final[final.index("-af") + 1], "volume=-7.40dB")
+
+    def test_a_mix_loudnorm_would_normalize_dynamically_keeps_its_two_passes(self) -> None:
+        for integrated, lra, true_peak in (("-20.0", "9.9", "-1.0"), ("-8.6", "14.0", "-1.0")):
+            with self.subTest(true_peak=true_peak, lra=lra):
+                commands = self._normalization_commands(self._ebur128_summary(integrated, lra, true_peak))
+                self.assertIn("print_format=json", " ".join(commands[-2]))
+                final = commands[-1]
+                self.assertIn("loudnorm=", final[final.index("-af") + 1])
+
     def test_prepare_playlist_audio_skips_normalization_for_near_silent_input(self) -> None:
         renderer = object.__new__(FFmpegRenderer)
         commands: list[list[str]] = []

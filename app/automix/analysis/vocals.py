@@ -96,6 +96,11 @@ def mix_regions(duration: float) -> list[tuple[float, float]]:
     return [(0.0, MIX_REGION_SECONDS), (duration - MIX_REGION_SECONDS, MIX_REGION_SECONDS)]
 
 
+def measured_regions(duration: float) -> tuple[tuple[float, float], ...]:
+    """(start, end) of the spans ``detect`` separates -- TrackAnalysis.vocal_coverage."""
+    return tuple((start, min(duration, start + length)) for start, length in mix_regions(duration) if length > 0.0)
+
+
 BUNDLED_MODEL = Path("demucs") / "955717e8.safetensors"
 """htdemucs's single model, shipped inside the frozen app (see playlist_canvas.spec)."""
 

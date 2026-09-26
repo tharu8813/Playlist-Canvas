@@ -42,6 +42,8 @@ _DETAIL_FIELDS = (
     ("tempo_delta_percent", "템포 차이 %", "Tempo delta %"),
     ("outgoing_cue", "나가는 곡 큐(초)", "Outgoing cue (s)"),
     ("incoming_cue", "들어오는 곡 큐(초)", "Incoming cue (s)"),
+    ("outgoing_vocal_outro_start", "나가는 곡 마지막 보컬 끝(초)", "Outgoing last vocal ends (s)"),
+    ("incoming_vocal_intro_end", "들어오는 곡 첫 보컬 시작(초)", "Incoming first vocal starts (s)"),
     ("outgoing_structure_anchor", "구조 큐: 아웃트로", "Structure cue: outro"),
     ("incoming_structure_anchor", "구조 큐: 인트로 끝", "Structure cue: intro end"),
     ("energy_delta", "에너지 차이", "Energy delta"),

@@ -11,7 +11,7 @@
   <p>음악, 가사, 비주얼 요소를 하나의 캔버스에서 편집해 플레이리스트 영상을 만드는 Windows 데스크톱 편집기</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-1.2.0.7-1685D1" alt="Version 1.2.0.7">
+    <img src="https://img.shields.io/badge/version-1.2.0.8-1685D1" alt="Version 1.2.0.8">
     <img src="https://img.shields.io/badge/platform-Windows%2064--bit-0078D4" alt="Windows 64-bit">
     <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python 3.12">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
@@ -48,14 +48,14 @@ Playlist Canvas는 정적인 이미지와 음악을 합치는 수준을 넘어, 
 - 자동 저장, 비정상 종료 복구와 누락 미디어 재연결
 - 한국어·영어 UI, 다크 전용 스튜디오 디자인과 부드러운 스크롤
 - 검증된 외부 JSON 언어팩 가져오기와 사용자 제작 번역 패치
-- AutoMix(베타): 프로젝트별로 켤 수 있는 템포 인식 자동 곡 전환(내보내기 오디오 한정)
+- AutoMix(베타): 미리보기와 내보내기에 적용되는 박자·보컬 분석 기반 자동 곡 전환
 - H.264/H.265 및 지원되는 GPU 인코더를 이용한 MP4 내보내기
 - FFmpeg 자동 다운로드, SHA-256 검증, 설치 및 즉시 적용
 - GitHub Releases 기반 자동 업데이트 확인, 릴리즈 노트 표시와 검증된 Setup 실행
 
 ## 사용자 설치
 
-1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.2.0.7-setup.exe`를 받습니다.
+1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.2.0.8-setup.exe`를 받습니다.
 2. Setup 파일을 실행하고 설치 언어를 선택합니다.
 3. 설치 위치와 바탕 화면 바로가기 생성 여부를 선택한 뒤 **설치**를 누릅니다.
 4. 설치가 완료되면 **Playlist Canvas 실행**을 선택하거나 시작 메뉴의 바로가기를 실행합니다. 설치 후에는 파일 탐색기의 `.pvsproj` 프로젝트를 더블클릭해 프로그램과 프로젝트를 바로 열 수도 있습니다.
@@ -95,7 +95,8 @@ Z 레이어는 무손실 색상 트랙과 알파 트랙으로 나누어 저장�
 
 AutoMix는 **곡 사이를 템포에 맞춰 자동으로 부드럽게 이어주는** 기능입니다. **프로젝트 설정 → AutoMix**에서 프로젝트별로 켜고 끌 수 있으며, 기본값은 꺼짐입니다.
 
-- 켜면 BPM·박자·조성(key)·에너지를 분석해(모델 다운로드 없이, 로컬에서만) 트랙 사이에 템포 인식 크로스페이드를 적용합니다. 템포가 맞지 않거나 분석에 실패한 곡은 자동으로 일반 크로스페이드로 대체됩니다.
+- 켜면 Beat This!와 Open-Unmix의 ONNX 모델로 박자·다운비트·보컬 구간을, librosa와 Sonara로 조성·에너지·곡 구조를 분석합니다. 모델은 설치본에 포함되어 추가 다운로드 없이 로컬 CPU에서 동작합니다.
+- 곡의 박자와 보컬 구간에 맞춰 전환 방식과 길이를 자동 선택합니다. 반주 인트로·아웃트로를 우선 활용하고, 양쪽 곡이 끝과 시작에서 모두 노래하면 짧게 넘깁니다. 템포가 맞지 않거나 분석에 실패한 곡은 일반 크로스페이드 또는 이어서 재생으로 대체됩니다.
 - 분석 결과(BPM 등)는 플레이리스트 목록과 곡 정보 창에서 확인할 수 있습니다.
 - 분석 캐시는 `%LOCALAPPDATA%\PlaylistCanvas\automix-cache\`에 저장되며, 언제든 폴더를 삭제해 초기화할 수 있습니다. 프로젝트 파일에는 켜짐/꺼짐 여부만 저장되고 분석 데이터는 저장되지 않습니다.
 - **Preview와 내보내기:** Preview에서도 AutoMix가 적용됩니다. 분석이 끝난 곡까지의 부분 믹스를 먼저 들려주고, 전체 분석이 끝나면 내보내기와 같은 최종 믹스로 자동 교체됩니다. 앨범 커버·가사·트랙 전환 등 화면 타이밍과 전체 영상 길이도 AutoMix 전환 위치를 따릅니다.
@@ -180,7 +181,7 @@ python -m PyInstaller --noconfirm --clean playlist_canvas.spec
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 ```
 
-완성된 `output-setup\Playlist Canvas-1.2.0.7-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
+완성된 `output-setup\Playlist Canvas-1.2.0.8-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
 
 ## 프로젝트 구조
 

@@ -41,6 +41,8 @@ from app.automix.candidates import (
     audible_start,
     generate_candidates,
     select_best_candidate,
+    vocal_intro_end,
+    vocal_outro_start,
 )
 from app.automix.compatibility import evaluate_compatibility
 from app.automix.models import TrackAnalysis
@@ -314,6 +316,9 @@ def _plan_overlap(
         ("outgoing_cut", best.outgoing_source_out),
         ("incoming_cue", best.incoming_source_time),
         ("outgoing_tail_trimmed", outgoing_analysis.duration_seconds - best.outgoing_source_out),
+        # Vocal-based sections: None = not measured (never "no vocals").
+        ("outgoing_vocal_outro_start", vocal_outro_start(outgoing_analysis)),
+        ("incoming_vocal_intro_end", vocal_intro_end(incoming_analysis)),
         ("outgoing_structure_anchor", _structure_outgoing_anchor(outgoing_structure)),
         ("incoming_structure_anchor", _structure_incoming_anchor(incoming_structure)),
         ("outgoing_key", outgoing_analysis.key),

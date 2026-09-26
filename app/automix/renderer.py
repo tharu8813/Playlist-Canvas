@@ -588,7 +588,11 @@ class AutoMixAudioPipeline:
         # already use (see _normalize_audio in ffmpeg_renderer.py), so the
         # concat/decode step downstream needs no special-casing.
         output_path = output_directory / f"automix_mix.{container}"
-        codec = ["-c:a", "flac", "-compression_level", "0"] if container == "flac" else ["-c:a", "pcm_s16le"]
+        # Float, not 16-bit: band splits and time-stretching push loud masters
+        # over full scale (+3.3 dBFS measured on a 16-bit master under a tempo
+        # ramp), which a 16-bit file clips before loudness normalization can
+        # bring it back down -- 15,116 clipped samples in a 15-minute mix.
+        codec = ["-c:a", "flac", "-compression_level", "0"] if container == "flac" else ["-c:a", "pcm_f32le"]
         expected_duration = max(clip.timeline_end for clip in clips)
 
         # Tempo ramps need a stretcher that takes timed tempo commands.
