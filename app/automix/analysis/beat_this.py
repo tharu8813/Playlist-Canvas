@@ -53,7 +53,7 @@ import numpy as np
 
 from app.automix.analysis.basic import SAMPLE_RATE as BASIC_SAMPLE_RATE
 from app.automix.analysis.basic import BasicAnalysisProvider, normalize_tempo_octave
-from app.automix.analysis.provider import AnalysisCancelled
+from app.automix.analysis.provider import STEP_BEAT_MODEL, STEP_DECODE, STEP_VOCALS, AnalysisCancelled
 from app.automix.analysis.vocals import ENGINE_ID as VOCAL_ENGINE_ID
 from app.automix.analysis.vocals import DemucsVocalDetector, measured_regions, vocal_detection_available
 from app.automix.beatgrid import fit_beat_grid
@@ -160,9 +160,11 @@ class BeatThisAnalysisProvider:
         # (torchaudio/soundfile) cannot read AAC/M4A, which real libraries are
         # full of -- every such track silently fell back to the basic beats.
         if progress is not None:
-            progress(0.0, "Decoding audio")
+            progress(0.0, STEP_DECODE)
         signal = self._basic._decode_mono_pcm(Path(track.file_path), cancel_event)
-        basic_result = self._basic.analyze_signal(track, signal, cancel_event=cancel_event, progress=progress)
+        # The basic steps take the first half; the beat model and vocals follow.
+        basic_progress = (lambda fraction, step: progress(fraction * 0.5, step)) if progress is not None else None
+        basic_result = self._basic.analyze_signal(track, signal, cancel_event=cancel_event, progress=basic_progress)
         if cancel_event.is_set():
             raise AnalysisCancelled("AutoMix analysis cancelled before Beat This inference.")
         if basic_result.energy is None:
@@ -222,6 +224,8 @@ class BeatThisAnalysisProvider:
             meter_numerator = basic_result.meter_numerator
             meter_denominator = basic_result.meter_denominator
 
+        if progress is not None and self._vocals is not None:
+            progress(0.8, STEP_VOCALS)
         vocal_activity, vocal_coverage, analyzer_id = self._detect_vocals(
             track, basic_result.duration_seconds, cancel_event)
         return replace(
@@ -265,15 +269,13 @@ class BeatThisAnalysisProvider:
         progress: Callable[[float, str], None] | None,
     ) -> tuple[np.ndarray, np.ndarray]:
         if progress is not None:
-            progress(0.92, "Loading Beat This model")
+            progress(0.55, STEP_BEAT_MODEL)
         audio2beats = self._load_model()
         if cancel_event.is_set():
             # PyTorch inference itself cannot be interrupted mid-forward-pass;
             # this is the latest point cancellation can still be honored
             # before committing to the (uninterruptible) inference call.
             raise AnalysisCancelled("AutoMix analysis cancelled before Beat This inference.")
-        if progress is not None:
-            progress(0.95, "Running Beat This inference")
         with self._model_lock:
             # Serialize actual inference: AnalysisService analyzes several
             # tracks concurrently on a thread pool, but running several

@@ -50,6 +50,11 @@ class _AutoMixAnalysisWorker(QThread):
     progress = Signal(str, int, int)
     """(stage, completed tracks, total tracks); stage is RHYTHM_STAGE or STRUCTURE_STAGE.
     Both stages report 0 up front, so combined progress never moves backwards."""
+    track_step = Signal(str, str, float)
+    """(track_id, step, fraction of that track's rhythm pass): a provider step
+    (provider.ANALYSIS_STEPS), STEP_CACHED, or STRUCTURE_STAGE when Sonara starts."""
+    failed = Signal(dict)
+    """track_id -> error message for the tracks the analyzer could not read."""
 
     def __init__(
         self, tracks: list[PlaylistTrack], ffmpeg_executable: Path, parent: QObject | None = None,
@@ -90,10 +95,13 @@ class _AutoMixAnalysisWorker(QThread):
         result = workflow.analyze(
             self._tracks, cancel_event=self._cancel_event,
             progress=lambda completed, count, _message: self.progress.emit(RHYTHM_STAGE, completed, count),
+            step_progress=self.track_step.emit,
         )
         if self._cancel_event.is_set():
             return
         self.analyzed.emit(result.analyses)
+        if result.failures:
+            self.failed.emit(result.failures)
         self._run_structure_analysis()
 
     def _structure_available(self) -> bool:
@@ -126,6 +134,8 @@ class _AutoMixAnalysisWorker(QThread):
         service = StructureAnalysisService(
             SonaraStructureProvider(self._ffmpeg_executable), max_workers=BACKGROUND_ANALYSIS_WORKERS,
         )
+        for track in self._tracks:
+            self.track_step.emit(track.id, STRUCTURE_STAGE, 1.0)
         result = service.analyze_tracks(
             self._tracks, cancel_event=self._cancel_event,
             progress=lambda completed, count, _message: self.progress.emit(STRUCTURE_STAGE, completed, count),
@@ -147,6 +157,10 @@ class AutoMixAnalysisController(QObject):
     """stage -> (completed, total) for the running pass (see RHYTHM_STAGE/STRUCTURE_STAGE)."""
     running_changed = Signal(bool)
     """True when a pass starts, False when it ends (finished or cancelled)."""
+    track_step_changed = Signal(str, str, float)
+    """(track_id, step, fraction) as each analysis step starts (see _AutoMixAnalysisWorker.track_step)."""
+    analyses_failed = Signal(dict)
+    """track_id -> error message for tracks that could not be analyzed."""
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -203,6 +217,14 @@ class AutoMixAnalysisController(QObject):
         worker.structures_analyzed.connect(
             lambda result: self.structures_updated.emit(result)
             if not worker._cancel_event.is_set() else None
+        )
+        worker.failed.connect(
+            lambda failures: self.analyses_failed.emit(failures)
+            if not worker._cancel_event.is_set() else None
+        )
+        worker.track_step.connect(
+            lambda track_id, step, fraction: self.track_step_changed.emit(track_id, step, fraction)
+            if worker is self._worker and not worker._cancel_event.is_set() else None
         )
         worker.progress.connect(lambda stage, completed, total: self._report(worker, stage, completed, total))
         # Clear our reference *before* scheduling deletion: a worker that

@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.automix.analysis.provider import AnalysisProvider
-from app.automix.analysis.service import AnalysisBatchResult, AnalysisService, ProgressCallback
+from app.automix.analysis.service import AnalysisBatchResult, AnalysisService, ProgressCallback, StepCallback
 from app.automix.cache import AnalysisCache
 from app.automix.models import TrackAnalysis
 from app.automix.planner import compile_automix
@@ -50,9 +50,12 @@ class AutoMixWorkflow:
         self, tracks: Sequence[PlaylistTrack], *,
         cancel_event: threading.Event | None = None,
         progress: ProgressCallback | None = None,
+        step_progress: StepCallback | None = None,
     ) -> AnalysisBatchResult:
         """Analyze ``tracks``, reusing cached results for any unchanged file."""
-        return self.analysis_service.analyze_tracks(tracks, cancel_event=cancel_event, progress=progress)
+        return self.analysis_service.analyze_tracks(
+            tracks, cancel_event=cancel_event, progress=progress, step_progress=step_progress,
+        )
 
     def plan(
         self, tracks: Sequence[PlaylistTrack], analyses: dict[str, TrackAnalysis],

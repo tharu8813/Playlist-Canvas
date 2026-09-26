@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.automix.analysis.provider import AnalysisCancelled
-from app.automix.analysis.service import AnalysisService
+from app.automix.analysis.service import STEP_CACHED, AnalysisService
 from app.automix.cache import AnalysisCache
 from app.automix.models import TrackAnalysis
 from app.automix.settings import AutoMixAnalysisSettings
@@ -88,6 +88,24 @@ class AnalysisServiceTests(unittest.TestCase):
             self.assertIn(track.id, result.analyses)
             self.assertEqual(result.analyses[track.id].bpm, 120.0)
             self.assertIsNotNone(cache.load(track.file_path))
+
+    def test_step_progress_forwards_provider_steps_then_reports_a_cache_hit(self) -> None:
+        class _SteppingProvider(_StubProvider):
+            def analyze(self, track, *, cancel_event, progress=None) -> TrackAnalysis:
+                progress(0.0, "decode")
+                progress(0.6, "bars")
+                return super().analyze(track, cancel_event=cancel_event)
+
+        with TemporaryDirectory(prefix="automix-service-") as directory:
+            cache = AnalysisCache(Path(directory) / "cache", analyzer_id="stub", analyzer_version="1")
+            service = AnalysisService(_SteppingProvider(), cache=cache)
+            track = _track(Path(directory), "a.mp3")
+            steps: list[tuple[str, str, float]] = []
+            service.analyze_tracks([track], step_progress=lambda *step: steps.append(step))
+            self.assertEqual(steps, [(track.id, "decode", 0.0), (track.id, "bars", 0.6)])
+            steps.clear()
+            service.analyze_tracks([track], step_progress=lambda *step: steps.append(step))
+            self.assertEqual(steps, [(track.id, STEP_CACHED, 1.0)])
 
     def test_cache_hit_skips_provider(self) -> None:
         with TemporaryDirectory(prefix="automix-service-") as directory:

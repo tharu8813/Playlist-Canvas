@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QPixmap
+import sys
+
+from mutagen import File as MutagenFile
+from PySide6.QtCore import QProcess, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QDialog,
@@ -22,6 +25,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QTabWidget,
@@ -30,8 +34,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.automix.analysis.key import key_to_camelot
 from app.automix.models import TrackAnalysis
+from app.automix.structure.models import TrackStructureAnalysis
 from app.models.playlist import PlaylistTrack
+from app.widgets.track_analysis_panel import TrackAnalysisPanel
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.services.lyrics_service import LyricsError, LyricsService
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
@@ -39,19 +46,44 @@ from app.preview.album_art import extract_track_cover
 from app.utils.i18n import Translator
 
 
+def audio_file_facts(path: str) -> dict[str, object]:
+    """Container/stream facts for the file tab; empty when the file cannot be read."""
+    facts: dict[str, object] = {}
+    source = Path(path)
+    try:
+        facts["size"] = source.stat().st_size
+    except OSError:
+        return facts
+    facts["format"] = source.suffix.lstrip(".").upper()
+    try:
+        info = getattr(MutagenFile(source), "info", None)
+    except Exception:  # noqa: BLE001 - mutagen raises format-specific errors; the tab just shows less
+        info = None
+    for name in ("bitrate", "sample_rate", "channels", "bits_per_sample"):
+        value = getattr(info, name, None)
+        if isinstance(value, (int, float)) and value > 0:
+            facts[name] = value
+    return facts
+
+
 class TrackDetailsDialog(QDialog):
     """Edit timed lyrics and synchronization without mutating the track on Cancel."""
+
+    analysis_requested = Signal()
+    """The user asked to analyze this track (MainWindow runs it and reports back)."""
 
     def __init__(
         self, track: PlaylistTrack, translator: Translator,
         parent: QWidget | None = None, *,
         content_lyrics: list[tuple[str, str]] | None = None,
         analysis: TrackAnalysis | None = None,
+        structure: TrackStructureAnalysis | None = None,
     ) -> None:
         super().__init__(parent)
         self.track = track
         self.translator = translator
         self.analysis = analysis
+        self._analysis_error = ""
         # (display name, resolved path) for every lyrics/subtitle file already
         # in the project content library.
         self._content_lyrics = list(content_lyrics or [])
@@ -71,12 +103,14 @@ class TrackDetailsDialog(QDialog):
         self._audio_available = Path(track.file_path).is_file()
         if self._audio_available:
             self.media_player.setSource(QUrl.fromLocalFile(str(Path(track.file_path).resolve())))
+        self._file_facts = audio_file_facts(track.file_path)
         self.setMinimumSize(780, 540)
-        self.resize(860, 600)
+        self.resize(880, 640)  # fits small laptop screens; the Analysis tab scrolls
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
+        root.addWidget(self._build_header())
         self.tabs = QTabWidget()
         self.tabs.setObjectName("trackDetailsTabs")
         self.info_tab = QWidget()
@@ -85,11 +119,13 @@ class TrackDetailsDialog(QDialog):
         info_tab_layout = QHBoxLayout(self.info_tab)
         info_tab_layout.setContentsMargins(12, 12, 12, 12)
         info_tab_layout.setSpacing(14)
+        info_column = QVBoxLayout()
+        info_column.setSpacing(10)
 
         self.info_group = QGroupBox()
         info_form = QFormLayout(self.info_group)
         info_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         info_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.info_name_labels: list[QLabel] = []
@@ -97,42 +133,53 @@ class TrackDetailsDialog(QDialog):
         self.artist_edit = QLineEdit(track.artist)
         self.album_edit = QLineEdit(track.album)
         self.metadata_edits = (self.title_edit, self.artist_edit, self.album_edit)
+        self.info_labels = list(self.metadata_edits)
         for field in self.metadata_edits:
             field.setObjectName("trackMetadataEdit")
             field.setClearButtonEnabled(True)
             field.setPlaceholderText("—")
             field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        self.file_label = QLabel(track.file_path.strip() or "—")
-        self.file_label.setToolTip(track.file_path)
-        self.duration_label = QLabel(track.duration_label)
-        self.automix_label = QLabel()
-        self.automix_label.setWordWrap(True)
-        self.info_labels = [
-            self.title_edit, self.artist_edit, self.album_edit,
-            self.file_label, self.duration_label, self.automix_label,
-        ]
-        for value, field in zip(
-            (
-                track.title, track.artist, track.album, track.file_path,
-                track.duration_label, "",
-            ),
-            self.info_labels,
-        ):
+            field.textChanged.connect(self._refresh_header)
             name_label = QLabel()
             name_label.setObjectName("trackInfoName")
             name_label.setMinimumWidth(78)
-            name_label.setAlignment(
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-            )
-            if isinstance(field, QLabel):
-                field.setObjectName("trackInfoValue")
-                field.setWordWrap(True)
-                field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             self.info_name_labels.append(name_label)
             info_form.addRow(name_label, field)
-        info_tab_layout.addWidget(self.info_group, 3)
+        info_column.addWidget(self.info_group)
+
+        self.file_group = QGroupBox()
+        file_form = QFormLayout(self.file_group)
+        file_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        file_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.file_label = QLabel(track.file_path.strip() or "—")
+        self.file_label.setToolTip(track.file_path)
+        self.reveal_file_button = QPushButton()
+        self.reveal_file_button.setEnabled(self._audio_available)
+        self.reveal_file_button.clicked.connect(self._reveal_audio_file)
+        path_widget = QWidget()
+        path_row = QHBoxLayout(path_widget)
+        path_row.setContentsMargins(0, 0, 0, 0)
+        path_row.addWidget(self.file_label, 1)
+        path_row.addWidget(self.reveal_file_button, 0, Qt.AlignmentFlag.AlignTop)
+        self.duration_label = QLabel(track.duration_label)
+        self.format_label = QLabel()
+        self.quality_label = QLabel()
+        self.size_label = QLabel()
+        self.file_name_labels: list[QLabel] = []
+        for field in (path_widget, self.duration_label, self.format_label, self.quality_label, self.size_label):
+            name_label = QLabel()
+            name_label.setObjectName("trackInfoName")
+            name_label.setMinimumWidth(78)
+            self.file_name_labels.append(name_label)
+            file_form.addRow(name_label, field)
+        for field in (self.file_label, self.duration_label, self.format_label, self.quality_label, self.size_label):
+            field.setObjectName("trackInfoValue")
+            field.setWordWrap(True)
+            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        info_column.addWidget(self.file_group)
+        info_column.addStretch(1)
+        info_tab_layout.addLayout(info_column, 3)
 
         self.cover_group = QGroupBox()
         cover_layout = QVBoxLayout(self.cover_group)
@@ -303,6 +350,14 @@ class TrackDetailsDialog(QDialog):
         lyrics_tab_layout.setContentsMargins(10, 10, 10, 10)
         lyrics_tab_layout.addLayout(content_row, 1)
         self.tabs.addTab(self.info_tab, "")
+        self.analysis_panel = TrackAnalysisPanel()
+        self.analysis_panel.set_results(analysis, structure)
+        self.analysis_panel.analyze_requested.connect(self.analysis_requested)
+        self.analysis_tab = QScrollArea()
+        self.analysis_tab.setWidgetResizable(True)
+        self.analysis_tab.setFrameShape(QFrame.Shape.NoFrame)
+        self.analysis_tab.setWidget(self.analysis_panel)
+        self.tabs.addTab(self.analysis_tab, "")
         self.tabs.addTab(self.lyrics_tab, "")
         video_layout = QVBoxLayout(self.video_tab)
         video_layout.setContentsMargins(12, 12, 12, 12)
@@ -394,30 +449,142 @@ class TrackDetailsDialog(QDialog):
         self._playback_duration_changed(round(track.duration_seconds * 1000))
         self._update_track_video_ui()
 
-    def _automix_summary(self, korean: bool) -> str:
-        """One line summarizing this track's AutoMix analysis, if any."""
-        if self.analysis is None:
-            return (
-                "분석되지 않음 (프로젝트 설정에서 AutoMix를 켜면 자동으로 분석됩니다)"
-                if korean else
-                "Not analyzed yet (enable AutoMix in Project settings to analyze automatically)"
-            )
-        if self.analysis.bpm is None:
-            return "리듬을 인식할 수 없음 (무음이거나 너무 짧음)" if korean else "No detectable rhythm (silent or too short)"
-        parts = [f"{round(self.analysis.bpm)} BPM"]
-        if self.analysis.key is not None:
-            parts.append(self.analysis.key)
-        if self.analysis.energy is not None:
-            parts.append(
-                f"에너지 {self.analysis.energy:.2f}" if korean else f"energy {self.analysis.energy:.2f}"
-            )
-        quality = self.analysis.beat_alignment_quality()
-        quality_label = {
-            "reliable": "비트 정렬 신뢰도 높음" if korean else "beat-alignment ready",
-            "bpm_only": "템포만 확인됨" if korean else "tempo only",
-            "insufficient": "신뢰도 낮음" if korean else "low confidence",
-        }[quality]
-        return " · ".join(parts) + f" ({quality_label})"
+    # -- header ---------------------------------------------------------------
+
+    def _build_header(self) -> QFrame:
+        """Cover, title, artist · album and one line of at-a-glance facts, above every tab."""
+        header = QFrame()
+        header.setObjectName("trackDetailsHeader")
+        header.setStyleSheet(
+            "#trackDetailsHeader { border: 1px solid rgba(128, 128, 128, 0.3);"
+            " border-radius: 10px; background: rgba(128, 128, 128, 0.07); }"
+        )
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(10, 10, 14, 10)
+        layout.setSpacing(12)
+        self.header_cover = QLabel()
+        self.header_cover.setFixedSize(68, 68)
+        self.header_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        self.header_title = QLabel()
+        self.header_title.setObjectName("panelTitle")
+        self.header_title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.header_subtitle = QLabel()
+        self.header_facts = QLabel()
+        self.header_facts.setObjectName("mutedLabel")
+        self.header_facts.setWordWrap(True)
+        for label in (self.header_title, self.header_subtitle, self.header_facts):
+            text.addWidget(label)
+        text.addStretch(1)
+        layout.addWidget(self.header_cover, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(text, 1)
+        return header
+
+    def _refresh_header(self, *_args: object) -> None:
+        if not hasattr(self, "video_list"):
+            return  # still building the tabs the header summarizes
+        korean = self.translator.language.value == "ko"
+        self.header_title.setText(self.title_edit.text().strip() or Path(self.track.file_path).stem)
+        self.header_subtitle.setText(" · ".join(
+            value for value in (self.artist_edit.text().strip(), self.album_edit.text().strip()) if value
+        ) or ("아티스트·앨범 정보 없음" if korean else "No artist or album"))
+        facts = [self.track.duration_label]
+        if self._file_facts.get("format"):
+            facts.append(str(self._file_facts["format"]))
+        if self._file_facts.get("sample_rate"):
+            facts.append(f"{float(self._file_facts['sample_rate']) / 1000:g} kHz")
+        count = len(self.selected_lyrics)
+        facts.append(
+            (f"가사 {count}줄" if count else "가사 없음") if korean
+            else (f"{count} lyric lines" if count else "No lyrics")
+        )
+        videos = self.video_list.count()
+        if videos:
+            facts.append(f"영상 {videos}개" if korean else f"{videos} video(s)")
+        analysis = self.analysis
+        if analysis is not None and analysis.bpm is not None:
+            camelot = key_to_camelot(analysis.key) if analysis.key else None
+            facts.append(f"{analysis.bpm:.0f} BPM" + (f" · {camelot}" if camelot else ""))
+        elif analysis is None:
+            facts.append("분석 전" if korean else "Not analyzed")
+        if not self._audio_available:
+            facts.append("⚠ 음원 파일 없음" if korean else "⚠ Audio file missing")
+        self.header_facts.setText("  ·  ".join(facts))
+        pixmap = extract_track_cover(self.track.file_path, self.selected_cover_path)
+        if pixmap.isNull():
+            self.header_cover.setPixmap(QPixmap())
+            self.header_cover.setText("♪")
+        else:
+            self.header_cover.setPixmap(pixmap.scaled(
+                self.header_cover.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+
+    def _refresh_file_facts(self, korean: bool) -> None:
+        facts = self._file_facts
+        unknown = "알 수 없음" if korean else "Unknown"
+        if not facts:
+            for label in (self.format_label, self.quality_label, self.size_label):
+                label.setText("파일을 찾을 수 없음" if korean else "File not found")
+            return
+        channels = facts.get("channels")
+        channel_text = (
+            {1: "모노" if korean else "Mono", 2: "스테레오" if korean else "Stereo"}.get(
+                int(channels), f"{int(channels)}ch") if channels else ""
+        )
+        self.format_label.setText(" · ".join(
+            part for part in (str(facts.get("format") or ""), channel_text) if part
+        ) or unknown)
+        quality = []
+        if facts.get("bitrate"):
+            quality.append(f"{round(float(facts['bitrate']) / 1000)} kbps")
+        if facts.get("sample_rate"):
+            quality.append(f"{float(facts['sample_rate']) / 1000:g} kHz")
+        if facts.get("bits_per_sample"):
+            quality.append(f"{facts['bits_per_sample']}-bit")
+        self.quality_label.setText(" · ".join(quality) or unknown)
+        size = float(facts["size"])
+        self.size_label.setText(
+            f"{size / 1024 ** 2:.1f} MB" if size >= 1024 ** 2 else f"{size / 1024:.0f} KB"
+        )
+
+    def _reveal_audio_file(self) -> None:
+        """Show the audio file in Explorer (its folder elsewhere)."""
+        path = Path(self.track.file_path)
+        if sys.platform == "win32":
+            QProcess.startDetached("explorer", ["/select,", str(path)])
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+
+    # -- analysis, run by MainWindow ---------------------------------------------
+
+    def begin_analysis(self) -> None:
+        self._analysis_error = ""
+        self.analysis_panel.begin_analysis()
+
+    def analysis_step(self, track_id: str, step: str, fraction: float) -> None:
+        if track_id == self.track.id:
+            self.analysis_panel.set_step(step, fraction)
+
+    def analyses_received(self, analyses: dict) -> None:
+        analysis = analyses.get(self.track.id)
+        if analysis is not None:
+            self.analysis = analysis
+            self.analysis_panel.set_results(analysis)
+            self._refresh_header()
+
+    def structures_received(self, structures: dict) -> None:
+        structure = structures.get(self.track.id)
+        if structure is not None:
+            self.analysis_panel.set_structure(structure)
+
+    def analyses_failed(self, failures: dict) -> None:
+        self._analysis_error = str(failures.get(self.track.id, "") or self._analysis_error)
+
+    def analysis_running_changed(self, running: bool) -> None:
+        if not running:
+            self.analysis_panel.finish_analysis(self._analysis_error)
 
     def _nudge_timing(self, delta: float) -> None:
         self.timing_offset_spin.setValue(self.timing_offset_spin.value() + delta)
@@ -480,6 +647,7 @@ class TrackDetailsDialog(QDialog):
         self.remove_video_button.setEnabled(selected)
         self.video_up_button.setEnabled(row > 0)
         self.video_down_button.setEnabled(0 <= row < count - 1)
+        self._refresh_header()
 
     def _load_lyrics(self) -> None:
         korean = self.translator.language.value == "ko"
@@ -589,6 +757,7 @@ class TrackDetailsDialog(QDialog):
             )
             self.cover_source_label.setToolTip(self.track.file_path)
         self.reset_cover_button.setEnabled(bool(self.selected_cover_path))
+        self._refresh_header()
 
     def _edit_in_lrc_generator(self) -> None:
         """Round-trip this track's timed lyrics through the LRC generator."""
@@ -786,6 +955,7 @@ class TrackDetailsDialog(QDialog):
             if korean else f"{count} timed cues · adjusted preview"
         )
         self._update_live_lyrics()
+        self._refresh_header()
         if not self.selected_lyrics:
             self.preview.setPlainText(
                 "시간 정보가 있는 가사를 불러오세요."
@@ -845,8 +1015,10 @@ class TrackDetailsDialog(QDialog):
         korean = self.translator.language.value == "ko"
         self.setWindowTitle("곡 정보/설정" if korean else "Track information/settings")
         self.tabs.setTabText(0, "곡 정보" if korean else "Track information")
-        self.tabs.setTabText(1, "가사 설정" if korean else "Lyrics settings")
-        self.tabs.setTabText(2, "이 곡의 영상" if korean else "Videos for this track")
+        self.tabs.setTabText(1, "분석" if korean else "Analysis")
+        self.tabs.setTabText(2, "가사 설정" if korean else "Lyrics settings")
+        self.tabs.setTabText(3, "이 곡의 영상" if korean else "Videos for this track")
+        self.analysis_panel.retranslate(korean)
         self.video_scope_badge.setText(
             "적용 범위 · 이 곡이 재생되는 동안만"
             if korean else "Scope · Only while this track is playing"
@@ -866,7 +1038,7 @@ class TrackDetailsDialog(QDialog):
         self.video_up_button.setText("위로" if korean else "Up")
         self.video_down_button.setText("아래로" if korean else "Down")
         self._update_track_video_ui()
-        self.info_group.setTitle("곡 정보" if korean else "Track information")
+        self.info_group.setTitle("기본 정보" if korean else "Basic information")
         self.cover_group.setTitle("앨범 커버" if korean else "Album artwork")
         self.change_cover_button.setText("이미지 변경…" if korean else "Change image…")
         self.reset_cover_button.setText("내장 커버 사용" if korean else "Use embedded artwork")
@@ -875,13 +1047,22 @@ class TrackDetailsDialog(QDialog):
             if korean else
             "Per-track artwork stored by the project. Source audio tags are not changed."
         )
-        info_names = (
-            ("제목", "아티스트", "앨범", "파일", "재생 시간", "AutoMix")
-            if korean else ("Title", "Artist", "Album", "File", "Duration", "AutoMix")
-        )
+        info_names = ("제목", "아티스트", "앨범") if korean else ("Title", "Artist", "Album")
         for label, name in zip(self.info_name_labels, info_names):
             label.setText(name)
-        self.automix_label.setText(self._automix_summary(korean))
+        self.file_group.setTitle("파일" if korean else "File")
+        file_names = (
+            ("위치", "재생 시간", "형식", "음질", "크기")
+            if korean else ("Location", "Duration", "Format", "Quality", "Size")
+        )
+        for label, name in zip(self.file_name_labels, file_names):
+            label.setText(name)
+        self.reveal_file_button.setText("폴더에서 보기" if korean else "Show in folder")
+        self.reveal_file_button.setToolTip(
+            "탐색기에서 이 음원 파일을 선택해 보여 줍니다." if korean
+            else "Show this audio file in the file manager."
+        )
+        self._refresh_file_facts(korean)
         metadata_tip = (
             "프로젝트에 저장할 곡 정보를 직접 수정할 수 있습니다. 원본 오디오 파일의 태그는 변경되지 않습니다."
             if korean else

@@ -25,6 +25,10 @@ ProgressCallback = Callable[[int, int, str], None]
 """(completed_tracks, total_tracks, message) -> None."""
 ResultCallback = Callable[[str, "TrackAnalysis | None"], None]
 """(track_id, analysis or None on failure) -> None, as each track finishes."""
+StepCallback = Callable[[str, str, float], None]
+"""(track_id, step, fraction of that track) -> None, as each provider step starts
+(see provider.ANALYSIS_STEPS), or STEP_CACHED when a stored result was reused."""
+STEP_CACHED = "cached"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +62,7 @@ class AnalysisService:
         cancel_event: threading.Event | None = None,
         progress: ProgressCallback | None = None,
         on_result: ResultCallback | None = None,
+        step_progress: StepCallback | None = None,
     ) -> AnalysisBatchResult:
         """Analyze every track, deduplicating identical source files.
 
@@ -92,7 +97,9 @@ class AnalysisService:
             for path_key in order:
                 if cancel_event.is_set():
                     break
-                futures[executor.submit(self._analyze_one, groups[path_key], cancel_event)] = path_key
+                futures[executor.submit(
+                    self._analyze_one, groups[path_key], cancel_event, step_progress,
+                )] = path_key
             for future in as_completed(futures):
                 path_key, result, error = future.result()
                 group = groups[path_key]
@@ -143,9 +150,16 @@ class AnalysisService:
 
     def _analyze_one(
         self, group: list[PlaylistTrack], cancel_event: threading.Event,
+        step_progress: StepCallback | None = None,
     ) -> tuple[str, TrackAnalysis | None, str | None]:
         representative = group[0]
         path_key = canonical_media_path(representative.file_path)
+
+        def report(fraction: float, step: str) -> None:
+            if step_progress is not None:
+                for track in group:  # identical files share one analysis
+                    step_progress(track.id, step, fraction)
+
         if self.cache is not None:
             cached_fields = self.cache.load(representative.file_path)
             if cached_fields is not None:
@@ -163,11 +177,12 @@ class AnalysisService:
                 # replaying the stale fallback instead of ever trying
                 # again). Treat a provenance mismatch as a miss instead.
                 if cached.analyzer_id == self.provider.provider_id:
+                    report(1.0, STEP_CACHED)
                     return path_key, cached, None
         if cancel_event.is_set():
             return path_key, None, None
         try:
-            result = self.provider.analyze(representative, cancel_event=cancel_event)
+            result = self.provider.analyze(representative, cancel_event=cancel_event, progress=report)
         except AnalysisCancelled:
             return path_key, None, None
         except Exception as error:  # noqa: BLE001 - one bad track must not abort the batch

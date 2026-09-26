@@ -44,7 +44,9 @@ import librosa
 import numpy as np
 
 from app.automix.analysis.key import estimate_key
-from app.automix.analysis.provider import AnalysisCancelled
+from app.automix.analysis.provider import (
+    STEP_BARS, STEP_DECODE, STEP_KEY_ENERGY, STEP_RHYTHM, AnalysisCancelled,
+)
 from app.automix.beatgrid import fit_beat_grid
 from app.automix.models import TrackAnalysis
 from app.models.playlist import PlaylistTrack
@@ -163,7 +165,7 @@ class BasicAnalysisProvider:
         cancel_event: threading.Event,
         progress: Callable[[float, str], None] | None = None,
     ) -> TrackAnalysis:
-        _report(progress, cancel_event, 0.0, "Decoding audio")
+        _report(progress, cancel_event, 0.0, STEP_DECODE)
         signal = self._decode_mono_pcm(Path(track.file_path), cancel_event)
         return self.analyze_signal(track, signal, cancel_event=cancel_event, progress=progress)
 
@@ -192,8 +194,7 @@ class BasicAnalysisProvider:
                 analyzer_id=self.provider_id, analyzer_version=self.version,
             )
 
-        report(0.2, "Analyzing rhythm")
-        report(0.4, "Tracking beats")
+        report(0.2, STEP_RHYTHM)
         tempo, raw_beat_times = librosa.beat.beat_track(y=signal, sr=SAMPLE_RATE, units="time")
         beat_times = self._clean_beats(np.atleast_1d(np.asarray(raw_beat_times, dtype=float)), duration_seconds)
 
@@ -207,16 +208,15 @@ class BasicAnalysisProvider:
             bpm_value = 0.0
         bpm_confidence = self._bpm_confidence(beat_times) if bpm_value > 0.0 else 0.0
 
-        report(0.7, "Resolving bars")
+        report(0.6, STEP_BARS)
         downbeats, meter_confidence = self._infer_downbeats(beat_times)
 
-        report(0.8, "Estimating key and energy")
+        report(0.75, STEP_KEY_ENERGY)
         key, key_confidence = self._estimate_key(signal)
         energy = self._estimate_energy(signal)
         audible_start, audible_end = audible_bounds(signal, duration_seconds)
 
-        report(0.9, "Validating result")
-        result = TrackAnalysis(
+        return TrackAnalysis(
             track_id=track.id, source_path=track.file_path, duration_seconds=duration_seconds,
             bpm=bpm_value if bpm_value > 0.0 else None,
             bpm_confidence=bpm_confidence,
@@ -231,8 +231,6 @@ class BasicAnalysisProvider:
             decay_start_seconds=decay_start(signal, duration_seconds),
             analyzer_id=self.provider_id, analyzer_version=self.version,
         )
-        report(1.0, "AutoMix analysis completed")
-        return result
 
     def _decode_mono_pcm(
         self, path: Path, cancel_event: threading.Event, *,

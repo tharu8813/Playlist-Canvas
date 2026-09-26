@@ -789,27 +789,33 @@ class MainWindowPlaylistTests(MainWindowTestCase):
         dialog = TrackDetailsDialog(track, self.window.translator, self.window)
         try:
             self.assertEqual(
-                [label.text() for label in dialog.info_name_labels],
-                ["제목", "아티스트", "앨범", "파일", "재생 시간", "AutoMix"],
+                [label.text() for label in dialog.info_name_labels], ["제목", "아티스트", "앨범"],
             )
             self.assertEqual(
-                [label.text() for label in dialog.info_labels],
-                [
-                    "Visible title", "Visible artist", "",
-                    "C:/Music/long folder/song.m4a", "02:05",
-                    "분석되지 않음 (프로젝트 설정에서 AutoMix를 켜면 자동으로 분석됩니다)",
-                ],
+                [label.text() for label in dialog.info_labels], ["Visible title", "Visible artist", ""],
             )
+            self.assertEqual(
+                [label.text() for label in dialog.file_name_labels],
+                ["위치", "재생 시간", "형식", "음질", "크기"],
+            )
+            self.assertEqual(dialog.duration_label.text(), "02:05")
+            self.assertEqual(dialog.format_label.text(), "파일을 찾을 수 없음")
+            self.assertFalse(dialog.reveal_file_button.isEnabled())
             self.assertEqual(dialog.album_edit.placeholderText(), "—")
-            for label in (*dialog.info_name_labels, *dialog.info_labels):
-                self.assertTrue(label.isVisible() or not dialog.isVisible())
             self.assertTrue(
-                dialog.info_labels[3].textInteractionFlags()
+                dialog.file_label.textInteractionFlags()
                 & Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            self.assertEqual(
-                dialog.info_labels[3].toolTip(), "C:/Music/long folder/song.m4a"
-            )
+            self.assertEqual(dialog.file_label.toolTip(), "C:/Music/long folder/song.m4a")
+            # The header sums the track up above every tab, following unsaved edits.
+            self.assertEqual(dialog.header_title.text(), "Visible title")
+            self.assertEqual(dialog.header_subtitle.text(), "Visible artist")
+            self.assertIn("분석 전", dialog.header_facts.text())
+            dialog.album_edit.setText("New album")
+            self.assertEqual(dialog.header_subtitle.text(), "Visible artist · New album")
+            # Analysis is offered whatever the transition mode.
+            self.assertEqual(dialog.analysis_panel.analyze_button.text(), "이 곡 분석")
+            self.assertIn("AutoMix를 쓰지 않아도", dialog.analysis_panel.status_label.text())
         finally:
             dialog.close()
             self.window.translator.set_language(original_language)
@@ -825,10 +831,12 @@ class MainWindowPlaylistTests(MainWindowTestCase):
             dialog = TrackDetailsDialog(track, self.window.translator, self.window)
             try:
                 self.assertEqual(dialog.windowTitle(), "곡 정보/설정")
-                self.assertEqual(dialog.tabs.count(), 3)
-                self.assertEqual(dialog.tabs.tabText(0), "곡 정보")
-                self.assertEqual(dialog.tabs.tabText(1), "가사 설정")
-                self.assertEqual(dialog.tabs.tabText(2), "이 곡의 영상")
+                self.assertEqual(dialog.tabs.count(), 4)
+                self.assertEqual(
+                    [dialog.tabs.tabText(index) for index in range(4)],
+                    ["곡 정보", "분석", "가사 설정", "이 곡의 영상"],
+                )
+                self.assertIs(dialog.tabs.widget(1), dialog.analysis_tab)
                 self.assertTrue(dialog.info_tab.isAncestorOf(dialog.info_group))
                 self.assertTrue(dialog.lyrics_tab.isAncestorOf(dialog.lyrics_group))
                 self.assertTrue(dialog.lyrics_tab.isAncestorOf(dialog.playback_group))
@@ -892,7 +900,7 @@ class MainWindowPlaylistTests(MainWindowTestCase):
         )
         dialog = TrackDetailsDialog(track, self.window.translator, self.window)
         try:
-            self.assertEqual(dialog.tabs.tabText(2), "이 곡의 영상")
+            self.assertEqual(dialog.tabs.tabText(3), "이 곡의 영상")
             self.assertIn("이 곡이 재생되는 동안만", dialog.video_scope_badge.text())
             self.assertEqual(dialog.video_count_label.text(), "2개 영상")
             dialog.video_list.setCurrentRow(1)
@@ -901,6 +909,45 @@ class MainWindowPlaylistTests(MainWindowTestCase):
             self.assertTrue(dialog.video_down_button.isEnabled())
         finally:
             dialog.close()
+
+    def test_track_details_analyzes_one_track_without_automix_and_shows_each_step(self) -> None:
+        from app.automix.models import TrackAnalysis
+
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="none")
+        track = PlaylistTrack(str(Path("analyze-me.wav").resolve()), "Analyze me", duration_seconds=200.0)
+        self.window.playlist_service.replace([track])
+        analysis = TrackAnalysis(track.id, track.file_path, 200.0, bpm=120.0, bpm_confidence=0.8, energy=0.4)
+        controller = self.window.track_analysis_controller
+        shown: list[TrackDetailsDialog] = []
+
+        def press_analyze(dialog: TrackDetailsDialog) -> int:
+            shown.append(dialog)
+            dialog.analysis_panel.analyze_button.click()
+            controller.track_step_changed.emit(track.id, "decode", 0.0)
+            controller.track_step_changed.emit("another-track", "vocals", 0.8)  # not this dialog's
+            self.assertEqual(dialog.analysis_panel.step_states["decode"], "running")
+            self.assertEqual(dialog.analysis_panel.step_states["vocals"], "pending")
+            controller.analyses_updated.emit({track.id: analysis})
+            controller.running_changed.emit(False)
+            return QDialog.DialogCode.Rejected
+
+        with (
+            patch("app.ui.main_window.FFmpegRenderer") as renderer,
+            patch.object(controller, "start") as start,
+            patch.object(TrackDetailsDialog, "exec", press_analyze),
+        ):
+            renderer.return_value.executable = Path("ffmpeg.exe")
+            self.window._show_track_details(track.id)
+        (tracks, executable), options = start.call_args
+        self.assertEqual([entry.id for entry in tracks], [track.id])
+        self.assertEqual(options, {"provider_id": "auto", "enable_structure_analysis": True})
+        panel = shown[0].analysis_panel
+        self.assertEqual(panel.step_states["decode"], "done")
+        self.assertFalse(panel.running)
+        self.assertEqual(panel.cards[0][1].text(), "120.0 BPM")
+        self.assertIn("120 BPM", shown[0].header_facts.text())
+        self.assertIs(self.window.automix_analyses[track.id], analysis)  # reaches the Playlist badges
+        self.assertNotIn(self.window.TRACK_ANALYSIS_ACTIVITY, self.window.activity_progress.active_keys)
 
     def test_empty_playlist_offers_the_add_action_and_rows_hide_placeholder_metadata(self) -> None:
         editor = self.window.playlist_editor

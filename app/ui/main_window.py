@@ -327,6 +327,15 @@ class MainWindow(QMainWindow):
             lambda _stages: self._update_automix_analysis_activity()
         )
         self.automix_analysis_controller.running_changed.connect(self._automix_analysis_running_changed)
+        # "Analyze this track" in Track information: its own pass, whatever the
+        # transition mode, so it never cancels (or waits for) the background one.
+        self.track_analysis_controller = AutoMixAnalysisController(self)
+        self.track_analysis_controller.analyses_updated.connect(self._automix_analyses_received)
+        self.track_analysis_controller.structures_updated.connect(self._automix_structures_received)
+        self.track_analysis_controller.track_step_changed.connect(self._track_analysis_step)
+        self.track_analysis_controller.analyses_failed.connect(self._track_analysis_failed)
+        self.track_analysis_controller.running_changed.connect(self._track_analysis_running_changed)
+        self._analyzing_track_id = ""
         # A pass over cached files ends within a moment of every playlist edit;
         # only a pass still running after this delay is worth a progress bar.
         self._automix_activity_timer = QTimer(self)
@@ -2367,6 +2376,72 @@ class MainWindow(QMainWindow):
         """
         self.automix_structures.update(structures)
 
+    TRACK_ANALYSIS_ACTIVITY = "track_analysis"
+
+    def _analyze_track(self, track_id: str, dialog: TrackDetailsDialog | None = None) -> None:
+        """Analyze one track now, whatever the transition mode (Track information's button)."""
+        track = next((entry for entry in self.playlist_service.tracks if entry.id == track_id), None)
+        if track is None:
+            return
+        korean = self.translator.language is Language.KOREAN
+        try:
+            ffmpeg_executable = FFmpegRenderer(self.settings_service.current.ffmpeg_path or None).executable
+        except FFmpegNotFoundError:
+            QMessageBox.warning(
+                dialog or self,
+                "FFmpeg 필요" if korean else "FFmpeg required",
+                "곡을 분석하려면 FFmpeg가 필요합니다. 도구 → 설정에서 FFmpeg를 설치하거나 경로를 지정하세요."
+                if korean else
+                "Analyzing a track needs FFmpeg. Install it or set its path in Tools → Settings.",
+            )
+            return
+        # Same analyzer and cache as AutoMix, so Preview/Export reuse the result.
+        self.track_analysis_controller.start(
+            [track], ffmpeg_executable, provider_id="auto", enable_structure_analysis=True,
+        )
+        self._analyzing_track_id = track_id
+        self.activity_progress.begin(
+            self.TRACK_ANALYSIS_ACTIVITY,
+            f"곡 분석 · {track.title}" if korean else f"Analyzing · {track.title}",
+            0.0,
+        )
+        if dialog is not None:
+            dialog.begin_analysis()
+
+    def _track_analysis_step(self, track_id: str, step: str, fraction: float) -> None:
+        from app.widgets.track_analysis_panel import STEP_NAMES, STEPS
+
+        if track_id != self._analyzing_track_id:
+            return
+        korean = self.translator.language is Language.KOREAN
+        name = STEP_NAMES[step][0 if korean else 1] if step in STEPS else (
+            "저장된 결과 불러오기" if korean else "Loading the stored result")
+        self.activity_progress.update(
+            self.TRACK_ANALYSIS_ACTIVITY, 0.9 if step == STEPS[-1] else 0.85 * fraction, detail=name,
+        )
+
+    def _track_analysis_failed(self, failures: dict[str, str]) -> None:
+        if self._analyzing_track_id in failures:
+            korean = self.translator.language is Language.KOREAN
+            self.statusBar().showMessage(
+                f"곡을 분석하지 못했습니다: {failures[self._analyzing_track_id]}" if korean
+                else f"Could not analyze the track: {failures[self._analyzing_track_id]}",
+                8000,
+            )
+
+    def _track_analysis_running_changed(self, running: bool) -> None:
+        if running:
+            return
+        self.activity_progress.finish(self.TRACK_ANALYSIS_ACTIVITY)
+        track_id, self._analyzing_track_id = self._analyzing_track_id, ""
+        track = next((entry for entry in self.playlist_service.tracks if entry.id == track_id), None)
+        if track is not None and track_id in self.automix_analyses:
+            self.statusBar().showMessage(
+                f"'{track.title}' 분석을 마쳤습니다." if self.translator.language is Language.KOREAN
+                else f"Finished analyzing '{track.title}'.",
+                5000,
+            )
+
     def _show_track_details(self, track_id: str) -> None:
         """Open track metadata and timed-lyrics editing for a playlist card."""
         track = next((entry for entry in self.playlist_service.tracks if entry.id == track_id), None)
@@ -2380,8 +2455,20 @@ class MainWindow(QMainWindow):
         dialog = TrackDetailsDialog(
             track, self.translator, self, content_lyrics=content_lyrics,
             analysis=self.automix_analyses.get(track_id),
+            structure=self.automix_structures.get(track_id),
         )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        controller = self.track_analysis_controller
+        dialog.analysis_requested.connect(lambda: self._analyze_track(track_id, dialog))
+        controller.track_step_changed.connect(dialog.analysis_step)
+        controller.analyses_updated.connect(dialog.analyses_received)
+        controller.structures_updated.connect(dialog.structures_received)
+        controller.analyses_failed.connect(dialog.analyses_failed)
+        controller.running_changed.connect(dialog.analysis_running_changed)
+        if controller.is_running and self._analyzing_track_id == track_id:
+            dialog.begin_analysis()  # reopened while its analysis still runs
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        dialog.deleteLater()  # drops its connections to the analysis controller
+        if accepted:
             self.playlist_service.update_track(
                 track_id,
                 title=dialog.selected_title,
@@ -4903,6 +4990,7 @@ class MainWindow(QMainWindow):
                 return
         self._automix_analysis_timer.stop()
         self.automix_analysis_controller.shutdown()
+        self.track_analysis_controller.shutdown()
         if self._workspace_settings_timer.isActive():
             self._workspace_settings_timer.stop()
         self._autosave_timer.stop()
