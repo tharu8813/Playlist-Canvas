@@ -516,14 +516,14 @@ class TransitionDspSelectionTests(unittest.TestCase):
         (transition,) = compile_automix(tracks, analyses, ENABLED).audio.transitions
         self.assertIs(transition.dsp, TransitionDsp.VOCAL_SAFE_EQ)
 
-    def test_singing_through_the_junction_is_never_mixed(self) -> None:
+    def test_singing_through_the_junction_is_only_a_short_handoff(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0)]
         plain = {"a": _analysis("a", 120.0, 60.0), "b": _analysis("b", 120.0, 60.0)}
         vocal = {key: replace(value, vocal_activity=((0.0, 60.0),)) for key, value in plain.items()}
-        plan = compile_automix(tracks, vocal, ENABLED)
-        clip_a, clip_b = plan.audio.clips
-        self.assertEqual(plan.audio.transitions, ())
-        self.assertEqual(clip_b.timeline_start, clip_a.timeline_end)  # back to back, no overlap
+        (transition,) = compile_automix(tracks, vocal, ENABLED).audio.transitions
+        self.assertEqual(dict(transition.details)["bars"], 2)
+        self.assertLessEqual(transition.duration, 2 * 2.0 + 1e-6)  # two 2 s bars at 120 BPM
+        self.assertIn(transition.dsp, (TransitionDsp.VOCAL_SAFE_EQ, TransitionDsp.SHORT_FADE))
 
     def test_fixed_crossfade_fallback_keeps_the_legacy_mix(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0)]

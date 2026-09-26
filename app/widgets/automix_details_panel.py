@@ -219,10 +219,10 @@ class AutoMixDetailsPanel(QFrame):
 
     @staticmethod
     def _back_to_back_reason(korean: bool) -> str:
-        return ("곡 끝까지 노래가 이어지거나 분석이 없는 곡은 두 보컬이 겹치지 않도록 섞지 않고, "
+        return ("분석하지 못했거나 섞을 길이가 부족한 곡은 섞지 않고, "
                 "앞 곡의 마지막 소리 바로 뒤에 다음 곡을 이어 재생합니다." if korean
-                else "A track that sings to its last sound, or has no analysis, is not blended so two voices "
-                     "never overlap: the next track starts right after its last sound.")
+                else "A track without analysis, or too short to blend, is not mixed: "
+                     "the next track starts right after its last sound.")
 
     def _show_details(self) -> None:
         row = self.list.currentRow()

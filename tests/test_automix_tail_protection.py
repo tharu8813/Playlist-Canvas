@@ -44,13 +44,11 @@ class TailProtectionTests(unittest.TestCase):
                                        structures={"a": _structure("a", 200.3, outro_start=150)})
                 clip, following = plan.audio.clips
                 self.assertEqual(clip.source_out, 200.3)
-                if vocals:  # sung to the very end: nothing may be mixed over it
-                    self.assertEqual(plan.audio.transitions, ())
-                    self.assertEqual(following.timeline_start, clip.timeline_end)
-                    continue
                 transition = plan.audio.transitions[0]
                 self.assertAlmostEqual(clip.timeline_end, transition.timeline_start + transition.duration)
                 self.assertLessEqual(transition.duration, ENABLED.max_transition_seconds)
+                if vocals:  # sung to the very end: only a short handoff over the last bars
+                    self.assertEqual(dict(transition.details)["bars"], 2)
 
     def test_uncertain_bars_do_not_disable_reliable_beat_tempo_matching(self):
         tracks = [_track("a", 60.3), _track("b", 60)]

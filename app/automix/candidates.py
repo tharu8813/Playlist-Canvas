@@ -69,6 +69,15 @@ VOCAL_EDGE_TOLERANCE_SECONDS = 0.1
 """Vocal spans are measured in 100 ms frames (app/automix/analysis/vocals.py):
 a downbeat within one frame of the last word counts as "right after" it."""
 
+HANDOFF_BARS = (2, 1)
+HANDOFF_MAX_SECONDS = 4.0
+"""When both tracks sing across the junction -- the outgoing one to its last
+sound, the incoming one from its first -- the longest of HANDOFF_BARS within
+this many seconds (else the shortest) blends them instead of joining them back
+to back, so the two voices overlap only briefly. A third of real pop tracks
+sing to their last sound, and most of those start singing right away too; two
+bars of a 64-80 BPM ballad were 6-7.5 s of both singing."""
+
 LOCAL_GRID_SECONDS = 60.0
 """Beats this far into each side's mix region fit its local tempo: a live or
 drifting track is matched on the tempo it actually has around the cue."""
@@ -296,6 +305,20 @@ def generate_candidates(
 
     candidates = _deduplicate_candidates(candidates)
 
+    if not candidates and _sings_to_end(outgoing):
+        # Neither room after the last line nor an instrumental intro to mix it over.
+        handoffs = [
+            candidate
+            for bars in HANDOFF_BARS
+            if (candidate := _beat_based_candidate(
+                outgoing, incoming, compatibility, bars, strategy, settings, handoff=True,
+                outgoing_playback_rate=outgoing_playback_rate,
+                outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
+            )) is not None
+        ]
+        fitting = [c for c in handoffs if c.duration_seconds <= HANDOFF_MAX_SECONDS + _DURATION_EPSILON_SECONDS]
+        candidates = fitting[:1] or sorted(handoffs, key=lambda c: c.duration_seconds)[:1]
+
     if not candidates:
         return _fallback_candidates(
             outgoing, incoming, settings, outgoing_playback_rate=outgoing_playback_rate,
@@ -357,7 +380,9 @@ def _beat_based_candidate(
     outgoing_playback_rate: float = 1.0,
     outgoing_structure: TrackStructureAnalysis | None = None,
     incoming_structure: TrackStructureAnalysis | None = None,
+    handoff: bool = False,
 ) -> TransitionCandidate | None:
+    """``handoff``: both tracks sing across the junction; blend over them anyway (HANDOFF_BARS)."""
     assert outgoing.bpm is not None and incoming.bpm is not None and compatibility.incoming_effective_bpm is not None
 
     # The incoming track always plays at its own tempo. For BEAT_MATCH the
@@ -421,11 +446,18 @@ def _beat_based_candidate(
     # Allow at most one extra bar for snapping, not an arbitrary long fade.
     if strategy is TransitionStrategy.BEAT_MATCH and outgoing_source_time not in outgoing_anchors:
         return None
-    # Never mix while the outgoing track sings: a cue inside its last phrase
-    # moves to the first beat after that phrase ends -- mixing starts right
-    # when the singer stops, even if that leaves only a short instrumental tail.
+    # Two voices must not share the blend. While the outgoing track sings, mix
+    # only under an instrumental incoming intro; otherwise a cue inside its last
+    # phrase moves to the first beat after that phrase ends -- mixing starts
+    # right when the singer stops, even if that leaves only a short tail.
+    naive_incoming_time = (
+        incoming_naive_override if incoming_naive_override is not None else audible_start(incoming)
+    )
+    naive_incoming_time = max(0.0, min(naive_incoming_time, incoming.duration_seconds))
     vocal_end = _last_vocal_end(outgoing, outgoing_source_time, outgoing_end)
-    after_vocals = vocal_end is not None
+    over_intro = vocal_end is not None and not handoff and _instrumental(
+        incoming, naive_incoming_time, naive_incoming_time + (bars + 1) * seconds_per_bar)
+    after_vocals = vocal_end is not None and not over_intro and not handoff
     if after_vocals:
         earliest = vocal_end - VOCAL_EDGE_TOLERANCE_SECONDS
         later = ([anchor for anchor in outgoing_anchors if earliest <= anchor < outgoing_end]
@@ -446,10 +478,6 @@ def _beat_based_candidate(
             or incoming_source_span > incoming.duration_seconds):
         return None
 
-    naive_incoming_time = (
-        incoming_naive_override if incoming_naive_override is not None else audible_start(incoming)
-    )
-    naive_incoming_time = max(0.0, min(naive_incoming_time, incoming.duration_seconds))
     incoming_anchors = (incoming.downbeats if strategy is TransitionStrategy.BEAT_MATCH
                         and _has_reliable_downbeats(incoming) else incoming.beats)
     incoming_source_time, incoming_snap = _nearest_bounded_anchor(
@@ -461,7 +489,9 @@ def _beat_based_candidate(
         incoming_source_time = max(0.0, incoming_grid.snap(incoming_source_time))
         if incoming_source_time + incoming_source_span > incoming.duration_seconds + _DURATION_EPSILON_SECONDS:
             return None
-    # The incoming track may already sing here: the outgoing one no longer does.
+    if over_intro and not _instrumental(incoming, incoming_source_time, incoming_source_time + incoming_source_span):
+        return None  # the snapped window reaches the incoming singer
+    # Otherwise the incoming track may already sing here: the outgoing one no longer does.
 
     confidence = min(outgoing.bpm_confidence, incoming.bpm_confidence)
     score, reasons = _score_beat_candidate(
@@ -476,6 +506,10 @@ def _beat_based_candidate(
                     f"aligned at {alignment} cues",)
     if after_vocals:
         reasons += (f"+ mixing starts after the outgoing vocals end ({vocal_end:.1f}s)",)
+    elif over_intro:
+        reasons += ("+ blending under the outgoing vocals: the incoming intro is instrumental",)
+    elif handoff:
+        reasons += (f"- both tracks sing across the junction: a short {bars}-bar blend hands the voice over",)
     elif outgoing.vocal_activity:
         reasons += ("+ outgoing track does not sing in the overlap",)
     reasons += ("+ audible outgoing ending preserved",)
@@ -675,6 +709,24 @@ def _last_vocal_end(analysis: TrackAnalysis, start: float, end: float) -> float 
     return max(ends) if ends else None
 
 
+def _instrumental(analysis: TrackAnalysis, start: float, end: float) -> bool:
+    """Whether ``analysis`` is known not to sing in ``[start, end]``.
+
+    Only measured vocal activity can say so ("no spans" cannot be told apart
+    from "not analyzed"); lyric lines only ever add singing."""
+    if not analysis.vocal_activity:
+        return False
+    return not any(a < end - VOCAL_EDGE_TOLERANCE_SECONDS and b > start
+                   for a, b in (*analysis.vocal_activity, *analysis.lyric_vocal_spans))
+
+
+def _sings_to_end(analysis: TrackAnalysis) -> bool:
+    """Whether the singing leaves less than MIN_AFTER_VOCAL_SECONDS before the track's last sound."""
+    end = audible_end(analysis)
+    vocal_end = _last_vocal_end(analysis, 0.0, end)
+    return vocal_end is not None and end - vocal_end < MIN_AFTER_VOCAL_SECONDS + VOCAL_EDGE_TOLERANCE_SECONDS
+
+
 def _fallback_candidates(
     outgoing: TrackAnalysis, incoming: TrackAnalysis, settings: AutoMixTransitionSettings,
     reasons: tuple[str, ...], outgoing_playback_rate: float = 1.0,
@@ -688,11 +740,20 @@ def _fallback_candidates(
     outgoing_end, incoming_start = audible_end(outgoing), audible_start(incoming)
     available = min(outgoing_end / outgoing_playback_rate, incoming.duration_seconds - incoming_start)
     shortest = settings.min_transition_seconds
-    # Never fade over the outgoing singer: the fade starts once it stops.
+    # Two voices must not share the fade: it starts once the outgoing singer
+    # stops, unless the incoming intro is instrumental. Sung to the very end on
+    # both sides, the plain fade stays as a short handoff (HANDOFF_BARS' reason).
     vocal_end = _last_vocal_end(outgoing, 0.0, outgoing_end)
-    if vocal_end is not None and (outgoing_end - vocal_end) / outgoing_playback_rate < available:
-        available = (outgoing_end - vocal_end) / outgoing_playback_rate
-        shortest = min(shortest, MIN_AFTER_VOCAL_SECONDS)
+    tail = (outgoing_end - vocal_end) / outgoing_playback_rate if vocal_end is not None else None
+    fade = min(settings.fallback_crossfade_seconds, available)
+    if tail is not None and tail < fade:
+        if _instrumental(incoming, incoming_start, incoming_start + fade):
+            reasons += ("+ fading under the outgoing vocals: the incoming intro is instrumental",)
+        elif tail >= MIN_AFTER_VOCAL_SECONDS:
+            available = tail
+            shortest = min(shortest, MIN_AFTER_VOCAL_SECONDS)
+        else:
+            reasons += ("- both tracks sing across the junction: a short fade hands the voice over",)
     duration_seconds = min(settings.fallback_crossfade_seconds, available)
     if duration_seconds < shortest:
         # A cut still drops the silence between the two sounds.

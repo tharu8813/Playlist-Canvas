@@ -195,7 +195,8 @@ class AdvancedScoringTests(unittest.TestCase):
 
 
 class VocalAwareWindowTests(unittest.TestCase):
-    """Never mix while the outgoing track sings; mix right after it stops (or later)."""
+    """Two voices never share a blend: mix after the outgoing singer stops, or under an
+    instrumental incoming intro; sung through on both sides, only a short handoff."""
 
     def _generate(self, outgoing, incoming):
         settings = AutoMixTransitionSettings(max_transition_seconds=60.0)
@@ -233,11 +234,49 @@ class VocalAwareWindowTests(unittest.TestCase):
         self.assertGreaterEqual(best.outgoing_source_time, 198.4)
         self.assertGreaterEqual(best.duration_seconds, 1.0)
 
-    def test_singing_through_the_junction_leaves_only_a_cut(self) -> None:
+    def test_singing_through_the_junction_gets_a_short_handoff_blend(self) -> None:
         outgoing = replace(_analysis("a", 128.0, duration=200.0), vocal_activity=((10.0, 200.0),))
-        incoming = _analysis("b", 128.0, duration=200.0)
-        candidates = self._generate(outgoing, incoming)
-        self.assertEqual([c.strategy for c in candidates], [TransitionStrategy.CUT])
+        for incoming_vocals in ((), ((0.0, 150.0),)):  # unknown, or singing from the first note
+            with self.subTest(incoming_vocals=incoming_vocals):
+                incoming = replace(_analysis("b", 128.0, duration=200.0), vocal_activity=incoming_vocals)
+                (candidate,) = self._generate(outgoing, incoming)
+                self.assertIs(candidate.strategy, TransitionStrategy.BEAT_MATCH)
+                self.assertEqual(candidate.bars, 2)
+                self.assertEqual(candidate.outgoing_source_out, 200.0)
+                self.assertIn("- both tracks sing across the junction: a short 2-bar blend hands the voice over",
+                              candidate.reasons)
+
+    def test_a_slow_handoff_shrinks_to_one_bar_to_keep_the_overlap_brief(self) -> None:
+        outgoing = replace(_analysis("a", 70.0, duration=200.0), vocal_activity=((10.0, 200.0),))
+        (candidate,) = self._generate(outgoing, _analysis("b", 70.0, duration=200.0))
+        self.assertEqual(candidate.bars, 1)  # two 70 BPM bars would be 6.9 s of both singing
+        self.assertLess(candidate.duration_seconds, 2 * 4 * 60.0 / 70.0)  # one bar plus its downbeat snap
+
+    def test_an_instrumental_intro_is_mixed_under_the_outgoing_singer(self) -> None:
+        outgoing = replace(_analysis("a", 128.0, duration=200.0), vocal_activity=((10.0, 200.0),))
+        incoming = replace(_analysis("b", 128.0, duration=200.0), vocal_activity=((30.0, 150.0),))
+        best = select_best_candidate(self._generate(outgoing, incoming))
+        self.assertEqual(best.bars, 8)  # the full preferred blend, not a handoff
+        self.assertLessEqual(best.incoming_source_time + best.duration_seconds, 30.0)
+        self.assertIn("+ blending under the outgoing vocals: the incoming intro is instrumental", best.reasons)
+        # An intro shorter than every bar length still gets the handoff, never a blend into its singer.
+        short_intro = replace(incoming, vocal_activity=((3.0, 150.0),))
+        (handoff,) = self._generate(outgoing, short_intro)
+        self.assertEqual(handoff.bars, 2)
+
+    def test_fixed_crossfades_follow_the_same_vocal_rules(self) -> None:
+        # 128 vs 90 BPM: no beat match, only the fixed crossfade.
+        outgoing = replace(_analysis("a", 128.0, duration=200.0), vocal_activity=((10.0, 200.0),))
+        for incoming_vocals, reason in (
+            (((0.0, 150.0),), "- both tracks sing across the junction: a short fade hands the voice over"),
+            (((30.0, 150.0),), "+ fading under the outgoing vocals: the incoming intro is instrumental"),
+        ):
+            with self.subTest(incoming_vocals=incoming_vocals):
+                incoming = replace(_analysis("b", 90.0, duration=200.0), vocal_activity=incoming_vocals)
+                (candidate,) = self._generate(outgoing, incoming)
+                self.assertIs(candidate.strategy, TransitionStrategy.FIXED_CROSSFADE)
+                self.assertEqual(candidate.duration_seconds, 3.0)
+                self.assertIn(reason, candidate.reasons)
 
 def _structure(
     track_id: str, duration: float, *,
