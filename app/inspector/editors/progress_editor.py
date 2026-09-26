@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from app.inspector.editors.base import apply_shared_fields, finish, hide_type_specific_fields
+from app.inspector.editors.base import editing, show_fields
 from app.models.source import Source
 
 if TYPE_CHECKING:
@@ -17,8 +17,5 @@ _OWN_FIELD_KEYS = (
 
 
 def edit(inspector: "SourceInspector", source: Source) -> None:
-    hide_type_specific_fields(inspector)
-    for key in _OWN_FIELD_KEYS:
-        inspector._set_field_visible(key, True)
-    apply_shared_fields(inspector, source)
-    finish(inspector, source)
+    with editing(inspector, source):
+        show_fields(inspector, _OWN_FIELD_KEYS)
