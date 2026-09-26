@@ -73,6 +73,7 @@ from app.video.decoder_backpressure import VideoDecoderBackpressure
 from app.video.preview_proxy import PreviewProxyCache, PreviewProxyWorker
 from app.utils.i18n import Translator
 from app.widgets.automix_details_panel import AutoMixDetailsPanel, ready_through
+from app.widgets.transition_inspector import TransitionInspectorWindow
 
 TIMELINE_SCALE = 100
 _BLENDED_AUDIO_TRACK_INDEX = -2
@@ -803,6 +804,7 @@ class ExportPreviewDialog(QDialog):
                 translator, automix=self._transition_mode == "automix",
             )
             track_panel_layout.addWidget(self.automix_details)
+            self.automix_details.open_requested.connect(self._open_transition_window)
             self._refresh_automix_details(self._blended_audio_until if self._blended_audio_path else None)
             last = getattr(self._blended_audio_controller, "last_progress", None)
             if last is not None:  # continue from where the preparation popup was
@@ -1194,6 +1196,27 @@ class ExportPreviewDialog(QDialog):
             state, through = "provisional", ready_through(self._compiled_plan, covered_until)
         panel.set_plan(self._compiled_plan, self.tracks, state=state, ready_through=through)
         panel.set_playhead(self._playhead_seconds if hasattr(self, "_playhead_seconds") else 0.0)
+
+    def _open_transition_window(self) -> None:
+        """Show the larger, drawn transition view; one window, reused and brought to front."""
+        window = getattr(self, "_transition_window", None)
+        if window is None:
+            window = self._transition_window = TransitionInspectorWindow(self.automix_details, self)
+            window.seek_requested.connect(self._seek_to_seconds)
+            window.play_requested.connect(self._play_from_seconds)
+            self.finished.connect(window.close)
+            window.set_playhead(self.timeline.value() / TIMELINE_SCALE)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _seek_to_seconds(self, seconds: float) -> None:
+        self.timeline.setValue(round(max(0.0, seconds) * TIMELINE_SCALE))
+
+    def _play_from_seconds(self, seconds: float) -> None:
+        self._seek_to_seconds(seconds)
+        if not self.play_button.isChecked():
+            self.play_button.setChecked(True)
 
     def _on_seeked(self, _value: int) -> None:
         panel = getattr(self, "automix_details", None)

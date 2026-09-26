@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QListWidget, QPlainTextEdit, QPushButton,
     QToolButton, QVBoxLayout, QWidget,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from app.automix.diagnostics import rows_to_json, transition_rows
 from app.utils.i18n import Language, Translator
@@ -72,7 +72,16 @@ def _clock(seconds: float) -> str:
 
 
 class AutoMixDetailsPanel(QFrame):
-    """Transitions of the playing plan, the one under the playhead marked."""
+    """Transitions of the playing plan, the one under the playhead marked.
+
+    Also the data source of the larger TransitionInspectorWindow: ``changed``
+    fires whenever the plan, status or language changes, ``playhead_changed``
+    on every playhead update, and ``open_requested`` asks Preview to show it.
+    """
+
+    changed = Signal()
+    playhead_changed = Signal(float)
+    open_requested = Signal()
 
     def __init__(
         self, translator: Translator, parent: QWidget | None = None, *, automix: bool = False,
@@ -82,6 +91,8 @@ class AutoMixDetailsPanel(QFrame):
         self.translator = translator
         # Only AutoMix plans can fall back; in crossfade mode "legacy" is the plan itself.
         self.automix = automix
+        self.plan = None
+        self.tracks: list = []
         self.rows: list[dict[str, object]] = []
         self._windows: list[tuple[float, float]] = []
         self._current = -1
@@ -93,6 +104,9 @@ class AutoMixDetailsPanel(QFrame):
         self.toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.toggle_button.setArrowType(Qt.ArrowType.RightArrow)
         self.toggle_button.toggled.connect(self._set_expanded)
+        self.open_window_button = QToolButton()
+        self.open_window_button.setAutoRaise(True)
+        self.open_window_button.clicked.connect(self.open_requested)
         self.status_label = QLabel()
         self.status_label.setObjectName("mutedLabel")
         self.status_label.setWordWrap(True)
@@ -120,7 +134,12 @@ class AutoMixDetailsPanel(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(4)
-        layout.addWidget(self.toggle_button)
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        header.addWidget(self.toggle_button)
+        header.addStretch(1)
+        header.addWidget(self.open_window_button)
+        layout.addLayout(header)
         layout.addWidget(self.status_label)
         layout.addWidget(self.body)
         self.body.setVisible(False)
@@ -131,6 +150,7 @@ class AutoMixDetailsPanel(QFrame):
     def set_plan(self, plan, tracks, *, state: str, ready_through: int | None = None) -> None:
         """``state``: "waiting" (no mix yet), "provisional" (partial mix) or "final"."""
         titles = {track.id: track.title or track.id for track in tracks}
+        self.plan, self.tracks = plan, list(tracks)
         self.rows = transition_rows(plan, titles)
         self._windows = [
             (float(row["timeline_start"]), float(row["timeline_start"]) + float(row["duration"]))
@@ -162,6 +182,7 @@ class AutoMixDetailsPanel(QFrame):
 
     def set_playhead(self, seconds: float) -> None:
         """Mark the transition sounding at ``seconds`` (cheap: called every frame)."""
+        self.playhead_changed.emit(seconds)
         current = next((index for index, (start, end) in enumerate(self._windows)
                         if start <= seconds < end), -1)
         if current == self._current:
@@ -283,6 +304,7 @@ class AutoMixDetailsPanel(QFrame):
         self.status_label.setToolTip(f"{text}\n{explanation}".strip())
         self.status_label.setAccessibleName(("믹스 상태: " if korean else "Mix status: ") + text.lstrip("●◐✓! "))
         self.status_label.setAccessibleDescription(explanation)
+        self.changed.emit()
 
     def _set_expanded(self, expanded: bool) -> None:
         self.body.setVisible(expanded)
@@ -294,6 +316,11 @@ class AutoMixDetailsPanel(QFrame):
         self.toggle_button.setToolTip(
             "각 전환의 위치, 방식, 선택 근거를 봅니다." if korean
             else "See where each transition sits, how it is mixed, and why."
+        )
+        self.open_window_button.setText("⤢ 크게 보기" if korean else "⤢ Open window")
+        self.open_window_button.setToolTip(
+            "새 창에서 전체 믹스와 각 전환의 대역별 음량 변화, 화면 전환 지점을 그래프로 봅니다." if korean
+            else "Open a window that graphs the whole mix, each transition's per-band levels and the Canvas switch."
         )
         self.copy_text_button.setText("텍스트 복사" if korean else "Copy text")
         self.copy_json_button.setText("JSON 복사" if korean else "Copy JSON")

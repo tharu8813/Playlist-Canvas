@@ -2210,6 +2210,17 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 preview._apply_blended_audio(files["final"], plans[3])
                 self.assertEqual(panel._state, ("final", None))
                 self.assertIn(("bars", 8), plans[3].audio.transitions[1].details)
+                # "Open window": the drawn view follows the same plan and seeks Preview.
+                panel.open_window_button.click()
+                window = preview._transition_window
+                self.assertTrue(window.isVisible())
+                self.assertEqual(len(window.junctions), len(tracks) - 1)
+                window._user_select(1)
+                window.jump_button.click()
+                self.assertAlmostEqual(preview.timeline.value() / TIMELINE_SCALE,
+                                       window.junctions[1].start, places=2)
+                panel.open_window_button.click()
+                self.assertIs(preview._transition_window, window)  # reused, not duplicated
 
     def test_background_mix_progress_clears_on_failure_or_when_preview_closes(self) -> None:
         track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
