@@ -119,10 +119,10 @@ class ProgressiveControllerTests(unittest.TestCase):
         self.analyze("t4", "t5")
         self.assertEqual(len(self.finals), 1)
 
-    def test_the_preset_plans_the_partial_mixes_and_reaches_the_final_export_pipeline(self) -> None:
-        from app.automix.settings import resolve_automix_settings
+    def test_given_settings_plan_the_partial_mixes_and_reach_the_final_export_pipeline(self) -> None:
+        from app.automix.settings import AutoMixTransitionSettings
 
-        energetic = resolve_automix_settings("energetic")
+        energetic = AutoMixTransitionSettings(enabled=True, preferred_bars=4, max_transition_seconds=12.0)
         self.controller.start(self.tracks, Path("unused"), "automix", 3.0, automix_settings=energetic)
         self.controller.report_playhead(0.0, True)
         self.analyze("t0", "t1")

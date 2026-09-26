@@ -15,7 +15,6 @@ class _Window:
         self.project_settings = SimpleNamespace(
             transition_mode="crossfade",
             crossfade_seconds=2.0,
-            automix_preset="auto",
         )
         self._export_storage_monitor = None
         self._active_export_output_path = None

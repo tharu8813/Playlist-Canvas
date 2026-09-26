@@ -1184,8 +1184,7 @@ class FFmpegRenderer:
     ) -> Path:
         """Prepare audio and report the exact plan actually rendered, including fallback.
 
-        ``automix_settings`` is the project's resolved AutoMix preset
-        (``app.automix.settings.resolve_automix_settings``); ``None`` is "auto".
+        ``automix_settings``: ``None`` is ``app.automix.settings.AUTOMIX_SETTINGS``.
         """
         cancel_event = cancel_event or threading.Event()
         resolved_plan = compile_playlist(active_tracks)

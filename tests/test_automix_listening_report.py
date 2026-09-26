@@ -23,14 +23,14 @@ class RatingSheetTests(unittest.TestCase):
         ]
         with TemporaryDirectory() as directory:
             path = Path(directory) / "ratings.csv"
-            write_rating_sheet(path, rows, "smooth")
+            write_rating_sheet(path, rows)
             with path.open(encoding="utf-8-sig", newline="") as file:
                 sheet = list(csv.DictReader(file))
 
         self.assertEqual([row["index"] for row in sheet], ["1", "3"])  # back-to-back has nothing to rate
         self.assertEqual(sheet[0]["from"], "첫 곡")
         self.assertEqual(sheet[0]["start"], "3:05")
-        self.assertEqual((sheet[0]["preset"], sheet[0]["style"]), ("smooth", "bass_swap"))
+        self.assertEqual(sheet[0]["style"], "bass_swap")
         self.assertEqual(sheet[1]["style"], "crossfade")
         self.assertTrue(all(row[column] == "" for row in sheet for column in RATING_COLUMNS))
 

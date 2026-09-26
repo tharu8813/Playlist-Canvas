@@ -111,9 +111,9 @@ class PreviewController:
             pass
         transition_mode = window.project_settings.transition_mode
         crossfade_seconds = window.project_settings.crossfade_seconds
-        from app.automix.settings import resolve_automix_settings
+        from app.automix.settings import AUTOMIX_SETTINGS
 
-        automix_settings = resolve_automix_settings(window.project_settings.automix_preset)
+        automix_settings = AUTOMIX_SETTINGS
         if transition_mode == "automix":
             # Preview analyzes the same files into the same caches at full
             # speed; a background pass still running would only duplicate

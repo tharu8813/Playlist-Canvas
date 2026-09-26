@@ -1307,14 +1307,12 @@ class MainWindowPreviewTests(MainWindowTestCase):
         self.window._finish_inline_preview()
         self.assertTrue(self.window._automix_analysis_timer.isActive())  # background resumes
 
-    def test_preview_hands_the_projects_resolved_automix_preset_to_the_mix(self) -> None:
-        from app.automix.settings import resolve_automix_settings
+    def test_preview_hands_the_automatic_automix_settings_to_the_mix(self) -> None:
+        from app.automix.settings import AUTOMIX_SETTINGS
 
         tracks = [PlaylistTrack("a.wav", "A", duration_seconds=100.0), PlaylistTrack("b.wav", "B", duration_seconds=90.0)]
         self.window.playlist_service.replace(tracks)
-        self.window.project_settings = replace(
-            self.window.project_settings, transition_mode="automix", automix_preset="energetic",
-        )
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="automix")
         received = {}
 
         def fake_prepare(_tracks, _executable, _mode, _seconds, automix_settings=None):
@@ -1331,8 +1329,8 @@ class MainWindowPreviewTests(MainWindowTestCase):
             ):
                 self.window.preview_controller.show_export_preview(tracks)
             self.addCleanup(self.window._finish_inline_preview)
-        self.assertIs(received["settings"], resolve_automix_settings("energetic"))
-        self.assertIs(fallback_start.call_args.kwargs["automix_settings"], resolve_automix_settings("energetic"))
+        self.assertIs(received["settings"], AUTOMIX_SETTINGS)
+        self.assertIs(fallback_start.call_args.kwargs["automix_settings"], AUTOMIX_SETTINGS)
 
     def test_automix_analysis_is_skipped_when_project_setting_is_off(self) -> None:
         self.window.playlist_service.replace([

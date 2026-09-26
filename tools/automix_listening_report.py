@@ -1,7 +1,6 @@
 """AutoMix listening/tuning report for real music (developer tool, not shipped).
 
     python tools/automix_listening_report.py OUT_DIR SONG1 SONG2 [SONG3 ...] [--ffmpeg PATH] [--ab]
-        [--preset auto|smooth|energetic|dj]
 
 Analyzes the songs in the given order exactly like Export does (rhythm
 provider "auto" = the light basic analyzer, Sonara structure when installed,
@@ -36,7 +35,7 @@ from app.automix.analysis.service import AnalysisService  # noqa: E402
 from app.automix.diagnostics import rows_to_csv, rows_to_json, transition_rows, window_metrics  # noqa: E402
 from app.automix.planner import compile_automix  # noqa: E402
 from app.automix.renderer import AutoMixAudioPipeline  # noqa: E402
-from app.automix.settings import AUTOMIX_PRESETS, resolve_automix_settings  # noqa: E402
+from app.automix.settings import AUTOMIX_SETTINGS  # noqa: E402
 from app.models.playlist import PlaylistTrack  # noqa: E402
 from app.renderer.ffmpeg_renderer import FFmpegRenderer  # noqa: E402
 from app.timeline.models import TransitionType  # noqa: E402
@@ -52,17 +51,17 @@ RATING_COLUMNS = (
 )
 
 
-def write_rating_sheet(path: Path, rows: list[dict], preset: str) -> None:
+def write_rating_sheet(path: Path, rows: list[dict]) -> None:
     """One blank row per real transition; utf-8-sig so Excel shows Korean titles."""
     with path.open("w", newline="", encoding="utf-8-sig") as file:
         writer = csv.writer(file)
-        writer.writerow(("index", "from", "to", "start", "preset", "style", "duration_s", *RATING_COLUMNS))
+        writer.writerow(("index", "from", "to", "start", "style", "duration_s", *RATING_COLUMNS))
         for row in rows:
             if not row["duration"]:
                 continue
             start = int(row["timeline_start"])
             writer.writerow((
-                row["index"], row["from"], row["to"], f"{start // 60}:{start % 60:02d}", preset,
+                row["index"], row["from"], row["to"], f"{start // 60}:{start % 60:02d}",
                 row["dsp"] or row["type"], f"{row['duration']:.1f}", *("" for _ in RATING_COLUMNS),
             ))
 
@@ -111,8 +110,6 @@ def main() -> int:
     parser.add_argument("songs", nargs="+", type=Path)
     parser.add_argument("--ffmpeg", type=Path, default=None)
     parser.add_argument("--ab", action="store_true", help="render every transition once per DSP style")
-    parser.add_argument("--preset", choices=AUTOMIX_PRESETS, default="auto",
-                        help="AutoMix preset to plan with, as chosen in Project Settings")
     args = parser.parse_args()
     ffmpeg = FFmpegRenderer.find_executable(args.ffmpeg)
     out_dir: Path = args.out_dir
@@ -135,7 +132,7 @@ def main() -> int:
         structures = StructureAnalysisService(SonaraStructureProvider(ffmpeg)).analyze_tracks(tracks).analyses
     print(f"structure: {'sonara' if structures else 'unavailable'}", flush=True)
 
-    plan = compile_automix(tracks, analyses, resolve_automix_settings(args.preset), structures=structures)
+    plan = compile_automix(tracks, analyses, AUTOMIX_SETTINGS, structures=structures)
     rows = transition_rows(plan, titles)
     pipeline = AutoMixAudioPipeline(ffmpeg)
     paths = {track.id: track.file_path for track in tracks}
@@ -157,7 +154,7 @@ def main() -> int:
 
     (out_dir / "report.csv").write_text(rows_to_csv(rows), encoding="utf-8")
     (out_dir / "report.json").write_text(rows_to_json(rows), encoding="utf-8")
-    write_rating_sheet(out_dir / "ratings.csv", rows, args.preset)
+    write_rating_sheet(out_dir / "ratings.csv", rows)
     for row in rows:
         print(f"{row['index']:>2} {row['from']} -> {row['to']}: {row['type']}/{row['dsp']} "
               f"{row['duration']:.1f}s dip={row.get('level_dip_db', float('nan')):.1f}dB "

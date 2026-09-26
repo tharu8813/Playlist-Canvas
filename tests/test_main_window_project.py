@@ -884,15 +884,10 @@ class MainWindowProjectTests(MainWindowTestCase):
                 dialog.selected_settings, self.window.translator, QPixmap(),
             )
             try:
-                self.assertFalse(dialog2.automix_preset_combo.isEnabled())
+                self.assertFalse(hasattr(dialog2, "automix_preset_combo"))  # the style is always automatic
                 dialog2.transition_automix_radio.setChecked(True)
-                self.assertTrue(dialog2.automix_preset_combo.isEnabled())
-                self.assertEqual(dialog2.automix_preset_combo.currentData(), "auto")
-                dialog2.automix_preset_combo.setCurrentIndex(dialog2.automix_preset_combo.findData("smooth"))
-                self.assertTrue(dialog2.automix_preset_help.text())
                 dialog2._accept()
                 self.assertEqual(dialog2.selected_settings.transition_mode, "automix")
-                self.assertEqual(dialog2.selected_settings.automix_preset, "smooth")
             finally:
                 dialog2.close()
         finally:

@@ -120,9 +120,9 @@ AutoMix 프리셋 값, DSP 선택 임계값, 기본 전환 스타일(예: FILTER
 
 ### 실행
 ```
-python tools/automix_listening_report.py OUT_DIR SONG1 SONG2 ... --ab --preset auto
+python tools/automix_listening_report.py OUT_DIR SONG1 SONG2 ... --ab
 ```
-- 평가할 프리셋마다 `--preset`을 바꿔 따로 실행한다(`OUT_DIR`도 분리).
+- AutoMix 스타일은 항상 자동(`AUTOMIX_SETTINGS`)이다. 프로젝트별 프리셋 선택은 2026-09-26에 없앴다.
 - 결과: `automix_mix.flac`(전체 믹스), `ab/<n>_<style>.flac`(같은 위치·길이, 스타일만 다른 발췌),
   `report.csv`(기계 지표), `ratings.csv`(빈 평가지).
 
