@@ -134,17 +134,24 @@ class ProjectController:
             self.save_worker is not None
             and self.save_worker.isRunning()
         )
+        # A project that was never written to disk is not "saved", even with no edits yet.
+        never_saved = window.current_project_path is None and window._legacy_project_path is None
         state = (
             "저장 중" if korean and saving else
             "Saving" if saving else
-            "저장됨" if korean and not window._project_dirty else
-            "저장 필요" if korean else
-            "Saved" if not window._project_dirty else "Unsaved"
+            "저장 필요" if korean and window._project_dirty else
+            "Unsaved" if window._project_dirty else
+            "저장 전" if korean and never_saved else
+            "Not saved yet" if never_saved else
+            "저장됨" if korean else "Saved"
         )
         legacy = " · 레거시 JSON" if korean and window._legacy_project_path else (
             " · Legacy JSON" if window._legacy_project_path else ""
         )
         window.project_status_label.setText(f"{name}  ·  {state}{legacy}")
+        # Taskbar/Alt+Tab: which project is open and whether it has unsaved edits.
+        window.setWindowTitle(f"{name}[*] — Playlist Canvas")
+        window.setWindowModified(bool(window._project_dirty))
         window.project_status_label.setToolTip(
             "프로젝트 스냅샷을 백그라운드에서 저장하고 있습니다."
             if korean and saving else
@@ -154,9 +161,9 @@ class ProjectController:
             if korean and window._legacy_project_path else
             "This is a legacy JSON project. Upgrade it to .pvsproj from the Project menu."
             if window._legacy_project_path else
-            "프로젝트를 저장하려면 Ctrl+S를 누르세요." if korean and window._project_dirty else
+            "프로젝트를 저장하려면 Ctrl+S를 누르세요." if korean and (window._project_dirty or never_saved) else
             "프로젝트가 저장되어 있습니다." if korean else
-            "Press Ctrl+S to save this project." if window._project_dirty else
+            "Press Ctrl+S to save this project." if window._project_dirty or never_saved else
             "This project is saved."
         )
 

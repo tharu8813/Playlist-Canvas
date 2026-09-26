@@ -62,11 +62,23 @@ class ShortcutsDialog(QDialog):
         )
         self.table.setHorizontalHeaderLabels(["키" if korean else "Key", "동작" if korean else "Action"])
         groups = [
+            ("파일" if korean else "File", [
+                ("Ctrl+N", "새 프로젝트 또는 최근 프로젝트 시작" if korean else "Start a new or recent project"),
+                ("Ctrl+O", "프로젝트 열기" if korean else "Open a project"),
+                ("Ctrl+S / Ctrl+Shift+S", "저장 / 다른 이름으로 저장" if korean else "Save / save as"),
+                ("Ctrl+E", "영상 내보내기" if korean else "Export video"),
+                ("F1", "도움말" if korean else "Help"),
+            ]),
             ("작업 공간" if korean else "Workspace", [
                 ("Ctrl+Alt+L", "왼쪽 요소·콘텐츠·레이어 패널 표시 전환" if korean else "Toggle the left Sources, Content, and Layers panel"),
                 ("Ctrl+Alt+R", "오른쪽 속성 패널 표시 전환" if korean else "Toggle the right properties panel"),
                 ("Ctrl+Alt+B", "하단 작업 패널 표시 전환" if korean else "Toggle the bottom workspace"),
-                ("Ctrl+Alt+1 / 2", "플레이리스트 / 타임라인 열기" if korean else "Open Playlist / Timeline"),
+                ("Ctrl+Alt+1 / 2 / 3", "플레이리스트 / 타임라인 / 미리보기 열기" if korean else "Open Playlist / Timeline / Preview"),
+            ]),
+            ("플레이리스트" if korean else "Playlist", [
+                ("Enter", "선택한 곡 정보/설정 열기" if korean else "Open the selected track's information/settings"),
+                ("Space", "선택한 곡을 내보내기에 포함 / 제외" if korean else "Include / exclude the selected tracks in export"),
+                ("Delete", "선택한 곡 삭제 (Ctrl+Z로 되돌리기)" if korean else "Remove the selected tracks (Ctrl+Z restores them)"),
             ]),
             ("기본 편집" if korean else "Essential editing", [
                 ("Ctrl+X / Ctrl+C / Ctrl+V", "잘라내기 / 복사 / 붙여넣기" if korean else "Cut / copy / paste selected sources"),

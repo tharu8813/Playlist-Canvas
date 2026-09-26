@@ -394,6 +394,7 @@ class PlaylistEditor(QFrame):
     files_dropped = Signal(list)
     lyrics_dropped = Signal(str, str)
     track_double_clicked = Signal(str)
+    tracks_removed = Signal(int)
 
     def __init__(self, service: PlaylistService, translator: Translator,
                  parent: QWidget | None = None) -> None:
@@ -595,7 +596,12 @@ class PlaylistEditor(QFrame):
         self.service.duplicate(self._selected_ids())
 
     def remove_selected(self) -> None:
-        self.service.remove(self._selected_ids())
+        selected = self._selected_ids()
+        before = len(self.service.tracks)
+        self.service.remove(selected)
+        removed = before - len(self.service.tracks)
+        if removed:
+            self.tracks_removed.emit(removed)
 
     def _sync_order(self) -> None:
         if self._ignore_order_signal:

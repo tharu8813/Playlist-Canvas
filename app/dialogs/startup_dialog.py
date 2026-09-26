@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QStyle,
     QVBoxLayout,
@@ -85,6 +86,8 @@ class StartupDialog(QDialog):
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
         self.setMinimumSize(820, 540)
         self.resize(960, 600)
+        # A project file dragged from Explorer opens directly.
+        self.setAcceptDrops(True)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(32, 32, 32, 24)
@@ -167,6 +170,9 @@ class StartupDialog(QDialog):
         self.clear_button.clicked.connect(self._clear_recent)
         self.recent_list.itemDoubleClicked.connect(lambda _item: self._open_recent())
         self.recent_list.itemSelectionChanged.connect(self._update_recent_buttons)
+        remove_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Delete), self.recent_list)
+        remove_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        remove_shortcut.activated.connect(self._remove_recent)
         translator.language_changed.connect(self.retranslate)
         recent.changed.connect(self.refresh_recent)
         self.retranslate()
@@ -178,8 +184,11 @@ class StartupDialog(QDialog):
         self.setWindowTitle("프로젝트 시작" if korean else "Start a project")
         self.title.setText("Playlist Canvas")
         self.description.setText(
-            "새 작업을 시작하거나 기존 프로젝트에서 계속하세요."
-            if korean else "Start something new or continue an existing project."
+            "새 작업을 시작하거나 기존 프로젝트에서 계속하세요. "
+            "프로젝트 파일을 이 창으로 끌어와도 열립니다."
+            if korean else
+            "Start something new or continue an existing project. "
+            "You can also drop a project file onto this window."
         )
         self.actions_title.setText("시작" if korean else "Get started")
         self.new_button.setText("새 프로젝트 만들기" if korean else "Create new project")
@@ -187,6 +196,11 @@ class StartupDialog(QDialog):
         self.recent_title.setText("최근 프로젝트" if korean else "Recent projects")
         self.clear_button.setText("목록 지우기" if korean else "Clear list")
         self.remove_button.setText("목록에서 제거" if korean else "Remove from list")
+        self.remove_button.setToolTip(
+            "선택한 항목을 최근 목록에서만 뺍니다. 프로젝트 파일은 삭제되지 않습니다. (Delete)"
+            if korean else
+            "Removes the entry from this list only; the project file is kept. (Delete)"
+        )
         self.open_recent_button.setText("선택한 프로젝트 열기" if korean else "Open selected")
         self.exit_hint.setText(
             "이 창을 닫으면 프로그램이 종료됩니다."
@@ -275,4 +289,40 @@ class StartupDialog(QDialog):
             self.recent.remove(path)
 
     def _clear_recent(self) -> None:
-        self.recent.clear()
+        korean = self.translator.language is Language.KOREAN
+        answer = QMessageBox.question(
+            self,
+            "최근 프로젝트 목록 지우기" if korean else "Clear recent projects",
+            "최근에 연 프로젝트 목록을 모두 지울까요?\n\n프로젝트 파일 자체는 삭제되지 않습니다."
+            if korean else
+            "Clear the entire recent projects list?\n\nThe project files themselves will not be deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.recent.clear()
+
+    @staticmethod
+    def _dropped_project(event: QDragEnterEvent | QDropEvent) -> Path | None:
+        for url in event.mimeData().urls() if event.mimeData().hasUrls() else ():
+            path = Path(url.toLocalFile())
+            name = path.name.lower()
+            if path.suffix.lower() in {".pvsproj", ".json"} or name.endswith(".project.json"):
+                return path
+        return None
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 - Qt API name
+        if self._dropped_project(event) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 - Qt API name
+        path = self._dropped_project(event)
+        if path is None or not path.is_file():
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.action = self.OPEN_PROJECT
+        self.project_path = path
+        self.accept()

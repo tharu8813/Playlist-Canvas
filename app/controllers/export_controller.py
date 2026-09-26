@@ -870,7 +870,7 @@ class ExportOrchestrator:
             configured_path = window.settings_service.current.ffmpeg_path or None
             renderer = FFmpegRenderer(configured_path)
         except FFmpegNotFoundError:
-            QMessageBox.warning(
+            answer = QMessageBox.warning(
                 window,
                 "FFmpeg 필요" if korean else "FFmpeg required",
                 (
@@ -883,13 +883,20 @@ class ExportOrchestrator:
                     "Click OK to open the FFmpeg setup page. Use automatic "
                     "installation or select an existing ffmpeg executable."
                 ),
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
             )
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
             window._show_settings(focus_ffmpeg=True)
             return
         active_tracks = [track for track in window.playlist_service.tracks if track.enabled]
         if not active_tracks:
-            QMessageBox.warning(window, "Export error", "Select at least one music track to export.")
-            return
+            if not window._offer_music_for_empty_playlist(
+                "영상 내보내기" if korean else "Export video"
+            ):
+                return
+            active_tracks = [track for track in window.playlist_service.tracks if track.enabled]
         invalid_track = next(
             (track for track in active_tracks if track.duration_seconds <= 0.0), None
         )

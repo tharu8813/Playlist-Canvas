@@ -55,16 +55,12 @@ class PreviewController:
             return
         tracks = [track for track in window.playlist_service.tracks if track.enabled]
         if not tracks:
-            QMessageBox.warning(
-                window,
-                "미리보기" if window.translator.language is Language.KOREAN else "Preview",
-                (
-                    "미리보기를 시작하려면 활성화된 곡을 한 개 이상 추가해 주세요."
-                    if window.translator.language is Language.KOREAN else
-                    "Add at least one enabled track before opening Preview."
-                ),
-            )
             self.select_edit_bottom_tab(window._last_edit_bottom_tab)
+            if window._offer_music_for_empty_playlist(
+                "미리보기" if window.translator.language is Language.KOREAN else "Preview"
+            ):
+                # Songs were just added: continue straight into the Preview they asked for.
+                window._show_bottom_panel(PREVIEW_TAB_INDEX)
             return
         self.show_export_preview(tracks)
 
