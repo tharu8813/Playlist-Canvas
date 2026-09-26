@@ -257,6 +257,19 @@ class MainWindow(QMainWindow):
     _DEFAULT_RIGHT_PANEL_WIDTH = 380  # every property tab fits without scroll arrows
     _DEFAULT_BOTTOM_PANEL_HEIGHT = 240
 
+    @property
+    def project_settings(self) -> ProjectSettings:
+        return self._project_settings
+
+    @project_settings.setter
+    def project_settings(self, settings: ProjectSettings) -> None:
+        # Every path that changes it (new, open, Project settings, undo) goes
+        # through here, so the Inspector's mix-handover rows always match.
+        self._project_settings = settings
+        inspector = getattr(self, "inspector", None)
+        if inspector is not None:
+            inspector.set_mix_transitions_active(settings.transition_mode != "none")
+
     def __init__(self) -> None:
         super().__init__()
         # Signal lambdas that capture self keep this wrapper alive forever, so without
@@ -1545,6 +1558,7 @@ class MainWindow(QMainWindow):
         self.inspector.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding,
         )
+        self.inspector.set_mix_transitions_active(self.project_settings.transition_mode != "none")
         self.inspector.animation_preview_requested.connect(
             self._preview_source_animation
         )

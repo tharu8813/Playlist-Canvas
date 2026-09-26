@@ -232,6 +232,66 @@ class CompiledRenderPlan:
     duration_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class VisualSegment:
+    """The span one track owns the Canvas, as drawn (see ``visual_segments``).
+
+    ``mixed_in``/``mixed_out``: this track takes/hands over the Canvas in the
+    middle of a crossfade/AutoMix overlap, where elements play their "mix"
+    entrance/exit instead of the ones at a plain track start/end.
+    """
+
+    window_index: int
+    track_id: str
+    start: float
+    end: float
+    mixed_in: bool = False
+    mixed_out: bool = False
+
+
+def visual_segments(plan: CompiledRenderPlan) -> tuple[VisualSegment, ...]:
+    """Canvas ownership for drawing: like the presentation windows, except that
+    across an audio overlap the next track takes over at the overlap's middle,
+    where it becomes the louder one, instead of the moment it starts playing.
+
+    Chapters and timestamps keep the presentation windows (a track's chapter
+    still starts when it starts playing); only what is drawn moves.
+    """
+    windows, clips = plan.presentation.windows, plan.audio.clips
+    overlaps: dict[tuple[str, str], AudioRenderTransition] = {
+        (transition.clip_a, transition.clip_b): transition
+        for transition in plan.audio.transitions if transition.duration > 0.0
+    }
+    handovers: list[tuple[float, bool]] = []
+    for index in range(len(windows) - 1):
+        outgoing, incoming = windows[index], windows[index + 1]
+        transition = (
+            overlaps.get((clips[index].clip_id, clips[index + 1].clip_id))
+            if len(clips) == len(windows) else None
+        )
+        overlap_end = min(outgoing.timeline_end, incoming.timeline_start + (
+            transition.duration if transition is not None else 0.0))
+        if transition is None or overlap_end <= incoming.timeline_start:
+            handovers.append((incoming.timeline_start, False))
+            continue
+        middle = transition.timeline_start + transition.duration / 2
+        handovers.append((min(max(middle, incoming.timeline_start), overlap_end), True))
+    segments = []
+    for index, window in enumerate(windows):
+        start, mixed_in = (handovers[index - 1] if index else (window.timeline_start, False))
+        end, mixed_out = (handovers[index] if index < len(handovers) else (plan.duration_seconds, False))
+        segments.append(VisualSegment(index, window.track_id, start, end, mixed_in, mixed_out))
+    return tuple(segments)
+
+
+def visual_segment_at(segments: Sequence[VisualSegment], global_seconds: float) -> VisualSegment | None:
+    """The segment drawn at ``global_seconds`` (the first before it starts, the last after it ends)."""
+    if not segments:
+        return None
+    index = max(0, bisect_right([segment.start for segment in segments], global_seconds) - 1)
+    return segments[index]
+
+
 def build_presentation_and_metadata(
     clips: Sequence[AudioRenderClip],
 ) -> tuple[PresentationPlan, MetadataPlan, float]:

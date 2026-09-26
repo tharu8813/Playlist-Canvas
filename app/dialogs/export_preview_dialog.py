@@ -59,7 +59,12 @@ from app.services.preview_audio_settings import preview_volume, save_preview_vol
 from app.services.playlist_service import PlaylistService
 from app.timeline.compiler import compile_playlist
 from app.timeline.models import TransitionType
-from app.timeline.render_plan import AudioRenderTransition, CompiledRenderPlan
+from app.timeline.render_plan import (
+    AudioRenderTransition, CompiledRenderPlan, visual_segment_at, visual_segments,
+)
+from app.preview.frame_state import (
+    MixJunction, resolve_mix_phase, segment_junction, source_animation_styles,
+)
 from app.preview.album_art import extract_track_cover
 from app.video.timeline import resolve_video_position, source_video_paths
 from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
@@ -1046,6 +1051,42 @@ class ExportPreviewDialog(QDialog):
         # remains inactive. This matches the established Canvas behavior.
         return index, track, track.duration_seconds, start
 
+    def _visual_track_at(
+        self, playlist_seconds: float,
+    ) -> tuple[tuple[int, PlaylistTrack, float, float] | None, MixJunction | None]:
+        """``_track_at`` for what the Canvas draws, plus its mix handover state.
+
+        Across a crossfade/AutoMix overlap the next track takes the Canvas over in
+        the overlap's middle (render_plan.visual_segments), exactly like export.
+        Audio transport keeps ``_track_at``: the incoming track starts playing
+        at its own start.
+        """
+        plan = getattr(self, "_compiled_plan", None)
+        if plan is None or not plan.presentation.windows:
+            return self._track_at(playlist_seconds), None
+        cached = getattr(self, "_visual_segments_cache", None)
+        if cached is None or cached[0] is not plan:
+            cached = self._visual_segments_cache = (plan, visual_segments(plan))
+        segment = visual_segment_at(cached[1], playlist_seconds)
+        window = plan.presentation.windows[segment.window_index]
+        index = next(i for i, track in enumerate(self.tracks) if track.id == window.track_id)
+        clamped = min(max(playlist_seconds, window.timeline_start), window.timeline_end)
+        elapsed = window.source_time_at_start + (clamped - window.timeline_start) * window.playback_rate
+        return (
+            (index, self.tracks[index], elapsed, window.timeline_start),
+            segment_junction(segment, playlist_seconds),
+        )
+
+    def _frame_animation_state(
+        self, track: PlaylistTrack, elapsed: float, junction: MixJunction | None,
+    ) -> tuple[str | None, float, float]:
+        """``_animation_state``, except right around a mix handover."""
+        plain = self._animation_state(track, elapsed)
+        mix = resolve_mix_phase(
+            [item.source for item in getattr(self, "_cached_source_items", ())], junction,
+        )
+        return mix if mix[0] is not None else plain
+
     def _track_start_seconds(self, target_index: int) -> float:
         if 0 <= target_index < len(self._track_schedule):
             return self._track_schedule[target_index][2]
@@ -1178,17 +1219,23 @@ class ExportPreviewDialog(QDialog):
             self._gpu_refresh_deferred = True
             return
         self._gpu_refresh_deferred = False
-        selected = self._track_at(self.timeline.value() / TIMELINE_SCALE)
+        selected, junction = self._visual_track_at(self.timeline.value() / TIMELINE_SCALE)
         if selected is None:
             return
         track_index, track, elapsed, start = selected
+        self._frame_junction = junction
         self._highlight_track(track_index)
         playlist_seconds = self.timeline.value() / TIMELINE_SCALE
-        phase, phase_progress, phase_duration = self._animation_state(track, elapsed)
+        phase, phase_progress, phase_duration = self._frame_animation_state(
+            track, elapsed, junction,
+        )
         self._refresh_source_partitions()
         audio_dynamic_ids = self._cached_audio_dynamic_ids
         canvas_dynamic_ids = self._canvas_dynamic_source_ids(
-            track_index, elapsed, phase,
+            track_index,
+            junction.visual_elapsed
+            if junction is not None and junction.visual_elapsed is not None else elapsed,
+            phase,
         )
         static_hidden_ids = frozenset(audio_dynamic_ids | canvas_dynamic_ids)
         ordered_canvas_required = self._canvas_dynamic_requires_z_composition(
@@ -1235,6 +1282,7 @@ class ExportPreviewDialog(QDialog):
                 self._playlist_duration(), self.tracks, self._active_render_scale,
                 timeline_seconds=self.timeline.value() / TIMELINE_SCALE,
                 animation_phase_duration=phase_duration,
+                junction=junction,
             )
             self._base_track_id = track.id
             self._base_elapsed = elapsed
@@ -1300,6 +1348,7 @@ class ExportPreviewDialog(QDialog):
                         capture_rect=capture_rect,
                         timeline_seconds=playlist_seconds,
                         animation_phase_duration=phase_duration,
+                        junction=junction,
                     )
                     self._dynamic_region_buffers[buffer_key] = buffer
                     target = QRectF(
@@ -1714,7 +1763,7 @@ class ExportPreviewDialog(QDialog):
                     or source.timeline_duration > 0.0
                     or any(token in source.text.lower() for token in time_tokens)):
                 always_dynamic_ids.add(source.id)
-            if source.animation_in != "none" or source.animation_out != "none":
+            if source_animation_styles(source) != {"none"}:
                 animated_source_ids.add(source.id)
         self._cached_audio_dynamic_ids = frozenset(audio_dynamic_ids)
         self._cached_always_dynamic_ids = frozenset(always_dynamic_ids)
@@ -2316,6 +2365,7 @@ class ExportPreviewDialog(QDialog):
             output_scale=self._active_render_scale,
             timeline_seconds=self.timeline.value() / TIMELINE_SCALE,
             animation_phase_duration=phase_duration,
+            junction=getattr(self, "_frame_junction", None),
         )
         base = CanvasSnapshot.capture_track(
             self.scene, track, track_index + 1, len(self.tracks), start,
@@ -2423,11 +2473,13 @@ class ExportPreviewDialog(QDialog):
         active_overlays: list[VisualizerOverlay], layers: tuple[QImage, ...],
     ) -> bool:
         """Interleave preview overlays and Canvas bands exactly like export."""
-        selected = self._track_at(self.timeline.value() / TIMELINE_SCALE)
+        selected, junction = self._visual_track_at(self.timeline.value() / TIMELINE_SCALE)
         if selected is None:
             return False
         track_index, _selected_track, _selected_elapsed, start = selected
-        phase, phase_progress, phase_duration = self._animation_state(track, elapsed)
+        phase, phase_progress, phase_duration = self._frame_animation_state(
+            track, elapsed, junction,
+        )
         audio_ids = set(self._cached_audio_dynamic_ids)
         z_bands = CanvasSnapshot.z_bands(self.scene, audio_ids)
         if len(z_bands) < 2:
@@ -2440,6 +2492,7 @@ class ExportPreviewDialog(QDialog):
             output_scale=self._active_render_scale,
             timeline_seconds=self.timeline.value() / TIMELINE_SCALE,
             animation_phase_duration=phase_duration,
+            junction=junction,
         )
         base = CanvasSnapshot.capture_track(
             self.scene, track, track_index + 1, len(self.tracks), start,

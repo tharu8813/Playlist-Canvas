@@ -16,7 +16,7 @@ from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
 from app.preview.canvas_snapshot import CanvasSnapshot
 from app.preview.frame_state import (
-    resolve_lyrics_cue_state, resolve_now_playing_exit_state,
+    resolve_edge_animation, resolve_lyrics_cue_state, resolve_now_playing_exit_state,
     resolve_timeline_window_phase,
 )
 from app.preview.text_template import expand_track_template
@@ -157,6 +157,13 @@ class ExportCanvasCapturer:
         if not visible:
             return (source.id, "hidden")
 
+        # Same screen clock as CanvasSnapshot.capture_track: after a mix handover the
+        # track-start visuals (Now Playing, background fade) run from the handover.
+        screen_elapsed = (
+            sample.junction.visual_elapsed
+            if sample.junction is not None and sample.junction.visual_elapsed is not None
+            else sample.elapsed_seconds
+        )
         content_state: tuple[object, ...]
         if source.source_type in {SourceType.TEXT, SourceType.TIME}:
             template = (
@@ -193,7 +200,7 @@ class ExportCanvasCapturer:
             content_state = ("track_list", sample.track_number)
         elif source.source_type is SourceType.NOW_PLAYING:
             exit_state = resolve_now_playing_exit_state(
-                sample.elapsed_seconds, source.now_playing_duration, source.now_playing_exit_duration,
+                screen_elapsed, source.now_playing_duration, source.now_playing_exit_duration,
             )
             if not exit_state.visible:
                 content_state = ("now_playing", "hidden")
@@ -244,14 +251,14 @@ class ExportCanvasCapturer:
                     0.05, source.background_track_transition_seconds,
                 )
                 if (previous_track is not None
-                        and 0.0 <= sample.elapsed_seconds < fade_seconds):
+                        and 0.0 <= screen_elapsed < fade_seconds):
                     # Mid cross-fade the pixels depend on the blend fraction and
                     # the previous track's artwork, so those must enter the key.
                     background_state = (
                         *background_state,
                         "fade",
                         ease_in_out_cubic(max(0.0, min(
-                            1.0, sample.elapsed_seconds / fade_seconds,
+                            1.0, screen_elapsed / fade_seconds,
                         ))),
                         previous_track.file_path,
                         previous_track.cover_path,
@@ -280,40 +287,29 @@ class ExportCanvasCapturer:
             return None
 
         animation_state: tuple[object, ...] = ("stable",)
-        window_phase, window_progress = resolve_timeline_window_phase(
-            source, global_seconds,
-        )
         source_has_window = source.timeline_start > 0.0 or source.timeline_duration > 0.0
-        phase = window_phase if source_has_window else sample.animation_phase
-        if phase is not None:
-            style = source.animation_in if phase == "in" else source.animation_out
-            if style != "none":
-                if window_phase is not None:
-                    raw_progress = window_progress
-                else:
-                    configured_duration = (
-                        source.animation_in_duration
-                        if phase == "in"
-                        else source.animation_out_duration
-                    )
-                    effective_duration = max(0.001, min(
-                        configured_duration,
-                        sample.animation_phase_duration,
-                    ))
-                    if phase == "in":
-                        raw_progress = sample.elapsed_seconds / effective_duration
-                    else:
-                        exit_start = max(
-                            0.0, sample.track.duration_seconds - effective_duration,
-                        )
-                        raw_progress = (
-                            sample.elapsed_seconds - exit_start
-                        ) / effective_duration
+        if source_has_window:
+            window_phase, window_progress = resolve_timeline_window_phase(
+                source, global_seconds,
+            )
+            style = (
+                source.animation_in if window_phase == "in" else source.animation_out
+            )
+            if window_phase is not None and style != "none":
                 animation_state = (
-                    phase,
-                    style,
-                    max(0.0, min(1.0, raw_progress)),
+                    window_phase, style, max(0.0, min(1.0, window_progress)),
                 )
+        else:
+            edge = resolve_edge_animation(
+                source, sample.animation_phase,
+                elapsed_seconds=sample.elapsed_seconds,
+                track_duration=sample.track.duration_seconds,
+                phase_progress=sample.animation_progress,
+                phase_duration=sample.animation_phase_duration,
+                junction=sample.junction,
+            )
+            if edge is not None:
+                animation_state = edge
         personal_color_state = (
             (
                 sample.track.file_path,
@@ -362,6 +358,7 @@ class ExportCanvasCapturer:
             "playlist_duration_seconds": self.playlist_duration,
             "playlist_tracks": self.tracks,
             "timeline_seconds": sample.timeline_seconds,
+            "junction": sample.junction,
         }
         if sample.animation_phase is not None:
             common.update({
@@ -444,18 +441,9 @@ class ExportCanvasCapturer:
         """Capture a safe stream once and stage it for the complete timeline."""
         if stream_key not in self.invariant_stream_keys:
             raise ValueError(f"Canvas stream is not capture-invariant: {stream_key}")
-        reference = ExportFrameSample(
-            track=sample.track,
-            track_number=sample.track_number,
-            track_start_seconds=sample.track_start_seconds,
-            duration_seconds=duration_seconds,
-            elapsed_seconds=sample.elapsed_seconds,
-            timeline_seconds=sample.timeline_seconds,
-            animation_phase=sample.animation_phase,
-            animation_progress=sample.animation_progress,
-            animation_phase_duration=sample.animation_phase_duration,
+        return self.capture_stream(
+            replace(sample, duration_seconds=duration_seconds), stream_key,
         )
-        return self.capture_stream(reference, stream_key)
 
     def static_layers(self) -> list[StaticOverlayLayer]:
         """Return transparent bands in the same Z and timeline order as capture."""

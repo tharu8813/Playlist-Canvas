@@ -28,8 +28,9 @@ from app.preview.album_art import (
     extract_track_personal_color,
 )
 from app.preview.frame_state import (
-    resolve_lyrics_cue_state, resolve_now_playing_exit_state,
-    resolve_timeline_window_phase,
+    MixJunction, resolve_edge_animation, resolve_lyrics_cue_state,
+    resolve_now_playing_exit_state, resolve_timeline_window_phase,
+    source_animation_styles,
 )
 from app.preview.text_template import (
     TEXT_TEMPLATE_TOKEN_NAMES,
@@ -348,7 +349,7 @@ class CanvasSnapshot:
                 source.subtitle_previous_blur * 2.0 + 2.0
                 if source.source_type is SourceType.LYRICS else 0.0,
             ) * scale
-            animation_styles = {source.animation_in, source.animation_out}
+            animation_styles = source_animation_styles(source)
             if animation_styles & slide_styles:
                 padding += slide_distance(source.width, source.height) * scale
             if "rotate" in animation_styles:
@@ -456,7 +457,7 @@ class CanvasSnapshot:
         merely keeps the established sequential capture path, while a false
         positive could freeze a time-dependent element in the final video.
         """
-        if source.animation_in != "none" or source.animation_out != "none":
+        if source_animation_styles(source) != {"none"}:
             return False
         if source.personal_color_enabled:
             return False
@@ -664,8 +665,20 @@ class CanvasSnapshot:
                       animation_phase_duration: float | None = None,
                       partial_render: bool = False,
                       render_metrics: dict[str, object] | None = None,
-                      band_source_items: Sequence[SourceItem] | None = None) -> QImage:
-        """Capture one track state with metadata, cover art, and an optional Z band."""
+                      band_source_items: Sequence[SourceItem] | None = None,
+                      junction: MixJunction | None = None) -> QImage:
+        """Capture one track state with metadata, cover art, and an optional Z band.
+
+        ``junction``: the frame sits at a crossfade/AutoMix handover of the
+        Canvas (see render_plan.visual_segments): sources play their mix
+        entrance/exit, and on-screen clocks that start with a track (Now
+        Playing, the album-art background cross-fade) start at the handover.
+        """
+        screen_elapsed = (
+            junction.visual_elapsed
+            if junction is not None and junction.visual_elapsed is not None
+            else elapsed_seconds
+        )
         original_text: list[tuple[SourceItem, str]] = []
         original_transforms: list[
             tuple[SourceItem, object, float, float, float]
@@ -897,7 +910,7 @@ class CanvasSnapshot:
                 album = f"\n{track.album}" if track.album else ""
                 source.text = f"NOW PLAYING\n{title}\n{artist}{album}"
                 exit_state = resolve_now_playing_exit_state(
-                    elapsed_seconds, source.now_playing_duration, source.now_playing_exit_duration,
+                    screen_elapsed, source.now_playing_duration, source.now_playing_exit_duration,
                 )
                 graphics_item.setVisible(exit_state.visible)
                 if exit_state.exit_progress is not None:
@@ -977,9 +990,9 @@ class CanvasSnapshot:
                     else None
                 )
                 fade_seconds = max(0.05, source.background_track_transition_seconds)
-                if previous_track is not None and 0.0 <= elapsed_seconds < fade_seconds:
+                if previous_track is not None and 0.0 <= screen_elapsed < fade_seconds:
                     blend = ease_in_out_cubic(
-                        max(0.0, min(1.0, elapsed_seconds / fade_seconds))
+                        max(0.0, min(1.0, screen_elapsed / fade_seconds))
                     )
                     filters = (source.brightness, source.contrast, source.blur)
                     if source.background_ambient:
@@ -1052,36 +1065,21 @@ class CanvasSnapshot:
                 source, global_seconds,
             )
             source_has_window = source.timeline_start > 0.0 or source.timeline_duration > 0.0
-            phase = window_phase if source_has_window else animation_phase
-            if phase:
-                style = source.animation_in if phase == "in" else source.animation_out
+            if source_has_window:
+                edge = (
+                    (window_phase, source.animation_in if window_phase == "in" else source.animation_out,
+                     max(0.0, min(1.0, window_progress)))
+                    if window_phase is not None else None
+                )
+            else:
+                edge = resolve_edge_animation(
+                    source, animation_phase, elapsed_seconds=elapsed_seconds,
+                    track_duration=track.duration_seconds, phase_progress=animation_progress,
+                    phase_duration=animation_phase_duration, junction=junction,
+                )
+            if edge is not None:
+                phase, style, local_progress = edge
                 if style != "none":
-                    if window_phase is not None:
-                        local_progress = window_progress
-                    elif animation_phase_duration is not None:
-                        configured_duration = (
-                            source.animation_in_duration
-                            if phase == "in"
-                            else source.animation_out_duration
-                        )
-                        effective_duration = max(
-                            0.001,
-                            min(configured_duration, animation_phase_duration),
-                        )
-                        if phase == "in":
-                            raw_progress = elapsed_seconds / effective_duration
-                        else:
-                            source_exit_start = max(
-                                0.0, track.duration_seconds - effective_duration
-                            )
-                            raw_progress = (
-                                elapsed_seconds - source_exit_start
-                            ) / effective_duration
-                        local_progress = max(0.0, min(1.0, raw_progress))
-                    else:
-                        # Backwards-compatible path for isolated callers that only
-                        # provide normalized animation progress.
-                        local_progress = max(0.0, min(1.0, animation_progress))
                     motion_progress = (
                         ease_out_quint(local_progress)
                         if phase == "in" else

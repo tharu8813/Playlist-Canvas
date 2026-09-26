@@ -216,6 +216,12 @@ class Source:
     animation_duration: float = 0.45
     animation_in_duration: float = 0.45
     animation_out_duration: float = 0.45
+    # Crossfade/AutoMix: the Canvas changes track in the middle of each audio
+    # overlap. These play there instead of animation_in/out ("same": reuse
+    # those, with their own durations; see preview.frame_state.mix_animation).
+    mix_animation_in: str = "same"
+    mix_animation_out: str = "same"
+    mix_animation_duration: float = 0.8
     timeline_start: float = 0.0
     timeline_duration: float = 0.0
     id: str = field(default_factory=lambda: str(uuid4()))

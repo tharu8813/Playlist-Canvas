@@ -9,8 +9,9 @@ from typing import Sequence
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
+from app.preview.frame_state import MixJunction, mix_phase_durations, segment_junction
 from app.timeline.compiler import compile_playlist
-from app.timeline.render_plan import CompiledRenderPlan
+from app.timeline.render_plan import CompiledRenderPlan, visual_segments
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,7 @@ class ExportFrameSample:
     animation_phase: str | None = None
     animation_progress: float = 1.0
     animation_phase_duration: float = 0.0
+    junction: MixJunction | None = None
 
 
 class ExportTimelinePlanner:
@@ -189,16 +191,25 @@ class ExportTimelinePlanner:
 
     @staticmethod
     def _build_compiled(tracks, sources, animation_fps, plan) -> list[ExportFrameSample]:
-        """Reuse the source-time sample schedule, clipped to each visual owner's span."""
+        """Reuse the source-time sample schedule, clipped to the span each track is drawn.
+
+        Across a crossfade/AutoMix overlap the Canvas changes hands in the overlap's
+        middle (render_plan.visual_segments). Frames there carry a MixJunction, and
+        the mix entrance/exit plus the screen-clock visuals after the handover (Now
+        Playing exit, album-art fade) are sampled densely on the timeline.
+        """
         track_by_id = {track.id: track for track in tracks}
+        windows = plan.presentation.windows
+        mix_intro, mix_outro = mix_phase_durations(sources)
         result: list[ExportFrameSample] = []
         cursor = 0.0
-        for number, (window, chapter) in enumerate(
-            zip(plan.presentation.windows, plan.metadata.chapters, strict=True), start=1,
-        ):
+        for segment in visual_segments(plan):
+            number = segment.window_index + 1
+            window = windows[segment.window_index]
             track = track_by_id[window.track_id]
-            start = window.timeline_start
-            end = min(window.timeline_end, chapter.end)
+            window_start = window.timeline_start
+            start = max(segment.start, window_start)
+            end = min(segment.end, window.timeline_end)
             rate, source_in = window.playback_rate, window.source_time_at_start
             if start > cursor:
                 # Gaps keep the last owner visible while global clocks/animations advance.
@@ -208,14 +219,29 @@ class ExportTimelinePlanner:
                     point = cursor + (start - cursor) * step / steps
                     next_point = cursor + (start - cursor) * (step + 1) / steps
                     previous = result[-1] if result else ExportFrameSample(
-                        track, number, start, 0.0, source_in, point,
+                        track, number, window_start, 0.0, source_in, point,
                     )
                     result.append(replace(previous, timeline_seconds=point,
                                           elapsed_seconds=plan.presentation.local_time(point),
                                           duration_seconds=next_point - point))
+
+            def source_time(point: float) -> float:
+                return source_in + (point - window_start) * rate
+
+            # Timeline ranges sampled densely instead of by the source-time schedule.
+            dense: list[tuple[float, float]] = []
+            if segment.mixed_in:
+                dense.append((start, start + mix_intro))
+                dense.extend(ExportTimelinePlanner._screen_clock_ranges(sources, start))
+            if segment.mixed_out:
+                dense.append((end - mix_outro, end))
+            dense = sorted((max(start, a), min(end, b)) for a, b in dense)
+            cuts = sorted({point for pair in dense for point in pair})
+
+            timed: list[tuple[float, ExportFrameSample]] = []
             translated_sources = [replace(
                 source,
-                timeline_start=(source.timeline_start - start) * rate + source_in,
+                timeline_start=(source.timeline_start - window_start) * rate + source_in,
                 timeline_duration=source.timeline_duration * rate,
             ) for source in sources]
             local_samples = ExportTimelinePlanner.build(
@@ -224,21 +250,70 @@ class ExportTimelinePlanner:
                 track_number_offset=number - 1,
             )
             source_cursor = 0.0
-            source_end = source_in + (end - start) * rate
+            source_start, source_end = source_time(start), source_time(end)
             for sample in local_samples:
-                left = max(source_in, source_cursor)
+                left = max(source_start, source_cursor)
                 source_cursor += sample.duration_seconds
                 right = min(source_end, source_cursor)
                 if right <= left:
                     continue
-                elapsed = min(right, max(left, sample.elapsed_seconds))
-                result.append(replace(
-                    sample, track=track, track_number=number, track_start_seconds=start,
-                    duration_seconds=(right - left) / rate, elapsed_seconds=elapsed,
-                    timeline_seconds=start + (elapsed - source_in) / rate,
-                ))
+                a = window_start + (left - source_in) / rate
+                b = window_start + (right - source_in) / rate
+                edges = [a, *(cut for cut in cuts if a < cut < b), b]
+                for piece_a, piece_b in zip(edges, edges[1:]):
+                    if any(lo <= piece_a and piece_b <= hi for lo, hi in dense):
+                        continue
+                    lo, hi = source_time(piece_a), source_time(piece_b)
+                    # A piece cut at a dense-range edge keeps its state just inside it.
+                    nudge = min(0.0005, (hi - lo) / 2)
+                    elapsed = min(hi - (nudge if piece_b < b else 0.0),
+                                  max(lo + (nudge if piece_a > a else 0.0),
+                                      sample.elapsed_seconds))
+                    timeline = window_start + (elapsed - source_in) / rate
+                    timed.append((piece_a, replace(
+                        sample, track=track, track_number=number,
+                        track_start_seconds=window_start,
+                        duration_seconds=piece_b - piece_a, elapsed_seconds=elapsed,
+                        timeline_seconds=timeline,
+                        junction=segment_junction(segment, timeline),
+                    )))
+            covered = start
+            for lo, hi in dense:
+                lo = max(lo, covered)
+                if hi <= lo:
+                    continue
+                covered = hi
+                steps = max(2, round((hi - lo) * animation_fps))
+                for step in range(steps):
+                    # Both endpoints, like _animation_samples: an exit ends fully
+                    # played at the handover rather than one frame short of it.
+                    point = lo + (hi - lo) * step / (steps - 1)
+                    timed.append((lo + (hi - lo) * step / steps, ExportFrameSample(
+                        track, number, window_start, (hi - lo) / steps,
+                        min(source_end, source_time(point)), point,
+                        junction=segment_junction(segment, point),
+                    )))
+            result.extend(sample for _key, sample in sorted(timed, key=lambda item: item[0]))
             cursor = end
         return result
+
+    @staticmethod
+    def _screen_clock_ranges(
+        sources: Sequence[Source], handover: float,
+    ) -> list[tuple[float, float]]:
+        """Timeline ranges after a mix handover whose visuals follow the screen
+        clock (seconds since the handover): Now Playing's exit and the album-art
+        background cross-fade."""
+        ranges = []
+        for source in sources:
+            if source.source_type is SourceType.NOW_PLAYING:
+                exit_start = max(0.0, source.now_playing_duration - source.now_playing_exit_duration)
+                ranges.append((handover + exit_start, handover + source.now_playing_duration))
+            elif (source.source_type is SourceType.BACKGROUND
+                  and source.background_mode == "album_art"
+                  and source.background_track_transition):
+                ranges.append((handover, handover + max(0.05, source.background_track_transition_seconds)))
+        return ranges
 
     @staticmethod
     def _animation_durations(
