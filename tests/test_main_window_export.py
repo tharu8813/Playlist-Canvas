@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QCloseEvent, QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QScrollArea
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.dialogs.settings_dialog import SettingsDialog
@@ -541,6 +541,27 @@ class MainWindowExportTests(MainWindowTestCase):
         self.assertIn("FFmpeg", warning.call_args.args[2])
         self.assertIn("설치 화면", warning.call_args.args[2])
         show_settings.assert_called_once_with(focus_ffmpeg=True)
+
+    def test_settings_tabs_scroll_so_the_dialog_fits_a_laptop_screen(self) -> None:
+        dialog = SettingsDialog(
+            self.window.settings_service.current,
+            self.window.translator.language,
+            self.window.theme_service.preference,
+            self.window.translator,
+            self.window,
+        )
+        try:
+            # The General tab alone needed ~900 px before its content scrolled.
+            self.assertLessEqual(dialog.minimumSizeHint().height(), 600)
+            self.assertLessEqual(dialog.height(), 600)
+            for page in (dialog.general_page, dialog.export_page, dialog.ffmpeg_page):
+                self.assertIsInstance(page, QScrollArea)
+            self.assertTrue(dialog.general_page.widget().isAncestorOf(dialog.app_group))
+            self.assertTrue(dialog.export_page.widget().isAncestorOf(dialog.notification_group))
+            self.assertTrue(dialog.ffmpeg_page.widget().isAncestorOf(dialog.ffmpeg_group))
+            self.assertFalse(dialog.general_page.isAncestorOf(dialog.button_box))
+        finally:
+            dialog.close()
 
     def test_settings_can_open_directly_on_ffmpeg_installation(self) -> None:
         dialog = SettingsDialog(

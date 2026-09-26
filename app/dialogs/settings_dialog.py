@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QTabWidget,
@@ -466,26 +467,11 @@ class SettingsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("settingsTabs")
         self.tabs.setDocumentMode(True)
-        self.general_page = QWidget()
-        general_layout = QVBoxLayout(self.general_page)
-        general_layout.setContentsMargins(14, 16, 14, 14)
-        general_layout.addWidget(app_group)
-        general_layout.addWidget(content_group)
-        general_layout.addStretch()
-        self.export_page = QWidget()
-        export_layout = QVBoxLayout(self.export_page)
-        export_layout.setContentsMargins(14, 16, 14, 14)
-        export_layout.addWidget(output_group)
-        export_layout.addWidget(render_group)
-        export_layout.addWidget(notification_group)
-        export_layout.addStretch()
-        self.ffmpeg_page = QWidget()
-        ffmpeg_layout = QVBoxLayout(self.ffmpeg_page)
-        ffmpeg_layout.setContentsMargins(14, 16, 14, 14)
-        ffmpeg_layout.addWidget(self.ffmpeg_about_card)
-        ffmpeg_layout.addWidget(self.ffmpeg_status_card)
-        ffmpeg_layout.addWidget(ffmpeg_group)
-        ffmpeg_layout.addStretch()
+        # Each tab scrolls on its own: the General tab alone needed ~900 px, so the
+        # dialog opened taller than a laptop screen.
+        self.general_page = self._scroll_page(app_group, content_group)
+        self.export_page = self._scroll_page(output_group, render_group, notification_group)
+        self.ffmpeg_page = self._scroll_page(self.ffmpeg_about_card, self.ffmpeg_status_card, ffmpeg_group)
         self.tabs.addTab(self.general_page, "")
         self.tabs.addTab(self.export_page, "")
         self.tabs.addTab(self.ffmpeg_page, "")
@@ -511,6 +497,22 @@ class SettingsDialog(QDialog):
         self._refresh_ffmpeg_status()
         self._update_language_pack_ui()
         self._refresh_ffmpeg_manager_actions()
+
+    @staticmethod
+    def _scroll_page(*widgets: QWidget) -> QScrollArea:
+        """One settings tab: its groups stacked in a vertically scrolling page."""
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        page.setFrameShape(QFrame.Shape.NoFrame)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(14, 16, 14, 14)
+        for widget in widgets:
+            layout.addWidget(widget)
+        layout.addStretch()
+        page.setWidget(body)
+        return page
 
     def open_ffmpeg_page(self) -> None:
         """Show the FFmpeg setup controls and highlight the install action."""
