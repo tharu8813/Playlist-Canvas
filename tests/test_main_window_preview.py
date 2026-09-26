@@ -34,7 +34,6 @@ from app.dialogs.export_preview_dialog import (
     _BLENDED_AUDIO_TRACK_INDEX,
     _transition_display_regions,
 )
-from app.dialogs.preview_preparation_dialog import PreviewPreparationDialog
 from app.controllers.progressive_automix_controller import ProgressiveAutoMixController
 from app.controllers.preview_audio_controller import PreviewAudioController
 from app.timeline.render_plan import AudioRenderTransition
@@ -95,7 +94,7 @@ class MainWindowPreviewTests(MainWindowTestCase):
         )
 
     def _open_progressive_preview(self, directory: str):
-        """Skip-path Preview adopting a (not started) progressive controller, plus partial plans."""
+        """Preview adopting a (not started) progressive controller, plus partial plans."""
         from app.automix.progressive import ProgressiveAnalysis, partial_plan
         from tests.test_automix_planner import ENABLED, _analysis
 
@@ -106,14 +105,7 @@ class MainWindowPreviewTests(MainWindowTestCase):
         fake_ffmpeg.touch()
         self.window.settings_service.save(replace(self.window.settings_service.current, ffmpeg_path=str(fake_ffmpeg)))
 
-        def fake_skip_exec(dialog) -> int:
-            dialog.skipped = True
-            return QDialog.DialogCode.Rejected
-
-        with (
-            patch.object(ProgressiveAutoMixController, "start"),
-            patch.object(PreviewPreparationDialog, "exec", fake_skip_exec),
-        ):
+        with patch.object(ProgressiveAutoMixController, "start"):
             self.window.preview_controller.show_export_preview(tracks)
         preview = self.window._inline_preview
         self.addCleanup(self.window._finish_inline_preview)
@@ -1937,10 +1929,10 @@ class MainWindowPreviewTests(MainWindowTestCase):
         finally:
             self.window._finish_inline_preview()
 
-    def test_preparation_dialog_waits_then_opens_preview_already_on_the_final_plan(self) -> None:
-        """The default path: the preparation dialog runs to completion, and
-        Preview then opens with the final AutoMix plan/timeline from the
-        first frame -- no sequential-then-AutoMix jump."""
+    def test_a_mix_ready_during_start_opens_preview_already_on_the_final_plan(self) -> None:
+        """A render that finishes inside start() (e.g. everything cached):
+        Preview opens with the final AutoMix plan/timeline from the first
+        frame -- no sequential-then-AutoMix jump, and no waiting dialog."""
         track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
         track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)
         tracks = [track_a, track_b]
@@ -1959,10 +1951,7 @@ class MainWindowPreviewTests(MainWindowTestCase):
             def fake_start(self, _tracks, _directory, _mode, _seconds, **_options):
                 self.audio_ready.emit(str(blended_path), plan)
 
-            with (
-                patch.object(ProgressiveAutoMixController, "start", fake_start),
-                patch.object(PreviewPreparationDialog, "exec", return_value=QDialog.DialogCode.Accepted),
-            ):
+            with patch.object(ProgressiveAutoMixController, "start", fake_start):
                 self.window.preview_controller.show_export_preview(tracks)
             try:
                 preview = self.window._inline_preview
@@ -1977,12 +1966,11 @@ class MainWindowPreviewTests(MainWindowTestCase):
             finally:
                 self.window._finish_inline_preview()
 
-    def test_start_without_waiting_adopts_the_running_controller_and_preserves_playhead(self) -> None:
-        """"Start Without Waiting": Preview opens immediately on the
-        sequential plan, using the SAME still-running PreviewAudioController
-        (no duplicate render). The previously-fixed hot-swap machinery then
-        takes over once that controller's render actually finishes, and the
-        user's playhead survives the swap."""
+    def test_preview_opens_at_once_adopts_the_running_controller_and_preserves_playhead(self) -> None:
+        """No waiting dialog: Preview opens immediately on the sequential plan,
+        using the SAME still-running controller (no duplicate render). The
+        hot-swap machinery then takes over once that controller's render
+        actually finishes, and the user's playhead survives the swap."""
         track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
         track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)
         tracks = [track_a, track_b]
@@ -1995,14 +1983,7 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 replace(self.window.settings_service.current, ffmpeg_path=str(fake_ffmpeg)),
             )
 
-            def fake_skip_exec(self) -> int:
-                self.skipped = True
-                return QDialog.DialogCode.Rejected
-
-            with (
-                patch.object(ProgressiveAutoMixController, "start") as start,
-                patch.object(PreviewPreparationDialog, "exec", fake_skip_exec),
-            ):
+            with patch.object(ProgressiveAutoMixController, "start") as start:
                 self.window.preview_controller.show_export_preview(tracks)
                 start.assert_called_once()
             try:
@@ -2043,9 +2024,9 @@ class MainWindowPreviewTests(MainWindowTestCase):
             finally:
                 self.window._finish_inline_preview()
 
-    def test_first_partial_mix_opens_preview_on_it_and_progress_continues(self) -> None:
-        """The preparation popup closes on the first AutoMix partial; Preview starts
-        on that partial with the same running controller and the popup's progress."""
+    def test_partial_mixes_and_progress_reach_the_open_preview_and_status_bar(self) -> None:
+        """Preview is already open when the first AutoMix partial lands: it swaps
+        onto that partial, and the render's progress shows in the status bar."""
         track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
         track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)
         tracks = [track_a, track_b]
@@ -2062,17 +2043,14 @@ class MainWindowPreviewTests(MainWindowTestCase):
             partial.touch()
 
             with patch.object(ProgressiveAutoMixController, "start", autospec=True) as start:
-                def fake_exec(dialog) -> int:
-                    controller = start.call_args.args[0]
-                    controller.progress.emit("AutoMix", 0.4, "Analyzing 2 / 5")
-                    controller.latest_partial = (str(partial), plan, 150.0, 0.5)  # as _on_partial_ready does
-                    controller.progressive_ready.emit(*controller.latest_partial)
-                    return dialog.result()
-
-                with patch.object(PreviewPreparationDialog, "exec", fake_exec):
-                    self.window.preview_controller.show_export_preview(tracks)
+                self.window.preview_controller.show_export_preview(tracks)
             try:
                 preview = self.window._inline_preview
+                self.assertIsNone(preview._blended_audio_path)  # opened at once, per-track audio
+                controller = start.call_args.args[0]
+                controller.progress.emit("AutoMix", 0.4, "Analyzing 2 / 5")
+                controller.latest_partial = (str(partial), plan, 150.0, 0.5)  # as _on_partial_ready does
+                controller.progressive_ready.emit(*controller.latest_partial)
                 self.assertIs(preview._compiled_plan, plan)
                 self.assertEqual(preview._blended_audio_path, partial)
                 self.assertEqual(preview._blended_audio_until, 150.0)
@@ -2080,7 +2058,8 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 self.assertIs(preview._blended_audio_controller, start.call_args.args[0])
                 start.assert_called_once()  # adopted, not restarted
                 activity = self.window.activity_progress
-                self.assertEqual(activity.progress_bar.value(), 400)  # continues from the popup
+                self.assertEqual(activity.active_keys, ("preview_mix",))  # Preview itself is no task
+                self.assertEqual(activity.progress_bar.value(), 400)
                 self.assertIn("Analyzing 2 / 5", activity.details_text())
             finally:
                 self.window._finish_inline_preview()
@@ -2244,17 +2223,10 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 replace(self.window.settings_service.current, ffmpeg_path=str(fake_ffmpeg)),
             )
 
-            def fake_skip_exec(self) -> int:
-                self.skipped = True
-                return QDialog.DialogCode.Rejected
-
             activity = self.window.activity_progress
             for outcome in ("failed", "closed"):
                 with self.subTest(outcome):
-                    with (
-                        patch.object(ProgressiveAutoMixController, "start"),
-                        patch.object(PreviewPreparationDialog, "exec", fake_skip_exec),
-                    ):
+                    with patch.object(ProgressiveAutoMixController, "start"):
                         self.window.preview_controller.show_export_preview([track_a, track_b])
                     self.assertIn("preview_mix", activity.active_keys)
                     if outcome == "failed":

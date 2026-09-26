@@ -157,16 +157,6 @@ class PreviewController:
             track_panel.setStyleSheet(controls_page.styleSheet())
             window.preview_track_inspector_layout.addWidget(track_panel)
         window.inspector_stack.setCurrentWidget(window.preview_track_inspector)
-        window.activity_progress.begin(
-            "inline_preview",
-            "캔버스 미리보기" if window.translator.language is Language.KOREAN
-            else "Canvas preview",
-            detail=(
-                "미리보기 중에는 편집 기능이 잠깁니다."
-                if window.translator.language is Language.KOREAN else
-                "Editing is locked during playback preview."
-            ),
-        )
         window.statusBar().showMessage(
             "캔버스에서 전체 미리보기를 재생합니다 · 편집 기능이 잠겼습니다."
             if window.translator.language is Language.KOREAN else
@@ -180,32 +170,26 @@ class PreviewController:
         self, tracks: list, executable, transition_mode: str, crossfade_seconds: float,
         automix_settings=None,
     ) -> tuple[tuple[Path, object] | None, object | None, TemporaryDirectory | None]:
-        """Render blended preview audio behind a preparation dialog before Preview opens.
+        """Start rendering blended preview audio and hand it to Preview without waiting.
 
-        Blocks this call (via QDialog.exec(), which keeps Qt's event loop --
-        and this dialog's own repaints and its "Start Without Waiting"
-        button -- alive) until either the render finishes or the user skips
-        the wait. Returns ``(preloaded, controller, temp_dir)``:
+        Preview opens at once on per-track audio; the render's progress shows in
+        the status-bar activity (_track_background_mix_progress) and Preview
+        hot-swaps to the mix -- AutoMix: to each partial mix -- as it lands.
+        Returns ``(preloaded, controller, temp_dir)``:
 
-        - ``preloaded`` is ``(path, plan)`` if the render finished before the
-          dialog closed, so the caller can open Preview already on the final
-          plan instead of the sequential one.
-        - ``controller`` is the still-running controller if the user skipped
-          while it was rendering, or (AutoMix) its first partial mix landed
-          -- Preview then opens on that partial -- so the caller can hand it to
-          ExportPreviewDialog to adopt (same worker, no duplicate render)
-          instead of starting a second one.
+        - ``preloaded`` is ``(path, plan)`` when the render finished during
+          ``start()`` itself, so Preview opens already on the final plan.
+        - ``controller`` is otherwise the still-running controller, for
+          ExportPreviewDialog to adopt (same worker, no duplicate render).
         - ``temp_dir`` backs whichever of the above is not None, and must
           stay alive (owned by ExportPreviewDialog from here on) for as long
           as the rendered file might still be read.
 
-        On failure, returns ``(None, None, None)`` -- the render is
-        abandoned entirely and ExportPreviewDialog falls back to its normal
-        best-effort background render, exactly as when a render fails
-        mid-preview.
+        When the render fails during ``start()``, returns ``(None, None,
+        None)``: ExportPreviewDialog falls back to its normal best-effort
+        background render, exactly as when a render fails mid-preview.
         """
         from app.controllers.preview_audio_controller import PreviewAudioController
-        from app.dialogs.preview_preparation_dialog import PreviewPreparationDialog
         from app.renderer.ffmpeg_renderer import FFmpegRenderer
 
         window = self.window
@@ -221,55 +205,37 @@ class PreviewController:
             )
         else:
             controller = PreviewAudioController(FFmpegRenderer(executable), window)
-        dialog = PreviewPreparationDialog(window.translator, window, transition_mode=transition_mode)
-        result: dict[str, tuple[Path, object]] = {}
+        result: dict[str, object] = {}
 
         def on_ready(path_str: str, plan: object) -> None:
             result["preloaded"] = (Path(path_str), plan)
-            dialog.accept()
 
         def on_failed(_message: str) -> None:
-            dialog.accept()
-
-        def on_partial(*_args: object) -> None:
-            # The first AutoMix transitions are playable: open Preview on them
-            # now and let it adopt the still-running controller for the rest.
-            dialog.accept()
+            result["failed"] = True
 
         controller.audio_ready.connect(on_ready)
         controller.audio_failed.connect(on_failed)
-        controller.progress.connect(dialog.set_progress)
-        progressive_ready = getattr(controller, "progressive_ready", None)
-        if progressive_ready is not None:
-            progressive_ready.connect(on_partial)
         controller.start(tracks, Path(temp_dir.name), transition_mode, crossfade_seconds,
                          automix_settings=automix_settings)
-        if progressive_ready is not None:
-            # Attach as a paused listener at 0 so partial mixes render during the wait.
+        if getattr(controller, "progressive_ready", None) is not None:
+            # Attach as a paused listener at 0 so partial mixes render right away.
             controller.report_playhead(0.0, False)
-        dialog.exec()
         controller.audio_ready.disconnect(on_ready)
         controller.audio_failed.disconnect(on_failed)
-        controller.progress.disconnect(dialog.set_progress)
-        if progressive_ready is not None:
-            progressive_ready.disconnect(on_partial)
-        dialog.deleteLater()
 
         if "preloaded" in result:
             # The render already finished and forgot its own worker; nothing
             # further to adopt, so release the empty controller shell.
             controller.deleteLater()
             return result["preloaded"], None, temp_dir
-        if dialog.skipped or getattr(controller, "latest_partial", None) is not None:
-            # Hand the same running controller to Preview: analysis and
-            # rendering continue exactly where this dialog left them.
-            return None, controller, temp_dir
-        # The render failed outright (audio_failed) or the dialog closed some
-        # other way: nothing to hand off, so let ExportPreviewDialog try its
-        # own normal background render from scratch.
-        controller.shutdown()
-        temp_dir.cleanup()
-        return None, None, None
+        if "failed" in result:
+            # Nothing to hand off: ExportPreviewDialog tries its own normal
+            # background render from scratch.
+            controller.shutdown()
+            temp_dir.cleanup()
+            return None, None, None
+        # Hand the running controller to Preview: analysis and rendering continue.
+        return None, controller, temp_dir
 
     def _track_background_mix_progress(self, preview) -> None:
         """Mirror a still-running blended-audio render in the status bar progress.
@@ -393,7 +359,6 @@ class PreviewController:
         self.unlock_editor_after_inline_preview()
         if window.bottom_tabs.currentIndex() == PREVIEW_TAB_INDEX:
             self.select_edit_bottom_tab()
-        window.activity_progress.finish("inline_preview")
         window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)  # render cancelled with Preview
         window.statusBar().showMessage(
             "미리보기를 종료하고 캔버스 편집으로 돌아왔습니다."
