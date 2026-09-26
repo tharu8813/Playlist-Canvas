@@ -597,6 +597,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.playlist_files_action)
         self.export_action = QAction(self)
         self.export_action.setEnabled(True)
+        self.export_action.setShortcut(QKeySequence("Ctrl+E"))
         self.export_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)
         )
@@ -606,6 +607,8 @@ class MainWindow(QMainWindow):
         self.preview_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
         )
+        # Ctrl+Alt+3 continues the Playlist (1) / Timeline (2) bottom-tab shortcuts.
+        self.preview_action.setShortcut(QKeySequence("Ctrl+Alt+3"))
         self.preview_action.triggered.connect(lambda: self._show_bottom_panel(2))
         self.export_button = toolbar.widgetForAction(self.export_action)
         if self.export_button is not None:
@@ -1611,6 +1614,13 @@ class MainWindow(QMainWindow):
         self.playlist_editor.files_dropped.connect(self._handle_dropped_files)
         self.playlist_editor.lyrics_dropped.connect(self._handle_lyrics_drop)
         self.playlist_editor.track_double_clicked.connect(self._show_track_details)
+        self.playlist_editor.tracks_removed.connect(
+            lambda count: self._show_undo_hint(
+                f"플레이리스트에서 {count}곡을 삭제했습니다."
+                if self.translator.language is Language.KOREAN else
+                f"Removed {count} track(s) from the Playlist."
+            )
+        )
         self.bottom_tabs.addTab(self.playlist_editor, "")
         self.timeline_panel = TimelinePanel(
             self.playlist_service, self.store, self.translator
@@ -2495,6 +2505,39 @@ class MainWindow(QMainWindow):
         if paths:
             self._add_music_paths([Path(path) for path in paths])
 
+    def _offer_music_for_empty_playlist(self, title: str) -> bool:
+        """Explain why Preview/Export cannot start and offer the fix.
+
+        Returns True once the Playlist has an enabled track again.
+        """
+        korean = self.translator.language is Language.KOREAN
+        if self.playlist_service.tracks:
+            # Songs exist but every one is excluded: adding more is not the fix.
+            QMessageBox.warning(
+                self, title,
+                "플레이리스트의 모든 곡이 내보내기에서 제외되어 있습니다.\n\n"
+                "곡을 선택한 뒤 Space 키 또는 오른쪽 클릭 메뉴의 '내보내기에 포함'으로 "
+                "다시 포함해 주세요."
+                if korean else
+                "Every track in the Playlist is excluded from export.\n\n"
+                "Select tracks and press Space, or right-click and choose "
+                "'Include in export'.",
+            )
+            self._show_bottom_panel(0)
+            return False
+        answer = QMessageBox.warning(
+            self, title,
+            "플레이리스트에 곡이 없습니다.\n\n지금 음악 파일을 추가할까요?"
+            if korean else
+            "The Playlist has no tracks yet.\n\nAdd music files now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        self._choose_audio_files()
+        return any(track.enabled for track in self.playlist_service.tracks)
+
     def _choose_m3u_playlist(self) -> None:
         """File menu: add the songs of one M3U8 playlist."""
         korean = self.translator.language is Language.KOREAN
@@ -2509,7 +2552,7 @@ class MainWindow(QMainWindow):
 
     def _add_music_paths(self, paths: list[Path]) -> None:
         """Import audio files and playlists; only the songs become project content."""
-        _audio_count, accepted, notes = self._import_audio_files(
+        audio_count, accepted, notes = self._import_audio_files(
             [path for path in paths if path.suffix.lower() in AUDIO_EXTENSIONS]
         )
         playlist_count, playlist_accepted, playlist_notes = self._import_m3u_playlists(
@@ -2517,12 +2560,19 @@ class MainWindow(QMainWindow):
         )
         self.project_content_service.add_paths([*accepted, *playlist_accepted])
         self._notify_sidecar_lyrics([*notes, *playlist_notes])
+        korean = self.translator.language is Language.KOREAN
         if playlist_count:
             self.statusBar().showMessage(
                 f"플레이리스트 파일에서 음악 {playlist_count}곡을 추가했습니다."
-                if self.translator.language is Language.KOREAN else
+                if korean else
                 f"Added {playlist_count} song(s) from the playlist file.",
                 7000,
+            )
+        elif audio_count:
+            self.statusBar().showMessage(
+                f"플레이리스트에 음악 {audio_count}곡을 추가했습니다."
+                if korean else f"Added {audio_count} song(s) to the Playlist.",
+                5000,
             )
 
     def _import_m3u_playlists(
@@ -4780,6 +4830,16 @@ class MainWindow(QMainWindow):
         self.bottom_tabs.setTabText(
             2, "미리보기" if self.translator.language is Language.KOREAN else "Preview"
         )
+        for index, tooltip in enumerate((
+            ("곡 추가·순서·포함 여부 편집 (Ctrl+Alt+1)" if korean
+             else "Add, order, and include tracks (Ctrl+Alt+1)"),
+            ("곡별 시작·종료 시간과 요소 표시 시간 확인 (Ctrl+Alt+2)" if korean
+             else "Track start/end times and source display timing (Ctrl+Alt+2)"),
+            ("전체 플레이리스트를 실제 음원과 함께 재생 · 재생 중에는 편집이 잠깁니다 (Ctrl+Alt+3)"
+             if korean else
+             "Play the complete playlist with audio · editing is locked while it plays (Ctrl+Alt+3)"),
+        )):
+            self.bottom_tabs.setTabToolTip(index, tooltip)
         self.source_search.setPlaceholderText(
             "요소 검색…" if korean else "Search sources…"
         )
@@ -4834,15 +4894,22 @@ class MainWindow(QMainWindow):
             "Show a 40 px grid across the complete Canvas workspace. It is not included in video output."
         )
         self.export_action.setToolTip(
-            "현재 Canvas와 Playlist를 MP4 파일로 렌더링합니다."
+            "현재 Canvas와 Playlist를 MP4 파일로 렌더링합니다. (Ctrl+E)"
             if self.translator.language is Language.KOREAN
-            else "Render the current Canvas and Playlist as an MP4 file."
+            else "Render the current Canvas and Playlist as an MP4 file. (Ctrl+E)"
         )
         self.preview_action.setToolTip(
-            "하단 미리보기 탭에서 전체 플레이리스트를 실제 음원과 함께 확인합니다."
+            "하단 미리보기 탭에서 전체 플레이리스트를 실제 음원과 함께 확인합니다. (Ctrl+Alt+3)"
             if self.translator.language is Language.KOREAN
-            else "Open the bottom Preview tab with the complete playlist and actual audio."
+            else "Open the bottom Preview tab with the complete playlist and actual audio. (Ctrl+Alt+3)"
         )
+        # Icon-only toolbar buttons: the tooltip is the only place their shortcut shows.
+        for action in (
+            self.new_action, self.open_action, self.save_action,
+            self.undo_action, self.redo_action,
+        ):
+            shortcut = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+            action.setToolTip(f"{action.text()} ({shortcut})" if shortcut else action.text())
         self.playlist_files_action.setToolTip(
             "YouTube 설명문과 CSV 목록 파일을 만듭니다."
             if self.translator.language is Language.KOREAN
@@ -4868,6 +4935,21 @@ class MainWindow(QMainWindow):
         ]
         for source_id in selected_ids:
             self.store.remove(source_id)
+        if selected_ids:
+            self._show_undo_hint(
+                f"요소 {len(selected_ids)}개를 삭제했습니다."
+                if self.translator.language is Language.KOREAN else
+                f"Deleted {len(selected_ids)} source(s)."
+            )
+
+    def _show_undo_hint(self, message: str) -> None:
+        """Confirm a removal in the status bar and name the way back."""
+        korean = self.translator.language is Language.KOREAN
+        self.statusBar().showMessage(
+            f"{message} 실행 취소(Ctrl+Z)로 되돌릴 수 있습니다." if korean
+            else f"{message} Undo (Ctrl+Z) brings it back.",
+            6000,
+        )
 
     def canvas_fit(self) -> None:
         self.canvas.fit_artboard()
