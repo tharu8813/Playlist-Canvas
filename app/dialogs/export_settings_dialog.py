@@ -39,6 +39,7 @@ from app.utils.i18n import Language, Translator
 from app.services.video_encoder_service import AUTO_VIDEO_ENCODER
 from app.services.export_storage_service import estimate_export_storage, format_bytes
 from app.services.export_validation_service import EXPORT_FPS_OPTIONS
+from app.utils.time_format import format_clock
 
 
 class ExportSettingsDialog(QDialog):
@@ -667,7 +668,4 @@ class ExportSettingsDialog(QDialog):
 
     @staticmethod
     def _format_duration(seconds: float) -> str:
-        total = max(0, round(seconds))
-        hours, remainder = divmod(total, 3600)
-        minutes, seconds_part = divmod(remainder, 60)
-        return f"{hours:02d}:{minutes:02d}:{seconds_part:02d}" if hours else f"{minutes:02d}:{seconds_part:02d}"
+        return format_clock(round(seconds))

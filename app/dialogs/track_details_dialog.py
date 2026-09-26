@@ -44,6 +44,7 @@ from app.services.lyrics_service import LyricsError, LyricsService
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.preview.album_art import extract_track_cover
 from app.utils.i18n import Translator
+from app.utils.time_format import format_clock
 
 
 def audio_file_facts(path: str) -> dict[str, object]:
@@ -924,13 +925,7 @@ class TrackDetailsDialog(QDialog):
 
     @staticmethod
     def _clock(milliseconds: int) -> str:
-        total_seconds = max(0, milliseconds // 1000)
-        minutes, seconds = divmod(total_seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        return (
-            f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            if hours else f"{minutes:02d}:{seconds:02d}"
-        )
+        return format_clock(milliseconds // 1000)
 
     @staticmethod
     def _timestamp(seconds: float) -> str:

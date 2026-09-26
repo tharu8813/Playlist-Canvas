@@ -11,6 +11,7 @@ from typing import Iterable
 from app.models.playlist import PlaylistTrack
 from app.timeline.compiler import compile_playlist
 from app.timeline.render_plan import CompiledRenderPlan
+from app.utils.time_format import format_clock
 
 
 class TimestampFormat(str, Enum):
@@ -103,9 +104,4 @@ class PlaylistExportService:
     @staticmethod
     def format_timestamp(seconds: float) -> str:
         """Format seconds as MM:SS, switching to HH:MM:SS beyond one hour."""
-        total = max(0, int(seconds))
-        hours, remainder = divmod(total, 3600)
-        minutes, seconds_part = divmod(remainder, 60)
-        if hours:
-            return f"{hours:02d}:{minutes:02d}:{seconds_part:02d}"
-        return f"{minutes:02d}:{seconds_part:02d}"
+        return format_clock(int(seconds))

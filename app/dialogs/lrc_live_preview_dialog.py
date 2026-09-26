@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 
 from app.services.lyrics_service import LyricsService
 from app.utils.i18n import Language, Translator
+from app.utils.time_format import format_clock
 
 
 class LrcLivePreviewDialog(QDialog):
@@ -147,6 +148,4 @@ class LrcLivePreviewDialog(QDialog):
 
     @staticmethod
     def _clock(milliseconds: int) -> str:
-        total_seconds = max(0, milliseconds) // 1000
-        minutes, seconds = divmod(total_seconds, 60)
-        return f"{minutes:02d}:{seconds:02d}"
+        return format_clock(milliseconds // 1000, hours=False)

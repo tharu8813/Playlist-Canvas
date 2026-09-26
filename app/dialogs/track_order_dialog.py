@@ -27,13 +27,13 @@ from app.models.playlist import PlaylistTrack
 from app.preview.album_art import extract_track_cover
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.utils.i18n import Translator
+from app.utils.time_format import format_clock
 
 _COVER_PX = 46
 
 
 def _clock(milliseconds: int) -> str:
-    total = max(0, milliseconds) // 1000
-    return f"{total // 60:02d}:{total % 60:02d}"
+    return format_clock(milliseconds // 1000, hours=False)
 
 
 class _ReorderList(QListWidget):

@@ -25,6 +25,7 @@ from app.models.source import Source
 from app.services.playlist_service import PlaylistService
 from app.services.source_store import SourceStore
 from app.utils.i18n import Translator
+from app.utils.time_format import format_clock
 
 
 class TimelineSpinBox(QDoubleSpinBox):
@@ -41,12 +42,7 @@ class TimelineSpinBox(QDoubleSpinBox):
     @staticmethod
     def format_timecode(value: float) -> str:
         """Format seconds without allocating a temporary QWidget."""
-        seconds = max(0, round(value))
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours:
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:02d}:{seconds:02d}"
+        return format_clock(round(value))
 
     def textFromValue(self, value: float) -> str:
         return self.format_timecode(value)

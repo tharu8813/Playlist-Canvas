@@ -8,6 +8,8 @@ from math import isfinite
 from typing import Any
 from uuid import uuid4
 
+from app.utils.time_format import format_clock
+
 
 @dataclass(slots=True)
 class PlaylistTrack:
@@ -35,8 +37,7 @@ class PlaylistTrack:
     @property
     def duration_label(self) -> str:
         """Format duration as minutes and seconds."""
-        total_seconds = max(0, round(self.duration_seconds))
-        return f"{total_seconds // 60:02d}:{total_seconds % 60:02d}"
+        return format_clock(round(self.duration_seconds), hours=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the model to JSON-compatible data."""

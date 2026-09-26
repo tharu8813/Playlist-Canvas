@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
+from app.utils.time_format import format_clock
 
 
 class _SeekSlider(QSlider):
@@ -397,10 +398,5 @@ class ContentPreviewDialog(QDialog):
 
     @staticmethod
     def _format_time(position_ms: int) -> str:
-        total_seconds = max(0, int(position_ms)) // 1000
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours:
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:02d}:{seconds:02d}"
+        return format_clock(int(position_ms) // 1000)
 
