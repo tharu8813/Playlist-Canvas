@@ -10,7 +10,7 @@ import math
 
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+    QFrame, QHBoxLayout, QLabel, QListWidget, QPlainTextEdit, QPushButton,
     QToolButton, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import Qt
@@ -140,8 +140,9 @@ class AutoMixDetailsPanel(QFrame):
         selected = self.list.currentRow()
         self.list.blockSignals(True)
         self.list.clear()
-        for row in self.rows:
-            self.list.addItem(QListWidgetItem(self._row_title(row)))
+        # Items Qt creates itself: clear() of Python-created QListWidgetItems runs shiboken's
+        # per-item wrapper teardown, which intermittently crashed (access violation) in here.
+        self.list.addItems([self._row_title(row) for row in self.rows])
         self.list.blockSignals(False)
         self._current = -1
         if self.rows:

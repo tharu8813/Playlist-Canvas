@@ -21,6 +21,7 @@ from app.models.source import Source, SourceType
 from app.dialogs.settings_dialog import SettingsDialog
 from app.dialogs.audio_metadata_dialog import AudioMetadataDialog
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
+from app.dialogs.m3u_import_dialog import M3uImportDialog
 from app.dialogs.track_details_dialog import TrackDetailsDialog
 from app.services.playlist_service import AudioImportCandidate, PlaylistService
 from app.services.lrc_draft_service import LrcDraftService
@@ -971,6 +972,74 @@ class MainWindowPlaylistTests(MainWindowTestCase):
         self.assertTrue(all(
             child.isEnabled() for child in rows[1].findChildren(QWidget)
         ))
+
+    def _m3u8_import(self, answer: QDialog.DialogCode) -> tuple[list[M3uImportDialog], Path]:
+        """Drop a two-song M3U8 (plus one missing entry) and answer its review window."""
+        directory = TemporaryDirectory(prefix="pc-m3u8-import-")
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        songs = [root / "one.mp3", root / "two.flac"]
+        for song in songs:
+            song.write_bytes(b"ID3 stub")
+        playlist = root / "mix.m3u8"
+        playlist.write_text("#EXTM3U\none.mp3\ntwo.flac\nmissing.mp3\n", encoding="utf-8")
+        candidates = [
+            AudioImportCandidate(PlaylistTrack(str(song.resolve()), song.stem, "Artist", "Album", 30.0))
+            for song in songs
+        ]
+        shown: list[M3uImportDialog] = []
+
+        def answer_review(dialog: M3uImportDialog) -> int:
+            shown.append(dialog)
+            return answer
+
+        with (
+            patch.object(self.window.playlist_service, "inspect_files", return_value=candidates) as inspect,
+            patch.object(M3uImportDialog, "exec", answer_review),
+        ):
+            self.window._handle_dropped_files([str(playlist)])
+        inspect.assert_called_once_with([song.resolve() for song in songs])
+        return shown, playlist
+
+    def test_m3u8_drop_shows_its_songs_then_adds_them_but_not_the_playlist_file(self) -> None:
+        before = len(self.window.playlist_service.tracks)
+        shown, playlist = self._m3u8_import(QDialog.DialogCode.Accepted)
+        self.assertEqual(len(shown), 1)
+        table = shown[0].table
+        self.assertEqual(table.rowCount(), 2)
+        self.assertFalse(table.item(0, 0).icon().isNull())  # album art, or the placeholder
+        self.assertEqual(
+            [table.item(0, column).text() for column in (1, 2, 3)], ["one", "Artist", "Album"],
+        )
+        self.assertEqual(shown[0].skipped, ["missing.mp3"])
+        tracks = self.window.playlist_service.tracks
+        self.assertEqual([track.title for track in tracks[before:]], ["one", "two"])
+        content = {Path(item.path).name for item in self.window.project_content_service.items}
+        self.assertTrue({"one.mp3", "two.flac"} <= content)
+        self.assertNotIn(playlist.name, content)
+
+    def test_cancelled_m3u8_review_adds_nothing(self) -> None:
+        before = self.window.playlist_service.tracks
+        content_before = self.window.project_content_service.items
+        self._m3u8_import(QDialog.DialogCode.Rejected)
+        self.assertEqual(self.window.playlist_service.tracks, before)
+        self.assertEqual(self.window.project_content_service.items, content_before)
+
+    def test_m3u8_export_writes_enabled_tracks_in_playlist_order(self) -> None:
+        with TemporaryDirectory(prefix="pc-m3u8-export-") as raw:
+            root = Path(raw)
+            self.window.playlist_service.replace([
+                PlaylistTrack(str(root / "a.mp3"), "A", "Artist", duration_seconds=10.0),
+                PlaylistTrack(str(root / "b.mp3"), "B", enabled=False),
+                PlaylistTrack(str(root / "c.mp3"), "C"),
+            ])
+            with patch.object(QFileDialog, "getSaveFileName", return_value=(str(root / "out"), "")):
+                self.window._export_m3u_playlist()
+            lines = (root / "out.m3u8").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            lines,
+            ["#EXTM3U", "#EXTINF:10,Artist - A", "a.mp3", "#EXTINF:-1,Unknown Artist - C", "c.mp3"],
+        )
 
 
 if __name__ == "__main__":

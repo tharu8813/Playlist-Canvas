@@ -140,6 +140,7 @@ Windows에서는 첫 실행 시 `%LOCALAPPDATA%\PlaylistCanvas\languages\`에 �
 | 오디오 | MP3, WAV, FLAC, AAC, M4A, OGG |
 | 이미지 | JPG, JPEG, PNG, WebP, SVG |
 | 가사·자막 | LRC, SRT, VTT |
+| 플레이리스트 | M3U8, M3U (가져오기: 곡만 추가 · 내보내기: M3U8) |
 | 프로젝트 | PVSProj, Project JSON |
 | 영상 출력 | MP4 |
 

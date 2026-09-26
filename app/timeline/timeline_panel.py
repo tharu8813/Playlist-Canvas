@@ -273,13 +273,14 @@ class TimelinePanel(QFrame):
             self.track_table.setVisible(bool(timeline_tracks))
             self.track_empty_label.setVisible(not timeline_tracks)
             self._update_move_buttons()
+            # ``self`` as context: the timer is dropped if the panel is deleted first.
             QTimer.singleShot(
-                0,
+                0, self,
                 lambda value=track_scroll:
                     self.track_table.verticalScrollBar().setValue(value),
             )
             QTimer.singleShot(
-                0,
+                0, self,
                 lambda value=source_scroll:
                     self.source_table.verticalScrollBar().setValue(value),
             )
@@ -296,7 +297,7 @@ class TimelinePanel(QFrame):
             self._refresh_pending = False
             self.refresh()
 
-        QTimer.singleShot(0, perform_refresh)
+        QTimer.singleShot(0, self, perform_refresh)
 
     def _selected_track_id(self) -> str | None:
         row = self.track_table.currentRow()

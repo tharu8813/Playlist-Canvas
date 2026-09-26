@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import replace
 import json
 import logging
@@ -64,6 +65,7 @@ from app.dialogs.playlist_export_dialog import PlaylistExportDialog
 from app.dialogs.preset_dialog import DesignPresetDialog
 from app.dialogs.ai_project_builder_dialog import AIProjectBuilderDialog
 from app.dialogs.audio_metadata_dialog import AudioMetadataDialog
+from app.dialogs.m3u_import_dialog import M3uImportDialog
 from app.dialogs.project_settings_dialog import ProjectSettingsDialog
 from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
@@ -106,8 +108,14 @@ from app.services.lyrics_service import (
 from app.services.theme_service import Theme, ThemeService
 from app.services.source_store import SourceStore
 from app.models.source_registry import source_registry
-from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
+from app.services.playlist_service import AUDIO_EXTENSIONS, AudioImportCandidate, PlaylistService
 from app.services.playlist_export_service import PlaylistExportError, PlaylistExportService
+from app.services.m3u_playlist import (
+    PLAYLIST_FILE_EXTENSIONS,
+    M3uPlaylistError,
+    read_m3u,
+    write_m3u8,
+)
 from app.services.app_settings_service import (
     AppSettings,
     AppSettingsService,
@@ -251,6 +259,10 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        # Signal lambdas that capture self keep this wrapper alive forever, so without
+        # this PySide destroyed the whole window tree during interpreter shutdown, which
+        # could crash at exit (0xC0000409). Deleted on close, it goes while Qt still runs.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         from app.ui.design_system import apply_studio_style
         apply_studio_style(QApplication.instance())
         self.store = SourceStore(self)
@@ -748,6 +760,9 @@ class MainWindow(QMainWindow):
         QApplication.instance().focusChanged.connect(self._sync_canvas_shortcut_actions)
         self._sync_canvas_shortcut_actions(None, QApplication.focusWidget())
 
+    def _sync_canvas_shortcut_actions_to_focus(self) -> None:
+        self._sync_canvas_shortcut_actions(None, QApplication.focusWidget())
+
     def _sync_canvas_shortcut_actions(
         self, previous: QWidget | None, current: QWidget | None,
     ) -> None:
@@ -1216,6 +1231,13 @@ class MainWindow(QMainWindow):
         self.file_menu.addAction(self.export_action)
         self.file_menu.addAction(self.playlist_files_action)
         self.file_menu.addSeparator()
+        self.import_m3u_action = QAction(self)
+        self.import_m3u_action.triggered.connect(self._choose_m3u_playlist)
+        self.file_menu.addAction(self.import_m3u_action)
+        self.export_m3u_action = QAction(self)
+        self.export_m3u_action.triggered.connect(self._export_m3u_playlist)
+        self.file_menu.addAction(self.export_m3u_action)
+        self.file_menu.addSeparator()
         self.exit_action = QAction(self)
         self.exit_action.setShortcut(QKeySequence.StandardKey.Quit)
         self.exit_action.setMenuRole(QAction.MenuRole.QuitRole)
@@ -1268,11 +1290,9 @@ class MainWindow(QMainWindow):
         self.clear_selection_action = QAction(self)
         self.clear_selection_action.triggered.connect(self._clear_canvas_selection)
         self.edit_menu.addAction(self.clear_selection_action)
-        QApplication.clipboard().dataChanged.connect(
-            lambda: self._sync_canvas_shortcut_actions(
-                None, QApplication.focusWidget()
-            )
-        )
+        # A bound method, not a lambda: the app-wide clipboard outlives this window,
+        # and only a method connection is dropped when the window is destroyed.
+        QApplication.clipboard().dataChanged.connect(self._sync_canvas_shortcut_actions_to_focus)
 
         self.insert_menu = menu_bar.addMenu("")
         source_categories = (
@@ -2375,22 +2395,102 @@ class MainWindow(QMainWindow):
             )
 
     def _choose_audio_files(self) -> None:
-        """Let the user select supported audio files for the playlist."""
+        """Let the user select audio files or M3U8 playlists for the playlist."""
+        korean = self.translator.language is Language.KOREAN
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "음악 파일 추가" if self.translator.language is Language.KOREAN else "Add music files",
+            "음악 파일 추가" if korean else "Add music files",
             "",
-            "Audio files (*.mp3 *.wav *.flac *.aac *.m4a *.ogg)",
+            ("음악 파일 및 플레이리스트" if korean else "Audio files and playlists")
+            + " (*.mp3 *.wav *.flac *.aac *.m4a *.ogg *.m3u8 *.m3u);;"
+            + ("M3U8 플레이리스트" if korean else "M3U8 playlists") + " (*.m3u8 *.m3u)",
         )
         if paths:
-            _added, accepted_paths, lyric_notes = self._import_audio_files(paths)
-            self.project_content_service.add_paths(accepted_paths)
-            self._notify_sidecar_lyrics(lyric_notes)
+            self._add_music_paths([Path(path) for path in paths])
+
+    def _choose_m3u_playlist(self) -> None:
+        """File menu: add the songs of one M3U8 playlist."""
+        korean = self.translator.language is Language.KOREAN
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "M3U8 플레이리스트 가져오기" if korean else "Import M3U8 playlist",
+            "",
+            ("M3U8 플레이리스트" if korean else "M3U8 playlists") + " (*.m3u8 *.m3u)",
+        )
+        if path:
+            self._add_music_paths([Path(path)])
+
+    def _add_music_paths(self, paths: list[Path]) -> None:
+        """Import audio files and playlists; only the songs become project content."""
+        _audio_count, accepted, notes = self._import_audio_files(
+            [path for path in paths if path.suffix.lower() in AUDIO_EXTENSIONS]
+        )
+        playlist_count, playlist_accepted, playlist_notes = self._import_m3u_playlists(
+            [path for path in paths if path.suffix.lower() in PLAYLIST_FILE_EXTENSIONS]
+        )
+        self.project_content_service.add_paths([*accepted, *playlist_accepted])
+        self._notify_sidecar_lyrics([*notes, *playlist_notes])
+        if playlist_count:
+            self.statusBar().showMessage(
+                f"플레이리스트 파일에서 음악 {playlist_count}곡을 추가했습니다."
+                if self.translator.language is Language.KOREAN else
+                f"Added {playlist_count} song(s) from the playlist file.",
+                7000,
+            )
+
+    def _import_m3u_playlists(
+        self, paths: list[Path],
+    ) -> tuple[int, list[Path], list[str]]:
+        """Show each playlist's songs for review, then add them like dropped audio.
+
+        The playlist file itself is never returned, so it never becomes project content.
+        """
+        added, accepted, notes = 0, [], []
+        korean = self.translator.language is Language.KOREAN
+        for path in paths:
+            try:
+                entries = read_m3u(path)
+            except M3uPlaylistError as error:
+                QMessageBox.warning(
+                    self, "플레이리스트 파일 오류" if korean else "Playlist file error", str(error),
+                )
+                continue
+            if not entries.audio_paths:
+                message = (
+                    f"'{path.name}'에서 찾을 수 있는 지원 음악 파일이 없습니다."
+                    if korean else
+                    f"'{path.name}' lists no supported music file that could be found."
+                )
+                if entries.skipped:
+                    message += (
+                        f"\n\n찾을 수 없거나 지원하지 않는 항목: {len(entries.skipped)}개"
+                        if korean else
+                        f"\n\nMissing or unsupported entries: {len(entries.skipped)}"
+                    )
+                QMessageBox.information(
+                    self, "추가할 곡 없음" if korean else "No songs to add", message,
+                )
+                continue
+
+            def review(candidates: list, playlist: Path = path, skipped: list[str] = entries.skipped) -> bool:
+                dialog = M3uImportDialog(candidates, playlist, skipped, self.translator, self)
+                return dialog.exec() == QDialog.DialogCode.Accepted
+
+            count, paths_added, lyric_notes = self._import_audio_files(entries.audio_paths, review=review)
+            added += count
+            accepted.extend(paths_added)
+            notes.extend(lyric_notes)
+        return added, accepted, notes
 
     def _import_audio_files(
         self, paths: list[str] | list[Path],
+        review: Callable[[list[AudioImportCandidate]], bool] | None = None,
     ) -> tuple[int, list[Path], list[str]]:
-        """Inspect audio tags, request missing project metadata, and add tracks."""
+        """Inspect audio tags, request missing project metadata, and add tracks.
+
+        ``review`` sees the inspected songs first and can cancel the whole import
+        (the M3U8 preview), before the missing-metadata step.
+        """
         if not paths:
             return 0, [], []
         korean = self.translator.language is Language.KOREAN
@@ -2403,6 +2503,8 @@ class MainWindow(QMainWindow):
         try:
             candidates = self.playlist_service.inspect_files(paths)
             if not candidates:
+                return 0, [], []
+            if review is not None and not review(candidates):
                 return 0, [], []
             tracks = [candidate.track for candidate in candidates]
             if any(candidate.missing_fields for candidate in candidates):
@@ -2724,12 +2826,19 @@ class MainWindow(QMainWindow):
         video_extensions = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
         video_paths = [path for path in paths if path.suffix.lower() in video_extensions]
         audio_paths = [path for path in paths if path.suffix.lower() in AUDIO_EXTENSIONS]
+        playlist_paths = [path for path in paths if path.suffix.lower() in PLAYLIST_FILE_EXTENSIONS]
         image_count = self._add_dropped_images(image_paths, position)
         video_count = self._add_dropped_videos(video_paths, position)
         audio_count, accepted_audio_paths, lyric_notes = self._import_audio_files(
             audio_paths
         )
-        self.project_content_service.add_paths([*image_paths, *video_paths, *accepted_audio_paths])
+        playlist_count, playlist_audio_paths, playlist_notes = self._import_m3u_playlists(playlist_paths)
+        audio_count += playlist_count
+        lyric_notes += playlist_notes
+        # Only the songs a playlist lists become project content, never the .m3u8 itself.
+        self.project_content_service.add_paths(
+            [*image_paths, *video_paths, *accepted_audio_paths, *playlist_audio_paths]
+        )
         if image_count or video_count or audio_count:
             korean = self.translator.language is Language.KOREAN
             message = (
@@ -2744,10 +2853,12 @@ class MainWindow(QMainWindow):
                 )
             self.statusBar().showMessage(message, 7000)
             return
+        if playlist_paths:
+            return  # the playlist review was cancelled or already explained why nothing was added
         korean = self.translator.language is Language.KOREAN
         self.statusBar().showMessage(
-            "지원되는 이미지, 영상, 음악 또는 프로젝트 파일을 놓아 주세요."
-            if korean else "Drop supported image, video, music, or project files.",
+            "지원되는 이미지, 영상, 음악, 플레이리스트(M3U8) 또는 프로젝트 파일을 놓아 주세요."
+            if korean else "Drop supported image, video, music, playlist (M3U8), or project files.",
             5000,
         )
 
@@ -3069,7 +3180,7 @@ class MainWindow(QMainWindow):
 
     def schedule_automatic_update_check(self) -> None:
         """Check once after startup without delaying project selection or first paint."""
-        QTimer.singleShot(1200, lambda: self._check_for_updates(manual=False))
+        QTimer.singleShot(1200, self, lambda: self._check_for_updates(manual=False))
 
     def _check_for_updates(self, manual: bool) -> None:
         """Request the latest stable GitHub Release on a background thread."""
@@ -3756,6 +3867,45 @@ class MainWindow(QMainWindow):
             self,
             "플레이리스트 파일 완료" if korean else "Playlist files complete",
             message,
+        )
+
+    def _export_m3u_playlist(self) -> None:
+        """Save the enabled tracks, in Playlist order, as an M3U8 file."""
+        korean = self.translator.language is Language.KOREAN
+        tracks = [track for track in self.playlist_service.tracks if track.enabled]
+        if not tracks:
+            QMessageBox.information(
+                self,
+                "M3U8 플레이리스트 내보내기" if korean else "Export M3U8 playlist",
+                "내보낼 곡이 없습니다. 플레이리스트에 곡을 추가하거나 사용으로 켜 주세요."
+                if korean else "There are no songs to export. Add songs or enable them in the Playlist.",
+            )
+            return
+        project = self.current_project_path
+        folder = project.parent if project is not None else Path.home()
+        name = project.name.split(".")[0] if project is not None else "playlist"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "M3U8 플레이리스트 내보내기" if korean else "Export M3U8 playlist",
+            str(folder / f"{name}.m3u8"),
+            ("M3U8 플레이리스트" if korean else "M3U8 playlist") + " (*.m3u8)",
+        )
+        if not path:
+            return
+        target = Path(path)
+        if target.suffix.lower() != ".m3u8":
+            target = target.with_name(target.name + ".m3u8")
+        try:
+            count = write_m3u8(tracks, target)
+        except M3uPlaylistError as error:
+            QMessageBox.warning(
+                self, "M3U8 내보내기 오류" if korean else "M3U8 export error", str(error),
+            )
+            return
+        self.statusBar().showMessage(
+            f"M3U8 플레이리스트에 {count}곡을 저장했습니다 · {target}"
+            if korean else f"Saved {count} song(s) to the M3U8 playlist · {target}",
+            7000,
         )
 
     def _export_cancelled(self) -> None:
@@ -4454,6 +4604,20 @@ class MainWindow(QMainWindow):
         )
         self.playlist_files_action.setText(
             "목록 파일" if self.translator.language is Language.KOREAN else "Playlist files"
+        )
+        self.import_m3u_action.setText(
+            "M3U8 플레이리스트 가져오기…" if korean else "Import M3U8 playlist…"
+        )
+        self.import_m3u_action.setStatusTip(
+            "M3U8 파일에 담긴 곡을 플레이리스트에 추가합니다."
+            if korean else "Add the songs listed in an M3U8 file to the Playlist."
+        )
+        self.export_m3u_action.setText(
+            "M3U8 플레이리스트 내보내기…" if korean else "Export M3U8 playlist…"
+        )
+        self.export_m3u_action.setStatusTip(
+            "사용 중인 곡을 플레이리스트 순서대로 M3U8 파일로 저장합니다."
+            if korean else "Save the enabled songs, in Playlist order, as an M3U8 file."
         )
         category_titles = {
             "basic": "기본 요소" if korean else "Basic sources",

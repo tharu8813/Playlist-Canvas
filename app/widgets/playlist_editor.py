@@ -28,8 +28,12 @@ from app.automix.models import TrackAnalysis
 from app.models.playlist import PlaylistTrack
 from app.preview.album_art import extract_track_cover
 from app.services.project_content_service import LYRICS_EXTENSIONS
+from app.services.m3u_playlist import PLAYLIST_FILE_EXTENSIONS
 from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
 from app.utils.i18n import Translator
+
+# Dropping an M3U8 playlist adds its songs (MainWindow shows them for review first).
+_ADDABLE_EXTENSIONS = AUDIO_EXTENSIONS | PLAYLIST_FILE_EXTENSIONS
 
 
 class PlaylistList(QListWidget):
@@ -117,7 +121,7 @@ class PlaylistList(QListWidget):
         ]
         media_paths = [
             path for path in paths
-            if Path(path).suffix.lower() in AUDIO_EXTENSIONS
+            if Path(path).suffix.lower() in _ADDABLE_EXTENSIONS
         ]
         if not lyrics_paths and not media_paths:
             self._clear_drop_feedback()
@@ -152,7 +156,7 @@ class PlaylistList(QListWidget):
         paths = self._local_paths(event)
         if any(
             Path(path).suffix.lower() in LYRICS_EXTENSIONS
-            or Path(path).suffix.lower() in AUDIO_EXTENSIONS
+            or Path(path).suffix.lower() in _ADDABLE_EXTENSIONS
             for path in paths
         ):
             event.setDropAction(Qt.DropAction.CopyAction)
@@ -227,7 +231,7 @@ class PlaylistList(QListWidget):
         ]
         media_paths = [
             path for path in paths
-            if Path(path).suffix.lower() in AUDIO_EXTENSIONS
+            if Path(path).suffix.lower() in _ADDABLE_EXTENSIONS
         ]
         target_item = self.itemAt(event.position().toPoint())
 
@@ -501,8 +505,8 @@ class PlaylistEditor(QFrame):
         self.up_button.setToolTip("위로 이동" if korean else "Move up")
         self.down_button.setToolTip("아래로 이동" if korean else "Move down")
         self.empty_label.setText(
-            "음악 파일을 추가하거나 이 영역으로 끌어오세요."
-            if korean else "Add music files or drop them in this area."
+            "음악 파일이나 M3U8 플레이리스트를 추가하거나 이 영역으로 끌어오세요."
+            if korean else "Add music files or an M3U8 playlist, or drop them in this area."
         )
         self.refresh()
 
@@ -567,8 +571,8 @@ class PlaylistEditor(QFrame):
             self.empty_label.setText(
                 ("검색 결과가 없습니다." if korean else "No matching tracks.")
                 if query else
-                ("음악 파일을 추가하거나 이 영역으로 끌어오세요." if korean
-                 else "Add music files or drop them in this area.")
+                ("음악 파일이나 M3U8 플레이리스트를 추가하거나 이 영역으로 끌어오세요." if korean
+                 else "Add music files or an M3U8 playlist, or drop them in this area.")
             )
             # A search filter breaks safe reordering, but external audio/lyrics
             # drops onto a specific track must still work.
@@ -577,8 +581,8 @@ class PlaylistEditor(QFrame):
                 QAbstractItemView.DragDropMode.DropOnly if query else
                 QAbstractItemView.DragDropMode.DragDrop
             )
-            QTimer.singleShot(
-                0, lambda value=scroll_position: self.list_widget.verticalScrollBar().setValue(value)
+            QTimer.singleShot(  # ``self`` as context: dropped if the editor is deleted first
+                0, self, lambda value=scroll_position: self.list_widget.verticalScrollBar().setValue(value)
             )
         finally:
             self._ignore_order_signal = False

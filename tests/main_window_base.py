@@ -48,11 +48,17 @@ class MainWindowTestCase(unittest.TestCase):
         self._original_language_setting = settings.value("language", None)
         settings.setValue("language", Language.KOREAN.value)
         self.window = MainWindow()
+        # Registered first, so it runs after every test's own cleanups: closing
+        # deletes the window (WA_DeleteOnClose) and those may still use it.
+        self.addCleanup(self._close_window)
+        self.application.processEvents()
+
+    def _close_window(self) -> None:
+        self.window._project_dirty = False
+        self.window.close()
         self.application.processEvents()
 
     def tearDown(self) -> None:
-        self.window._project_dirty = False
-        self.window.close()
         settings = QSettings()
         if self._original_language_setting is None:
             settings.remove("language")
