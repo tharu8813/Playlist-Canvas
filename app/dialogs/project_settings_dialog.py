@@ -10,8 +10,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QMessageBox, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
+    QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QMessageBox, QRadioButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from app.models.project import (
@@ -36,10 +36,20 @@ class ProjectSettingsDialog(QDialog):
         self.selected_settings = replace(settings)
         self.canvas_thumbnail = canvas_thumbnail
         self.original_canvas_size = canvas_size
-        self.setMinimumWidth(620)
-        self.resize(680, 820)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 16)
+        self.setMinimumSize(620, 420)
+        self.resize(700, 620)  # fits small laptop screens; the settings scroll, the buttons stay
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 16)
+        outer.setSpacing(10)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        self.scroll_area.setWidget(body)
+        outer.addWidget(self.scroll_area, 1)
+        root = QVBoxLayout(body)
+        root.setContentsMargins(20, 18, 20, 4)
         root.setSpacing(14)
 
         identity_group = QGroupBox()
@@ -179,13 +189,15 @@ class ProjectSettingsDialog(QDialog):
         thumbnail_layout.addLayout(thumbnail_controls, 1)
         (self.custom_radio if settings.thumbnail_mode == "custom" else self.canvas_radio).setChecked(True)
         root.addWidget(self.thumbnail_group)
+        root.addStretch(1)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
         self.buttons.accepted.connect(self._accept)
         self.buttons.rejected.connect(self.reject)
-        root.addWidget(self.buttons)
+        self.buttons.setContentsMargins(20, 0, 20, 0)
+        outer.addWidget(self.buttons)
         self.choose_thumbnail_button.clicked.connect(self._choose_thumbnail)
         self.canvas_radio.toggled.connect(self._refresh_thumbnail)
         self.custom_radio.toggled.connect(self._refresh_thumbnail)
@@ -195,10 +207,14 @@ class ProjectSettingsDialog(QDialog):
         self.canvas_width_spin.valueChanged.connect(self._update_canvas_summary)
         self.canvas_height_spin.valueChanged.connect(self._update_canvas_summary)
         translator.language_changed.connect(self.retranslate)
-        matching = self.canvas_preset_combo.findData(canvas_size)
-        self.canvas_preset_combo.setCurrentIndex(
-            matching if matching >= 0 else self.canvas_preset_combo.count() - 1
+        # By value: findData() compared the stored Python tuples by identity, so a
+        # preset-sized canvas always showed up as "Custom".
+        matching = next(
+            (index for index in range(self.canvas_preset_combo.count())
+             if self.canvas_preset_combo.itemData(index) == tuple(canvas_size)),
+            self.canvas_preset_combo.count() - 1,
         )
+        self.canvas_preset_combo.setCurrentIndex(matching)
         self.retranslate()
         self._canvas_preset_changed(self.canvas_preset_combo.currentIndex())
         self._refresh_thumbnail()

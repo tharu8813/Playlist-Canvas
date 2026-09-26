@@ -17,7 +17,7 @@ from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QGraphicsView, QMessageBox
 from app import __version__
-from app.models.project import ProjectDocument
+from app.models.project import ProjectDocument, ProjectSettings
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.dialogs.preset_dialog import DesignPresetDialog
@@ -953,6 +953,90 @@ class MainWindowProjectTests(MainWindowTestCase):
             self.assertTrue(dialog.design_description.text())
         finally:
             dialog.close()
+
+    def test_project_settings_dialog_scrolls_its_settings_and_keeps_the_buttons_visible(self) -> None:
+        dialog = ProjectSettingsDialog(
+            ProjectSettings(), self.window.translator, QPixmap(16, 9), self.window, canvas_size=(720, 1280),
+        )
+        try:
+            self.assertLessEqual(dialog.height(), 640)
+            content = dialog.scroll_area.widget()
+            self.assertGreater(content.sizeHint().height(), dialog.height())  # the settings scroll
+            for group in (dialog.identity_group, dialog.transition_group, dialog.thumbnail_group):
+                self.assertTrue(content.isAncestorOf(group))
+            self.assertFalse(content.isAncestorOf(dialog.buttons))  # Save/Cancel never scroll away
+            # A preset-sized canvas is shown as that preset, not as "Custom".
+            self.assertEqual(dialog.canvas_preset_combo.currentText(), "9:16")
+        finally:
+            dialog.close()
+
+    def test_new_project_dialog_collects_identity_playback_storage_and_music(self) -> None:
+        dialog = NewProjectDialog(
+            self.window.translator, self.window,
+            preview_sources=self.window._preset_sources_for_canvas,
+        )
+        try:
+            # Defaults match a fresh ProjectSettings.
+            defaults = dialog.project_settings
+            self.assertEqual(
+                (defaults.title, defaults.transition_mode, defaults.content_mode),
+                ("Untitled Project", "none", "embed"),
+            )
+            self.assertTrue(dialog.crossfade_spin.isHidden())
+            dialog.title_edit.setText("  Night drive  ")
+            dialog.author_edit.setText("DJ")
+            dialog.transition_combo.setCurrentIndex(dialog.transition_combo.findData("crossfade"))
+            self.assertFalse(dialog.crossfade_spin.isHidden())
+            dialog.crossfade_spin.setValue(6.5)
+            dialog.storage_combo.setCurrentIndex(dialog.storage_combo.findData("reference"))
+            self.assertIn("다시 연결", dialog.storage_help.text())
+            settings = dialog.project_settings
+            self.assertEqual(
+                (settings.title, settings.author, settings.transition_mode,
+                 settings.crossfade_seconds, settings.content_mode),
+                ("Night drive", "DJ", "crossfade", 6.5, "reference"),
+            )
+
+            # The preview letterboxes the chosen design on the chosen canvas.
+            self.assertFalse(dialog.preview_label.pixmap().isNull())
+            dialog.design_preset_combo.setCurrentIndex(1)
+            dialog.preset_combo.setCurrentIndex(1)  # 9:16
+            self.assertIn(
+                (dialog.selected_design_preset.identifier, 720, 1280), dialog._preview_cache,
+            )
+
+            with patch.object(
+                QFileDialog, "getOpenFileNames",
+                return_value=(["C:/music/a.mp3", "C:/music/mix.m3u8", "C:/music/a.mp3", "C:/music/cover.jpg"], ""),
+            ):
+                dialog._choose_music()
+            self.assertEqual(dialog.music_paths, [Path("C:/music/a.mp3"), Path("C:/music/mix.m3u8")])
+            self.assertEqual(dialog.music_count.text(), "파일 2개 (플레이리스트 1개)")
+            dialog.music_list.item(0).setSelected(True)
+            dialog._remove_music()
+            self.assertEqual(dialog.music_paths, [Path("C:/music/mix.m3u8")])
+            self.assertEqual(dialog.music_list.count(), 1)
+        finally:
+            dialog.close()
+
+    def test_new_project_applies_the_chosen_settings_and_adds_the_starting_music(self) -> None:
+        chosen = ProjectSettings(title="Night drive", transition_mode="automix", content_mode="reference")
+        songs = [Path("C:/music/a.mp3"), Path("C:/music/mix.m3u8")]
+
+        def choose_and_accept(dialog: NewProjectDialog) -> int:
+            dialog.music_paths = list(songs)
+            return QDialog.DialogCode.Accepted
+
+        with (
+            patch.object(NewProjectDialog, "exec", choose_and_accept),
+            patch.object(NewProjectDialog, "project_settings",
+                         new_callable=lambda: property(lambda _dialog: chosen)),
+            patch.object(self.window, "_add_music_paths") as add_music,
+        ):
+            self.assertTrue(self.window._new_project(confirm_unsaved=False))
+        self.assertIs(self.window.project_settings, chosen)
+        self.assertEqual(self.window._project_document().settings.title, "Night drive")
+        add_music.assert_called_once_with(songs)
 
     def test_track_details_dialog_saves_edited_project_metadata_only_on_accept(self) -> None:
         track = PlaylistTrack(

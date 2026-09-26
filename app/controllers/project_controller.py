@@ -25,7 +25,7 @@ from app.dialogs.missing_media_dialog import MissingMediaDialog
 from app.dialogs.new_project_dialog import NewProjectDialog
 from app.dialogs.startup_dialog import StartupDialog
 from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
-from app.models.project import CanvasSettings, ProjectDocument, ProjectSettings
+from app.models.project import CanvasSettings, ProjectDocument
 from app.preview.canvas_snapshot import CanvasSnapshot
 from app.services.project_media_service import ProjectMediaService
 from app.services.project_persistence_service import (
@@ -176,11 +176,15 @@ class ProjectController:
         window = self.window
         if confirm_unsaved and not window._confirm_unsaved_changes():
             return False
-        dialog = NewProjectDialog(window.translator, window)
+        dialog = NewProjectDialog(
+            window.translator, window, preview_sources=window._preset_sources_for_canvas,
+        )
         if dialog.exec() != dialog.DialogCode.Accepted:
             return False
         canvas_width, canvas_height = dialog.canvas_size
         selected_preset = dialog.selected_design_preset
+        project_settings = dialog.project_settings
+        music_paths = list(dialog.music_paths)
         previous_project_path = window.current_project_path
         window._history_restoring = True
         try:
@@ -188,7 +192,7 @@ class ProjectController:
             window._legacy_project_path = None
             if hasattr(window, "upgrade_project_action"):
                 window.upgrade_project_action.setEnabled(False)
-            window.project_settings = ProjectSettings()
+            window.project_settings = project_settings
             window._project_theme_metadata = window.theme_service.preference.value
             window._project_language_metadata = window.translator.language.value
             window.project_content_service.replace([])
@@ -219,6 +223,9 @@ class ProjectController:
         else:
             window._project_dirty = False
         window._update_project_status()
+        if music_paths:
+            # The normal import path: missing-tag review, M3U8 review, lyrics, project content.
+            window._add_music_paths(music_paths)
         return True
 
     def show_project_start_dialog(self) -> bool:
