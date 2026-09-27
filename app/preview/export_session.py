@@ -123,6 +123,7 @@ class ExportSession:
         self._piped = False
         self._pipes: dict[str, PipedCanvasStream] = {}
         self._live_encoder_reached = False
+        self._encoder_reached_at: float | None = None
         self._final_render_stopped: Callable[[], str | None] = lambda: None
 
     @property
@@ -584,25 +585,33 @@ class ExportSession:
 
     def _check_piped_state(self) -> None:
         """Abort capture when the final render failed or stopped reading."""
-        if any(pipe.connected for pipe in self._pipes.values()):
+        if (
+            self._encoder_reached_at is None
+            and any(pipe.connected for pipe in self._pipes.values())
+        ):
             self._live_encoder_reached = True
+            self._encoder_reached_at = monotonic()
         failure = self._final_render_stopped()
         if failure is not None:
             raise FinalRenderStoppedError(failure)
-        pipes = [pipe for pipe in self._pipes.values() if pipe.started]
-        if not any(pipe.connected for pipe in pipes):
+        if self._encoder_reached_at is None:
             # FFmpeg has not opened its inputs yet (audio or visualizers are
             # still being prepared); its own failure is reported above.
             return
-        if all(pipe.reader_closed for pipe in pipes):
-            return
         busy = [
-            pipe for pipe in pipes
-            if not pipe.reader_closed and pipe.pending_frames > 0
+            pipe for pipe in self._pipes.values()
+            if pipe.started and not pipe.reader_closed and pipe.pending_frames > 0
         ]
         if not busy:
             return
-        idle_seconds = monotonic() - max(pipe.last_activity for pipe in pipes)
+        # Judge each blocked pipe on its own: another stream that is still
+        # being read must not hide one FFmpeg stopped reading (or never
+        # opened, measured from when FFmpeg reached its first pipe).
+        now = monotonic()
+        idle_seconds = max(
+            now - max(pipe.last_activity, self._encoder_reached_at)
+            for pipe in busy
+        )
         if idle_seconds > PIPE_STALL_SECONDS:
             raise CanvasPipeError(
                 "The final encoder stopped reading the Canvas for "

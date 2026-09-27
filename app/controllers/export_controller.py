@@ -1198,8 +1198,31 @@ class ExportOrchestrator:
                 ):
                     return
                 # Nothing to pipe, or the live path failed: capture again
-                # into the proven intermediate files.
+                # into the proven intermediate files. Those need far more room
+                # than the live estimate checked above, so check again (this
+                # also gives the fallback a fresh staging folder).
                 plan = replace(plan, use_piped_visuals=False)
+                if not window._prepare_export_staging_space(
+                    render_settings, playlist_duration, len(plan.z_bands),
+                    plan.use_streamed_visuals, korean,
+                ):
+                    raise RenderCancelledError(
+                        "Export cancelled at the disk-space check."
+                    )
+                window._export_dialog.set_storage_estimate(estimate_export_storage(
+                    render_settings.output_width, render_settings.output_height,
+                    render_settings.fps, playlist_duration,
+                    selected_app_settings.crf, selected_app_settings.audio_bitrate,
+                    max(1, len(plan.z_bands)),
+                ))
+                # The recheck replaced the staging folder and stopped the
+                # storage monitor along with the old one.
+                self.start_storage_monitor(output)
+                stream_root = (
+                    Path(self.frames.staging.name)
+                    if plan.use_streamed_visuals and self.frames.staging is not None
+                    else None
+                )
                 export_session = make_session(plan)
                 window._active_export_session = export_session
             artifacts = export_session.run()

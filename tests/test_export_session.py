@@ -345,6 +345,32 @@ class PipedExportSessionTests(unittest.TestCase):
         self.assertIn("stopped reading", str(raised.exception))
         self.assertTrue(session.live_encoder_reached)
 
+    def test_a_busy_pipe_stall_is_not_hidden_by_another_active_pipe(self) -> None:
+        class _Pipe:
+            def __init__(self, key: str, pending: int, last_activity: float) -> None:
+                self.stream_key = key
+                self.started = True
+                self.connected = True
+                self.reader_closed = False
+                self.pending_frames = pending
+                self.last_activity = last_activity
+
+        with TemporaryDirectory() as directory:
+            session = self._session(
+                _plan(streamed=True, direct=False, piped=True), Path(directory),
+                threading.Event(),
+            )
+            now = export_session_module.monotonic()
+            session._pipes = {
+                "base": _Pipe("base", 3, now - 500.0),
+                "layer:0": _Pipe("layer:0", 0, now),
+            }
+            session._check_piped_state()  # FFmpeg reached its pipes just now
+            session._encoder_reached_at = now - 500.0
+            with self.assertRaises(CanvasPipeError) as raised:
+                session._check_piped_state()
+        self.assertIn("base=3", str(raised.exception))
+
     def test_cancel_during_live_capture_stops_pipes(self) -> None:
         cancel = threading.Event()
         received = bytearray()

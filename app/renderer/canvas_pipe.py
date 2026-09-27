@@ -247,6 +247,8 @@ class _WindowsNamedPipeEndpoint(_PipeEndpoint):
             # (ERROR_PIPE_CONNECTED), so one wait covers both orders.
             overlapped = self._winapi.ConnectNamedPipe(self._handle, overlapped=True)
         except OSError as error:
+            if getattr(error, "winerror", None) == self._ERROR_PIPE_CONNECTED:
+                return  # FFmpeg opened the pipe first; it is already connected.
             raise CanvasPipeError(f"Could not open a Canvas pipe: {error}") from error
         self._wait(overlapped, cancelled)
 
