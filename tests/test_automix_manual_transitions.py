@@ -322,3 +322,103 @@ class PlaylistChipTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CUSTOM_BANDS = (((0.10, 0.30), (0.20, 0.40)), ((0.30, 0.80), (0.30, 0.80)), ((0.0, 1.0), (0.0, 0.50)))
+
+
+class CustomEqTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_band_windows_round_trip_and_bad_ones_are_dropped(self) -> None:
+        override = TransitionOverride(150.0, style="eq", eq_bands=CUSTOM_BANDS)
+        data = override.to_dict()
+        self.assertEqual(data["eq"]["low"], {"out": [0.10, 0.30], "in": [0.20, 0.40]})
+        broken = dict(data, eq={"low": data["eq"]["low"], "mid": data["eq"]["mid"]})
+        backwards = dict(data, eq=dict(data["eq"], high={"out": [0.9, 0.2], "in": [0.0, 1.0]}))
+        parsed = parse_overrides({"a>b": data, "b>c": broken, "c>d": backwards})
+        self.assertEqual(parsed, {"a>b": override})
+        self.assertIsNone(TransitionOverride(150.0).to_dict().get("eq"))
+        with self.assertRaises(ValueError):
+            TransitionOverride(150.0, style="eq", eq_bands=(((0.5, 0.5), (0.0, 1.0)),) * 3)
+
+    def test_custom_eq_renders_the_users_band_windows(self) -> None:
+        from app.automix.diagnostics import transition_rows
+        from app.automix.renderer import band_fade_windows, build_filter_graph
+        from app.widgets.transition_inspector import mix_lanes
+
+        tracks = _tracks()
+        override = TransitionOverride(150.0, 0.0, 10.0, "eq", tempo_match=False, eq_bands=CUSTOM_BANDS)
+        plan = compile_automix(tracks, _analyses(tracks), _manual(ENABLED, **{"a>b": override}))
+        validate_compiled_render_plan(plan)
+        transition = plan.audio.transitions[0]
+        self.assertEqual(transition.band_windows, CUSTOM_BANDS)
+        self.assertIs(transition.dsp, TransitionDsp.BASS_SWAP)
+        self.assertEqual(transition_rows(plan)[0]["dsp"], "eq")
+        side = (transition.dsp, transition.duration, transition.vocal_handoff, transition.band_windows)
+        (_fade, start, length), = band_fade_windows("low", 200.0, side, None)
+        self.assertAlmostEqual(start, transition.duration * 0.20)
+        self.assertAlmostEqual(length, transition.duration * 0.20)
+        graph, _output = build_filter_graph(plan.audio.clips, plan.audio.transitions)
+        self.assertIn(f"afade=t=in:st={transition.duration * 0.20:.6f}", graph)
+        lanes = {lane.key: lane for lane in mix_lanes(transition)}
+        self.assertAlmostEqual(lanes["high"].incoming(0.5), 1.0)
+        self.assertAlmostEqual(lanes["low"].outgoing(0.31), 0.0)
+        # Without eq_bands, Custom EQ starts from the bass swap; other styles never carry windows.
+        plain = compile_automix(tracks, _analyses(tracks), _manual(ENABLED, **{
+            "a>b": TransitionOverride(150.0, style="eq"),
+            "b>c": TransitionOverride(150.0, style="vocal_safe_eq", eq_bands=CUSTOM_BANDS),
+        }))
+        from app.automix.renderer import default_eq_bands
+
+        self.assertEqual(plain.audio.transitions[0].band_windows, default_eq_bands())
+        self.assertIsNone(plain.audio.transitions[1].band_windows)
+
+    def test_window_helpers(self) -> None:
+        from app.widgets.transition_editor import band_hole, move_window
+
+        self.assertEqual(move_window((0.2, 0.4), "move", 0.9), (0.8, 1.0))
+        self.assertEqual(move_window((0.2, 0.4), "start", 0.5)[0], 0.4 - 0.02)
+        self.assertEqual(move_window((0.2, 0.4), "end", -1.0), (0.2, 0.2 + 0.02))
+        self.assertAlmostEqual(band_hole((0.1, 0.3), (0.5, 0.7)), 0.2)
+        self.assertEqual(band_hole((0.1, 0.6), (0.5, 0.7)), 0.0)
+
+    def test_editor_starts_custom_eq_from_what_plays_and_commits_drags(self) -> None:
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+
+        from app.automix.renderer import band_windows_of, default_eq_bands
+
+        window, changes = EditorWindowTests._window(self)
+        window.select_pair("a", "b")
+        window.manual_button.click()
+        playing = band_windows_of(window.diagram.junction.transition)
+        panel = window.editor
+        self.assertTrue(panel.eq_box.isHidden())
+        panel.style_buttons["eq"].click()
+        override = changes[-1][1]
+        self.assertEqual(override.style, "eq")
+        self.assertEqual(override.eq_bands, playing if playing is not None else default_eq_bands())
+        self.assertFalse(panel.eq_box.isHidden())
+
+        panel.eq_presets["even"].click()
+        self.assertEqual(changes[-1][1].eq_bands, (((0.0, 1.0), (0.0, 1.0)),) * 3)
+
+        editor = panel.eq_editor
+        editor.resize(700, editor.minimumHeight())
+        bar = editor._bar_rect("low", "out")
+        start = QPoint(int(bar.right()), int(bar.center().y()))
+        QTest.mousePress(editor, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, start)
+        QTest.mouseMove(editor, start - QPoint(int(bar.width() / 2), 0))
+        QTest.mouseRelease(editor, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier,
+                           start - QPoint(int(bar.width() / 2), 0))
+        low_out, low_in = changes[-1][1].eq_bands[0]
+        self.assertLess(low_out[1], 0.6)
+        self.assertEqual(low_out, low_in)  # "move both together" is on by default
+
+        panel.style_buttons["bass_swap"].click()
+        self.assertEqual(changes[-1][1].style, "bass_swap")
+        self.assertIsNotNone(changes[-1][1].eq_bands)  # kept for switching back
+        self.assertTrue(panel.eq_box.isHidden())

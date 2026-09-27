@@ -23,6 +23,7 @@ _STYLE_LABELS = {
     "filter_sweep": ("필터 스윕", "Filter sweep"),
     "drop_in": ("여운 위로 시작", "Drop in over the tail"),
     "legacy": ("기본 크로스페이드", "Plain crossfade"),
+    "eq": ("EQ 직접 설정", "Custom EQ"),
     "sequential": ("이어서 재생", "Back to back"),
     "gap": ("간격", "Gap"),
 }

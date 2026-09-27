@@ -196,7 +196,7 @@ def build_filter_graph(
         if not 0 <= index < len(styles) or styles[index] not in BAND_ENVELOPES:
             return None
         transition = transition_by_pair[(clips[index].clip_id, clips[index + 1].clip_id)]
-        return styles[index], transition.duration, transition.vocal_handoff
+        return styles[index], transition.duration, transition.vocal_handoff, transition.band_windows
 
     def sweep_side(index: int) -> float | None:
         if not 0 <= index < len(styles) or styles[index] is not TransitionDsp.FILTER_SWEEP:
@@ -348,16 +348,35 @@ def transition_dsp_style(transition: AudioRenderTransition) -> TransitionDsp | N
     return TransitionDsp.BASS_SWAP if transition.type == TransitionType.BEAT_MATCH else None
 
 
-BandSide = tuple[TransitionDsp, float, float | None]
-"""(band style, transition duration, vocal handoff) for one side of a clip."""
+BandSide = tuple
+"""(band style, transition duration, vocal handoff[, band windows]) for one side of a clip."""
 
 
-def _band_envelope(style: TransitionDsp, band: str, vocal_handoff: float | None):
-    """BAND_ENVELOPES entry, with VOCAL_SAFE_EQ's mid swap moved to the planned handoff."""
+def _band_envelope(style: TransitionDsp, band: str, vocal_handoff: float | None, band_windows=None):
+    """BAND_ENVELOPES entry: hand-set ``band_windows`` when given, else the style's own
+    with VOCAL_SAFE_EQ's mid swap moved to the planned handoff."""
+    if band_windows is not None:
+        return band_windows[_BANDS.index(band)]
     if style is TransitionDsp.VOCAL_SAFE_EQ and band == "mid" and vocal_handoff is not None:
         window = (vocal_handoff - VOCAL_MID_SWAP_WIDTH / 2, vocal_handoff + VOCAL_MID_SWAP_WIDTH / 2)
         return window, window
     return BAND_ENVELOPES[style][band]
+
+
+def band_windows_of(transition: AudioRenderTransition) -> tuple | None:
+    """The per-band fade windows ``transition`` renders with (low, mid, high),
+    ``None`` when it is not a band style."""
+    style = transition_dsp_style(transition)
+    if style not in BAND_ENVELOPES:
+        return None
+    return tuple(
+        _band_envelope(style, band, transition.vocal_handoff, transition.band_windows) for band in _BANDS
+    )
+
+
+def default_eq_bands() -> tuple:
+    """Where a hand-set EQ starts when nothing better is known: the bass swap."""
+    return tuple(BAND_ENVELOPES[TransitionDsp.BASS_SWAP][band] for band in _BANDS)
 
 
 def band_fade_windows(
@@ -373,12 +392,12 @@ def band_fade_windows(
     """
     windows: list[tuple[str, float, float]] = []
     if incoming is not None:
-        style, duration, handoff = incoming
-        start, end = _band_envelope(style, band, handoff)[1]
+        style, duration, handoff, *custom = incoming
+        start, end = _band_envelope(style, band, handoff, *custom)[1]
         windows.append(("in", duration * start, duration * (end - start)))
     if outgoing is not None:
-        style, duration, handoff = outgoing
-        start, end = _band_envelope(style, band, handoff)[0]
+        style, duration, handoff, *custom = outgoing
+        start, end = _band_envelope(style, band, handoff, *custom)[0]
         window_start = clip_duration - duration
         windows.append(("out", window_start + duration * start, duration * (end - start)))
     return windows

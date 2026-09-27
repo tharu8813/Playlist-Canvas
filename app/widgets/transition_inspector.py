@@ -49,6 +49,8 @@ _STYLE_DESCRIPTIONS = {
                      "A DJ-style sweep: a highpass lifts the outgoing lows away while the incoming track fills in from the highs."),
     "drop_in": ("나가는 곡의 여운이 이미 잦아드는 중이라, 들어오는 곡을 처음부터 제 음량으로 시작합니다.",
                 "The outgoing tail is already fading, so the incoming track starts at full level over it."),
+    "eq": ("저음·중음·고음을 각각 언제 넘길지 직접 정한 전환입니다.",
+           "Hand-set band timing: when the lows, mids and highs each change hands."),
     "legacy": ("두 곡의 음량을 전체 대역에서 교차하는 기본 크로스페이드입니다.",
                "A plain crossfade of the full signal."),
     "sequential": ("섞지 않고 앞 곡이 끝나자마자 다음 곡을 이어 재생합니다.",
@@ -103,7 +105,7 @@ def mix_lanes(transition: AudioRenderTransition) -> list[MixLane]:
         }
         lanes = []
         for band in ("high", "mid", "low"):
-            out_window, in_window = _band_envelope(style, band, transition.vocal_handoff)
+            out_window, in_window = _band_envelope(style, band, transition.vocal_handoff, transition.band_windows)
             korean, english = names[band]
             lanes.append(MixLane(
                 band, f"{korean}\n{ranges[band]}", f"{english}\n{ranges[band]}",
@@ -1518,6 +1520,9 @@ class TransitionInspectorWindow(QDialog):
         tracks = context.tracks if context is not None else {}
         durations = tuple(tracks[clip.track_id].duration_seconds if clip.track_id in tracks else clip.source_out
                           for clip in (drawn.outgoing, drawn.incoming))
+        from app.automix.renderer import band_windows_of
+
+        self.editor.set_current_bands(band_windows_of(drawn.transition) if drawn.transition is not None else None)
         self.editor.set_override(self._overrides.get(self._pair(self._selected)), (outgoing, incoming), durations)
 
         def marks(clip: AudioRenderClip, analysis) -> tuple[float, ...]:
