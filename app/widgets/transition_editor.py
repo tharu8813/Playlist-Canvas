@@ -153,12 +153,44 @@ def snap(seconds: float, grid: Sequence[float], tolerance: float | None = None) 
     return float(nearest)
 
 
-def snap_length(seconds: float, analysis: TrackAnalysis | None) -> float:
-    """``seconds`` rounded to whole beats of ``analysis``'s tempo (unchanged without one)."""
+def snap_length(seconds: float, analysis: TrackAnalysis | None, tolerance: float | None = None) -> float:
+    """``seconds`` rounded to whole beats of ``analysis``'s tempo (unchanged without one).
+
+    With ``tolerance`` it is magnetic: whole bars pull from ``tolerance``
+    seconds away, whole beats from 60% of that, and anything else stays free.
+    """
     if analysis is None or not analysis.bpm:
         return seconds
     beat = 60.0 / analysis.bpm
-    return max(beat, round(seconds / beat) * beat)
+    if tolerance is None:
+        return max(beat, round(seconds / beat) * beat)
+    bar = beat * (analysis.meter_numerator or 4)
+    for step, reach in ((bar, tolerance), (beat, tolerance * 0.6)):
+        if step < 3.0 * reach:
+            continue
+        nearest = max(step, round(seconds / step) * step)
+        if abs(nearest - seconds) <= reach:
+            return nearest
+    return seconds
+
+
+def magnet(seconds: float, analysis: TrackAnalysis | None, tolerance: float) -> float:
+    """``seconds`` pulled onto a nearby downbeat (within ``tolerance``) or beat (60% of it); else unchanged.
+
+    Unlike a hard grid this lets a drag land anywhere, while still clicking onto
+    the beat when the pointer passes close to one.
+    """
+    if analysis is None:
+        return seconds
+    beat = 60.0 / analysis.bpm if analysis.bpm else 0.0
+    bar = beat * (analysis.meter_numerator or 4)
+    for grid, reach, spacing in ((analysis.downbeats, tolerance, bar), (analysis.beats, tolerance * 0.6, beat)):
+        # A grid denser than 3x its pull would catch every position: at that zoom it stays off.
+        if grid and (not spacing or spacing >= 3.0 * reach):
+            snapped = snap(seconds, grid, reach)
+            if snapped != seconds:
+                return snapped
+    return seconds
 
 
 def bars_text(seconds: float, analysis: TrackAnalysis | None, korean: bool) -> str:
@@ -292,8 +324,13 @@ class BandTimingEditor(QWidget):
     # -- editing ---------------------------------------------------------------
 
     def _snap(self, value: float) -> float:
-        step = self.beat if self.beat and self.beat >= 0.01 else 0.01
-        return round(value / step) * step
+        """``value`` pulled onto a beat (or the window's start, middle or end) within 8 px; else free."""
+        reach = self._progress_delta(8.0)
+        points = [0.0, 0.5, 1.0]
+        if self.beat and self.beat >= 0.01:
+            points.append(round(value / self.beat) * self.beat)
+        nearest = min(points, key=lambda point: abs(point - value))
+        return nearest if abs(nearest - value) <= reach else value
 
     def _dragged(self, x: float, free: bool) -> BandWindows:
         band, side, kind, press_x, base = self._drag

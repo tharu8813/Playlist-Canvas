@@ -422,3 +422,72 @@ class CustomEqTests(unittest.TestCase):
         self.assertEqual(changes[-1][1].style, "bass_swap")
         self.assertIsNotNone(changes[-1][1].eq_bands)  # kept for switching back
         self.assertTrue(panel.eq_box.isHidden())
+
+
+class DragFeelTests(unittest.TestCase):
+    """What a drag in the graph does: follows the pointer, holds the scale, stops with a reason."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
+    def _editing(self):
+        window, changes = EditorWindowTests._window(self)
+        window.resize(1100, 1000)
+        window.select_pair("a", "b")
+        window.manual_button.click()
+        return window, changes
+
+    def _drag(self, window, kind, delta, free=False):
+        window._drag_started(kind)
+        window.diagram._drag = (kind, 0.0)  # as if the pointer were held down
+        window._drag_moved(kind, delta, free)
+        hint = window.diagram.drag_hint
+        window.diagram._drag = None
+        window._drag_finished()
+        return hint
+
+    def test_moving_keeps_the_length_and_stops_at_the_song_end_with_a_reason(self) -> None:
+        window, changes = self._editing()
+        before = window.diagram.junction
+        length = before.end - before.start
+        hint = self._drag(window, "move", 30.0)
+        after = changes[-1][1] if changes[-1][1] != changes[0][1] else None
+        self.assertIn("나가는 곡 끝", hint)
+        drawn = window._draft(changes[-1][1]) if after is not None else before
+        self.assertAlmostEqual(drawn.end - drawn.start, length, places=3)
+
+    def test_small_drags_land_between_beats_when_no_beat_is_near(self) -> None:
+        window, changes = self._editing()
+        self._drag(window, "end", -6.0, free=True)  # make room to move
+        start = window._draft(changes[-1][1]).start
+        pull = 12.0 * window.diagram.seconds_per_pixel()
+        self._drag(window, "move", -(pull + 0.1))  # past the downbeat's pull; beats are too dense to pull here
+        self.assertAlmostEqual(window._draft(changes[-1][1]).start, start - pull - 0.1, places=3)
+
+    def test_the_scale_holds_still_across_a_re_mix(self) -> None:
+        window, changes = self._editing()
+        shown = window.diagram._range()
+        self._drag(window, "end", -3.0, free=True)
+        tracks = _tracks()
+        settings = ENABLED.with_overrides({changes[-1][0]: changes[-1][1]})
+        window.panel.set_plan(compile_automix(tracks, _analyses(tracks), settings), tracks, state="final")
+        self.assertEqual(window.diagram._range(), shown)
+
+    def test_band_bars_move_freely_and_click_onto_beats(self) -> None:
+        from app.widgets.transition_editor import BandTimingEditor
+
+        editor = BandTimingEditor()
+        self.addCleanup(editor.deleteLater)
+        editor.resize(700, editor.minimumHeight())
+        editor.set_bands((((0.3, 0.5), (0.3, 0.5)),) * 3, 16.0, 0.5 / 16.0)
+        free = editor._progress_delta(40.0)
+        editor._drag = ("low", "out", "move", 0.0, editor.bands)
+        moved = editor._dragged(editor._x(0.0) + 40.0 - editor._x(0.0), False)
+        editor._drag = None
+        self.assertNotAlmostEqual(moved[0][0][0], 0.3 + free, places=4)  # pulled onto a beat
+        self.assertAlmostEqual(moved[0][0][0] % (0.5 / 16.0), 0.0, places=6)
+        editor._drag = ("low", "out", "move", 0.0, editor.bands)
+        moved = editor._dragged(40.0, True)
+        editor._drag = None
+        self.assertAlmostEqual(moved[0][0][0], 0.3 + free, places=6)
