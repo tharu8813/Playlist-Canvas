@@ -37,6 +37,7 @@ from app.services.app_settings_service import (
 )
 from app.utils.i18n import Language, Translator
 from app.services.video_encoder_service import AUTO_VIDEO_ENCODER
+from app.renderer.canvas_pipe import piped_export_supported
 from app.services.export_storage_service import estimate_export_storage, format_bytes
 from app.services.export_validation_service import EXPORT_FPS_OPTIONS
 from app.utils.time_format import format_clock
@@ -415,6 +416,7 @@ class ExportSettingsDialog(QDialog):
             int(data[0]), int(data[1]), fps, self.duration_seconds,
             self.crf_spin.value(), self.audio_bitrate_combo.currentText(),
             self.estimated_layer_count,
+            piped=piped_export_supported(),
         )
         korean = self.translator.is_korean
         self.storage_estimate_label.setText(

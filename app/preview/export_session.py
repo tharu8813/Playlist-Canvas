@@ -16,7 +16,14 @@ from app.models.playlist import PlaylistTrack
 from app.preview.export_canvas_capture import ExportCanvasCapturer
 from app.preview.export_plan import ExportPlan
 from app.renderer.export_timeline import ExportFrameSample
+from app.renderer.canvas_pipe import (
+    CanvasPipeCancelledError,
+    CanvasPipeError,
+    PipedCanvasStream,
+)
 from app.renderer.ffmpeg_renderer import (
+    PipedStaticOverlayLayer,
+    PipedVideoInput,
     PreparedStaticOverlayLayer,
     PreparedVideoInput,
     RenderCancelledError,
@@ -35,6 +42,14 @@ LOGGER = logging.getLogger(__name__)
 # Fraction of the export progress bar reserved for Canvas preparation; the
 # remainder belongs to FFmpeg encoding. Mirrors the main window constant.
 PREPARATION_PROGRESS_WEIGHT = 0.25
+
+# A live pipe with queued frames that FFmpeg has not read for this long is
+# treated as a stalled encoder; the caller falls back to intermediate files.
+PIPE_STALL_SECONDS = 120.0
+
+
+class FinalRenderStoppedError(RenderError):
+    """The final FFmpeg failed while the Canvas was still being captured."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,27 +120,59 @@ class ExportSession:
         self._sparse_invariant_stream_keys: set[str] = set()
         self._stream_wait_last_update: dict[str, float] = {}
         self._capturer: ExportCanvasCapturer | None = None
+        self._piped = False
+        self._pipes: dict[str, PipedCanvasStream] = {}
+        self._live_encoder_reached = False
+        self._encoder_reached_at: float | None = None
+        self._final_render_stopped: Callable[[], str | None] = lambda: None
 
     @property
     def capture_count(self) -> int:
         return self._capture_count
+
+    @property
+    def live_encoder_reached(self) -> bool:
+        """Whether the final FFmpeg opened at least one Canvas pipe."""
+        return self._live_encoder_reached or any(
+            pipe.connected for pipe in self._pipes.values()
+        )
 
     def cancel_streams(self) -> None:
         """Stop every active encoder and the PNG pipeline (cleanup on failure)."""
         for encoder in tuple(self._active_encoders.values()):
             encoder.cancel()
         self._active_encoders.clear()
+        for pipe in tuple(self._pipes.values()):
+            self._live_encoder_reached |= pipe.connected
+            pipe.cancel()
+        self._pipes.clear()
         self._staging.cancel_pipeline()
 
     # -- capture loop -----------------------------------------------------
 
     def run(self) -> ExportArtifacts:
         plan = self._plan
+        stream_specs, stream_keys = self._prepare_capture(piped=False)
+        if plan.use_streamed_visuals:
+            artifacts = self._run_streamed(stream_specs, stream_keys)
+        else:
+            artifacts = self._run_png(stream_keys)
+
+        self._finalize_progress(len(stream_keys))
+        self._log_partial_render_metrics()
+        if self._cancel.is_set():
+            raise RenderCancelledError("Export preparation was cancelled.")
+        return artifacts
+
+    def _prepare_capture(self, *, piped: bool) -> tuple[list, list[str]]:
+        """Create the capturer and coalesce every stream's sample schedule."""
+        plan = self._plan
+        self._piped = piped
         z_bands = plan.z_bands
         stream_timeline_samples = plan.stream_timeline_samples
         playlist_duration = plan.playlist_duration
 
-        stream_specs = self._build_stream_specs()
+        stream_specs = [] if piped else self._build_stream_specs()
         independent_capture_count = sum(
             len(samples) for samples in stream_timeline_samples.values()
         )
@@ -139,21 +186,26 @@ class ExportSession:
             z_bands,
             (
                 self._stage_frame
-                if plan.use_streamed_visuals
+                if plan.use_streamed_visuals or piped
                 else self._staging.stage_frame
             ),
             self._ensure_not_cancelled,
             self._after_capture,
-            retain_static_frames=not plan.use_streamed_visuals,
+            retain_static_frames=not (plan.use_streamed_visuals or piped),
             output_scale=plan.canvas_render_scale,
         )
         self._capturer = capturer
         self._invariant_stream_keys = capturer.invariant_stream_keys
+        # A live pipe gains nothing from repeating one image for the whole
+        # timeline, so piped exports keep every invariant stream as one PNG.
         self._sparse_invariant_stream_keys = (
             set(self._invariant_stream_keys)
-            if not plan.direct_final_stream else set()
+            if piped or not plan.direct_final_stream else set()
         )
-        if plan.use_streamed_visuals and self._sparse_invariant_stream_keys:
+        if (
+            (plan.use_streamed_visuals or piped)
+            and self._sparse_invariant_stream_keys
+        ):
             self._staging.start_pipeline(self._staging.queue_capacity)
             stream_specs = [
                 spec for spec in stream_specs
@@ -194,17 +246,7 @@ class ExportSession:
                 for key in stream_keys
             ),
         )
-
-        if plan.use_streamed_visuals:
-            artifacts = self._run_streamed(stream_specs, stream_keys)
-        else:
-            artifacts = self._run_png(stream_keys)
-
-        self._finalize_progress(len(stream_keys))
-        self._log_partial_render_metrics()
-        if self._cancel.is_set():
-            raise RenderCancelledError("Export preparation was cancelled.")
-        return artifacts
+        return stream_specs, stream_keys
 
     # -- streamed lossless path ----------------------------------------
 
@@ -381,6 +423,212 @@ class ExportSession:
         ]
         return ExportArtifacts(frames, static_layers)
 
+    # -- live piped path -----------------------------------------------
+
+    def run_piped(
+        self,
+        start_final_render: Callable[[ExportArtifacts], None],
+        final_render_stopped: Callable[[], str | None],
+    ) -> ExportArtifacts | None:
+        """Capture every stream straight into an already-running final FFmpeg.
+
+        Returns ``None`` without side effects beyond capturer setup when every
+        stream is invariant (nothing would be piped). Otherwise
+        ``start_final_render`` receives the pipe inputs as soon as each stream
+        has its first frame (which fixes its resolution), and capture
+        continues in timeline order while FFmpeg encodes. ``final_render_stopped``
+        returns an error message once the final render has failed.
+        """
+        plan = self._plan
+        if self._stream_root is None:
+            raise RenderError("Piped Canvas export needs a working folder.")
+        self._final_render_stopped = final_render_stopped
+        _specs, stream_keys = self._prepare_capture(piped=True)
+        piped_keys = [
+            key for key in stream_keys
+            if key not in self._sparse_invariant_stream_keys
+        ]
+        if not piped_keys:
+            if self._sparse_invariant_stream_keys:
+                self._staging.cancel_pipeline()
+            return None
+        samples_by_stream = plan.stream_timeline_samples
+        playlist_duration = plan.playlist_duration
+        pipe_root = self._stream_root / "pipes"
+        try:
+            for stream_key in piped_keys:
+                self._pipes[stream_key] = PipedCanvasStream(
+                    pipe_root,
+                    stream_key,
+                    self._settings.fps,
+                    preserve_alpha=stream_key != "base",
+                    queue_capacity=3 if stream_key == "base" else 2,
+                    producer_cancel_event=self._cancel,
+                    producer_wait_callback=self._pipe_wait,
+                )
+            LOGGER.info(
+                "Canvas live capture: piped=%s sparse_invariant=%d",
+                ",".join(piped_keys), len(self._sparse_invariant_stream_keys),
+            )
+            for stream_key in stream_keys:
+                if stream_key in self._sparse_invariant_stream_keys:
+                    self._capturer.capture_invariant_stream(
+                        samples_by_stream[stream_key][0],
+                        stream_key,
+                        playlist_duration,
+                    )
+            if self._sparse_invariant_stream_keys:
+                # The final FFmpeg reads these PNGs when it opens its inputs.
+                self._staging.finish_pipeline()
+            # One frame per pipe fixes every input's resolution before FFmpeg
+            # starts; each fits in its queue, so nothing can block yet.
+            pending: list[tuple[float, int, int, str, ExportFrameSample]] = []
+            for stream_order, stream_key in enumerate(piped_keys):
+                samples = samples_by_stream[stream_key]
+                self._capturer.capture_stream(samples[0], stream_key)
+                if len(samples) > 1:
+                    heappush(pending, (
+                        samples[1].timeline_seconds, stream_order, 1,
+                        stream_key, samples[1],
+                    ))
+            artifacts = self._piped_artifacts()
+            start_final_render(artifacts)
+            while pending:
+                (
+                    _timeline_seconds, stream_order, sample_index,
+                    stream_key, sample,
+                ) = heappop(pending)
+                self._capturer.capture_stream(sample, stream_key)
+                samples = samples_by_stream[stream_key]
+                next_index = sample_index + 1
+                if next_index < len(samples):
+                    next_sample = samples[next_index]
+                    heappush(pending, (
+                        next_sample.timeline_seconds, stream_order,
+                        next_index, stream_key, next_sample,
+                    ))
+            duration_tolerance = 1e-6 * max(1.0, playlist_duration)
+            for stream_key in piped_keys:
+                result = self._pipes[stream_key].finish()
+                self._live_encoder_reached |= self._pipes[stream_key].connected
+                self._pipes.pop(stream_key, None)
+                LOGGER.info(
+                    "Canvas pipe drained: key=%s frames=%d duration=%.3fs "
+                    "reader_closed_early=%s queue_peak=%d",
+                    stream_key, result.frame_count, result.duration_seconds,
+                    result.reader_closed_early, result.peak_buffered_frames,
+                )
+                if abs(result.duration_seconds - playlist_duration) > duration_tolerance:
+                    raise RenderError(
+                        "A streamed Canvas timeline does not match the playlist "
+                        f"duration (expected {playlist_duration:.6f}s, got "
+                        f"{result.duration_seconds:.6f}s)."
+                    )
+        except CanvasPipeCancelledError as error:
+            self.cancel_streams()
+            if self._cancel.is_set():
+                raise RenderCancelledError(
+                    "Export preparation was cancelled."
+                ) from error
+            raise CanvasPipeError(str(error)) from error
+        except CanvasPipeError:
+            self.cancel_streams()
+            raise
+        except Exception:
+            self.cancel_streams()
+            raise
+        self._log_partial_render_metrics()
+        if self._cancel.is_set():
+            raise RenderCancelledError("Export preparation was cancelled.")
+        return artifacts
+
+    def _piped_artifacts(self) -> ExportArtifacts:
+        plan = self._plan
+        duration = plan.playlist_duration
+
+        def piped_input(stream_key: str) -> PipedVideoInput:
+            pipe = self._pipes[stream_key]
+            return PipedVideoInput(
+                tuple(pipe.input_arguments()), duration,
+                pipe.width, pipe.height, self._settings.fps,
+            )
+
+        if "base" in self._sparse_invariant_stream_keys:
+            frames: list[RenderFrame] | PipedVideoInput = (
+                self._sparse_stream_frames["base"]
+            )
+        else:
+            frames = piped_input("base")
+        static_layers: list = []
+        for index, (z_min, _z_max) in enumerate(plan.z_bands[1:]):
+            stream_key = f"layer:{index}"
+            z_index = z_min if z_min is not None else -10_000.0
+            origin = self._capturer.stream_origin(stream_key)
+            if stream_key in self._sparse_invariant_stream_keys:
+                static_layers.append(StaticOverlayLayer(
+                    z_index, self._sparse_stream_frames[stream_key], *origin,
+                ))
+            else:
+                static_layers.append(PipedStaticOverlayLayer(
+                    z_index, piped_input(stream_key), *origin,
+                ))
+        return ExportArtifacts(frames, static_layers)
+
+    def _stage_piped_frame(
+        self, image: QImage, duration_seconds: float, stream_key: str,
+    ) -> RenderFrame:
+        pipe = self._pipes.get(stream_key)
+        if pipe is None:
+            raise RenderError("Invalid piped Canvas frame configuration.")
+        pipe.submit(image, duration_seconds)
+        return RenderFrame(Path(pipe.path), max(0.001, duration_seconds))
+
+    def _check_piped_state(self) -> None:
+        """Abort capture when the final render failed or stopped reading."""
+        if (
+            self._encoder_reached_at is None
+            and any(pipe.connected for pipe in self._pipes.values())
+        ):
+            self._live_encoder_reached = True
+            self._encoder_reached_at = monotonic()
+        failure = self._final_render_stopped()
+        if failure is not None:
+            raise FinalRenderStoppedError(failure)
+        if self._encoder_reached_at is None:
+            # FFmpeg has not opened its inputs yet (audio or visualizers are
+            # still being prepared); its own failure is reported above.
+            return
+        busy = [
+            pipe for pipe in self._pipes.values()
+            if pipe.started and not pipe.reader_closed and pipe.pending_frames > 0
+        ]
+        if not busy:
+            return
+        # Judge each blocked pipe on its own: another stream that is still
+        # being read must not hide one FFmpeg stopped reading (or never
+        # opened, measured from when FFmpeg reached its first pipe).
+        now = monotonic()
+        idle_seconds = max(
+            now - max(pipe.last_activity, self._encoder_reached_at)
+            for pipe in busy
+        )
+        if idle_seconds > PIPE_STALL_SECONDS:
+            raise CanvasPipeError(
+                "The final encoder stopped reading the Canvas for "
+                f"{idle_seconds:.0f}s (pending: "
+                + ", ".join(
+                    f"{pipe.stream_key}={pipe.pending_frames}" for pipe in busy
+                )
+                + ")."
+            )
+
+    def _pipe_wait(self) -> None:
+        """Producer wait callback while a pipe queue is full."""
+        self._pump_ui()
+        if self._cancel.is_set():
+            return
+        self._check_piped_state()
+
     # -- PNG fallback path -------------------------------------------
 
     def _run_png(self, stream_keys: list[str]) -> ExportArtifacts:
@@ -443,7 +691,7 @@ class ExportSession:
         # CPU-only intermediate encoder. Preserve the single lossless image and
         # duration; the final graph applies the output FPS.
         if (
-            self._plan.use_streamed_visuals
+            (self._plan.use_streamed_visuals or self._piped)
             and stream_key in self._sparse_invariant_stream_keys
         ):
             rendered = self._staging.stage_frame(image, duration_seconds, stream_key)
@@ -454,6 +702,8 @@ class ExportSession:
     def _stage_streamed_frame(
         self, image: QImage, duration_seconds: float, stream_key: str,
     ) -> RenderFrame:
+        if self._piped:
+            return self._stage_piped_frame(image, duration_seconds, stream_key)
         encoder = self._active_encoders.get(stream_key)
         if encoder is None:
             raise RenderError("Invalid streamed Canvas frame configuration.")
@@ -470,6 +720,15 @@ class ExportSession:
     def _after_capture(self, track_number: int, _stream_key: str) -> None:
         """Capturer callback after each staged Canvas state."""
         self._capture_count += 1
+        if self._piped:
+            # The final encoder reports the combined progress; keep the UI
+            # responsive and notice a failed encoder between captures.
+            if self._capture_count % 4 == 0:
+                self._pump_ui()
+            self._check_piped_state()
+            if self._cancel.is_set():
+                raise RenderCancelledError("Export preparation was cancelled.")
+            return
         completed = min(self._capture_count, self._total_captures)
         if completed % 4 != 0 and completed != self._total_captures:
             return

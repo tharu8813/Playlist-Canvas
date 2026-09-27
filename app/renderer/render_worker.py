@@ -17,6 +17,8 @@ from app.renderer.ffmpeg_renderer import (
     RenderError,
     RenderResult,
     RenderFrame,
+    PipedStaticOverlayLayer,
+    PipedVideoInput,
     PreparedVideoInput,
     RenderSettings,
     PreparedStaticOverlayLayer,
@@ -40,11 +42,14 @@ class RenderWorker(QThread):
     storage_path_changed = Signal(str, object)
 
     def __init__(self, renderer: FFmpegRenderer,
-                 image: QImage | list[QImage] | list[RenderFrame] | PreparedVideoInput,
+                 image: QImage | list[QImage] | list[RenderFrame] | PreparedVideoInput
+                 | PipedVideoInput,
                  tracks: list[PlaylistTrack], output_path: str | Path,
                  settings: RenderSettings | None = None,
                  visualizers: list[VisualizerOverlay] | None = None,
-                 static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer] | None = None,
+                 static_layers: list[
+                     StaticOverlayLayer | PreparedStaticOverlayLayer | PipedStaticOverlayLayer
+                 ] | None = None,
                  video_clips: list[VideoClipOverlay] | None = None,
                  metadata: ExportMetadata | None = None,
                  transition_mode: str = "none",
@@ -58,7 +63,7 @@ class RenderWorker(QThread):
         self.automix_settings = automix_settings
         self.compiled_plan = compiled_plan
         self.prepared_audio_path = prepared_audio_path
-        if isinstance(image, PreparedVideoInput):
+        if isinstance(image, (PreparedVideoInput, PipedVideoInput)):
             self.image = image
         elif isinstance(image, list):
             self.image = [

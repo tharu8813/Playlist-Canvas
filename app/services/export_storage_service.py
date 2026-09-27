@@ -60,6 +60,7 @@ def estimate_export_storage(
     crf: int,
     audio_bitrate: str,
     layer_count: int = 1,
+    piped: bool = False,
 ) -> ExportStorageEstimate:
     """Estimate working and result sizes without pretending CRF is exact.
 
@@ -67,6 +68,8 @@ def estimate_export_storage(
     deliberately expressed as a range.  Temporary estimates use the same
     lossless-intermediate assumptions as the export preflight and include room
     for audio normalization, manifests and the final file being written.
+    ``piped`` exports capture the Canvas straight into the final encoder, so
+    only a few still images per layer are staged.
     """
     width = max(2, int(width))
     height = max(2, int(height))
@@ -77,7 +80,10 @@ def estimate_export_storage(
 
     # Canvas lossless streams/PNGs typically occupy far less than raw RGB, but
     # highly textured images and several independent layers can be larger.
-    visual_files = int(raw_rate * seconds * 0.40 * layers)
+    visual_files = (
+        int(width * height * 3 * 0.40 * 4 * layers)
+        if piped else int(raw_rate * seconds * 0.40 * layers)
+    )
     audio_work = int(seconds * (1_536_000 / 8))  # stereo PCM-like safety budget
     processing_files = max(8 * MIB, int(audio_work * 1.25)) if seconds else 0
 

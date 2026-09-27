@@ -3192,9 +3192,11 @@ class MainWindow(QMainWindow):
     def _prepare_export_staging_space(
         self, render_settings: RenderSettings, duration_seconds: float,
         layer_count: int, use_streamed_visuals: bool, korean: bool,
+        piped_visuals: bool = False,
     ) -> bool:
         return self.export_orchestrator.prepare_staging_space(
             render_settings, duration_seconds, layer_count, use_streamed_visuals, korean,
+            piped_visuals=piped_visuals,
         )
 
     def _export_video(self) -> None:

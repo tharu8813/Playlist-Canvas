@@ -682,6 +682,7 @@ class ExportProgressDialog(QDialog):
             "Combining audio": "audio",
             "Preparing visualizers": "effects",
             "Encoding video": "encode",
+            "Capturing and encoding": "encode",
             "Finalizing export": "encode",
             "Complete": "complete",
         }.get(stage, "visuals")
@@ -766,6 +767,7 @@ class ExportProgressDialog(QDialog):
             "Preparing visualizers": "음악 반응 효과 준비",
             "Preparing visual layers": "추가 화면 준비",
             "Encoding video": "최종 영상 만들기",
+            "Capturing and encoding": "화면 캡처와 영상 만들기",
             "Finalizing export": "내보내기 마무리",
             "Preparing download": "다운로드 준비",
             "Downloading FFmpeg": "FFmpeg 다운로드",
@@ -842,6 +844,8 @@ class ExportProgressDialog(QDialog):
             "Analyzing stereo level meter channels": "스테레오 레벨 미터 분석 중",
             "Visualizer frames complete": "비주얼라이저 프레임 준비 완료",
             "Rendering the final video": "최종 영상 렌더링 중",
+            "Capturing the Canvas into the final video":
+                "화면을 캡처하면서 바로 최종 영상으로 만드는 중",
             "Muxing prepared video and audio": "준비된 영상과 오디오를 결합하는 중",
             "Finishing the MP4 file": "마지막 프레임을 정리하고 MP4 파일을 마무리하는 중",
             "Audio normalization complete": "오디오 정규화 완료",
@@ -921,6 +925,10 @@ class ExportProgressDialog(QDialog):
         if message.startswith("Inserted ") and message.endswith(" of silence"):
             duration = message.removeprefix("Inserted ").removesuffix(" of silence")
             return f"무음 구간 {duration} 추가"
+        if message.startswith("Capturing and encoding ") and " / " in message:
+            return message.replace(
+                "Capturing and encoding ", "화면 캡처·영상 인코딩 중 · ", 1,
+            )
         if message.startswith("Encoding ") and " / " in message:
             return message.replace("Encoding ", "영상 인코딩 중 · ", 1)
         if message.startswith("Muxing ") and " / " in message:
