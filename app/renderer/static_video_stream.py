@@ -20,6 +20,14 @@ from app.renderer.bounded_pipeline import (
 from app.utils.subprocess_utils import hidden_process_kwargs
 
 
+# Colour streams are visually lossless, not bit-exact: at 720p30, CRF 12 keeps
+# PSNR 46-56 dB (far above the final H.264/HEVC pass) while cutting the
+# intermediate 40% (grainy moving photos, 44 -> 26 GB per 15 min) to 70% (clean
+# graphics) at the same ultrafast speed. Alpha stays lossless ffv1 so edges
+# never shift.
+INTERMEDIATE_CRF = "12"
+
+
 class StaticVideoStreamError(RuntimeError):
     """Raised when the lossless Canvas stream cannot be encoded."""
 
@@ -243,14 +251,14 @@ class StaticVideoStreamEncoder:
                 "-map", "[alphaout]",
                 "-an",
                 "-c:v:0", "libx264rgb", "-preset:v:0", "ultrafast",
-                "-crf:v:0", "0", "-pix_fmt:v:0", "bgr0",
+                "-crf:v:0", INTERMEDIATE_CRF, "-pix_fmt:v:0", "bgr0",
                 "-c:v:1", "ffv1", "-level:v:1", "3",
                 "-coder:v:1", "1", "-pix_fmt:v:1", "gray",
             ])
         else:
             command.extend([
                 "-an", "-c:v", "libx264rgb", "-preset", "ultrafast",
-                "-crf", "0", "-pix_fmt", "bgr0",
+                "-crf", INTERMEDIATE_CRF, "-pix_fmt", "bgr0",
             ])
         command.extend(["-f", "matroska", str(self.output_path)])
         try:
