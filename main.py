@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 import shutil
+import threading
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, QSettings, QStandardPaths, QTimer
@@ -109,6 +110,9 @@ def main() -> int:
     splash.show()
     splash.set_status("프로그램을 불러오는 중…", "Loading…")
     install_exception_hook()
+    from app.utils.temp_cleanup import sweep_stale_temp_dirs
+
+    threading.Thread(target=sweep_stale_temp_dirs, daemon=True).start()
     from app.ui.main_window import MainWindow
 
     splash.set_status("작업 공간을 준비하는 중…", "Preparing the workspace…")

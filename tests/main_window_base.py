@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -39,6 +40,7 @@ class MainWindowTestCase(unittest.TestCase):
             os.environ.pop("PLAYLIST_CANVAS_PRESET_DIR", None)
         else:
             os.environ["PLAYLIST_CANVAS_PRESET_DIR"] = cls._prev_preset_dir
+        shutil.rmtree(cls._preset_dir, ignore_errors=True)
 
     def setUp(self) -> None:
         # Main-window UI assertions use the Korean baseline unless a test opts

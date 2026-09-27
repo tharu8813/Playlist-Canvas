@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import shutil
 from tempfile import mkdtemp
 
 from PySide6.QtCore import QCoreApplication, QEvent, QStandardPaths
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import QApplication
 
 
 _TEST_LOCAL_APP_DATA = mkdtemp(prefix="playlist-canvas-tests-")
+atexit.register(shutil.rmtree, _TEST_LOCAL_APP_DATA, ignore_errors=True)
 os.environ.setdefault("LOCALAPPDATA", _TEST_LOCAL_APP_DATA)
 QStandardPaths.setTestModeEnabled(True)
 

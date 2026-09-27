@@ -1310,11 +1310,11 @@ class FFmpegRenderer:
         )
         if cancel_event.is_set():
             raise RenderCancelledError("Rendering was cancelled.")
-        if blended_segments is not None:
-            # The float mix intermediate is ~23 MB per minute and nothing reads it
-            # again; free it now instead of when the whole temp folder goes.
-            for segment in segments:
-                segment.unlink(missing_ok=True)
+        # The PCM/float intermediates (~11-23 MB per minute, one file per track in
+        # sequential mode) are never read again; free them now instead of holding
+        # them until the whole temp folder goes at the end of the export.
+        for segment in (*segments, concat_path):
+            segment.unlink(missing_ok=True)
         if plan_callback is not None:
             plan_callback(resolved_plan)
         return audio_path
