@@ -527,12 +527,17 @@ class MainWindowExportTests(MainWindowTestCase):
         )), 2)
 
     def test_export_without_ffmpeg_opens_the_ffmpeg_setup_page(self) -> None:
+        self.window.playlist_service.add_tracks([
+            PlaylistTrack("C:/music/song.mp3", "Song", duration_seconds=120.0),
+        ])
         with (
             patch(
                 "app.controllers.export_controller.FFmpegRenderer",
                 side_effect=FFmpegNotFoundError("missing"),
             ),
-            patch.object(QMessageBox, "warning") as warning,
+            patch.object(
+                QMessageBox, "warning", return_value=QMessageBox.StandardButton.Ok,
+            ) as warning,
             patch.object(self.window, "_show_settings") as show_settings,
         ):
             self.window._export_video()

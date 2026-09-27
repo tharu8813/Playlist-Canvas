@@ -865,6 +865,15 @@ class ExportOrchestrator:
         """Render the static Canvas and enabled playlist tracks to an MP4 file."""
         window = self.window
         korean = window.translator.is_korean
+        # Offer the empty-playlist fix before FFmpeg setup, so a new project
+        # on a machine without FFmpeg still gets the "add music" recovery.
+        active_tracks = [track for track in window.playlist_service.tracks if track.enabled]
+        if not active_tracks:
+            if not window._offer_music_for_empty_playlist(
+                "영상 내보내기" if korean else "Export video"
+            ):
+                return
+            active_tracks = [track for track in window.playlist_service.tracks if track.enabled]
         try:
             configured_path = window.settings_service.current.ffmpeg_path or None
             renderer = FFmpegRenderer(configured_path)
@@ -885,17 +894,10 @@ class ExportOrchestrator:
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Ok,
             )
-            if answer == QMessageBox.StandardButton.Cancel:
-                return
-            window._show_settings(focus_ffmpeg=True)
+            # Closing the box with X returns NoButton: treat it as Cancel.
+            if answer == QMessageBox.StandardButton.Ok:
+                window._show_settings(focus_ffmpeg=True)
             return
-        active_tracks = [track for track in window.playlist_service.tracks if track.enabled]
-        if not active_tracks:
-            if not window._offer_music_for_empty_playlist(
-                "영상 내보내기" if korean else "Export video"
-            ):
-                return
-            active_tracks = [track for track in window.playlist_service.tracks if track.enabled]
         invalid_track = next(
             (track for track in active_tracks if track.duration_seconds <= 0.0), None
         )

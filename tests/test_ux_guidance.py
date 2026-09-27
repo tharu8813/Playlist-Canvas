@@ -71,20 +71,47 @@ class UxGuidanceTests(MainWindowTestCase):
         self.assertEqual(warning.call_args.args[1], "영상 내보내기")
         settings_dialog.assert_not_called()
 
-    def test_ffmpeg_prompt_can_be_cancelled(self) -> None:
+    def test_empty_export_offers_music_before_ffmpeg_setup(self) -> None:
         from app.renderer.ffmpeg_renderer import FFmpegNotFoundError
 
         with (
             patch(
                 "app.controllers.export_controller.FFmpegRenderer",
                 side_effect=FFmpegNotFoundError("missing"),
-            ),
-            patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Cancel),
-            patch.object(self.window, "_show_settings") as show_settings,
+            ) as renderer,
+            patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.No) as warning,
         ):
             self.window._export_video()
 
-        show_settings.assert_not_called()
+        warning.assert_called_once()
+        self.assertIn("곡이 없습니다", warning.call_args.args[2])
+        renderer.assert_not_called()
+
+    def test_ffmpeg_prompt_cancel_or_close_does_not_open_settings(self) -> None:
+        from app.renderer.ffmpeg_renderer import FFmpegNotFoundError
+
+        self.window.playlist_service.add_tracks([self._track()])
+        # NoButton is what closing the message box with X returns.
+        for answer in (QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.NoButton):
+            with (
+                patch(
+                    "app.controllers.export_controller.FFmpegRenderer",
+                    side_effect=FFmpegNotFoundError("missing"),
+                ),
+                patch.object(QMessageBox, "warning", return_value=answer),
+                patch.object(self.window, "_show_settings") as show_settings,
+            ):
+                self.window._export_video()
+            show_settings.assert_not_called()
+
+    def test_mixed_audio_and_playlist_import_reports_every_added_song(self) -> None:
+        with (
+            patch.object(self.window, "_import_audio_files", return_value=(2, [], [])),
+            patch.object(self.window, "_import_m3u_playlists", return_value=(3, [], [])),
+        ):
+            self.window._add_music_paths([Path("C:/music/a.mp3"), Path("C:/music/list.m3u8")])
+
+        self.assertIn("5곡", self.window.statusBar().currentMessage())
 
     # -- save state, window title, feedback ------------------------------
 

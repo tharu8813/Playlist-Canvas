@@ -2575,7 +2575,15 @@ class MainWindow(QMainWindow):
         self.project_content_service.add_paths([*accepted, *playlist_accepted])
         self._notify_sidecar_lyrics([*notes, *playlist_notes])
         korean = self.translator.is_korean
-        if playlist_count:
+        if playlist_count and audio_count:
+            total = audio_count + playlist_count
+            self.statusBar().showMessage(
+                f"음악 {total}곡을 추가했습니다 (플레이리스트 파일에서 {playlist_count}곡)."
+                if korean else
+                f"Added {total} song(s) ({playlist_count} from the playlist file).",
+                7000,
+            )
+        elif playlist_count:
             self.statusBar().showMessage(
                 f"플레이리스트 파일에서 음악 {playlist_count}곡을 추가했습니다."
                 if korean else
