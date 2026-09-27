@@ -48,7 +48,7 @@ from app.automix.candidates import (
 )
 from app.automix.compatibility import evaluate_compatibility
 from app.automix.models import TrackAnalysis
-from app.automix.overrides import STYLE_AUTO, STYLE_CUT, STYLE_LEGACY, TransitionOverride
+from app.automix.overrides import STYLE_AUTO, STYLE_CUT, STYLE_EQ, STYLE_LEGACY, TransitionOverride
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
 from app.automix.transition_style import describe_transition, select_transition_dsp
@@ -445,8 +445,16 @@ def _plan_manual(
             handoff = handoff if handoff is not None else decision.vocal_handoff
         else:
             dsp = TransitionDsp.SHORT_FADE if duration < 4.0 else None
+    elif override.style == STYLE_EQ:
+        # Hand-set band timing renders through the band splitter; the windows replace the style's.
+        from app.automix.renderer import default_eq_bands
+
+        dsp = TransitionDsp.BASS_SWAP
+        band_windows = override.eq_bands if override.eq_bands is not None else default_eq_bands()
     else:
         dsp = None if override.style == STYLE_LEGACY else TransitionDsp(override.style)
+    if override.style != STYLE_EQ:
+        band_windows = None
     if dsp is not TransitionDsp.VOCAL_SAFE_EQ:
         handoff = None
     # BEAT_MATCH without a dsp renders the bass swap; a plain crossfade must stay EQUAL_POWER.
@@ -478,11 +486,12 @@ def _plan_manual(
         ("incoming_key", incoming_analysis.key if incoming_analysis is not None else None),
         *metrics,
     )
-    style_name = dsp.value if dsp is not None else "legacy"
+    style_name = STYLE_EQ if band_windows is not None else dsp.value if dsp is not None else "legacy"
     transition = AudioRenderTransition(
         clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
         timeline_start=timeline_start, duration=duration, type=transition_type,
         dsp=dsp, dsp_reasons=(f"* manual: {style_name}", *reasons[1:]), details=details, vocal_handoff=handoff,
+        band_windows=band_windows,
     )
     if log_diagnostics:
         LOGGER.info("AutoMix transition (manual): %s", describe_transition(

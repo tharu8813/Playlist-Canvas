@@ -139,6 +139,10 @@ class AudioRenderTransition:
     vocal_handoff: float | None = None
     """VOCAL_SAFE_EQ: where (0..1 of the window) the mid band hands over;
     ``None`` is the style's default. Chosen by the planner, rendered as is."""
+    band_windows: tuple[tuple[tuple[float, float], tuple[float, float]], ...] | None = None
+    """A band style's fade windows set by hand (low, mid, high; each
+    ((outgoing start, end), (incoming start, end)) as 0..1 of the window),
+    used instead of the style's BAND_ENVELOPES. ``None``: the style's own."""
 
 
 @dataclass(frozen=True, slots=True)

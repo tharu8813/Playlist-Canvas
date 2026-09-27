@@ -49,6 +49,8 @@ _STYLE_DESCRIPTIONS = {
                      "A DJ-style sweep: a highpass lifts the outgoing lows away while the incoming track fills in from the highs."),
     "drop_in": ("나가는 곡의 여운이 이미 잦아드는 중이라, 들어오는 곡을 처음부터 제 음량으로 시작합니다.",
                 "The outgoing tail is already fading, so the incoming track starts at full level over it."),
+    "eq": ("저음·중음·고음을 각각 언제 넘길지 직접 정한 전환입니다.",
+           "Hand-set band timing: when the lows, mids and highs each change hands."),
     "legacy": ("두 곡의 음량을 전체 대역에서 교차하는 기본 크로스페이드입니다.",
                "A plain crossfade of the full signal."),
     "sequential": ("섞지 않고 앞 곡이 끝나자마자 다음 곡을 이어 재생합니다.",
@@ -103,7 +105,7 @@ def mix_lanes(transition: AudioRenderTransition) -> list[MixLane]:
         }
         lanes = []
         for band in ("high", "mid", "low"):
-            out_window, in_window = _band_envelope(style, band, transition.vocal_handoff)
+            out_window, in_window = _band_envelope(style, band, transition.vocal_handoff, transition.band_windows)
             korean, english = names[band]
             lanes.append(MixLane(
                 band, f"{korean}\n{ranges[band]}", f"{english}\n{ranges[band]}",
@@ -349,6 +351,11 @@ class TransitionDiagram(QWidget):
         """Timeline seconds of each clip's bars (outgoing, incoming), drawn as ticks while editing."""
         self._drag: tuple[str, float] | None = None
         self._frozen_range: tuple[float, float] | None = None
+        self._view: tuple[float, float] | None = None
+        """The shown seconds; while editing it holds still across re-mixes (see set_junction)."""
+        self._view_pair: tuple[str, str] | None = None
+        self.drag_hint = ""
+        """Shown over the graph during a drag: the value being set, and why it stops at a limit."""
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_height()
@@ -356,6 +363,7 @@ class TransitionDiagram(QWidget):
     def set_junction(self, junction: Junction | None) -> None:
         self.junction = junction
         self.lanes = mix_lanes(junction.transition) if junction and junction.transition else []
+        self._update_view()
         self._update_height()
         self.update()
 
@@ -367,10 +375,37 @@ class TransitionDiagram(QWidget):
     def sizeHint(self) -> QSize:
         return QSize(720, self.minimumHeight())
 
+    @property
+    def dragging(self) -> bool:
+        return self._drag is not None
+
+    def _update_view(self) -> None:
+        """Pick the shown range. While a manual junction is edited the scale holds still,
+        so what the user just dragged stays under the pointer after the re-mix; it only
+        widens to fit, and starts over for another junction or a much shorter overlap."""
+        junction = self.junction
+        if junction is None:
+            self._view, self._view_pair = None, None
+            return
+        natural = diagram_range(junction)
+        pair = (junction.outgoing.track_id, junction.incoming.track_id)
+        view = self._view
+        if self.editable and view is not None and pair == self._view_pair:
+            widened = (min(view[0], natural[0]), max(view[1], natural[1]))
+            if (natural[1] - natural[0]) >= 0.4 * (widened[1] - widened[0]):
+                natural = widened
+        self._view, self._view_pair = natural, pair
+
     def _range(self) -> tuple[float, float]:
         if self._frozen_range is not None:  # the scale must not move under a drag
             return self._frozen_range
+        if self._view is not None:
+            return self._view
         return diagram_range(self.junction) if self.junction else (0.0, 1.0)
+
+    def seconds_per_pixel(self) -> float:
+        start, end = self._range()
+        return (end - start) / max(1.0, self.width() - self.LABEL_WIDTH - 14.0)
 
     def _x(self, seconds: float) -> float:
         start, end = self._range()
@@ -493,6 +528,15 @@ class TransitionDiagram(QWidget):
             rows_end[row] = label_left + width
             painter.setPen(color if color != muted else text_color)
             painter.drawText(QRectF(label_left, 4 + row * 17, width, 16), Qt.AlignmentFlag.AlignCenter, label)
+        if self._drag is not None and self.drag_hint:
+            metrics = painter.fontMetrics()
+            width = metrics.horizontalAdvance(self.drag_hint) + 16
+            box = QRectF(plot_right - width, 2, width, 20)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(20, 20, 24, 215))
+            painter.drawRoundedRect(box, 5, 5)
+            painter.setPen(QColor("#FDE68A"))
+            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, self.drag_hint)
         if start <= self.playhead <= end:
             x = self._x(self.playhead)
             painter.setPen(QPen(PLAYHEAD_COLOR, 2))
@@ -569,7 +613,7 @@ class TransitionDiagram(QWidget):
             clip = junction.incoming
             if self._x(clip.timeline_start) - 2 <= x <= self._x(clip.timeline_end) + 2:
                 return "incoming"
-        if left <= x <= right:
+        if left <= x <= right and y <= incoming_top + self.CLIP_LANE + 3:
             return "move"
         return None
 
@@ -622,6 +666,7 @@ class TransitionDiagram(QWidget):
         if self._drag is not None:
             self._drag = None
             self._frozen_range = None
+            self.drag_hint = ""
             self._update_cursor(event.position().x(), event.position().y())
             self.drag_finished.emit()
             self.update()
@@ -1235,9 +1280,12 @@ class TransitionInspectorWindow(QDialog):
         junction = self.junction
         manual = self._is_manual(self._selected)
         drawn = self._drafts.get(self._pair(self._selected), junction) if manual else junction
-        self.diagram.editable = manual
-        self.diagram.draft = drawn is not junction
-        self.diagram.set_junction(drawn)
+        if self.diagram.dragging:  # a re-mix landed mid-drag: keep drawing the drag
+            drawn = self.diagram.junction
+        else:
+            self.diagram.editable = manual
+            self.diagram.draft = drawn is not junction
+            self.diagram.set_junction(drawn)
         has_junction = junction is not None and 0 <= self._selected < len(rows)
         self._show_editing(has_junction and rows[self._selected].get("type") != "gap", manual, drawn)
         for widget in (self.listen_button, self.jump_button, self.loop_check, self.details_button, self.diagram):
@@ -1518,6 +1566,9 @@ class TransitionInspectorWindow(QDialog):
         tracks = context.tracks if context is not None else {}
         durations = tuple(tracks[clip.track_id].duration_seconds if clip.track_id in tracks else clip.source_out
                           for clip in (drawn.outgoing, drawn.incoming))
+        from app.automix.renderer import band_windows_of
+
+        self.editor.set_current_bands(band_windows_of(drawn.transition) if drawn.transition is not None else None)
         self.editor.set_override(self._overrides.get(self._pair(self._selected)), (outgoing, incoming), durations)
 
         def marks(clip: AudioRenderClip, analysis) -> tuple[float, ...]:
@@ -1588,39 +1639,81 @@ class TransitionInspectorWindow(QDialog):
         self._drag_override = None
 
     def _drag_moved(self, kind: str, delta: float, free: bool) -> None:
-        from app.widgets.transition_editor import MIN_EDIT_SECONDS, beat_grid, snap, snap_length
+        """Re-plan the dragged junction: the part under the pointer follows it, clicks onto
+        nearby bars and beats (not with Shift), and stops at what the songs allow, saying so."""
         from app.automix.overrides import MAX_DURATION_SECONDS
+        from app.widgets.transition_editor import MIN_EDIT_SECONDS, magnet, ramp_floor, snap_length
 
         if self._drag_base is None:
             return
         base, drawn = self._drag_base
+        korean = self._korean()
         context = self._context()
         analyses = context.analyses if context is not None else {}
         tracks = context.tracks if context is not None else {}
         outgoing_analysis = analyses.get(drawn.outgoing.track_id)
         incoming_analysis = analyses.get(drawn.incoming.track_id)
         snapping = self.editor.snapping and not free
+        tolerance = 12.0 * self.diagram.seconds_per_pixel()  # a bar or beat pulls from 12 px away
         outgoing_track = tracks.get(drawn.outgoing.track_id)
+        incoming_track = tracks.get(drawn.incoming.track_id)
         head = replace(drawn.outgoing, source_out=max(drawn.outgoing.source_out,
                                                       outgoing_track.duration_seconds if outgoing_track else 0.0))
+        incoming_length = (incoming_track.duration_seconds if incoming_track is not None
+                           else drawn.incoming.source_out)
+        floor = head.timeline_at(ramp_floor(self.junctions, self._selected)) if self.junctions else head.timeline_start
+        length = drawn.end - drawn.start
+        limit = ""
         changes: dict[str, float] = {}
         if kind in ("move", "start"):
-            cue = head.source_at(drawn.start + delta)
+            start = drawn.start + delta
             if snapping:
-                cue = snap(cue, beat_grid(outgoing_analysis))
-            changes["outgoing_cue"] = max(0.0, cue)
-            if kind == "start" and drawn.end > drawn.start:
-                changes["duration"] = drawn.end - head.timeline_at(cue)
+                start = head.timeline_at(magnet(head.source_at(start), outgoing_analysis, tolerance))
+            latest = (head.timeline_end - length if kind == "move" else drawn.end - MIN_EDIT_SECONDS)
+            if start > latest:
+                start, limit = latest, ("나가는 곡 끝" if korean else "outgoing song ends")
+            if start < floor:
+                start, limit = floor, ("앞 전환 끝" if korean else "previous transition")
+            if kind == "start" and drawn.end - start > MAX_DURATION_SECONDS:
+                start, limit = drawn.end - MAX_DURATION_SECONDS, ("최대 60초" if korean else "60 s max")
+            changes["outgoing_cue"] = max(0.0, head.source_at(start))
+            changes["duration"] = length if kind == "move" else drawn.end - start
+            label = "믹스 시작" if korean else "Mix starts"
+            hint = f"{label} {_clock(start, precise=True)} · {changes['duration']:.1f}s"
         elif kind == "end":
-            length = base.duration + delta
-            changes["duration"] = snap_length(length, incoming_analysis) if snapping else length
-        elif kind == "incoming":
-            cue = max(0.0, base.incoming_cue - delta)
+            new_length = length + delta
             if snapping:
-                cue = snap(cue, (0.0, *beat_grid(incoming_analysis)))
+                new_length = snap_length(new_length, incoming_analysis, tolerance)
+            longest = min(MAX_DURATION_SECONDS, head.timeline_end - drawn.start,
+                          incoming_length - base.incoming_cue)
+            if new_length > longest:
+                new_length = longest
+                which = (0 if longest >= MAX_DURATION_SECONDS - 1e-6
+                         else 1 if longest >= head.timeline_end - drawn.start - 1e-6 else 2)
+                limit = (("최대 60초", "나가는 곡 끝", "들어오는 곡 끝") if korean
+                         else ("60 s max", "outgoing song ends", "incoming song ends"))[which]
+            if new_length < MIN_EDIT_SECONDS:
+                new_length, limit = MIN_EDIT_SECONDS, ("최소 길이" if korean else "shortest")
+            changes["duration"] = new_length
+            hint = f"{'겹침' if korean else 'Overlap'} {new_length:.1f}s"
+        else:  # "incoming": slide the incoming song under its window (skip or keep its intro)
+            cue = base.incoming_cue - delta
+            if snapping:
+                cue = magnet(cue, incoming_analysis, tolerance)
+                if abs(cue) <= tolerance:
+                    cue = 0.0
+            latest = max(0.0, incoming_length - length)
+            if cue < 0.0:
+                cue, limit = 0.0, ("곡의 맨 앞" if korean else "start of the song")
+            elif cue > latest:
+                cue, limit = latest, ("들어오는 곡 끝" if korean else "incoming song ends")
             changes["incoming_cue"] = cue
+            hint = f"{'들어오는 곡' if korean else 'Incoming from'} {_clock(cue, precise=True)}"
         if "duration" in changes:
             changes["duration"] = min(MAX_DURATION_SECONDS, max(MIN_EDIT_SECONDS, changes["duration"]))
+        if limit:
+            hint += f"  ▸ {limit}에서 멈춤" if korean else f"  ▸ stops at {limit}"
+        self.diagram.drag_hint = hint
         try:
             override = replace(base, **changes)
         except ValueError:
