@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from app.automix.models import TrackAnalysis
 from app.automix.overrides import (
-    MANUAL_STYLES, MAX_DURATION_SECONDS, STYLE_AUTO, TransitionOverride, pair_key,
+    MANUAL_STYLES, MAX_DURATION_SECONDS, STYLE_AUTO, STYLE_CUT, TransitionOverride, pair_key,
 )
 from app.automix.structure.models import TrackStructureAnalysis
 from app.models.playlist import PlaylistTrack
@@ -78,11 +78,13 @@ def override_from_junction(junction: Junction) -> TransitionOverride:
             style=STYLE_AUTO,
             tempo_match=isinstance(rate, (int, float)) and abs(float(rate) - 1.0) > 1e-9,
         )
-    outgoing = junction.outgoing
+    # No overlap now (an automatic cut or back-to-back junction): keep that exact
+    # boundary as a manual cut; picking a style then opens an 8 s overlap there.
     return TransitionOverride(
-        outgoing_cue=max(outgoing.source_in, outgoing.source_out - DEFAULT_MANUAL_SECONDS),
+        outgoing_cue=max(0.0, float(junction.outgoing.source_out)),
         incoming_cue=max(0.0, float(junction.incoming.source_in)),
         duration=DEFAULT_MANUAL_SECONDS,
+        style=STYLE_CUT,
     )
 
 

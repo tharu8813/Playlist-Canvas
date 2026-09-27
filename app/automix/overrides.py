@@ -107,11 +107,15 @@ def parse_overrides(data: object) -> dict[str, TransitionOverride]:
         return {}
     parsed: dict[str, TransitionOverride] = {}
     for key, value in list(data.items())[:MAX_OVERRIDES]:
-        if not isinstance(key, str) or key.count(">") != 1 or not all(key.split(">")):
+        # Keys are only ever compared whole (settings.override_for builds the
+        # same pair_key), so a track id that itself contains ">" is fine.
+        if not isinstance(key, str) or not any(
+            key[:index] and key[index + 1:] for index, char in enumerate(key) if char == ">"
+        ):
             continue
         try:
             parsed[key] = TransitionOverride.from_dict(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
     return parsed
 

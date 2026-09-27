@@ -47,8 +47,10 @@ class OverrideStorageTests(unittest.TestCase):
             "no-separator": good.to_dict(),
             "b>c": {"outgoing_cue": -3},
             "c>d": {"outgoing_cue": 10.0, "style": "reverb"},
+            "d>e": {"outgoing_cue": 10 ** 400},
+            "x>y>z": good.to_dict(),
         })
-        self.assertEqual(parsed, {"a>b": good})
+        self.assertEqual(parsed, {"a>b": good, "x>y>z": good})
         self.assertEqual(parse_overrides(serialize_overrides(parsed)), parsed)
 
     def test_project_file_keeps_manual_junctions(self) -> None:
@@ -170,6 +172,16 @@ class EditorHelperTests(unittest.TestCase):
         again = plan_junctions(manual)[0]
         self.assertAlmostEqual(again.start, junction.start, places=4)
         self.assertAlmostEqual(again.end, junction.end, places=4)
+
+    def test_prefill_keeps_a_junction_without_overlap_as_it_is(self) -> None:
+        tracks = _tracks()
+        plan = compile_automix(tracks, {}, ENABLED)  # no analysis: the songs play back to back
+        junction = plan_junctions(plan)[0]
+        override = override_from_junction(junction)
+        self.assertEqual(override.style, "cut")
+        again = plan_junctions(compile_automix(tracks, {}, ENABLED.with_overrides({"a>b": override})))[0]
+        self.assertEqual((again.start, again.transition), (junction.start, None))
+        self.assertEqual(again.incoming.source_in, junction.incoming.source_in)
 
     def test_snapping(self) -> None:
         self.assertEqual(snap(10.3, (8.0, 10.0, 12.0)), 10.0)

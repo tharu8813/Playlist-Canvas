@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
-from app.automix.overrides import TransitionOverride, parse_overrides
+from app.automix.overrides import TransitionOverride, pair_key, parse_overrides
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +43,7 @@ class AutoMixTransitionSettings:
     junction stays automatic. A tuple so the settings stay hashable."""
 
     def override_for(self, outgoing_track_id: str, incoming_track_id: str) -> TransitionOverride | None:
-        key = f"{outgoing_track_id}>{incoming_track_id}"
+        key = pair_key(outgoing_track_id, incoming_track_id)
         return next((override for pair, override in self.overrides if pair == key), None)
 
     def with_overrides(self, overrides: Mapping[str, object] | None) -> "AutoMixTransitionSettings":
