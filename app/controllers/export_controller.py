@@ -38,7 +38,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFontDatabase, QImage, QImageReader, QImageWriter
 from PySide6.QtWidgets import QApplication, QMessageBox, QStyle, QSystemTrayIcon
 
-from app.automix.settings import AUTOMIX_SETTINGS
+from app.automix.settings import automix_settings_for
 from app.models.source import Source, SourceType
 from app.preview.album_art import (
     adjust_personal_color, extract_track_cover, extract_track_personal_color,
@@ -203,7 +203,7 @@ class ExportOrchestrator:
                 renderer, active_tracks, Path(self._audio_staging.name),
                 mode, window.project_settings.crossfade_seconds,
                 render_settings, cancel_event, progress_callback,
-                automix_settings=AUTOMIX_SETTINGS,
+                automix_settings=automix_settings_for(window.project_settings),
             )
         except Exception:
             self.clear_audio_staging()
@@ -1335,7 +1335,7 @@ class ExportOrchestrator:
             crossfade_seconds=window.project_settings.crossfade_seconds,
             compiled_plan=compiled_plan,
             prepared_audio_path=prepared_audio_path,
-            automix_settings=AUTOMIX_SETTINGS,
+            automix_settings=automix_settings_for(window.project_settings),
         )
         export_dialog = window._export_dialog
         worker.progress.connect(

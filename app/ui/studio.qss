@@ -178,6 +178,15 @@ QTreeWidget::item:selected, QListWidget::item:selected, QTableWidget::item:selec
 #trackRow[trackDisabled="true"] { background: @panel; border: 1px dashed @border; }
 #trackRow[trackDisabled="true"] QLabel { color: @muted; }
 #trackRow[dropTarget="true"] { background: @hover; border: 1px solid @accent; }
+#transitionChip { background: transparent; color: @muted; border: 1px solid @border; border-radius: 9px; padding: 1px 9px; font-size: 11px; min-height: 16px; }
+#transitionChip:hover { color: @text; border-color: @accent; }
+#transitionChip[manual="true"] { background: #40392B; color: #F5C66B; border-color: #BEA77C; }
+#transitionChip[manual="true"]:hover { border-color: #F5C66B; }
+QPushButton#transitionModeButton { border-radius: 0; padding: 5px 14px; }
+QPushButton#transitionModeButton:checked { background: @accent; color: @window; border-color: @accent; font-weight: 600; }
+QToolButton#transitionStyleCard { background: @button; border: 1px solid @border; border-radius: 5px; padding: 6px 8px; }
+QToolButton#transitionStyleCard:hover { background: @hover; }
+QToolButton#transitionStyleCard:checked { background: #40392B; color: #F5C66B; border-color: #F5C66B; font-weight: 600; }
 #trackOrderRow[nowPlaying="true"] { background: #304B44; border: 1px solid @accent; border-radius: 3px; }
 
 /* --- Scroll bars & splitters ---------------------------------- */

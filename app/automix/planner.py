@@ -34,8 +34,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from app.automix.candidates import (
+    TransitionCandidate,
     TransitionStrategy,
     _structure_incoming_anchor,
+    _nearest_octave_rate,
     _structure_outgoing_anchor,
     audible_end,
     audible_start,
@@ -46,6 +48,7 @@ from app.automix.candidates import (
 )
 from app.automix.compatibility import evaluate_compatibility
 from app.automix.models import TrackAnalysis
+from app.automix.overrides import STYLE_AUTO, STYLE_CUT, STYLE_LEGACY, TransitionOverride
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
 from app.automix.transition_style import describe_transition, select_transition_dsp
@@ -57,6 +60,7 @@ from app.timeline.render_plan import (
     AudioRenderTransition,
     CompiledRenderPlan,
     TempoRamp,
+    TransitionDsp,
     build_presentation_and_metadata,
     validate_compiled_render_plan,
 )
@@ -243,6 +247,12 @@ def _plan_overlap(
 
     fallback = adjacent(_audible_end(outgoing_analysis, settings, previous_clip),
                         _audible_start(incoming_analysis, settings))
+    override = settings.override_for(previous_track.id, track.id) if settings.enabled else None
+    if override is not None:
+        return _plan_manual(
+            previous_clip, previous_track, track, override, outgoing_analysis, incoming_analysis,
+            structures, settings, ramp_floor, fallback, log_diagnostics,
+        )
     if outgoing_analysis is None or incoming_analysis is None or not settings.enabled:
         return fallback
 
@@ -293,6 +303,7 @@ def _plan_overlap(
     outgoing_structure = structures.get(previous_track.id)
     incoming_structure = structures.get(track.id)
     details = (
+        ("mode", "auto"),
         ("strategy", best.strategy.value),
         ("bars", best.bars),
         ("score", best.score),
@@ -336,3 +347,183 @@ def _plan_overlap(
             transition, previous_track.title or previous_track.id, track.title or track.id,
         ))
     return outgoing_clip, timeline_start, source_in, transition
+
+
+MIN_MANUAL_OVERLAP_SECONDS = 0.05
+"""A manual window shorter than this (or one squeezed to it by the tracks'
+ends) is played as a cut: an overlap FFmpeg cannot fade is not a mix."""
+
+
+def _plan_manual(
+    previous_clip: AudioRenderClip,
+    previous_track: PlaylistTrack,
+    track: PlaylistTrack,
+    override: TransitionOverride,
+    outgoing_analysis: TrackAnalysis | None,
+    incoming_analysis: TrackAnalysis | None,
+    structures: Mapping[str, TrackStructureAnalysis],
+    settings: AutoMixTransitionSettings,
+    ramp_floor: float,
+    fallback: tuple[AudioRenderClip, float, float, AudioRenderTransition | None],
+    log_diagnostics: bool = True,
+) -> tuple[AudioRenderClip, float, float, AudioRenderTransition | None]:
+    """``_plan_overlap`` for a junction the user set by hand.
+
+    The user's cues, length and style are kept as far as the two tracks
+    allow: the cue never goes before the previous transition has finished
+    (nor the clip's start), the window is shortened to what both tracks
+    still have, and tempo matching needs both BPMs within the tempo budget.
+    Analysis is optional; without it "auto" style is a plain crossfade.
+    """
+    outgoing_end = _audible_end(outgoing_analysis, settings, previous_clip)
+    incoming_end = (min(track.duration_seconds, audible_end(incoming_analysis))
+                    if incoming_analysis is not None else track.duration_seconds)
+    cue = min(max(float(override.outgoing_cue), ramp_floor, previous_clip.source_in), outgoing_end)
+    incoming_cue = min(max(0.0, float(override.incoming_cue)), max(0.0, incoming_end - MIN_MANUAL_OVERLAP_SECONDS))
+
+    def cut() -> tuple[AudioRenderClip, float, float, None]:
+        outgoing_clip = replace(previous_clip, source_out=max(previous_clip.source_in, cue))
+        if outgoing_clip.timeline_end <= previous_clip.timeline_start:
+            return fallback
+        return outgoing_clip, outgoing_clip.timeline_end, incoming_cue, None
+
+    if override.style == STYLE_CUT:
+        return cut()
+
+    bpms_known = (outgoing_analysis is not None and incoming_analysis is not None
+                  and outgoing_analysis.bpm is not None and incoming_analysis.bpm is not None)
+    rate = 1.0
+    if override.tempo_match and bpms_known:
+        matched = _nearest_octave_rate(incoming_analysis.bpm / outgoing_analysis.bpm, settings)
+        if abs(matched - 1.0) * 100.0 <= settings.max_tempo_change_percent:
+            rate = matched
+    duration = min(float(override.duration), (outgoing_end - cue) / rate, incoming_end - incoming_cue)
+    if duration < MIN_MANUAL_OVERLAP_SECONDS:
+        return cut()
+    outgoing_out = min(outgoing_end, cue + duration * rate)
+
+    outgoing_clip = replace(previous_clip, source_out=outgoing_out)
+    ramp_seconds = 0.0
+    if abs(rate - 1.0) > 1e-9:
+        bar = (outgoing_analysis.meter_numerator or 4) * 60.0 / outgoing_analysis.bpm
+        ramp_start = min(cue, max(cue - RAMP_BARS * bar, ramp_floor, previous_clip.source_in))
+        ramp_seconds = cue - ramp_start
+        outgoing_clip = replace(outgoing_clip, tempo_ramp=TempoRamp(ramp_start, cue, rate))
+    timeline_start = outgoing_clip.timeline_at(cue)
+    if timeline_start <= previous_clip.timeline_start:
+        return fallback
+    duration = outgoing_clip.timeline_end - timeline_start
+
+    outgoing_structure = structures.get(previous_track.id)
+    incoming_structure = structures.get(track.id)
+    bar_seconds = (60.0 * (incoming_analysis.meter_numerator or 4) / incoming_analysis.bpm
+                   if incoming_analysis is not None and incoming_analysis.bpm else None)
+    bars = round(duration / bar_seconds) if bar_seconds else 0
+    metrics: tuple[tuple[str, object], ...] = ()
+    reasons: tuple[str, ...] = ()
+    handoff = override.vocal_handoff
+    if override.style == STYLE_AUTO:
+        if outgoing_analysis is not None and incoming_analysis is not None:
+            strategy = (TransitionStrategy.BEAT_MATCH if rate != 1.0
+                        else TransitionStrategy.BEAT_ALIGNED_CROSSFADE if bpms_known
+                        else TransitionStrategy.FIXED_CROSSFADE)
+            candidate = TransitionCandidate(
+                from_track_id=previous_track.id, to_track_id=track.id,
+                outgoing_source_time=cue, outgoing_source_out=outgoing_out, incoming_source_time=incoming_cue,
+                bars=bars, duration_seconds=duration,
+                outgoing_bpm=outgoing_analysis.bpm, incoming_bpm=incoming_analysis.bpm,
+                target_bpm=incoming_analysis.bpm if rate != 1.0 else None,
+                outgoing_rate=rate, incoming_rate=1.0, score=0.0, confidence=0.0,
+                strategy=strategy, reasons=("manual",),
+            )
+            compatibility = evaluate_compatibility(outgoing_analysis, incoming_analysis, settings)
+            decision = select_transition_dsp(
+                candidate, compatibility, outgoing_analysis, incoming_analysis,
+                outgoing_structure, incoming_structure,
+            )
+            dsp, reasons, metrics = decision.dsp, decision.reasons, decision.metrics
+            handoff = handoff if handoff is not None else decision.vocal_handoff
+        else:
+            dsp = TransitionDsp.SHORT_FADE if duration < 4.0 else None
+    else:
+        dsp = None if override.style == STYLE_LEGACY else TransitionDsp(override.style)
+    if dsp is not TransitionDsp.VOCAL_SAFE_EQ:
+        handoff = None
+    # BEAT_MATCH without a dsp renders the bass swap; a plain crossfade must stay EQUAL_POWER.
+    transition_type = TransitionType.BEAT_MATCH if rate != 1.0 and dsp is not None else TransitionType.EQUAL_POWER
+    details = (
+        ("mode", "manual"),
+        ("manual_style", override.style),
+        ("strategy", "manual"),
+        ("bars", bars),
+        ("outgoing_bpm", outgoing_analysis.bpm if outgoing_analysis is not None else None),
+        ("incoming_bpm", incoming_analysis.bpm if incoming_analysis is not None else None),
+        ("target_bpm", incoming_analysis.bpm if rate != 1.0 else None),
+        ("outgoing_rate", rate),
+        ("tempo_ramp_seconds", ramp_seconds),
+        ("incoming_rate", 1.0),
+        ("tempo_match_requested", override.tempo_match),
+        ("outgoing_analyzer", outgoing_analysis.analyzer_id if outgoing_analysis is not None else None),
+        ("incoming_analyzer", incoming_analysis.analyzer_id if incoming_analysis is not None else None),
+        ("outgoing_cue", cue),
+        ("outgoing_cut", outgoing_out),
+        ("incoming_cue", incoming_cue),
+        ("outgoing_vocal_outro_start",
+         vocal_outro_start(outgoing_analysis) if outgoing_analysis is not None else None),
+        ("incoming_vocal_intro_end",
+         vocal_intro_end(incoming_analysis) if incoming_analysis is not None else None),
+        ("outgoing_structure_anchor", _structure_outgoing_anchor(outgoing_structure)),
+        ("incoming_structure_anchor", _structure_incoming_anchor(incoming_structure)),
+        ("outgoing_key", outgoing_analysis.key if outgoing_analysis is not None else None),
+        ("incoming_key", incoming_analysis.key if incoming_analysis is not None else None),
+        *metrics,
+    )
+    style_name = dsp.value if dsp is not None else "legacy"
+    transition = AudioRenderTransition(
+        clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
+        timeline_start=timeline_start, duration=duration, type=transition_type,
+        dsp=dsp, dsp_reasons=(f"* manual: {style_name}", *reasons[1:]), details=details, vocal_handoff=handoff,
+    )
+    if log_diagnostics:
+        LOGGER.info("AutoMix transition (manual): %s", describe_transition(
+            transition, previous_track.title or previous_track.id, track.title or track.id,
+        ))
+    return outgoing_clip, timeline_start, incoming_cue, transition
+
+
+def plan_manual_junction(
+    outgoing_clip: AudioRenderClip,
+    outgoing_track: PlaylistTrack,
+    incoming_track: PlaylistTrack,
+    override: TransitionOverride,
+    analyses: Mapping[str, TrackAnalysis],
+    structures: Mapping[str, TrackStructureAnalysis] | None = None,
+    settings: AutoMixTransitionSettings | None = None,
+    ramp_floor: float | None = None,
+) -> tuple[AudioRenderClip, AudioRenderClip, AudioRenderTransition | None]:
+    """One manual junction on its own, exactly as ``compile_automix`` would place it.
+
+    For an editor's live draft: ``outgoing_clip`` is the outgoing clip of the
+    current plan (its head is kept; its tail and tempo ramp are re-planned),
+    ``ramp_floor`` the outgoing source second before which the window may
+    not start (where the previous transition ends; default the clip's
+    start). Returns (outgoing clip, incoming clip, transition or None).
+    """
+    settings = settings or AutoMixTransitionSettings(enabled=True)
+    structures = structures or {}
+    outgoing_analysis = analyses.get(outgoing_track.id)
+    incoming_analysis = analyses.get(incoming_track.id)
+    head = replace(outgoing_clip, source_out=max(outgoing_clip.source_in, outgoing_track.duration_seconds),
+                   tempo_ramp=None)
+    ramp_floor = head.source_in if ramp_floor is None else ramp_floor
+    tail = replace(head, source_out=_audible_end(outgoing_analysis, settings, head))
+    fallback = (tail, tail.timeline_end, _audible_start(incoming_analysis, settings), None)
+    outgoing, start, source_in, transition = _plan_manual(
+        head, outgoing_track, incoming_track, override, outgoing_analysis, incoming_analysis,
+        structures, settings, ramp_floor, fallback, log_diagnostics=False,
+    )
+    incoming = AudioRenderClip(
+        clip_id=f"automix:{incoming_track.id}", track_id=incoming_track.id,
+        timeline_start=start, source_in=source_in, source_out=incoming_track.duration_seconds,
+    )
+    return outgoing, incoming, transition

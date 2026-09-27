@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.automix.models import TrackAnalysis
+from app.automix.overrides import pair_key
 from app.models.playlist import PlaylistTrack
 from app.preview.album_art import extract_track_cover
 from app.services.project_content_service import LYRICS_EXTENSIONS
@@ -287,6 +288,48 @@ class PlaylistList(QListWidget):
         super().keyPressEvent(event)
 
 
+class TransitionChip(QPushButton):
+    """The junction into a track, drawn above its row: "auto" or what was set by hand.
+
+    A click opens Transition details on it; the menu puts a manual one back on auto.
+    """
+
+    reset_requested = Signal()
+
+    def __init__(self, override: dict | None, korean: bool, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("transitionChip")
+        self.korean = korean
+        self.setProperty("manual", override is not None)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFlat(True)
+        if override is None:
+            self.setText("⟷ 자동 전환" if korean else "⟷ Auto transition")
+            self.setToolTip("앞 곡에서 이 곡으로 넘어가는 전환을 AutoMix가 정합니다. 클릭하면 직접 설정할 수 있습니다."
+                            if korean else
+                            "AutoMix decides how the previous song hands over to this one. Click to set it yourself.")
+            return
+        from app.widgets.transition_editor import style_label
+
+        style = style_label(str(override.get("style", "auto")), korean)
+        if override.get("style") == "cut":
+            summary = style
+        else:
+            seconds = float(override.get("duration", 0.0))
+            summary = f"{seconds:.1f}{'초' if korean else ' s'} · {style}"
+        self.setText(("✎ 수동 · " if korean else "✎ Manual · ") + summary)
+        self.setToolTip("직접 설정한 전환입니다. 클릭하면 편집하고, 우클릭하면 자동으로 되돌립니다." if korean
+                        else "A transition you set. Click to edit it; right-click to go back to automatic.")
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        if not self.property("manual"):
+            return
+        menu = QMenu(self)
+        reset = menu.addAction("자동으로 되돌리기" if self.korean else "Back to automatic")
+        if menu.exec(event.globalPos()) is reset:
+            self.reset_requested.emit()
+
+
 class TrackRow(QWidget):
     """Compact, display-only visual row for a playlist track.
 
@@ -297,14 +340,25 @@ class TrackRow(QWidget):
 
     def __init__(self, number: int, track: PlaylistTrack, korean: bool = False,
                  parent: QWidget | None = None, *,
-                 analysis: TrackAnalysis | None = None) -> None:
+                 analysis: TrackAnalysis | None = None,
+                 transition: TransitionChip | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("trackRow")
         self.track_id = track.id
         self.setProperty("trackDisabled", not track.enabled)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
+        self.transition_chip = transition
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 4 if transition is not None else 6, 10, 6)
+        outer.setSpacing(3)
+        if transition is not None:
+            chip_row = QHBoxLayout()
+            chip_row.setContentsMargins(43, 0, 0, 0)  # under the track number, like a connector
+            chip_row.addWidget(transition)
+            chip_row.addStretch(1)
+            outer.addLayout(chip_row)
+        layout = QHBoxLayout()
         layout.setSpacing(9)
+        outer.addLayout(layout)
         number_label = QLabel(f"{number:02d}")
         number_label.setObjectName("trackNumber")
         cover_label = QLabel()
@@ -395,6 +449,10 @@ class PlaylistEditor(QFrame):
     lyrics_dropped = Signal(str, str)
     track_double_clicked = Signal(str)
     tracks_removed = Signal(int)
+    transition_edit_requested = Signal(str, str)
+    """(outgoing track id, incoming track id): open Transition details on that junction."""
+    transition_reset_requested = Signal(str)
+    """A manual junction's pair key: put it back on automatic."""
 
     def __init__(self, service: PlaylistService, translator: Translator,
                  parent: QWidget | None = None) -> None:
@@ -402,6 +460,8 @@ class PlaylistEditor(QFrame):
         self.setObjectName("playlistStrip")
         self.service = service
         self._analyses: dict[str, TrackAnalysis] = {}
+        self._automix = False
+        self._overrides: dict[str, dict] = {}
         self.translator = translator
         self._ignore_order_signal = False
         self._pending_order_ids: list[str] = []
@@ -516,6 +576,24 @@ class PlaylistEditor(QFrame):
         self._analyses = analyses
         self.refresh()
 
+    def set_transitions(self, automix: bool, overrides: dict[str, dict]) -> None:
+        """Show AutoMix's junction chips (``automix``) and which ones were set by hand."""
+        if automix == self._automix and overrides == self._overrides:
+            return
+        self._automix = automix
+        self._overrides = dict(overrides)
+        self.refresh()
+
+    def _transition_chip(self, previous: PlaylistTrack | None, track: PlaylistTrack) -> TransitionChip | None:
+        """The chip for the junction into ``track`` (None: no AutoMix junction there)."""
+        if not self._automix or previous is None or not track.enabled or track.start_time_seconds is not None:
+            return None
+        key = pair_key(previous.id, track.id)
+        chip = TransitionChip(self._overrides.get(key), self.translator.is_korean)
+        chip.clicked.connect(lambda: self.transition_edit_requested.emit(previous.id, track.id))
+        chip.reset_requested.connect(lambda: self.transition_reset_requested.emit(key))
+        return chip
+
     def refresh(self) -> None:
         """Rebuild rows from service order and update inclusion summary."""
         selected_ids = set(self._selected_ids())
@@ -542,6 +620,14 @@ class PlaylistEditor(QFrame):
             track_numbers = {
                 track.id: number for number, track in enumerate(all_tracks, start=1)
             }
+            # AutoMix mixes enabled tracks only: each one joins the enabled track before it.
+            previous_enabled: dict[str, PlaylistTrack] = {}
+            last_enabled: PlaylistTrack | None = None
+            for track in all_tracks:
+                if track.enabled:
+                    if last_enabled is not None:
+                        previous_enabled[track.id] = last_enabled
+                    last_enabled = track
             for track in tracks:
                 number = track_numbers[track.id]
                 item = QListWidgetItem()
@@ -549,6 +635,7 @@ class PlaylistEditor(QFrame):
                 row = TrackRow(
                     number, track, self.translator.is_korean,
                     analysis=self._analyses.get(track.id),
+                    transition=self._transition_chip(previous_enabled.get(track.id), track),
                 )
                 item.setSizeHint(row.sizeHint())
                 self.list_widget.addItem(item)
