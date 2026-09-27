@@ -48,7 +48,7 @@
 
 ## 남은 일
 
-- 사람 청감 평가(`02_real_music_listening_and_tuning.md`의 절차). 위 수치는 박자·보컬·레벨 구멍 같은
+- 사람 청감 평가(`docs/automix-history/followup/02_real_music_listening_and_tuning.md`의 절차). 위 수치는 박자·보컬·레벨 구멍 같은
   명백한 실패만 잡는다. 특히 DROP_IN의 20 ms 시작과 끝까지 노래하는 곡의 컷이 자연스러운지 들어야 한다.
 - 조용한 인트로로 들어가는 전환(위 두 사례).
 - 측정 스크립트는 저장소에 두지 않았다. 재현은 `tools/automix_listening_report.py`의 `report.csv`

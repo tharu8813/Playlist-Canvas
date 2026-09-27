@@ -13,7 +13,7 @@ rendered mix.
 ``--ab`` also renders each transition as a short excerpt once per DSP style
 (``OUT_DIR/ab/<n>_<style>.flac``) with the same geometry, and measures each,
 for side-by-side listening. ``ratings.csv`` is the blank sheet a human listener
-fills in per transition (protocol: docs/automix-roadmap/02_real_music_listening_and_tuning.md).
+fills in per transition (protocol: docs/automix-history/followup/02_real_music_listening_and_tuning.md).
 Never commit the audio files or reports.
 """
 
