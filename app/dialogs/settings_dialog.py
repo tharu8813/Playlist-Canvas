@@ -362,8 +362,10 @@ class SettingsDialog(QDialog):
         self.ffmpeg_update_button.clicked.connect(self.update_requested.emit)
         self.ffmpeg_reinstall_button.clicked.connect(self.reinstall_requested.emit)
         self.ffmpeg_delete_button.clicked.connect(self.delete_requested.emit)
+        # A bound method, not a lambda: a lambda capturing self keeps the
+        # dialog alive forever, and ~QApplication then crashes deleting it.
         self.ffmpeg_refresh_versions_button.clicked.connect(
-            lambda: self.request_ffmpeg_catalog(force=True)
+            self._refresh_ffmpeg_catalog
         )
         self.ffmpeg_version_combo.currentIndexChanged.connect(
             self._update_ffmpeg_release_info
@@ -552,6 +554,9 @@ class SettingsDialog(QDialog):
             "Checking available FFmpeg versions…"
         )
         self.catalog_requested.emit(force)
+
+    def _refresh_ffmpeg_catalog(self) -> None:
+        self.request_ffmpeg_catalog(force=True)
 
     def set_ffmpeg_catalog(self, releases: list[FFmpegReleaseOption]) -> None:
         """Populate version choices with the app-tested branch first."""

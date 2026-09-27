@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+import weakref
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -112,6 +114,16 @@ class LanguagePackTests(unittest.TestCase):
                 self.assertIn("Test translator", dialog.language_pack_status.text())
             finally:
                 dialog.close()
+
+    def test_closed_settings_dialog_is_not_kept_alive_by_its_own_connections(self) -> None:
+        # A leaked dialog is only deleted inside ~QApplication, which crashed
+        # the interpreter at exit (0xC0000409 / 0xC0000005).
+        dialog = SettingsDialog(AppSettings(), Language.ENGLISH, Theme.AUTO, Translator())
+        dialog.close()
+        reference = weakref.ref(dialog)
+        del dialog
+        gc.collect()
+        self.assertIsNone(reference())
 
     def test_default_windows_folder_receives_complete_template(self) -> None:
         with TemporaryDirectory(prefix="pc-language-pack-localappdata-") as raw_directory:
