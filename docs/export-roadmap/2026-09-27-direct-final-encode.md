@@ -94,3 +94,46 @@
   사용자가 변경을 확인할 수 있다.
 - 로그: `%LOCALAPPDATA%\PlaylistCanvas\logs\playlist-canvas.log`
   (`Canvas capture bands`, `Canvas independent timelines`, `Final FFmpeg stage` 줄이 유용).
+
+## 결과 (2026-09-27 구현)
+
+- 전송 방식: Canvas 스트림(불투명 base, 투명 Z 밴드)마다 명명 파이프 하나
+  (`app/renderer/canvas_pipe.py`). Windows는 `\\.\pipe\playlist-canvas-...`
+  (단일 인스턴스, 원격 거부, overlapped I/O로 취소 가능), 그 외는 FIFO.
+  - 레이어를 한 장으로 합치는 방식은 쓰지 않았다. 시각화·비디오 클립이 Z 밴드 사이에
+    끼므로 합치려면 FFmpeg의 디코드·필터를 파이썬으로 다시 만들어야 한다.
+    stdin은 입력 하나뿐이고, loopback TCP는 방화벽 경고·다른 프로세스 접속 위험이 있다.
+  - base는 `bgr0`, 투명 레이어는 straight `rgba` 원시 프레임으로 보내고 최종 그래프는
+    기존 overlay 그대로 쓴다. 중간 CRF 12 손실이 없어져 결과가 오히려 원본에 더 가깝다.
+- 교착 방지: 스트림마다 전용 쓰기 스레드 + 작은 큐. 캡처는 타임라인 순서(heap)라
+  한 큐에서 막혀도 다른 스트림은 그 시점까지 데이터가 들어가 있다. FFmpeg가 입력을
+  순서대로 열 때 막히지 않도록 `-probesize 32 -analyzeduration 0`, 각 파이프의 첫
+  프레임을 FFmpeg 시작 전에 캡처한다. 그래도 멈추면 120초 무진행 감시가 오류를 낸다.
+- 순서: 각 파이프 첫 프레임 캡처 → RenderWorker 시작(오디오·시각화 준비 후 FFmpeg
+  실행) → 나머지 캡처가 FFmpeg와 동시에 진행. 변하지 않는 스트림은 PNG 한 장.
+  워커 결과는 `RenderOutcomeGate`가 캡처가 끝날 때까지 보관한다.
+- 대체 경로: 파이프 오류·멈춤, 또는 FFmpeg가 파이프를 읽기 시작한 뒤 실패하면(디스크
+  부족 제외) 처음부터 기존 중간 파일 방식으로 다시 캡처한다. FFmpeg가 파이프를 열기
+  전에 실패한 경우(오디오 등)는 같은 오류가 반복되므로 그대로 보고한다.
+  `PLAYLIST_CANVAS_DISABLE_PIPED_EXPORT=1`로 새 방식을 끌 수 있다.
+- 진행률: "준비"(오디오·시각화, 4~12%) 뒤 "화면 캡처와 영상 만들기" 한 단계로
+  FFmpeg 출력 시간을 따라간다.
+- 저장 공간 추정: 파이프 스트림은 정지 PNG 몇 장만 계산한다.
+
+### 실측 (Linux 컨테이너, CPU 4코어, FFmpeg 6.1, libx264 medium, 1080p30)
+
+`python tools/export_pipe_benchmark.py --seconds 60` — 움직이는 앨범아트 배경 +
+진행 바 + 파이썬 시각화 + 페이드 텍스트, 실제 내보내기 컨트롤러로 두 방식을 각각 실행.
+
+| 항목 | 중간 파일 방식 | 새 방식 |
+|---|---|---|
+| 총 소요 시간 (60초 영상) | 268.1초 | 84.3초 |
+| 최대 임시 디스크 (출력 파일 포함) | 305.6 MB | 49.6 MB |
+| 프레임 수 / 길이 | 1800 / 60.0초 | 1800 / 60.0초 |
+| 두 결과 PSNR | — | 평균 57.7 dB (최소 53.9) |
+
+새 방식의 남은 임시 공간은 시각화 `.mov`(qtrle)와 쓰는 중인 출력 mp4다.
+GPU가 없는 환경이라 h264_nvenc는 측정하지 못했다. Windows에서
+`python tools/export_pipe_benchmark.py --encoder h264_nvenc --ffmpeg <ffmpeg.exe>`로
+같은 표를 얻을 수 있다. 원리상 전체 시간은 "캡처 + 최종 인코드"에서
+"둘 중 느린 쪽"으로 바뀌므로, NVENC처럼 인코드가 빠르면 캡처 속도가 상한이 된다.

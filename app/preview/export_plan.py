@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.canvas_snapshot import CanvasSnapshot
+from app.renderer.canvas_pipe import piped_export_supported
 from app.renderer.export_timeline import ExportFrameSample, ExportTimelinePlanner
 from app.renderer.ffmpeg_renderer import RenderError, RenderSettings
 from app.timeline.render_plan import CompiledRenderPlan
@@ -36,6 +37,9 @@ class ExportPlan:
     animation_fps: int
     playlist_duration: float
     canvas_render_scale: float = 1.0
+    # Capture straight into the final encoder through pipes (no intermediate
+    # video). The session falls back to the streamed/PNG paths when it fails.
+    use_piped_visuals: bool = False
 
 
 def canvas_render_scale(scene: object, render_settings: RenderSettings) -> float:
@@ -136,4 +140,5 @@ def build_export_plan(
         animation_fps=animation_fps,
         playlist_duration=playlist_duration,
         canvas_render_scale=canvas_render_scale(scene, render_settings),
+        use_piped_visuals=piped_export_supported(),
     )

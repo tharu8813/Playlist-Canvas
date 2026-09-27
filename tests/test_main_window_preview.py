@@ -2426,6 +2426,9 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 patch("app.controllers.export_controller.FFmpegRenderer") as renderer_type,
                 patch("app.controllers.export_controller.RenderWorker", WorkerStub),
                 patch("app.preview.export_session.StaticVideoStreamEncoder", EncoderStub),
+                # This test covers the intermediate-file path.
+                patch("app.preview.export_plan.piped_export_supported",
+                      return_value=False),
                 patch("app.controllers.export_controller.ExportSettingsDialog.exec",
                       return_value=QDialog.DialogCode.Accepted),
                 patch.object(CanvasSnapshot, "z_bands",

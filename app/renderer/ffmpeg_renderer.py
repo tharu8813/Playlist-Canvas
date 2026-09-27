@@ -119,6 +119,31 @@ class PreparedVideoInput:
 
 
 @dataclass(frozen=True, slots=True)
+class PipedVideoInput:
+    """A Canvas stream captured live into the final FFmpeg through a pipe.
+
+    ``input_arguments`` are the complete FFmpeg input options, ending in
+    ``-i <pipe>``; nothing is written to disk for this input.
+    """
+
+    input_arguments: tuple[str, ...]
+    duration_seconds: float
+    width: int
+    height: int
+    fps: int
+
+
+@dataclass(frozen=True, slots=True)
+class PipedStaticOverlayLayer:
+    """A transparent Canvas Z band streamed live as RGBA through a pipe."""
+
+    z_index: float
+    video: PipedVideoInput
+    x: int = 0
+    y: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class StaticOverlayLayer:
     """A transparent, time-synchronised Canvas Z band for compositing."""
 
@@ -267,13 +292,16 @@ class FFmpegRenderer:
             return Path(found)
         raise FFmpegNotFoundError("FFmpeg executable was not found.")
 
-    def render(self, image: QImage | list[QImage] | list[RenderFrame] | PreparedVideoInput,
+    def render(self, image: QImage | list[QImage] | list[RenderFrame] | PreparedVideoInput
+               | PipedVideoInput,
                tracks: list[PlaylistTrack], output_path: str | Path,
                settings: RenderSettings | None = None,
                progress_callback: Callable[[str, float, str], None] | None = None,
                cancel_event: threading.Event | None = None,
                visualizers: list[VisualizerOverlay] | None = None,
-               static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer] | None = None,
+               static_layers: list[
+                   StaticOverlayLayer | PreparedStaticOverlayLayer | PipedStaticOverlayLayer
+               ] | None = None,
                video_clips: list[VideoClipOverlay] | None = None,
                metadata: "ExportMetadata | None" = None,
                storage_path_callback: Callable[[str, Path | None], None] | None = None,
@@ -307,12 +335,20 @@ class FFmpegRenderer:
         video_clips = video_clips or []
         video_file_inputs, video_input_slots = self._video_input_plan(video_clips)
         static_layers = static_layers or []
+        piped_video = image if isinstance(image, PipedVideoInput) else None
+        piped = piped_video is not None or any(
+            isinstance(layer, PipedStaticOverlayLayer) for layer in static_layers
+        )
+        if piped and progress_callback is not None:
+            progress_callback = self._piped_progress(
+                progress_callback, bool(visualizers),
+            )
         prepared_video = image if isinstance(image, PreparedVideoInput) else None
         supplied_frames = (
-            [] if prepared_video is not None
+            [] if prepared_video is not None or piped_video is not None
             else list(image) if isinstance(image, list) else [image]
         )
-        if prepared_video is None and not supplied_frames:
+        if prepared_video is None and piped_video is None and not supplied_frames:
             raise RenderError("No Canvas frames were supplied for export.")
         explicit_frames = bool(
             supplied_frames and isinstance(supplied_frames[0], RenderFrame)
@@ -331,7 +367,7 @@ class FFmpegRenderer:
         )
         if explicit_frames and any(duration <= 0 for duration in durations):
             raise RenderError("Each Canvas frame duration must be greater than zero.")
-        if (prepared_video is None and not explicit_frames
+        if (prepared_video is None and piped_video is None and not explicit_frames
                 and len(frames) not in {1, len(active_tracks)}):
             raise RenderError(
                 "The number of Canvas frames does not match the enabled playlist tracks."
@@ -341,6 +377,7 @@ class FFmpegRenderer:
         # intentionally represent an entire multi-track playlist with one image.
         if (
             prepared_video is None
+            and piped_video is None
             and not explicit_frames
             and len(frames) == 1
             and len(active_tracks) > 1
@@ -350,11 +387,16 @@ class FFmpegRenderer:
             progress_callback, "Preparing export", 0.005,
             (
                 "Validating lossless Canvas stream"
-                if prepared_video is not None
+                if prepared_video is not None or piped_video is not None
                 else f"Validating visual frames 0/{len(frames)}"
             ),
         )
-        if prepared_video is not None:
+        if piped_video is not None:
+            if (piped_video.duration_seconds <= 0.0
+                    or piped_video.width <= 0 or piped_video.height <= 0
+                    or not piped_video.input_arguments):
+                raise RenderError("The piped Canvas stream is invalid.")
+        elif prepared_video is not None:
             if (not prepared_video.path.is_file()
                     or prepared_video.duration_seconds <= 0.0
                     or prepared_video.width <= 0 or prepared_video.height <= 0):
@@ -373,6 +415,10 @@ class FFmpegRenderer:
             raise RenderError(f"Audio file is missing: {missing[0]}")
         selected_settings = settings or RenderSettings()
         self._validate_settings(selected_settings)
+        if piped_video is not None and piped_video.fps != selected_settings.fps:
+            raise RenderError(
+                "The piped Canvas stream frame rate does not match export settings."
+            )
         if prepared_video is not None and prepared_video.fps != selected_settings.fps:
             raise RenderError(
                 "The prepared Canvas video frame rate does not match export settings."
@@ -428,7 +474,12 @@ class FFmpegRenderer:
             metadata_path = self._write_export_ffmetadata(
                 temporary, active_tracks, metadata or ExportMetadata(), target, compiled_plan,
             )
-            if prepared_video is not None:
+            if piped_video is not None:
+                visual_sequence = [
+                    (Path("canvas-pipe"), piped_video.duration_seconds),
+                ]
+                base_input_arguments = list(piped_video.input_arguments)
+            elif prepared_video is not None:
                 prepared_path = prepared_video.path.resolve()
                 visual_sequence = [
                     (prepared_path, prepared_video.duration_seconds),
@@ -497,6 +548,8 @@ class FFmpegRenderer:
             encoding_start = 0.78 if visualizers else 0.66
             encoding_span = 0.21 if visualizers else 0.33
             static_inputs: list[tuple[float, Path, str, int, int]] = []
+            piped_input_arguments: dict[int, tuple[str, ...]] = {}
+            base_video = piped_video or prepared_video
             static_stage_start = 0.76 if visualizers else 0.64
             static_stage_span = max(0.0, encoding_start - static_stage_start)
             static_frame_total = sum(
@@ -517,6 +570,22 @@ class FFmpegRenderer:
             for layer_index, layer in enumerate(static_layers):
                 if cancel_event.is_set():
                     raise RenderCancelledError("Rendering was cancelled.")
+                if isinstance(layer, PipedStaticOverlayLayer):
+                    piped_layer = layer.video
+                    if (piped_layer.width <= 0 or piped_layer.height <= 0
+                            or not piped_layer.input_arguments
+                            or piped_layer.fps != selected_settings.fps
+                            or layer.x < 0 or layer.y < 0
+                            or (base_video is not None and (
+                                layer.x + piped_layer.width > base_video.width
+                                or layer.y + piped_layer.height > base_video.height
+                            ))):
+                        raise RenderError("A piped Canvas layer is invalid.")
+                    piped_input_arguments[len(static_inputs)] = piped_layer.input_arguments
+                    static_inputs.append((
+                        layer.z_index, Path("canvas-pipe"), "pipe", layer.x, layer.y,
+                    ))
+                    continue
                 if isinstance(layer, PreparedStaticOverlayLayer):
                     prepared_layer = layer.video
                     if (not prepared_layer.path.is_file()
@@ -592,12 +661,14 @@ class FFmpegRenderer:
                 static_inputs.append((
                     layer.z_index, layer_manifest, "concat", layer.x, layer.y,
                 ))
-            if prepared_video is None:
+            if prepared_video is None and piped_video is None:
                 video_concat_path = temporary / "video.ffconcat"
                 self._write_visual_concat(video_concat_path, visual_sequence)
                 base_input_arguments = [
                     "-f", "concat", "-safe", "0", "-i", str(video_concat_path),
                 ]
+
+            encoding_stage = "Capturing and encoding" if piped else "Encoding video"
 
             def encoding_progress(line: str) -> None:
                 seconds = self._parse_progress_seconds(line)
@@ -610,24 +681,28 @@ class FFmpegRenderer:
                     )
                     self._report(
                         progress_callback,
-                        "Finalizing export" if direct_mux or finishing else "Encoding video",
+                        "Finalizing export" if direct_mux or finishing else encoding_stage,
                         encoding_start + fraction * encoding_span,
                         (
                             "Finishing the MP4 file"
                             if finishing else
                             f"Muxing {bounded:.1f}s / {total_duration:.1f}s"
                             if direct_mux else
+                            f"Capturing and encoding {bounded:.1f}s / {total_duration:.1f}s"
+                            if piped else
                             f"Encoding {bounded:.1f}s / {total_duration:.1f}s"
                         ),
                     )
 
             self._report(
                 progress_callback,
-                "Finalizing export" if direct_mux else "Encoding video",
+                "Finalizing export" if direct_mux else encoding_stage,
                 encoding_start,
                 (
                     "Muxing prepared video and audio"
-                    if direct_mux else "Rendering the final video"
+                    if direct_mux else
+                    "Capturing the Canvas into the final video"
+                    if piped else "Rendering the final video"
                 ),
             )
             try:
@@ -668,8 +743,12 @@ class FFmpegRenderer:
                     "-t", f"{video_input.duration_seconds:.6f}",
                     "-i", str(video_input.path),
                 ])
-            for _z_index, layer_path, input_kind, _x, _y in static_inputs:
-                if input_kind == "concat":
+            for static_index, (_z_index, layer_path, input_kind, _x, _y) in enumerate(
+                static_inputs
+            ):
+                if input_kind == "pipe":
+                    video_arguments.extend(piped_input_arguments[static_index])
+                elif input_kind == "concat":
                     video_arguments.extend([
                         "-f", "concat", "-safe", "0", "-i", str(layer_path),
                     ])
@@ -744,11 +823,12 @@ class FFmpegRenderer:
                     "-progress", "pipe:1", "-nostats", "-y", str(temporary_video),
                 ])
             LOGGER.info(
-                "Final FFmpeg stage: codec=%s direct_mux=%s duration=%.3fs "
+                "Final FFmpeg stage: codec=%s direct_mux=%s piped=%s duration=%.3fs "
                 "fps=%d resolution=%dx%d filter_workers=%d visualizers=%d "
                 "video_clips=%d static_inputs=%d",
                 "copy" if direct_mux else selected_settings.video_codec,
                 direct_mux,
+                piped,
                 total_duration,
                 selected_settings.fps,
                 selected_settings.output_width,
@@ -923,7 +1003,9 @@ class FFmpegRenderer:
     @staticmethod
     def _validate_visual_timeline(
         visual_sequence: list[tuple[Path, float]],
-        static_layers: list[StaticOverlayLayer | PreparedStaticOverlayLayer],
+        static_layers: list[
+            StaticOverlayLayer | PreparedStaticOverlayLayer | PipedStaticOverlayLayer
+        ],
         expected_duration: float,
         fps: int,
     ) -> None:
@@ -943,7 +1025,7 @@ class FFmpegRenderer:
 
         validate("The prepared Canvas video", [duration for _path, duration in visual_sequence])
         for index, layer in enumerate(static_layers, start=1):
-            if isinstance(layer, PreparedStaticOverlayLayer):
+            if isinstance(layer, (PreparedStaticOverlayLayer, PipedStaticOverlayLayer)):
                 validate(
                     f"Static overlay layer {index}",
                     [layer.video.duration_seconds],
@@ -1855,6 +1937,30 @@ class FFmpegRenderer:
         if process.returncode != 0:
             message = "".join(stderr_lines).strip() or "FFmpeg returned an unknown error."
             raise RenderError(message)
+
+    @staticmethod
+    def _piped_progress(
+        callback: Callable[[str, float, str], None], has_visualizers: bool,
+    ) -> Callable[[str, float, str], None]:
+        """Rescale progress when Canvas capture runs inside the encode stage.
+
+        The staged path reserves 66-78% of its scale for preparation because the
+        Canvas video already exists. With live capture almost all the work
+        happens while encoding, so preparation gets a small share instead.
+        """
+        encoding_start = 0.78 if has_visualizers else 0.66
+        preparation_share = 0.12 if has_visualizers else 0.04
+        encoding_stages = {"Capturing and encoding", "Finalizing export", "Complete"}
+
+        def report(stage: str, fraction: float, message: str) -> None:
+            if stage in encoding_stages:
+                encoded = max(0.0, fraction - encoding_start) / (1.0 - encoding_start)
+                scaled = preparation_share + encoded * (1.0 - preparation_share)
+            else:
+                scaled = min(1.0, fraction / encoding_start) * preparation_share
+            callback(stage, min(1.0, max(0.0, scaled)), message)
+
+        return report
 
     @staticmethod
     def _report(callback: Callable[[str, float, str], None] | None, stage: str,

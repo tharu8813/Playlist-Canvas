@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
+from time import monotonic
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -35,7 +36,9 @@ from app.preview.canvas_snapshot import CanvasSnapshot
 from app.renderer.ffmpeg_renderer import (
     FFmpegRenderer,
     FFmpegNotFoundError,
+    PipedVideoInput,
     PreparedVideoInput,
+    RenderResult,
     RenderError,
     RenderFrame,
     RenderSettings,
@@ -1089,6 +1092,9 @@ class MainWindowExportTests(MainWindowTestCase):
             with (
                 patch("app.controllers.export_controller.FFmpegRenderer") as renderer_type,
                 patch("app.controllers.export_controller.RenderWorker", WorkerStub),
+                # This test covers the intermediate-file path.
+                patch("app.preview.export_plan.piped_export_supported",
+                      return_value=False),
                 patch("app.controllers.export_controller.ExportSettingsDialog.exec",
                       return_value=QDialog.DialogCode.Accepted),
                 patch.object(CanvasSnapshot, "z_bands",
@@ -1230,6 +1236,9 @@ class MainWindowExportTests(MainWindowTestCase):
                 patch("app.controllers.export_controller.FFmpegRenderer") as renderer_type,
                 patch("app.controllers.export_controller.RenderWorker", WorkerStub),
                 patch("app.preview.export_session.StaticVideoStreamEncoder", EncoderStub),
+                # This test covers the intermediate-file path.
+                patch("app.preview.export_plan.piped_export_supported",
+                      return_value=False),
                 patch("app.controllers.export_controller.ExportSettingsDialog.exec",
                       return_value=QDialog.DialogCode.Accepted),
                 patch.object(CanvasSnapshot, "z_bands", return_value=[(None, None)]),
@@ -1266,6 +1275,134 @@ class MainWindowExportTests(MainWindowTestCase):
                 self.window._export_dialog = None
             self.window._export_finished()
             self.application.processEvents()
+
+    def _run_live_export(self, render_side_effect, *, image_size=(4, 4)):
+        """Drive ``_export_video`` down the live (piped) path with a mocked FFmpeg."""
+        track = PlaylistTrack(
+            file_path="live-capture.mp3", title="Live capture", duration_seconds=1.0,
+        )
+        self.window.playlist_service.replace([track])
+        self.window.store.add(Source(SourceType.TEXT, "Moving title"))
+        render_inputs: list[object] = []
+        encoder_submissions: list[float] = []
+
+        class EncoderStub:
+            def __init__(self, _executable, output_path, fps, **_kwargs) -> None:
+                self.output_path = Path(output_path)
+                self.fps = fps
+                self.frame_count = 0
+
+            def submit(self, _image, duration) -> None:
+                encoder_submissions.append(duration)
+
+            def finish(self) -> StaticVideoStreamResult:
+                self.output_path.touch()
+                return StaticVideoStreamResult(
+                    self.output_path, sum(encoder_submissions), 4, 4, self.fps,
+                    False, 30, 1,
+                )
+
+            def cancel(self) -> None:
+                pass
+
+        def capture(*_arguments: object, **_state: object) -> QImage:
+            image = QImage(*image_size, QImage.Format.Format_RGB32)
+            image.fill(QColor("#224466"))
+            return image
+
+        def render(image, *arguments, **keywords):
+            render_inputs.append(image)
+            return render_side_effect(len(render_inputs), image, keywords)
+
+        with (
+            patch("app.controllers.export_controller.FFmpegRenderer") as renderer_type,
+            patch("app.preview.export_session.StaticVideoStreamEncoder", EncoderStub),
+            patch("app.controllers.export_controller.ExportSettingsDialog.exec",
+                  return_value=QDialog.DialogCode.Accepted),
+            patch.object(CanvasSnapshot, "z_bands", return_value=[(None, None)]),
+            patch.object(CanvasSnapshot, "invariant_stream_keys", return_value=set()),
+            patch(
+                "app.preview.export_canvas_capture.ExportCanvasCapturer.coalesce_samples",
+                lambda _self, samples, _key: list(samples),
+            ),
+            patch.object(CanvasSnapshot, "capture_track", side_effect=capture),
+            patch.object(self.window, "_export_visualizers", return_value=[]),
+            patch.object(
+                QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes,
+            ),
+            patch.object(
+                type(self.window.export_orchestrator), "show_complete_dialog",
+            ) as complete_dialog,
+            patch.object(QMessageBox, "critical") as critical_message,
+        ):
+            renderer_type.return_value.ensure_encoder_available.return_value = None
+            renderer_type.return_value.direct_encoding_profile.return_value = None
+            renderer_type.return_value.render.side_effect = render
+            self.window._export_video()
+            deadline = monotonic() + 20.0
+            while (
+                self.window._render_worker is not None
+                or self.window._export_dialog is not None
+            ) and monotonic() < deadline:
+                self.application.processEvents()
+                QTest.qWait(10)
+            self.application.processEvents()
+            QTest.qWait(20)
+        return render_inputs, encoder_submissions, critical_message, complete_dialog
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") or os.name == "nt", "named pipes")
+    def test_live_export_hands_capture_to_the_running_final_encoder(self) -> None:
+        received = bytearray()
+
+        def render(_call, image, _keywords):
+            self.assertIsInstance(image, PipedVideoInput)
+            with open(image.input_arguments[-1], "rb") as reader:
+                while chunk := reader.read(65536):
+                    received.extend(chunk)
+            return RenderResult(Path("live-capture.mp4"), 1)
+
+        render_inputs, submissions, critical, complete_dialog = self._run_live_export(render)
+
+        critical.assert_not_called()
+        self.assertEqual(len(render_inputs), 1)
+        self.assertEqual(submissions, [])  # no intermediate video at all
+        self.assertEqual(len(received), 30 * 4 * 4 * 4)
+        complete_dialog.assert_called_once()
+        self.assertIsNone(self.window._render_worker)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") or os.name == "nt", "named pipes")
+    def test_live_export_falls_back_to_intermediate_files_when_ffmpeg_dies(self) -> None:
+        def render(call, image, _keywords):
+            if call == 1:
+                with open(image.input_arguments[-1], "rb") as reader:
+                    reader.read(1)
+                raise RenderError("Error while decoding stream #0:0: broken pipe")
+            self.assertIsInstance(image, PreparedVideoInput)
+            return RenderResult(Path("live-capture.mp4"), 1)
+
+        render_inputs, submissions, critical, complete_dialog = self._run_live_export(
+            render, image_size=(640, 360),
+        )
+
+        critical.assert_not_called()
+        self.assertEqual(len(render_inputs), 2)
+        self.assertAlmostEqual(sum(submissions), 1.0)
+        complete_dialog.assert_called_once()
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") or os.name == "nt", "named pipes")
+    def test_live_export_does_not_retry_when_ffmpeg_fails_before_reading(self) -> None:
+        def render(_call, _image, _keywords):
+            raise RenderError("The prepared playlist audio is missing.")
+
+        render_inputs, _submissions, critical, complete_dialog = self._run_live_export(
+            render, image_size=(640, 360),
+        )
+
+        self.assertEqual(len(render_inputs), 1)
+        critical.assert_called_once()
+        self.assertIn("audio is missing", critical.call_args.args[2])
+        complete_dialog.assert_not_called()
+        self.assertIsNone(self.window._export_dialog)
 
     def test_export_probes_independent_video_files_concurrently(self) -> None:
         with TemporaryDirectory(prefix="parallel-video-probe-") as raw_directory:

@@ -44,7 +44,12 @@ from app.preview.album_art import (
     adjust_personal_color, extract_track_cover, extract_track_personal_color,
 )
 from app.preview.export_plan import build_export_plan, canvas_render_scale
-from app.preview.export_session import ExportSession, PngStaging
+from app.preview.export_session import (
+    ExportSession,
+    FinalRenderStoppedError,
+    PngStaging,
+)
+from app.controllers.render_outcome_gate import RenderOutcomeGate
 from app.dialogs.export_complete_dialog import ExportCompleteDialog
 from app.dialogs.export_progress_dialog import ExportProgressDialog
 from app.dialogs.export_settings_dialog import ExportSettingsDialog
@@ -69,6 +74,7 @@ from app.renderer.png_frame_staging import (
     PngFrameStagingError,
     PngFrameStagingPipeline,
 )
+from app.renderer.canvas_pipe import CanvasPipeError, piped_export_supported
 from app.renderer.render_worker import RenderWorker
 from app.services.app_settings_service import AppSettings, VIDEO_ENCODERS
 from app.services.export_policy import ExportPolicy
@@ -83,6 +89,7 @@ from app.services.video_encoder_service import (
     VideoEncoderAdvisor,
 )
 from app.utils.logging_setup import report_unexpected_error
+from app.utils.qt_worker_lifecycle import stop_qthread_now
 from app.video.timeline import build_video_occurrences
 
 if TYPE_CHECKING:
@@ -548,13 +555,15 @@ class ExportOrchestrator:
         stage: str,
         fraction: float,
         message: str,
+        preparation_weight: float = EXPORT_PREPARATION_PROGRESS_WEIGHT,
     ) -> None:
-        """Keep progress UI, status activity, and notifications synchronized."""
+        """Keep progress UI, status activity, and notifications synchronized.
+
+        ``preparation_weight`` is 0 for a live (piped) export, whose renderer
+        progress already covers Canvas capture.
+        """
         window = self.window
-        overall = (
-            EXPORT_PREPARATION_PROGRESS_WEIGHT
-            + (1.0 - EXPORT_PREPARATION_PROGRESS_WEIGHT) * fraction
-        )
+        overall = preparation_weight + (1.0 - preparation_weight) * fraction
         export_dialog.update_progress(stage, overall, message)
         window.activity_progress.update(
             "export", overall, export_dialog.status_line(stage, message),
@@ -626,6 +635,7 @@ class ExportOrchestrator:
     def prepare_staging_space(
         self, render_settings: RenderSettings, duration_seconds: float,
         layer_count: int, use_streamed_visuals: bool, korean: bool,
+        piped_visuals: bool = False,
     ) -> bool:
         """Redirect frame staging to the output drive if the temp drive is short,
         and warn before starting when neither drive has comfortable room.
@@ -638,10 +648,15 @@ class ExportOrchestrator:
         )
         seconds = max(0.0, duration_seconds)
         # ffv1 / libx264rgb (or deflated PNGs) on Canvas content: conservatively
-        # ~40% of raw RGB, once per visual layer.
-        intermediate = int(
-            raw_frame_bytes * render_settings.fps * seconds
-            * 0.4 * max(1, layer_count if use_streamed_visuals else 1)
+        # ~40% of raw RGB, once per visual layer. Live capture pipes the Canvas
+        # into the final encoder, leaving only a few still PNGs per layer.
+        intermediate = (
+            int(raw_frame_bytes * 0.4 * 4 * max(1, layer_count))
+            if piped_visuals else
+            int(
+                raw_frame_bytes * render_settings.fps * seconds
+                * 0.4 * max(1, layer_count if use_streamed_visuals else 1)
+            )
         )
         final_video = int(raw_frame_bytes * render_settings.fps * seconds * 0.08)
         temp_need = int(intermediate * 1.3)
@@ -1031,6 +1046,7 @@ class ExportOrchestrator:
             render_settings.fps, window._playlist_duration(active_tracks),
             selected_app_settings.crf, selected_app_settings.audio_bitrate,
             min(3, max(1, len(window.store.sources()))),
+            piped=piped_export_supported(),
         )
         window._export_dialog.set_storage_estimate(initial_storage_estimate)
         window._export_dialog.set_busy(
@@ -1117,6 +1133,7 @@ class ExportOrchestrator:
             if not window._prepare_export_staging_space(
                 render_settings, playlist_duration, len(plan.z_bands),
                 plan.use_streamed_visuals, korean,
+                piped_visuals=plan.use_piped_visuals,
             ):
                 raise RenderCancelledError("Export cancelled at the disk-space check.")
             actual_storage_estimate = estimate_export_storage(
@@ -1124,43 +1141,67 @@ class ExportOrchestrator:
                 render_settings.fps, playlist_duration,
                 selected_app_settings.crf, selected_app_settings.audio_bitrate,
                 max(1, len(plan.z_bands)),
+                piped=plan.use_piped_visuals,
             )
             window._export_dialog.set_storage_estimate(actual_storage_estimate)
             self.start_storage_monitor(output)
             stream_root = (
                 Path(self.frames.staging.name)
-                if plan.use_streamed_visuals and self.frames.staging is not None
+                if (plan.use_streamed_visuals or plan.use_piped_visuals)
+                and self.frames.staging is not None
                 else None
             )
-            export_session = ExportSession(
-                scene=window.canvas.scene_model,
-                renderer=renderer,
-                plan=plan,
-                render_settings=render_settings,
-                active_tracks=active_tracks,
-                stream_root=stream_root,
-                preparation_cancel=preparation_cancel,
-                korean=korean,
-                staging=PngStaging(
-                    stage_frame=window._stage_export_frame,
-                    start_pipeline=lambda capacity: self.start_png_pipeline(
-                        preparation_cancel, queue_capacity=capacity,
+
+            def make_session(session_plan) -> ExportSession:
+                return ExportSession(
+                    scene=window.canvas.scene_model,
+                    renderer=renderer,
+                    plan=session_plan,
+                    render_settings=render_settings,
+                    active_tracks=active_tracks,
+                    stream_root=stream_root,
+                    preparation_cancel=preparation_cancel,
+                    korean=korean,
+                    staging=PngStaging(
+                        stage_frame=window._stage_export_frame,
+                        start_pipeline=lambda capacity: self.start_png_pipeline(
+                            preparation_cancel, queue_capacity=capacity,
+                        ),
+                        finish_pipeline=self.finish_png_pipeline,
+                        cancel_pipeline=window._cancel_export_png_pipeline,
+                        pending_frames=lambda: (
+                            self.frames.png_pipeline.pending_frames
+                            if self.frames.png_pipeline is not None else 0
+                        ),
+                        queue_capacity=window._export_png_queue_capacity(render_settings),
                     ),
-                    finish_pipeline=self.finish_png_pipeline,
-                    cancel_pipeline=window._cancel_export_png_pipeline,
-                    pending_frames=lambda: (
-                        self.frames.png_pipeline.pending_frames
-                        if self.frames.png_pipeline is not None else 0
+                    layer_worker_count=lambda count: window._export_layer_worker_count(
+                        render_settings, count,
                     ),
-                    queue_capacity=window._export_png_queue_capacity(render_settings),
-                ),
-                layer_worker_count=lambda count: window._export_layer_worker_count(
-                    render_settings, count,
-                ),
-                report_progress=self.report_preparation_progress,
-                pump_ui=QApplication.processEvents,
-            )
+                    report_progress=self.report_preparation_progress,
+                    pump_ui=QApplication.processEvents,
+                )
+
+            export_session = make_session(plan)
             window._active_export_session = export_session
+            if plan.use_piped_visuals:
+                if self.run_piped_export(
+                    export_session,
+                    lambda frames, static_layers: self.create_render_worker(
+                        renderer, frames, static_layers, output, render_settings,
+                        visualizers, video_clips, compiled_plan,
+                        prepared_audio_path, preparation_weight=0.0,
+                    ),
+                    preparation_cancel,
+                    request_preparation_cancel,
+                    korean,
+                ):
+                    return
+                # Nothing to pipe, or the live path failed: capture again
+                # into the proven intermediate files.
+                plan = replace(plan, use_piped_visuals=False)
+                export_session = make_session(plan)
+                window._active_export_session = export_session
             artifacts = export_session.run()
             frames = artifacts.frames
             static_layers = artifacts.static_layers
@@ -1227,6 +1268,27 @@ class ExportOrchestrator:
             window._export_dialog.setWindowTitle("내보내기 진행 상황")
             window._export_dialog.cancel_button.setText("취소")
             window._export_dialog.stage_label.setText("내보내기 준비 중")
+        window._render_worker = self.create_render_worker(
+            renderer, frames, static_layers, output, render_settings,
+            visualizers, video_clips, compiled_plan, prepared_audio_path,
+        )
+        window._render_worker.succeeded.connect(window._export_succeeded)
+        window._render_worker.failed.connect(window._export_failed)
+        window._render_worker.cancelled.connect(window._export_cancelled)
+        window._render_worker.finished.connect(window._export_finished)
+        window._export_dialog.cancel_requested.connect(window._render_worker.cancel)
+        window.statusBar().showMessage("렌더링 중..." if korean else "Rendering...")
+        window._render_worker.start()
+
+    def create_render_worker(
+        self, renderer: "FFmpegRenderer", frames: object, static_layers: list,
+        output: str, render_settings: RenderSettings,
+        visualizers: list, video_clips: list, compiled_plan: object,
+        prepared_audio_path: Path | None, *,
+        preparation_weight: float = EXPORT_PREPARATION_PROGRESS_WEIGHT,
+    ) -> RenderWorker:
+        """Build the final-render worker with progress and storage wired up."""
+        window = self.window
         project_title = window.project_settings.title.strip()
         export_metadata = ExportMetadata(
             title=(
@@ -1236,7 +1298,7 @@ class ExportOrchestrator:
             artist=window.project_settings.author.strip(),
             comment=window.project_settings.description.strip(),
         )
-        window._render_worker = RenderWorker(
+        worker = RenderWorker(
             renderer,
             frames,
             window.playlist_service.tracks,
@@ -1253,23 +1315,120 @@ class ExportOrchestrator:
             automix_settings=AUTOMIX_SETTINGS,
         )
         export_dialog = window._export_dialog
-        window._render_worker.progress.connect(
+        worker.progress.connect(
             lambda stage, fraction, message: self.handle_render_progress(
-                export_dialog, stage, fraction, message,
+                export_dialog, stage, fraction, message, preparation_weight,
             )
         )
-        storage_path_signal = getattr(
-            window._render_worker, "storage_path_changed", None,
-        )
+        storage_path_signal = getattr(worker, "storage_path_changed", None)
         if storage_path_signal is not None:
             storage_path_signal.connect(window._handle_export_storage_path)
-        window._render_worker.succeeded.connect(window._export_succeeded)
-        window._render_worker.failed.connect(window._export_failed)
-        window._render_worker.cancelled.connect(window._export_cancelled)
-        window._render_worker.finished.connect(window._export_finished)
-        window._export_dialog.cancel_requested.connect(window._render_worker.cancel)
+        return worker
+
+    def run_piped_export(
+        self,
+        session: ExportSession,
+        make_worker,
+        preparation_cancel: threading.Event,
+        request_preparation_cancel,
+        korean: bool,
+    ) -> bool:
+        """Capture the Canvas straight into a running final encoder.
+
+        Returns ``True`` once the final render owns the export (its normal
+        completion handlers take over), or ``False`` when nothing could be
+        piped or the live path failed in a way intermediate files can
+        survive; the caller then captures again the proven way. Cancellation
+        and unrecoverable errors propagate to the caller's handlers.
+        """
+        window = self.window
+        gate = RenderOutcomeGate(window)
+        workers: list[RenderWorker] = []
+
+        def start_final_render(artifacts) -> None:
+            worker = make_worker(artifacts.frames, artifacts.static_layers)
+            gate.watch(worker)
+            workers.append(worker)
+            worker.start()
+
+        def stop_final_render() -> None:
+            session.cancel_streams()
+            gate.discard()
+            for worker in workers:
+                worker.cancel()
+                stop_qthread_now(worker)
+            workers.clear()
+
+        try:
+            artifacts = session.run_piped(start_final_render, gate.failure_message)
+        except RenderCancelledError:
+            stop_final_render()
+            raise
+        except Exception as error:
+            reached_encoder = session.live_encoder_reached
+            stop_final_render()
+            if preparation_cancel.is_set():
+                raise RenderCancelledError(
+                    "Export preparation was cancelled."
+                ) from error
+            if not self.piped_failure_is_recoverable(error, reached_encoder):
+                raise
+            LOGGER.warning(
+                "Live Canvas capture failed; retrying with intermediate files: %s",
+                error,
+            )
+            dialog = window._export_dialog
+            if dialog is not None:
+                dialog.log_output.add_detail(
+                    "실시간 캡처를 쓸 수 없어 중간 파일 방식으로 다시 준비합니다."
+                    if korean else
+                    "Live capture was unavailable; preparing again with "
+                    "intermediate files."
+                )
+            return False
+        if artifacts is None:
+            return False
+
+        worker = workers[0]
+        window._active_export_session = None
+        window._export_preparation_cancel = None
+        dialog = window._export_dialog
+        if dialog is not None:
+            try:
+                dialog.cancel_requested.disconnect(request_preparation_cancel)
+            except (RuntimeError, TypeError):
+                pass
+            dialog.cancel_requested.connect(worker.cancel)
+        window._render_worker = worker
         window.statusBar().showMessage("렌더링 중..." if korean else "Rendering...")
-        window._render_worker.start()
+        gate.open(
+            succeeded=window._export_succeeded,
+            failed=window._export_failed,
+            cancelled=window._export_cancelled,
+            finished=window._export_finished,
+        )
+        return True
+
+    @staticmethod
+    def piped_failure_is_recoverable(error: BaseException, reached_encoder: bool) -> bool:
+        """Whether retrying with intermediate files can fix a live-capture failure.
+
+        Pipe errors and stalls can. A final render that failed after it
+        started reading the Canvas may be a pipe problem too, unless the disk
+        is full (intermediate files need more room, not less). A render that
+        failed before opening its pipes (audio, visualizers) would fail the
+        same way again.
+        """
+        if isinstance(error, CanvasPipeError):
+            return True
+        if isinstance(error, FinalRenderStoppedError):
+            message = str(error).lower()
+            if any(marker in message for marker in (
+                "no space left", "disk full", "not enough space",
+            )):
+                return False
+            return reached_encoder
+        return False
 
     def minimize_during_export(self) -> None:
         """Minimize the app while keeping preparation or rendering active."""
