@@ -54,7 +54,10 @@ class AutoMixTransitionSettings:
                 pairs.append((key, value))
             else:
                 pairs.extend(parse_overrides({key: value}).items())
-        return replace(self, overrides=tuple(sorted(pairs, key=lambda pair: pair[0])))
+        ordered = tuple(sorted(pairs, key=lambda pair: pair[0]))
+        # Unchanged overrides keep this very object: a project with no manual
+        # junction plans with AUTOMIX_SETTINGS itself.
+        return self if ordered == self.overrides else replace(self, overrides=ordered)
 
 
 AUTOMIX_SETTINGS = AutoMixTransitionSettings(enabled=True)
