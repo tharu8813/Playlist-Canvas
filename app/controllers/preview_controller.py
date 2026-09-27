@@ -78,6 +78,16 @@ class PreviewController:
         if window._inline_preview is not None:
             window._finish_inline_preview()
 
+    def edit_transition(self, outgoing_track_id: str, incoming_track_id: str) -> None:
+        """Open Preview on Transition details for one junction (the playlist's transition chip)."""
+        window = self.window
+        self.open_playlist_preview()
+        if window._inline_preview is None:
+            self.open_playlist_preview()  # the first call may only have switched to the Preview tab
+        preview = window._inline_preview
+        if preview is not None:
+            QTimer.singleShot(0, preview, lambda: preview.open_transition_editor(outgoing_track_id, incoming_track_id))
+
     def select_edit_bottom_tab(self, index: int | None = None) -> None:
         """Select one persisted editing tab without recursively changing modes."""
         window = self.window
@@ -106,9 +116,9 @@ class PreviewController:
             pass
         transition_mode = window.project_settings.transition_mode
         crossfade_seconds = window.project_settings.crossfade_seconds
-        from app.automix.settings import AUTOMIX_SETTINGS
+        from app.automix.settings import automix_settings_for
 
-        automix_settings = AUTOMIX_SETTINGS
+        automix_settings = automix_settings_for(window.project_settings)
         if transition_mode == "automix":
             # Preview analyzes the same files into the same caches at full
             # speed; a background pass still running would only duplicate
@@ -136,6 +146,11 @@ class PreviewController:
             blended_audio_temp_dir=blended_audio_temp_dir,
             automix_settings=automix_settings,
         )
+        if transition_mode == "automix":
+            # Transition details can set junctions by hand: they land in the
+            # project (undoable) and Preview re-mixes on the spot.
+            preview.analysis_fallback = lambda: (dict(window.automix_analyses), dict(window.automix_structures))
+            preview.automix_override_changed.connect(window._set_automix_override)
         controls_page = preview.build_embedded_controls_page()
         window._inline_preview = preview
         window._inline_preview_controls = controls_page

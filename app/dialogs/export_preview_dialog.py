@@ -424,6 +424,9 @@ class OverlayFrameWorker(QThread):
 class ExportPreviewDialog(QDialog):
     """Play and inspect the complete playlist using export-equivalent visuals."""
 
+    automix_override_changed = Signal(str, object)
+    """A junction was set by hand in Transition details (pair key, TransitionOverride or None for auto)."""
+
     def __init__(self, scene: CanvasScene, tracks: list[PlaylistTrack], translator: Translator,
                  overlays: list[VisualizerOverlay] | None = None,
                  ffmpeg_executable: Path | None = None,
@@ -486,6 +489,10 @@ class ExportPreviewDialog(QDialog):
         )
         self._transition_mode = transition_mode
         self._crossfade_seconds = crossfade_seconds
+        self._automix_settings = automix_settings
+        self._remix_count = 0
+        self.analysis_fallback = None
+        """Optional () -> (analyses, structures) the editor may use before this Preview's own analysis lands."""
         self._blended_audio_path: Path | None = (
             preloaded_blended_audio[0] if preloaded_blended_audio is not None else None
         )
@@ -1213,9 +1220,90 @@ class ExportPreviewDialog(QDialog):
             window.set_volume(self.volume_slider.value())
             self.finished.connect(window.close)
             window.set_playhead(self.timeline.value() / TIMELINE_SCALE)
+            if self._transition_mode == "automix":
+                window.enable_editing(self._transition_edit_context, self._automix_overrides())
+                window.override_changed.connect(self._on_automix_override_changed)
         window.show()
         window.raise_()
         window.activateWindow()
+
+    def open_transition_editor(self, outgoing_track_id: str, incoming_track_id: str) -> None:
+        """Show Transition details on the junction between two tracks (the playlist's chip)."""
+        if self.automix_details is None:
+            return
+        self._open_transition_window()
+        self._transition_window.select_pair(outgoing_track_id, incoming_track_id)
+
+    def _automix_overrides(self) -> dict:
+        return dict(getattr(self._automix_settings, "overrides", ()) or ())
+
+    def _transition_edit_context(self):
+        from app.widgets.transition_editor import EditContext
+
+        analyses: dict = {}
+        structures: dict = {}
+        if self.analysis_fallback is not None:
+            fallback_analyses, fallback_structures = self.analysis_fallback()
+            analyses.update(fallback_analyses)
+            structures.update(fallback_structures)
+        snapshot = getattr(self._blended_audio_controller, "analysis_snapshot", None)
+        if snapshot is not None:
+            own_analyses, own_structures = snapshot()
+            analyses.update(own_analyses)
+            structures.update(own_structures)
+        return EditContext({track.id: track for track in self.tracks}, analyses, structures)
+
+    def _on_automix_override_changed(self, key: str, override) -> None:
+        from app.automix.settings import AUTOMIX_SETTINGS
+
+        overrides = self._automix_overrides()
+        if override is None:
+            overrides.pop(key, None)
+        else:
+            overrides[key] = override
+        self._automix_settings = (self._automix_settings or AUTOMIX_SETTINGS).with_overrides(overrides)
+        self.automix_override_changed.emit(key, override)
+        self.remix_automix()
+
+    def remix_automix(self) -> None:
+        """Re-plan and re-render the AutoMix with the current settings; the new mix swaps in when ready.
+
+        Reuses (or creates) a progressive controller: cached analysis makes the
+        re-plan immediate, and the existing swap logic keeps the music going
+        (``swap_playhead``) while the new mix renders into a fresh directory,
+        never over the file that is playing.
+        """
+        if self._closing or self._transition_mode != "automix" or not self.tracks:
+            return
+        controller = self._blended_audio_controller
+        if getattr(controller, "progressive_ready", None) is None:
+            if self._preview_proxy_ffmpeg is None:
+                return
+            from app.controllers.progressive_automix_controller import ProgressiveAutoMixController
+
+            if controller is not None:
+                controller.shutdown()
+            controller = ProgressiveAutoMixController(
+                FFmpegRenderer(self._preview_proxy_ffmpeg), self, korean=self.translator.is_korean,
+            )
+            self._blended_audio_controller = controller
+            controller.audio_ready.connect(self._on_blended_audio_ready)
+            controller.audio_failed.connect(self._on_blended_audio_failed)
+            controller.progress.connect(self._on_blended_audio_progress)
+            controller.progressive_ready.connect(self._on_progressive_audio_ready)
+            controller.level_ready.connect(self._on_playback_level)
+            self._progressive = True
+        if self._blended_audio_temp_dir is None:
+            self._blended_audio_temp_dir = TemporaryDirectory(
+                prefix="playlist-preview-audio-", ignore_cleanup_errors=True,
+            )
+        self._remix_count += 1
+        self._pending_swap = None
+        controller.start(
+            self.tracks, Path(self._blended_audio_temp_dir.name) / f"remix-{self._remix_count}",
+            "automix", self._crossfade_seconds, automix_settings=self._automix_settings,
+        )
+        self._report_playhead(force=True)
 
     def _seek_to_seconds(self, seconds: float) -> None:
         self.timeline.setValue(round(max(0.0, seconds) * TIMELINE_SCALE))

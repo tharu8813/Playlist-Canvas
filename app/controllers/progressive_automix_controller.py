@@ -370,6 +370,13 @@ class ProgressiveAutoMixController(QObject):
         self._analysis_worker = worker
         worker.start()
 
+    def analysis_snapshot(self) -> tuple[dict, dict]:
+        """(rhythm analyses, structures) known so far, for Transition details' editor."""
+        state = getattr(self, "_state", None)
+        if state is None:
+            return {}, {}
+        return dict(state.rhythm), dict(state.structures)
+
     def report_playhead(self, seconds: float, playing: bool) -> None:
         """Preview's global playhead; the first report marks Preview as attached."""
         if self._shutting_down or not hasattr(self, "_scheduler"):

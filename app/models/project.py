@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from app import __version__
+from app.automix.overrides import parse_overrides, serialize_overrides
 from app.models.playlist import PlaylistTrack
 from app.models.layer import LayerGroup
 from app.models.source import Source
@@ -50,6 +51,10 @@ class ProjectSettings:
     # Only meaningful when transition_mode == "crossfade": how many seconds
     # before each track ends the next one starts fading in.
     crossfade_seconds: float = DEFAULT_CROSSFADE_SECONDS
+    # Only meaningful when transition_mode == "automix": junctions the user
+    # set by hand, keyed "<outgoing track id>><incoming track id>" (see
+    # app.automix.overrides). Every other junction is automatic.
+    automix_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -72,6 +77,8 @@ class ProjectSettings:
             self.crossfade_seconds = max(
                 MIN_CROSSFADE_SECONDS, min(MAX_CROSSFADE_SECONDS, float(self.crossfade_seconds)),
             )
+        # A broken entry (hand-edited file, older build) drops back to automatic.
+        self.automix_overrides = serialize_overrides(parse_overrides(self.automix_overrides))
 
 
 @dataclass(slots=True)

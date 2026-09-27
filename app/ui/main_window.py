@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
 
 from app.canvas.live_canvas import LiveCanvas
 from app.automix.models import TrackAnalysis
-from app.automix.settings import AUTOMIX_SETTINGS
+from app.automix.settings import automix_settings_for
 from app.automix.structure.models import TrackStructureAnalysis
 from app.controllers.automix_analysis_controller import AutoMixAnalysisController
 from app.controllers.autosave_controller import AutosaveController
@@ -269,6 +269,9 @@ class MainWindow(QMainWindow):
         inspector = getattr(self, "inspector", None)
         if inspector is not None:
             inspector.set_mix_transitions_active(settings.transition_mode != "none")
+        playlist_editor = getattr(self, "playlist_editor", None)
+        if playlist_editor is not None:
+            playlist_editor.set_transitions(settings.transition_mode == "automix", settings.automix_overrides)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1628,6 +1631,11 @@ class MainWindow(QMainWindow):
         self.playlist_editor.files_dropped.connect(self._handle_dropped_files)
         self.playlist_editor.lyrics_dropped.connect(self._handle_lyrics_drop)
         self.playlist_editor.track_double_clicked.connect(self._show_track_details)
+        self.playlist_editor.set_transitions(
+            self.project_settings.transition_mode == "automix", self.project_settings.automix_overrides,
+        )
+        self.playlist_editor.transition_edit_requested.connect(self.preview_controller.edit_transition)
+        self.playlist_editor.transition_reset_requested.connect(lambda key: self._set_automix_override(key, None))
         self.playlist_editor.tracks_removed.connect(
             lambda count: self._show_undo_hint(
                 f"플레이리스트에서 {count}곡을 삭제했습니다."
@@ -3993,7 +4001,7 @@ class MainWindow(QMainWindow):
                             renderer, tracks, Path(directory), self.project_settings.transition_mode,
                             self.project_settings.crossfade_seconds, RenderSettings(), cancel,
                             lambda stage, fraction, message: progress.setLabelText(message),
-                            automix_settings=AUTOMIX_SETTINGS,
+                            automix_settings=automix_settings_for(self.project_settings),
                         )
                 except RenderCancelledError:
                     return
@@ -4552,6 +4560,18 @@ class MainWindow(QMainWindow):
 
     def _project_thumbnail_image(self) -> QImage:
         return self.project_controller.thumbnail_image()
+
+    def _set_automix_override(self, key: str, override) -> None:
+        """Store one manual AutoMix junction (``None``: back to automatic) in the project, undoably."""
+        overrides = dict(self.project_settings.automix_overrides)
+        if override is None:
+            if overrides.pop(key, None) is None:
+                return
+        else:
+            overrides[key] = override.to_dict()
+        self.project_settings = replace(self.project_settings, automix_overrides=overrides)
+        self._schedule_history()
+        self._update_project_status()
 
     def _show_project_settings(self) -> None:
         """Edit project-scoped identity, content policy, and thumbnail."""

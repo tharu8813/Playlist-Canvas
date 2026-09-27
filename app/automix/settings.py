@@ -6,7 +6,10 @@ AutoMix UI and no new persisted project schema (roadmap 1.2, 1.3).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+
+from app.automix.overrides import TransitionOverride, pair_key, parse_overrides
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,9 +38,34 @@ class AutoMixTransitionSettings:
     max_transition_seconds: float = 20.0
     allow_half_double_tempo: bool = True
     fallback_crossfade_seconds: float = 3.0
+    overrides: tuple[tuple[str, TransitionOverride], ...] = ()
+    """Manually set junctions, as (``pair_key``, override) pairs; every other
+    junction stays automatic. A tuple so the settings stay hashable."""
+
+    def override_for(self, outgoing_track_id: str, incoming_track_id: str) -> TransitionOverride | None:
+        key = pair_key(outgoing_track_id, incoming_track_id)
+        return next((override for pair, override in self.overrides if pair == key), None)
+
+    def with_overrides(self, overrides: Mapping[str, object] | None) -> "AutoMixTransitionSettings":
+        """A copy planning ``overrides`` (TransitionOverride values or their saved dicts)."""
+        pairs = []
+        for key, value in (overrides or {}).items():
+            if isinstance(value, TransitionOverride):
+                pairs.append((key, value))
+            else:
+                pairs.extend(parse_overrides({key: value}).items())
+        ordered = tuple(sorted(pairs, key=lambda pair: pair[0]))
+        # Unchanged overrides keep this very object: a project with no manual
+        # junction plans with AUTOMIX_SETTINGS itself.
+        return self if ordered == self.overrides else replace(self, overrides=ordered)
 
 
 AUTOMIX_SETTINGS = AutoMixTransitionSettings(enabled=True)
 """The one tuned set Preview and Export plan every AutoMix project with. Projects
 used to pick a listening preset (smooth/energetic/dj); the style is now always
 automatic, and a project saved with another preset loads as this one."""
+
+
+def automix_settings_for(project_settings: object) -> AutoMixTransitionSettings:
+    """AUTOMIX_SETTINGS plus the project's manual junctions -- what Preview and Export plan with."""
+    return AUTOMIX_SETTINGS.with_overrides(getattr(project_settings, "automix_overrides", None))
