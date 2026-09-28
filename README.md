@@ -129,7 +129,7 @@ AutoMix는 **곡 사이를 템포에 맞춰 자동으로 부드럽게 이어주�
 
 - 누락된 번역은 영어로 표시됩니다.
 - 실행 코드가 없는 JSON 데이터만 허용합니다.
-- 잘못된 JSON, 호환되지 않는 스키마, 자리표시자 오류와 1MB 초과 파일은 거부합니다.
+- 잘못된 JSON, 호환되지 않는 스키마, 자리표시자 오류와 4MB 초과 파일은 거부합니다.
 - 형식과 예제는 [`docs/language-packs`](docs/language-packs/README.md)에서 확인할 수 있습니다.
 
 Windows에서는 첫 실행 시 `%LOCALAPPDATA%\PlaylistCanvas\languages\`에 기본
