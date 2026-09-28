@@ -9,6 +9,8 @@ result under a new meaning (the analyzer identity is folded into the key).
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import Callable
 import json
 import logging
 import os
@@ -16,6 +18,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+import threading
+import time
 from typing import Any, ClassVar
 
 from app.automix.models import TrackAnalysis
@@ -44,8 +48,8 @@ def _cache_files(directories: tuple[Path, ...]) -> list[Path]:
 def cache_usage(directories: tuple[Path, ...] | None = None) -> tuple[int, int]:
     """(entry count, total bytes) of the AutoMix analysis caches.
 
-    Entries are never pruned on their own: a changed file or analyzer version
-    just stops matching, so old entries accumulate until cleared.
+    A changed file or analyzer version just stops matching, so old entries
+    linger until cleared or aged out by ``prune_caches``.
     """
     entries = total = 0
     for path in _cache_files(directories or cache_directories()):
@@ -74,27 +78,109 @@ def clear_caches(directories: tuple[Path, ...] | None = None) -> int:
     return removed
 
 
+PRUNE_MAX_AGE_DAYS = 180
+_STALE_TEMP_SECONDS = 86_400
+
+
+def prune_caches(
+    directories: tuple[Path, ...] | None = None, max_age_days: float = PRUNE_MAX_AGE_DAYS,
+) -> int:
+    """Delete entries unused for ``max_age_days`` and leftover temp files.
+
+    A cache hit refreshes its entry's mtime, so this removes what no current
+    file or analyzer version reads -- the entries that otherwise accumulate
+    forever. Meant for a background thread; returns how many files went.
+    ponytail: age only, add a total-size cap if a huge library outgrows this.
+    """
+    now = time.time()
+    removed = 0
+    for path in _cache_files(directories or cache_directories()):
+        limit = max_age_days * 86_400 if path.suffix == ".json" else _STALE_TEMP_SECONDS
+        try:
+            if now - path.stat().st_mtime > limit:
+                path.unlink()
+                removed += 1
+        except OSError:  # removed or in use by a concurrent reader: skip it
+            continue
+    if removed:
+        LOGGER.info("AutoMix cache pruned %d unused file(s)", removed)
+    return removed
+
+
 def canonical_media_path(path: str) -> str:
     """Normalize a media path so the same file always hashes identically."""
     return os.path.normcase(str(Path(path).expanduser().resolve()))
 
 
+class BoundedMemo:
+    """Thread-safe LRU memo keyed by file version, e.g. (path, size, mtime_ns).
+
+    A changed file gets a new key, so stale values are never returned; they
+    just age out. The capacity must stay above the largest playlist: a pass
+    over more files than it holds evicts each one before it is reused.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self._items: OrderedDict[Any, Any] = OrderedDict()
+        self._inflight: dict[Any, threading.Lock] = {}
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def get(self, key: Any) -> Any:
+        with self._lock:
+            value = self._items.get(key)
+            if value is not None:
+                self._items.move_to_end(key)
+            return value
+
+    def put(self, key: Any, value: Any) -> None:
+        with self._lock:
+            self._items[key] = value
+            self._items.move_to_end(key)
+            while len(self._items) > self.capacity:
+                self._items.popitem(last=False)
+
+    def get_or_compute(self, key: Any, compute: Callable[[], Any]) -> Any:
+        """Return the memoized value, computing it once even under concurrent
+        callers; the global lock is never held while ``compute`` runs."""
+        value = self.get(key)
+        if value is not None:
+            return value
+        with self._lock:
+            key_lock = self._inflight.setdefault(key, threading.Lock())
+        try:
+            with key_lock:
+                value = self.get(key)
+                if value is None:
+                    value = compute()
+                    self.put(key, value)
+                return value
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+
+
 _HASH_CHUNK_BYTES = 1024 * 1024
+# ~0.5 KB per entry, so 4096 files cost ~2 MB while covering any real playlist.
+MEMO_CAPACITY = 4096
 # (canonical path, size, mtime_ns) -> content digest, so a session hashes each
-# file once. ponytail: unbounded, fine for playlist-sized sessions.
-_digest_memo: dict[tuple[str, int, int], str] = {}
+# file once -- and the rhythm and structure threads, which open the same file
+# at the same moment, share one hash instead of each reading it in full.
+_digest_memo = BoundedMemo(MEMO_CAPACITY)
 
 
 def _content_digest(canonical: str, size: int, mtime_ns: int) -> str:
-    key = (canonical, size, mtime_ns)
-    digest = _digest_memo.get(key)
-    if digest is None:
+    def compute() -> str:
         hasher = sha256()
         with open(canonical, "rb") as file:
             while chunk := file.read(_HASH_CHUNK_BYTES):
                 hasher.update(chunk)
-        digest = _digest_memo[key] = hasher.hexdigest()
-    return digest
+        return hasher.hexdigest()
+
+    return _digest_memo.get_or_compute((canonical, size, mtime_ns), compute)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +292,10 @@ class VersionedAnalysisCache:
             )
             return None
         logger.debug("%s cache hit: %s", label, fingerprint.canonical_path)
+        try:
+            os.utime(entry_path)  # marks the entry as in use for prune_caches()
+        except OSError:
+            pass
         return fields
 
     def store(self, source_path: str, analysis: Any) -> None:
