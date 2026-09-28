@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import copy
+import json
+from pathlib import Path
 import unittest
 
 from app import __version__
 from app.models.playlist import PlaylistTrack
-from app.models.project import CanvasSettings, ProjectDocument, ProjectSettings
+from app.models.project import (
+    CURRENT_VERSION, CanvasSettings, ProjectDocument, ProjectSettings, migrate_project_payload,
+)
 from app.models.source import Source, SourceType
 
 
@@ -148,6 +153,59 @@ class ProjectModelValidationTests(unittest.TestCase):
         payload["playlist"][0]["cover_path"] = 123
         with self.assertRaisesRegex(ValueError, "cover paths"):
             ProjectDocument.from_dict(payload)
+
+
+class ProjectMigrationTests(unittest.TestCase):
+    """Saved files of every supported version, kept as fixtures in tests/data/projects."""
+
+    @staticmethod
+    def _fixture(name: str) -> dict:
+        path = Path(__file__).parent / "data" / "projects" / name
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_v1_fixture_loads_as_current_model(self) -> None:
+        document = ProjectDocument.from_dict(self._fixture("v1.json"))
+        self.assertEqual(document.version, CURRENT_VERSION)
+        self.assertEqual(document.app_version, "")
+        self.assertEqual((document.canvas.width, document.theme, document.language), (1920, "light", "en"))
+        self.assertEqual(document.settings.content_mode, "reference")
+        self.assertEqual(document.settings.transition_mode, "none")
+        self.assertEqual(document.playlist[0].id, "track-1")
+
+    def test_v2_legacy_automix_fixture_migrates_retired_settings(self) -> None:
+        document = ProjectDocument.from_dict(self._fixture("v2_legacy_automix.json"))
+        self.assertEqual(document.settings.transition_mode, "automix")
+        self.assertEqual(document.settings.crossfade_seconds, 4.0)
+        saved = document.to_dict()["settings"]
+        self.assertNotIn("automix_enabled", saved)
+        self.assertNotIn("automix_preset", saved)
+
+    def test_migration_is_pure_and_idempotent(self) -> None:
+        for name in ("v1.json", "v2_legacy_automix.json"):
+            with self.subTest(fixture=name):
+                original = self._fixture(name)
+                untouched = copy.deepcopy(original)
+                migrated = migrate_project_payload(original)
+                self.assertEqual(original, untouched)
+                self.assertEqual(migrate_project_payload(migrated), migrated)
+
+    def test_explicit_transition_mode_wins_over_legacy_switch(self) -> None:
+        payload = self._fixture("v2_legacy_automix.json")
+        payload["settings"]["transition_mode"] = "crossfade"
+        self.assertEqual(migrate_project_payload(payload)["settings"]["transition_mode"], "crossfade")
+
+    def test_unknown_versions_and_non_objects_are_rejected(self) -> None:
+        for version in (0, 3, 99, -1):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "not supported"):
+                ProjectDocument.from_dict({**self._fixture("v1.json"), "version": version})
+        with self.assertRaises(ValueError):
+            migrate_project_payload([])
+
+    def test_save_load_save_is_stable(self) -> None:
+        for name in ("v1.json", "v2_legacy_automix.json"):
+            with self.subTest(fixture=name):
+                saved = ProjectDocument.from_dict(self._fixture(name)).to_dict()
+                self.assertEqual(ProjectDocument.from_dict(saved).to_dict(), saved)
 
 
 if __name__ == "__main__":
