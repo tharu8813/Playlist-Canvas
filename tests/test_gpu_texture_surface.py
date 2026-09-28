@@ -174,6 +174,10 @@ class GpuTextureSurfaceTests(unittest.TestCase):
                 return True
 
             def setData(self, *arguments: object) -> None:
+                # Like PySide6: an int "address" is rejected. The old upload
+                # passed one, silently recreating the texture on every frame.
+                if isinstance(arguments[-1], int):
+                    raise ValueError("setData called with wrong argument values")
                 self.arguments = arguments
 
         surface = GpuTexturePreviewSurface()
@@ -195,8 +199,8 @@ class GpuTextureSurfaceTests(unittest.TestCase):
                 QOpenGLTexture.PixelType.UInt8,
             ),
         )
-        self.assertIsInstance(texture.arguments[2], int)
-        self.assertIs(surface._textures["dynamic"].texture, texture)
+        self.assertEqual(len(memoryview(texture.arguments[2]).cast("B")), 16 * 8 * 4)
+        self.assertIs(surface._textures["dynamic"].texture, texture)  # in place, not reallocated
         surface._textures.clear()
         surface.deleteLater()
 

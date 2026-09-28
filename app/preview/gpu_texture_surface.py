@@ -8,7 +8,6 @@ coupling playback controls to OpenGL resource lifetime.
 from __future__ import annotations
 
 from array import array
-from ctypes import addressof, c_ubyte
 from dataclasses import dataclass, replace
 from math import cos, radians, sin
 from typing import Hashable, Sequence
@@ -384,12 +383,15 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
                     # QOpenGLTexture.setData(QImage) attempts to redefine the
                     # texture storage on some Qt/AMD combinations.  Upload raw
                     # RGBA pixels into the existing allocation instead.
-                    pixels = image.bits()
-                    address = addressof(c_ubyte.from_buffer(pixels))
+                    # Pass the buffer itself: PySide rejects an int address
+                    # with ValueError, which silently recreated the texture on
+                    # every frame, and building that error's message rescans
+                    # every loaded module (>0.5 s stalls while AutoMix loads
+                    # its analysis libraries).
                     existing.texture.setData(
                         QOpenGLTexture.PixelFormat.RGBA,
                         QOpenGLTexture.PixelType.UInt8,
-                        address,
+                        image.constBits(),
                     )
                     self._textures[layer.key] = _TextureEntry(
                         existing.texture, cache_key, image.width(), image.height(),
@@ -470,10 +472,8 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
         ) -> None:
             if not data:
                 return
-            address = addressof(c_ubyte.from_buffer(data))
-            texture.setData(
-                pixel_format, QOpenGLTexture.PixelType.UInt8, address,
-            )
+            # The buffer itself, never an int address (PySide rejects that).
+            texture.setData(pixel_format, QOpenGLTexture.PixelType.UInt8, data)
 
         @staticmethod
         def _new_raw_texture(
