@@ -11,7 +11,6 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from app.automix.overrides import TransitionOverride, pair_key  # noqa: E402
-from app.controllers.preview_controller import PreviewController  # noqa: E402
 from app.dialogs.automix_editor_dialog import AutoMixEditorDialog  # noqa: E402
 from app.models.project import ProjectSettings  # noqa: E402
 from app.utils.i18n import Translator  # noqa: E402
@@ -45,6 +44,8 @@ class AutoMixEditorTests(unittest.TestCase):
         return host, editor
 
     def test_opens_on_the_chip_junction_without_preview_or_any_render(self):
+        from app.controllers.preview_controller import PreviewController
+
         host = self._host()
         controller = PreviewController(host)
         controller.open_playlist_preview = Mock()
@@ -191,6 +192,57 @@ class AutoMixEditorTests(unittest.TestCase):
         editor.properties.reset_button.click()
         self.assertEqual(host._set_automix_override.call_args.args, (pair_key("a", "b"), None))
         self.assertFalse(editor.properties.reset_button.isEnabled())
+
+    def test_a_b_plays_the_automatic_version_until_the_next_edit(self):
+        from pathlib import Path
+
+        _host, editor = self._editor()
+        self.assertFalse(editor.compare_button.isEnabled())  # automatic: nothing to compare
+        editor.audition._executable = Path("ffmpeg.exe")
+        editor.audition.request = Mock()
+        editor.properties.length_presets[4.0].click()
+        self.assertTrue(editor.compare_button.isEnabled())
+
+        def heard_mode():
+            plan, index, _tracks_ = editor.audition.request.call_args.args
+            return dict(plan.audio.transitions[index].details)["mode"]
+
+        self.assertEqual(heard_mode(), "manual")
+        editor.compare_button.click()
+        self.assertEqual(heard_mode(), "auto")
+        self.assertTrue(editor.state_label.text() == "" or "자동 버전" in editor.state_label.text())
+        editor.compare_button.click()
+        self.assertEqual(heard_mode(), "manual")
+        editor.compare_button.click()
+        editor.properties.length_presets[8.0].click()  # an edit is heard as edited
+        self.assertFalse(editor.compare_button.isChecked())
+        self.assertEqual(heard_mode(), "manual")
+
+    def test_presets_save_how_it_mixes_and_apply_elsewhere(self):
+        store = {}
+        fake = Mock()
+        fake.return_value.value.side_effect = lambda key, default=None: store.get(key, default)
+        fake.return_value.setValue.side_effect = store.__setitem__
+        host, editor = self._editor()
+        editor.properties.style_buttons["filter_sweep"].click()
+        editor.properties.length_presets[16.0].click()
+        with patch("app.dialogs.automix_editor_dialog.QSettings", fake), \
+                patch("PySide6.QtWidgets.QInputDialog.getText", return_value=("Club sweep", True)):
+            editor._save_preset()
+            self.assertEqual(list(editor._load_presets()), ["Club sweep"])
+            editor._user_select(1)
+            cues = editor._base()
+            editor._fill_presets_menu()
+            titles = [action.text() for action in editor.presets_menu.actions()]
+            self.assertTrue(any(title.startswith("Club sweep") for title in titles), titles)
+            editor._apply_preset("Club sweep")
+            key, applied = host._set_automix_override.call_args.args
+            self.assertEqual(key, pair_key("b", "c"))
+            self.assertEqual((applied.style, applied.duration), ("filter_sweep", 16.0))
+            self.assertEqual((applied.outgoing_cue, applied.incoming_cue), (cues.outgoing_cue, cues.incoming_cue))
+            store["automix_editor/presets"] = '{"preset>Broken": {"outgoing_cue": 0, "style": "reverb"}}'
+            self.assertEqual(editor._load_presets(), {})  # a broken preset is dropped, not fatal
+            editor._delete_preset("Club sweep")
 
     def test_new_analysis_keeps_the_selection_and_the_view(self):
         host, editor = self._editor(pair=("b", "c"))

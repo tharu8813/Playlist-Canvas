@@ -18,7 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton,
     QScrollArea, QSlider, QSplitter, QToolButton, QVBoxLayout,
 )
 
@@ -38,7 +38,8 @@ from app.widgets.transition_inspector import INCOMING_COLOR, OUTGOING_COLOR, _cl
 
 _SETTINGS_KEY = "automix_editor/advanced"
 _COPIED_FIELDS = ("style", "duration", "tempo_match", "vocal_handoff", "eq_bands")
-"""What "paste" carries to another transition: how it mixes, never where (cues belong to the songs)."""
+"""What paste and presets carry to another transition: how it mixes, never where (cues belong to the songs)."""
+_PRESETS_KEY = "automix_editor/presets"
 
 
 class _OverrideCommand(QUndoCommand):
@@ -166,6 +167,11 @@ class AutoMixEditorDialog(QDialog):
         self.zoom_in_button = tool("+")
         self.copy_button = tool()
         self.paste_button = tool()
+        self.presets_button = tool()
+        self.presets_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.presets_menu = QMenu(self.presets_button)
+        self.presets_menu.aboutToShow.connect(self._fill_presets_menu)
+        self.presets_button.setMenu(self.presets_menu)
         self.properties_button = tool("", checkable=True)
         self.properties_button.setChecked(True)
         self.help_button = tool("?")
@@ -203,7 +209,8 @@ class AutoMixEditorDialog(QDialog):
         for widget in (self.zoom_out_button, self.fit_button, self.zoom_in_button):
             bar.addWidget(widget)
         bar.addStretch(1)
-        for widget in (self.copy_button, self.paste_button, self.properties_button, self.help_button):
+        for widget in (self.copy_button, self.paste_button, self.presets_button, self.properties_button,
+                       self.help_button):
             bar.addWidget(widget)
 
         self.timeline = AutoMixTimeline()
@@ -249,6 +256,8 @@ class AutoMixEditorDialog(QDialog):
         self.loop_button = tool("", checkable=True)
         self.loop_button.setChecked(True)
         self.loop_button.toggled.connect(self._loop_toggled)
+        self.compare_button = tool("", checkable=True)
+        self.compare_button.toggled.connect(self._compare_toggled)
         self.time_label = QLabel()
         self.time_label.setObjectName("previewTimeLabel")
         self.time_label.setMinimumWidth(150)
@@ -272,7 +281,7 @@ class AutoMixEditorDialog(QDialog):
         row = QHBoxLayout(transport)
         row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(8)
-        for widget in (self.play_button, self.stop_button, self.loop_button, self.time_label):
+        for widget in (self.play_button, self.stop_button, self.loop_button, self.compare_button, self.time_label):
             row.addWidget(widget)
         row.addWidget(self.position_slider, 1)
         row.addWidget(self.state_label)
@@ -291,6 +300,7 @@ class AutoMixEditorDialog(QDialog):
         for sequence, callback in (
             ("Space", lambda: self.play_button.toggle()),
             ("L", self.loop_button.toggle),
+            ("B", lambda: self.compare_button.isEnabled() and self.compare_button.toggle()),
             (QKeySequence.StandardKey.Undo, self._undo),
             (QKeySequence.StandardKey.Redo, self._redo),
             ("Ctrl+Shift+Z", self._redo),
@@ -374,6 +384,9 @@ class AutoMixEditorDialog(QDialog):
         self._index = min(max(index, 0), len(self._junctions) - 1) if self._junctions else -1
         self.transition_combo.setCurrentIndex(self._index)
         if refit:
+            self.compare_button.blockSignals(True)
+            self.compare_button.setChecked(False)
+            self.compare_button.blockSignals(False)
             self._stop()
             self._audio = None
             self.timeline.audition = None
@@ -402,7 +415,7 @@ class AutoMixEditorDialog(QDialog):
         if drawn is None:
             self.audition.load_peaks([track for track in self._tracks
                                       if track.id in (junction.outgoing.track_id, junction.incoming.track_id)])
-            self.audition.request(self._plan, self._index, self._tracks)
+            self._request_audition()
         self._fill_properties(drawn or junction, pair, drawn_override)
         self._refresh_actions()
 
@@ -466,7 +479,87 @@ class AutoMixEditorDialog(QDialog):
         before = self._overrides.get(key)
         if not key or override is None or override == before:
             return
+        self.compare_button.setChecked(False)  # an edit is heard as edited
         self.undo_stack.push(_OverrideCommand(self, key, before, override, text))
+
+    def _request_audition(self) -> None:
+        """Audition the selected window: as edited, or -- comparing -- as analysis would mix it."""
+        plan = self._plan
+        key = self._key()
+        comparing = self.compare_button.isChecked() and key in self._overrides
+        if comparing:
+            context = self._context()
+            automatic = {name: value for name, value in self._overrides.items() if name != key}
+            plan = compile_automix(self._tracks, context.analyses, self._settings.with_overrides(automatic),
+                                   context.structures, log_diagnostics=False)
+        self.audition.request(plan, self._index, self._tracks)
+        self._set_audition_text()
+
+    def _compare_toggled(self, _checked: bool) -> None:
+        if self.junction is not None:
+            self._request_audition()
+
+    # -- user presets: how a transition mixes, saved by name -------------------------------
+
+    def _load_presets(self) -> dict:
+        import json
+
+        from app.automix.overrides import parse_overrides
+
+        try:
+            data = json.loads(str(QSettings().value(_PRESETS_KEY, "{}") or "{}"))
+        except ValueError:
+            return {}
+        # Stored as "preset>name" so parse_overrides' key check and validation apply unchanged.
+        return {key[len("preset>"):]: value for key, value in parse_overrides(data).items()
+                if key.startswith("preset>")}
+
+    def _save_presets(self, presets: dict) -> None:
+        import json
+
+        QSettings().setValue(_PRESETS_KEY, json.dumps(
+            {f"preset>{name}": override.to_dict() for name, override in presets.items()}, ensure_ascii=False))
+
+    def _fill_presets_menu(self) -> None:
+        menu = self.presets_menu
+        menu.clear()
+        presets = self._load_presets()
+        save = menu.addAction(self._text("현재 설정을 프리셋으로 저장…", "Save these settings as a preset…"))
+        save.setEnabled(self.junction is not None)
+        save.triggered.connect(self._save_preset)
+        if not presets:
+            menu.addAction(self._text("저장된 프리셋 없음", "No saved presets")).setEnabled(False)
+            return
+        menu.addSeparator()
+        for name, preset in sorted(presets.items()):
+            action = menu.addAction(f"{name}  ·  {style_label(preset.style, self.korean)} {preset.duration:g}s")
+            action.setEnabled(self.junction is not None)
+            action.triggered.connect(lambda _checked=False, name=name: self._apply_preset(name))
+        remove = menu.addMenu(self._text("프리셋 삭제", "Delete a preset"))
+        for name in sorted(presets):
+            remove.addAction(name).triggered.connect(lambda _checked=False, name=name: self._delete_preset(name))
+
+    def _save_preset(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        name, accepted = QInputDialog.getText(self, self._text("프리셋 저장", "Save preset"),
+                                              self._text("프리셋 이름", "Preset name"))
+        name = name.strip()
+        if accepted and name:
+            self.properties.flush()
+            presets = self._load_presets()
+            presets[name] = replace(self._base(), outgoing_cue=0.0, incoming_cue=0.0)
+            self._save_presets(presets)
+
+    def _apply_preset(self, name: str) -> None:
+        preset = self._load_presets().get(name)
+        if preset is not None and self.junction is not None:
+            self._apply_settings(preset, self._text(f"프리셋 적용: {name}", f"Apply preset: {name}"))
+
+    def _delete_preset(self, name: str) -> None:
+        presets = self._load_presets()
+        if presets.pop(name, None) is not None:
+            self._save_presets(presets)
 
     def _store(self, key: str, override) -> None:
         """Apply one undo step: the project, the whole plan, the view (selecting what changed)."""
@@ -533,15 +626,18 @@ class AutoMixEditorDialog(QDialog):
             self._refresh_actions()
 
     def _paste(self) -> None:
-        if self._copied is None or self.junction is None:
-            return
+        if self._copied is not None and self.junction is not None:
+            self._apply_settings(self._copied, self._text("전환 설정 붙여넣기", "Paste transition settings"))
+
+    def _apply_settings(self, source, text: str) -> None:
+        """How ``source`` mixes (style, length, tempo, handoff, bands) on the selected transition, keeping its cues."""
         self.properties.flush()
-        values = {name: getattr(self._copied, name) for name in _COPIED_FIELDS}
+        values = {name: getattr(source, name) for name in _COPIED_FIELDS}
         try:
             override = replace(self._base(), **values)
         except ValueError:
             return
-        self._commit(override, self._text("전환 설정 붙여넣기", "Paste transition settings"))
+        self._commit(override, text)
 
     def _nudge(self, part: str, direction: int, fine: bool) -> None:
         """Move one part by a beat of its song (0.05 s with Shift), as one undo step."""
@@ -627,6 +723,8 @@ class AutoMixEditorDialog(QDialog):
             tip = detail
         else:
             text, tip = "", ""
+        if text and self.compare_button.isChecked():
+            text = self._text("자동 버전 재생 · ", "Automatic version · ") + text
         self.state_label.setText(text)
         self.state_label.setToolTip(tip)
         self.state_label.setProperty("state", state)
@@ -808,6 +906,12 @@ class AutoMixEditorDialog(QDialog):
             f": {self.undo_stack.redoText()}" if self.undo_stack.canRedo() else "") + " (Ctrl+Shift+Z)")
         self.paste_button.setEnabled(self._copied is not None and self.junction is not None)
         self.copy_button.setEnabled(self.junction is not None)
+        manual = self._key() in self._overrides
+        self.compare_button.setEnabled(manual and self.audition.available)
+        if not manual and self.compare_button.isChecked():
+            self.compare_button.blockSignals(True)
+            self.compare_button.setChecked(False)
+            self.compare_button.blockSignals(False)
 
     def _retranslate(self) -> None:
         korean = self.korean
@@ -833,6 +937,14 @@ class AutoMixEditorDialog(QDialog):
         self.paste_button.setText(self._text("붙여넣기", "Paste"))
         self.paste_button.setToolTip(self._text("복사한 설정을 이 전환에 적용 · 큐 지점은 유지 (Ctrl+V)",
                                                 "Apply the copied settings here, keeping this transition's cues (Ctrl+V)"))
+        self.presets_button.setText(self._text("프리셋", "Presets"))
+        self.presets_button.setToolTip(self._text(
+            "스타일·길이·템포·대역 설정을 이름으로 저장하고 다른 전환에 적용합니다 (큐 지점은 유지)",
+            "Save style, length, tempo and band settings by name and apply them elsewhere (cues stay)"))
+        self.compare_button.setText(self._text("A/B 자동과 비교", "A/B vs automatic"))
+        self.compare_button.setToolTip(self._text(
+            "켜면 같은 위치에서 분석이 정한 자동 버전을 들려줍니다. 끄면 직접 설정한 버전으로 돌아옵니다 (B)",
+            "On: hear what analysis would do here, from the same spot. Off: back to your version (B)"))
         self.properties_button.setText(self._text("속성", "Properties"))
         self.properties_button.setToolTip(self._text("속성 패널 보이기/숨기기", "Show or hide the properties panel"))
         self.help_button.setToolTip(self._text("단축키 (F1)", "Shortcuts (F1)"))
@@ -855,6 +967,7 @@ class AutoMixEditorDialog(QDialog):
     def _show_shortcuts(self) -> None:
         rows = (
             ("Space", "재생 / 일시정지", "Play / pause"), ("L", "구간 반복", "Loop the window"),
+            ("B", "직접 설정 ↔ 자동 버전 비교", "Compare your version with the automatic one"),
             ("Home", "구간 처음으로", "Window start"),
             ("Ctrl+Z · Ctrl+Shift+Z", "실행 취소 · 다시 실행", "Undo · redo"),
             ("Alt+← / →", "이전 / 다음 전환", "Previous / next transition"),
