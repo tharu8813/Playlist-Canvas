@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -101,6 +102,9 @@ class OnnxAudio2Beats:
         options = onnxruntime.SessionOptions()
         # Half the cores: analysis runs while the user keeps editing/previewing.
         options.intra_op_num_threads = max(1, (os.cpu_count() or 2) // 2)
+        # Idle pool threads sleep instead of busy-waiting between chunks, so the
+        # cores they would spin on stay free for Preview playback (same output).
+        options.add_session_config_entry("session.intra_op.allow_spinning", "0")
         self._session = onnxruntime.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
 
     def __call__(self, signal: np.ndarray, sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
@@ -142,8 +146,28 @@ class BeatThisOnnxAnalysisProvider(BeatThisAnalysisProvider):
     def _load_model(self):
         with self._model_lock:
             if self._model is None:
-                self._model = OnnxAudio2Beats(model_path())
+                self._model = shared_beat_model(model_path())
             return self._model
+
+
+_SHARED_MODELS: dict[str, OnnxAudio2Beats] = {}
+_SHARED_MODELS_LOCK = threading.Lock()
+
+
+def shared_beat_model(path: Path) -> OnnxAudio2Beats:
+    """One ONNX session per model file for the whole app session.
+
+    Creating it holds the GIL for ~0.65 s (onnxruntime loads and optimizes the
+    graph without releasing it), which froze Preview every time a provider was
+    built -- each Preview open, remix and final mix. ``InferenceSession.run``
+    is thread-safe, so every provider and worker can share it.
+    """
+    key = str(path)
+    with _SHARED_MODELS_LOCK:
+        model = _SHARED_MODELS.get(key)
+        if model is None:
+            model = _SHARED_MODELS[key] = OnnxAudio2Beats(path)
+        return model
 
 
 def _installed_onnxruntime_version() -> str:

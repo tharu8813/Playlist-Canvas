@@ -208,6 +208,8 @@ class OnnxVocalDetector:
 
             options = onnxruntime.SessionOptions()
             options.intra_op_num_threads = max(1, (os.cpu_count() or 2) // 2)
+            # Sleep, not busy-wait, between runs: keeps cores free for Preview.
+            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
             self._session = onnxruntime.InferenceSession(str(self._model), options, providers=["CPUExecutionProvider"])
             LOGGER.info("Loaded Open-Unmix %s for AutoMix vocal detection", ONNX_ENGINE_ID)
         return self._session

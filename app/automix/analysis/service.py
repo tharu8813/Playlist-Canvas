@@ -18,6 +18,7 @@ from app.automix.cache import AnalysisCache, canonical_media_path
 from app.automix.models import TrackAnalysis
 from app.automix.settings import AutoMixAnalysisSettings
 from app.models.playlist import PlaylistTrack
+from app.utils.subprocess_utils import lower_thread_if_background
 
 LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class AnalysisService:
 
         with ThreadPoolExecutor(
             max_workers=worker_count, thread_name_prefix="automix-analysis",
+            initializer=lower_thread_if_background,
         ) as executor:
             futures = {}
             for path_key in order:

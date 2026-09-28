@@ -24,6 +24,7 @@ from app.models.playlist import PlaylistTrack
 from app.renderer.ffmpeg_renderer import FFmpegRenderer, RenderCancelledError, RenderError
 from app.timeline.compiler import compile_playlist
 from app.utils.qt_worker_lifecycle import stop_qthread_now
+from app.utils.subprocess_utils import background_work
 
 LOGGER = logging.getLogger(__name__)
 
@@ -64,9 +65,11 @@ class _PreviewAudioWorker(QThread):
         self, renderer: FFmpegRenderer, tracks: list[PlaylistTrack], output_directory: Path,
         transition_mode: str, crossfade_seconds: float, parent: QObject | None = None,
         *, settings=None, cancel_event: threading.Event | None = None, automix_settings=None,
-        audio_codec: str = "aac",
+        audio_codec: str = "aac", background: bool = False,
     ) -> None:
         super().__init__(parent)
+        self._background = background
+        """Preview's own mix: yield the CPU to playback (never set for Export)."""
         self._automix_settings = automix_settings
         self._audio_codec = audio_codec
         self._renderer = renderer
@@ -85,6 +88,13 @@ class _PreviewAudioWorker(QThread):
         self._cancel_event.set()
 
     def run(self) -> None:
+        if self._background:
+            with background_work():
+                self._prepare()
+        else:
+            self._prepare()
+
+    def _prepare(self) -> None:
         try:
             from app.renderer.ffmpeg_renderer import RenderSettings
 
@@ -144,7 +154,7 @@ class PreviewAudioController(QObject):
         # loudness, lossless, and without the encode (27 s per 40 min of audio).
         worker = _PreviewAudioWorker(
             self._renderer, tracks, output_directory, transition_mode, crossfade_seconds, self,
-            automix_settings=automix_settings, audio_codec="flac",
+            automix_settings=automix_settings, audio_codec="flac", background=True,
         )
         worker.ready.connect(
             lambda path, plan: self.audio_ready.emit(path, plan)

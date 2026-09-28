@@ -47,13 +47,19 @@ from app.models.playlist import PlaylistTrack
 from app.renderer.ffmpeg_renderer import FFmpegRenderer
 from app.renderer.progress_text import audio_progress_text, clock
 from app.utils.qt_worker_lifecycle import stop_qthread_now
-from app.utils.subprocess_utils import hidden_process_kwargs
+from app.utils.subprocess_utils import (
+    background_work, hidden_process_kwargs, lower_thread_if_background,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 _LUFS = re.compile(r"I:\s*(-?(?:\d+(?:\.\d+)?|inf))\s*LUFS")
 _PEAK = re.compile(r"Peak:\s*(-?(?:\d+(?:\.\d+)?|inf))\s*dBFS")
 
+PREVIEW_ANALYSIS_WORKERS = 2
+"""Tracks analysed side by side while Preview plays: each worker's Python steps
+contend with playback for the GIL. Measured on 11 tracks: 2 workers finish the
+mix as fast as 4 (the final render dominates) with fewer late frames."""
 PUBLISH_INTERVAL_SECONDS = 0.25
 """At most this often a burst of analysis steps redraws the status line."""
 ANALYSIS_WEIGHT = 0.45
@@ -169,6 +175,10 @@ class _AnalysisWorker(QThread):
         self._structure_enabled = structure_enabled
 
     def run(self) -> None:
+        with background_work():
+            self._analyze()
+
+    def _analyze(self) -> None:
         # Loudness is one cheap decode per file (~0.1 s); running it first
         # thing puts per-track playback at the mix's level within moments.
         threads = [threading.Thread(target=self._run_levels, name="progressive-levels")]
@@ -181,8 +191,12 @@ class _AnalysisWorker(QThread):
             # cache entries written here are the ones the final render reads.
             from app.automix.analysis.registry import create_analysis_provider
             from app.automix.analysis.service import AnalysisService
+            from app.automix.settings import AutoMixAnalysisSettings
 
-            AnalysisService(create_analysis_provider("auto", self._executable)).analyze_tracks(
+            AnalysisService(
+                create_analysis_provider("auto", self._executable),
+                settings=AutoMixAnalysisSettings(max_workers=PREVIEW_ANALYSIS_WORKERS),
+            ).analyze_tracks(
                 self._tracks, cancel_event=self._cancel_event,
                 on_result=lambda track_id, analysis: self.rhythm_done.emit(self._generation, track_id, analysis),
                 step_progress=lambda track_id, step, _fraction: self.rhythm_step.emit(
@@ -200,6 +214,7 @@ class _AnalysisWorker(QThread):
                 thread.join()
 
     def _run_levels(self) -> None:
+        lower_thread_if_background()
         try:
             gain = playlist_gain(self._executable, self._tracks, self._cancel_event)
         except Exception as error:  # noqa: BLE001 - the partial render measures again if needed
@@ -209,6 +224,7 @@ class _AnalysisWorker(QThread):
             self.level_done.emit(self._generation, gain)
 
     def _run_structure(self) -> None:
+        lower_thread_if_background()
         try:
             from app.automix.structure.service import StructureAnalysisService
             from app.automix.structure.sonara import SonaraStructureProvider
@@ -246,6 +262,10 @@ class _PartialRenderWorker(QThread):
         self._gain = gain
 
     def run(self) -> None:
+        with background_work():
+            self._render()
+
+    def _render(self) -> None:
         from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
 
         try:

@@ -31,7 +31,7 @@ from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderCancelled, A
 from app.controllers.progressive_automix_controller import playlist_gain
 from app.models.playlist import PlaylistTrack
 from app.utils.qt_worker_lifecycle import stop_qthread_now
-from app.utils.subprocess_utils import hidden_process_kwargs
+from app.utils.subprocess_utils import background_work, hidden_process_kwargs
 
 LOGGER = logging.getLogger(__name__)
 
@@ -95,10 +95,11 @@ class _PeaksWorker(QThread):
         self._executable, self._tracks, self._cancel = executable, tracks, cancel
 
     def run(self) -> None:
-        for track_id, path in self._tracks:
-            if self._cancel.is_set():
-                return
-            self.ready.emit(track_id, track_peaks(self._executable, path))
+        with background_work():
+            for track_id, path in self._tracks:
+                if self._cancel.is_set():
+                    return
+                self.ready.emit(track_id, track_peaks(self._executable, path))
 
 
 class _WindowWorker(QThread):
@@ -115,6 +116,10 @@ class _WindowWorker(QThread):
         self._cancel, self._gain = cancel, gain
 
     def run(self) -> None:
+        with background_work():
+            self._render()
+
+    def _render(self) -> None:
         try:
             gain = self._gain if self._gain is not None else playlist_gain(
                 self._executable, self._tracks, self._cancel)

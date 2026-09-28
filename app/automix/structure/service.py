@@ -27,6 +27,7 @@ from app.automix.structure.cache import StructureAnalysisCache
 from app.automix.structure.models import TrackStructureAnalysis
 from app.automix.structure.provider import StructureAnalysisCancelled, StructureAnalysisProvider
 from app.models.playlist import PlaylistTrack
+from app.utils.subprocess_utils import lower_thread_if_background
 
 LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ class StructureAnalysisService:
 
         with ThreadPoolExecutor(
             max_workers=worker_count, thread_name_prefix="automix-structure",
+            initializer=lower_thread_if_background,
         ) as executor:
             futures = {}
             for path_key in order:

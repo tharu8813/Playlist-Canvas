@@ -103,6 +103,22 @@ class _AutoMixAnalysisWorker(QThread):
         if result.failures:
             self.failed.emit(result.failures)
         self._run_structure_analysis()
+        self._warm_rhythm_model(provider)
+
+    def _warm_rhythm_model(self, provider) -> None:
+        """Load the shared beat model now, while the user edits.
+
+        Loading holds the GIL for ~0.65 s; done here it never lands in the
+        middle of Preview playback (the session is shared app-wide, see
+        beat_this_onnx.shared_beat_model). A no-op for other providers.
+        """
+        load = getattr(provider, "_load_model", None)
+        if load is None or self._cancel_event.is_set():
+            return
+        try:
+            load()
+        except Exception as error:  # noqa: BLE001 - only a warm-up; analysis loads it again if needed
+            LOGGER.info("AutoMix beat model warm-up skipped: %s", error)
 
     def _structure_available(self) -> bool:
         if not self._enable_structure_analysis:
