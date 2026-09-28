@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import unittest
 
 from app import __version__
@@ -137,6 +138,32 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("python312.dll", packaging)
         self.assertIn("Python 3.12", lock_file.splitlines()[0])
         self.assertNotIn("python314.dll", packaging)
+
+    def test_documented_setup_names_and_badge_match_the_app_version(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        packaging = (ROOT / "PACKAGING.md").read_text(encoding="utf-8")
+        setup_names = re.findall(r"Playlist Canvas-([\d.]+)-setup\.exe", readme + packaging)
+        self.assertTrue(setup_names)
+        self.assertEqual(set(setup_names), {__version__})
+        self.assertIn(f"badge/version-{__version__}-", readme)
+
+    def test_release_lock_pins_every_package_the_spec_bundles(self) -> None:
+        specification = (ROOT / "playlist_canvas.spec").read_text(encoding="utf-8")
+        declared = re.search(r"AUTOMIX_PACKAGES = \(([^)]*)\)", specification)
+        self.assertIsNotNone(declared)
+        modules = [*re.findall(r'"([\w.]+)"', declared.group(1)), "onnxruntime", "numpy"]
+        self.assertIn("sonara", modules)  # the parse found the real list
+        distributions = {"sklearn": "scikit-learn"}  # import name -> pip name
+        pinned = {
+            line.split("==")[0].strip().lower().replace("_", "-")
+            for line in (ROOT / "requirements-lock.txt").read_text(encoding="utf-8").splitlines()
+            if "==" in line and not line.lstrip().startswith("#")
+        }
+        missing = [
+            module for module in modules
+            if distributions.get(module, module).lower().replace("_", "-") not in pinned
+        ]
+        self.assertEqual(missing, [])
 
     def test_installer_registers_pvsproj_file_association(self) -> None:
         installer = (ROOT / "setup.iss").read_text(encoding="utf-8")
