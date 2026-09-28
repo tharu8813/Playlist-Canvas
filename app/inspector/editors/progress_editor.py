@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 _OWN_FIELD_KEYS = (
     "progress_style", "progress_value", "progress_track_color", "progress_mode",
+    "progress_knob",
 )
 
 

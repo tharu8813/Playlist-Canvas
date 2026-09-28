@@ -514,26 +514,30 @@ class ExportTimelinePlanner:
                         )
                         if intro < adjusted_point < intro + stable:
                             sample_points.add(adjusted_point)
-                cue_start = float(cue.get("start", 0.0))
-                for lyric_source in lyric_sources:
-                    if lyric_source.subtitle_animation == "none":
-                        continue
-                    steps = max(
-                        1,
-                        round(
-                            lyric_source.subtitle_animation_duration
-                            * animation_fps
-                        ),
-                    )
-                    for step in range(steps + 1):
-                        point = (
-                            cue_start - track_offset
-                            - lyric_source.subtitle_timing_offset
-                            + lyric_source.subtitle_animation_duration
-                            * step / steps
+                # A cue animates in at its start and, when a gap follows,
+                # releases its highlight after its end.
+                for edge in (
+                    float(cue.get("start", 0.0)), float(cue.get("end", 0.0)),
+                ):
+                    for lyric_source in lyric_sources:
+                        if lyric_source.subtitle_animation == "none":
+                            continue
+                        steps = max(
+                            1,
+                            round(
+                                lyric_source.subtitle_animation_duration
+                                * animation_fps
+                            ),
                         )
-                        if intro < point < intro + stable:
-                            sample_points.add(point)
+                        for step in range(steps + 1):
+                            point = (
+                                edge - track_offset
+                                - lyric_source.subtitle_timing_offset
+                                + lyric_source.subtitle_animation_duration
+                                * step / steps
+                            )
+                            if intro < point < intro + stable:
+                                sample_points.add(point)
 
         for source in (
             item for item in sources

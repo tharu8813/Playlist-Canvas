@@ -31,6 +31,12 @@ class SourceType(str, Enum):
     PARTICLE_OVERLAY = "particle_overlay"
 
 
+TEXT_SOURCE_TYPES = frozenset({
+    SourceType.TEXT, SourceType.TIME, SourceType.LYRICS,
+    SourceType.TRACK_LIST, SourceType.NOW_PLAYING,
+})
+
+
 @dataclass(slots=True)
 class Shadow:
     """Drop-shadow appearance settings."""
@@ -44,6 +50,8 @@ class Shadow:
 
 
 SUBTITLE_ANIMATIONS = ("glow", "rise", "none")
+TEXT_CASES = ("none", "upper", "lower", "capitalize", "small_caps")
+PROGRESS_KNOBS = ("auto", "none", "circle", "bar")
 
 # Projects saved before the lyric transitions were reduced to two distinct
 # styles used these identifiers. Map each onto its closest survivor.
@@ -109,6 +117,14 @@ class Source:
     text_overflow: str = "wrap"
     text_stroke_color: str = "#000000"
     text_stroke_width: float = 0.0
+    # Typography shared by every text-bearing source.
+    text_letter_spacing: float = 0.0
+    text_italic: bool = False
+    text_case: str = "none"
+    # Paint the fill gradient into the glyphs instead of the box behind them.
+    text_gradient: bool = False
+    # Cast the shadow from the glyph shapes instead of the source box.
+    text_shadow_glyph: bool = False
     content_path: str = ""
     video_paths: list[str] = field(default_factory=list)
     video_timing_mode: str = "timeline"
@@ -133,6 +149,8 @@ class Source:
     progress_value: float = 0.62
     progress_track_color: str = "#303842"
     progress_mode: str = "track"
+    # "auto" keeps each style's own handle (only Spotify draws one).
+    progress_knob: str = "auto"
     group_id: str | None = None
     visualizer_style: str = "bars"
     visualizer_bars: int = 32
@@ -158,6 +176,10 @@ class Source:
     subtitle_current_line_count: int = 1
     subtitle_scroll_offset: float = 0.0
     subtitle_timing_offset: float = 0.0
+    # Size of the current lyric row relative to the context rows.
+    subtitle_current_scale: float = 1.08
+    subtitle_accent_enabled: bool = False
+    subtitle_accent_color: str = "#FFE08A"
     track_list_count: int = 5
     track_list_style: str = "compact"
     track_list_window: str = "centered"
@@ -348,6 +370,20 @@ class Source:
             raise ValueError(
                 f"Source '{source.name}' text stroke width must be between 0 and 12."
             )
+        for name, allowed in (
+            ("text_case", TEXT_CASES), ("progress_knob", PROGRESS_KNOBS),
+        ):
+            if getattr(source, name) not in allowed:
+                raise ValueError(f"Source '{source.name}' has an invalid {name}.")
+        for name, (minimum, maximum) in {
+            "text_letter_spacing": (-10.0, 60.0),
+            "subtitle_current_scale": (1.0, 2.0),
+        }.items():
+            if not minimum <= float(getattr(source, name)) <= maximum:
+                raise ValueError(
+                    f"Source '{source.name}' value for '{name}' must be between "
+                    f"{minimum:g} and {maximum:g}."
+                )
         bounded_integers = {
             "visualizer_bars": (4, 96),
             # -1 means that lyric context is derived from source height. Track

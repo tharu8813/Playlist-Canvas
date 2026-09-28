@@ -1636,6 +1636,7 @@ class MainWindow(QMainWindow):
             self.project_settings.transition_mode == "automix", self.project_settings.automix_overrides,
         )
         self.playlist_editor.transition_edit_requested.connect(self.preview_controller.edit_transition)
+        self.playlist_editor.automix_editor_requested.connect(lambda: self.preview_controller.edit_transition())
         self.playlist_editor.transition_reset_requested.connect(lambda key: self._set_automix_override(key, None))
         self.playlist_editor.tracks_removed.connect(
             lambda count: self._show_undo_hint(

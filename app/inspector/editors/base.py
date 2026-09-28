@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QPushButton, QWidget
 
-from app.models.source import Source
+from app.models.source import TEXT_CASES, TEXT_SOURCE_TYPES, Source
 
 if TYPE_CHECKING:
     from app.inspector.source_inspector import SourceInspector
@@ -140,6 +140,72 @@ class FieldSection:
         """Field-specific guidance merged into each field's hover help."""
         return {}
 
+
+class TypographySection(FieldSection):
+    """Typography and glyph effects shared by every text-bearing source.
+
+    Its rows live in three tabs, so the Inspector adds them with ``keys``:
+    TEXT_KEYS to the text tab, and the glyph shadow / gradient toggles next to
+    the shadow and gradient settings they redirect.
+    """
+
+    FAMILY = ("글자", "typography")
+    TEXT_KEYS = ("text_letter_spacing", "text_italic", "text_case")
+    ROWS = (
+        ("text_letter_spacing", None),
+        ("text_italic", None),
+        ("text_case", None),
+        ("text_shadow_glyph", None),
+        ("text_gradient", None),
+    )
+    LABELS = {
+        "text_letter_spacing": ("자간", "Letter spacing"),
+        "text_italic": ("기울임꼴", "Italic"),
+        "text_case": ("대소문자", "Letter case"),
+        "text_shadow_glyph": ("글자 모양 그림자", "Glyph-shaped shadow"),
+        "text_gradient": ("글자에 그라데이션", "Gradient on text"),
+    }
+    SECTION_TITLES: ClassVar[dict[str, tuple[str, str]]] = {}
+    HELP = {
+        "letter_spacing": ("글자 사이 간격(px)입니다. 음수는 좁히고 양수는 넓힙니다.", "Extra space between letters in pixels. Negative values tighten, positive values widen."),
+        "italic": ("글자를 기울임꼴로 표시합니다.", "Shows the text in italics."),
+        "case": ("원문은 그대로 두고 대문자, 소문자, 단어 첫 글자 대문자 또는 작은 대문자로 표시합니다.", "Displays the text in upper, lower, title case or small caps without changing it."),
+        "shadow_glyph": ("그림자를 요소 상자가 아닌 글자 모양을 따라 드리웁니다. 오프셋을 0으로 두면 글로우처럼 보입니다.", "Casts the shadow from the letters instead of the source box. With zero offset it reads as a glow."),
+        "gradient": ("채우기 그라데이션을 배경 대신 글자에 칠합니다.", "Paints the fill gradient into the letters instead of the background."),
+    }
+    def __init__(self, spin: Callable[[float, float, float], QWidget]) -> None:
+        case = QComboBox()
+        for value in TEXT_CASES:
+            case.addItem(value, value)
+        self.widgets: dict[str, QWidget] = {
+            "text_letter_spacing": spin(-10, 60, 0.5),
+            "text_italic": QCheckBox(),
+            "text_case": case,
+            "text_shadow_glyph": QCheckBox(),
+            "text_gradient": QCheckBox(),
+        }
+
+    def hidden_when_off(self, source: Source) -> dict[str, bool]:
+        return {
+            "text_shadow_glyph": source.shadow.enabled,
+            "text_gradient": source.gradient.enabled,
+        }
+
+    def retranslate(self, korean: bool) -> None:
+        labels = (
+            ("그대로", "대문자", "소문자", "단어 첫 글자 대문자", "작은 대문자")
+            if korean else
+            ("As typed", "UPPERCASE", "lowercase", "Title Case", "Small caps")
+        )
+        for index, label in enumerate(labels):
+            self.widgets["text_case"].setItemText(index, label)
+        for key, text in (
+            ("text_italic", "사용" if korean else "Enabled"),
+            ("text_shadow_glyph", "사용" if korean else "Enabled"),
+            ("text_gradient", "사용" if korean else "Enabled"),
+        ):
+            self.widgets[key].setText(text)
+
 # Every field key _update_legacy_source_specific_fields toggles purely by
 # source_type. Excludes shadow_* (every source shows it, see
 # apply_shared_fields) and the toggle-dependent rows
@@ -149,9 +215,11 @@ class FieldSection:
 TYPE_SPECIFIC_FIELD_KEYS: tuple[str, ...] = (
     "text", "font_size", "font_weight", "font_family",
     "text_stroke_color", "text_stroke_width", "text_alignment", "text_overflow",
+    *(key for key, _section in TypographySection.ROWS),
     "file", "image_fit", "blur", "brightness", "contrast",
     "shape", "video_settings",
     "progress_style", "progress_value", "progress_track_color", "progress_mode",
+    "progress_knob",
     "visualizer_style", "visualizer_bars", "visualizer_line_width",
     "visualizer_sensitivity", "visualizer_reactivity", "visualizer_noise_gate",
     "visualizer_min_level", "visualizer_max_level", "visualizer_attack",
@@ -169,7 +237,8 @@ TYPE_SPECIFIC_FIELD_KEYS: tuple[str, ...] = (
     "now_playing_exit_duration",
     "subtitle_animation", "subtitle_animation_duration", "subtitle_context_lines",
     "subtitle_next_lines", "subtitle_line_spacing", "subtitle_previous_opacity",
-    "subtitle_previous_blur", "subtitle_timing_offset",
+    "subtitle_previous_blur", "subtitle_timing_offset", "subtitle_current_scale",
+    "subtitle_accent_enabled", "subtitle_accent_color",
     "waveform_style",
     "level_meter_mode", "level_meter_style", "level_meter_orientation",
     "level_meter_sensitivity", "level_meter_attack", "level_meter_release",
@@ -207,6 +276,10 @@ def apply_shared_fields(inspector: "SourceInspector", source: Source) -> None:
     it, and the shadow group is visible for any selected source.
     """
     inspector._set_field_visible("text_color", inspector._uses_primary_text_color(source))
+    show_fields(
+        inspector, (key for key, _section in TypographySection.ROWS),
+        source.source_type in TEXT_SOURCE_TYPES,
+    )
     show_fields(inspector, _ALWAYS_VISIBLE_FIELD_KEYS)
 
 

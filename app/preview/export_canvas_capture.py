@@ -194,7 +194,7 @@ class ExportCanvasCapturer:
             transition = cue_state.transition_progress if cue_state.transitioning else None
             content_state = (
                 "lyrics", id(sample.track), cue_state.cue_index, cue_state.active_cue_index,
-                transition,
+                transition, cue_state.release_progress,
             )
         elif source.source_type is SourceType.TRACK_LIST:
             content_state = ("track_list", sample.track_number)

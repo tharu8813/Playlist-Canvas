@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 
 from app.automix.diagnostics import transition_rows
 from app.utils.i18n import Language, Translator
@@ -105,6 +105,13 @@ class AutoMixDetailsPanel(QFrame):
         self.status_label = QLabel()
         self.status_label.setObjectName("mutedLabel")
         self.status_label.setWordWrap(True)
+        self.progress_label = QLabel()
+        self.explanation_label = QLabel()
+        for label in (self.progress_label, self.explanation_label):
+            label.setObjectName("mutedLabel")
+            label.setWordWrap(True)
+            label.setTextFormat(Qt.TextFormat.PlainText)
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(4)
@@ -115,6 +122,8 @@ class AutoMixDetailsPanel(QFrame):
         header.addWidget(self.open_window_button)
         layout.addLayout(header)
         layout.addWidget(self.status_label)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.explanation_label)
         self.retranslate()
 
     # -- state ---------------------------------------------------------------
@@ -129,17 +138,24 @@ class AutoMixDetailsPanel(QFrame):
             for row in self.rows
         ]
         self._state = (state, ready_through)
+        if state == "final":
+            self._failed = False
+            self._progress_message = ""
         self._current = -1
         self._update_status()
 
     def set_progress_message(self, message: str) -> None:
-        """Live preparation text ("Analyzing 4 / 12 ..."), shown until a mix plays."""
+        """Show preparation progress alongside the plan currently playing."""
+        if message == self._progress_message and not self._failed:
+            return
+        self._failed = False
         self._progress_message = message or ""
         self._update_status()
 
     def set_failed(self) -> None:
         """The mix could not be prepared: Preview keeps playing what it already has."""
         self._failed = True
+        self._progress_message = ""
         self._update_status()
 
     def set_playhead(self, seconds: float) -> None:
@@ -203,7 +219,10 @@ class AutoMixDetailsPanel(QFrame):
         planned = len(self.rows) if state == "final" else (ready_through or 1) - 1
         joined = sum(1 for row in self.rows if row["type"] == "sequential" and int(row["index"]) <= planned
                      ) if self.automix else 0
-        if self._failed and state != "final":
+        if self._failed and state == "final":
+            text = ("! 새 믹스를 준비하지 못했습니다 · 이전 믹스를 계속 재생합니다" if korean
+                    else "! Could not update the mix · keeping the previous mix")
+        elif self._failed and state != "final":
             if state == "provisional":
                 text = (f"! {ready_through}번째 곡까지만 AutoMix 적용 · 이후는 곡을 차례로 재생합니다" if korean
                         else f"! AutoMix only through track {ready_through} · then tracks play back to back")
@@ -213,6 +232,9 @@ class AutoMixDetailsPanel(QFrame):
         elif state == "provisional":
             text = (f"◐ 임시 계획 · {ready_through}번째 곡까지 AutoMix 적용됨 · 전환 {mixed}개" if korean
                     else f"◐ Provisional · AutoMix through track {ready_through} · {mixed} transition(s)")
+        elif not self.rows and self.plan is not None:
+            text = ("전환할 곡이 없습니다 · 재생할 곡을 2개 이상 추가하세요" if korean
+                    else "No transitions · add at least two playable tracks")
         elif state == "final":
             text = f"✓ 최종 계획 · 전환 {mixed}개" if korean else f"✓ Final plan · {mixed} transition(s)"
         elif self._progress_message:
@@ -239,12 +261,19 @@ class AutoMixDetailsPanel(QFrame):
         self.status_label.setToolTip(f"{text}\n{explanation}".strip())
         self.status_label.setAccessibleName(("믹스 상태: " if korean else "Mix status: ") + text.lstrip("●◐✓! "))
         self.status_label.setAccessibleDescription(explanation)
+        self.explanation_label.setText(explanation)
+        self.explanation_label.setVisible(bool(explanation))
+        self.progress_label.setText(self._progress_message)
+        self.progress_label.setVisible(bool(self._progress_message) and state != "waiting" and not self._failed)
+        self.open_window_button.setEnabled(bool(self.rows))
         self.changed.emit()
 
     def retranslate(self) -> None:
         korean = self._korean()
-        self.title_label.setText("믹스" if korean else "Mix")
-        self.open_window_button.setText("⤢ 전환 상세" if korean else "⤢ Transition details")
+        self.title_label.setText("AutoMix" if self.automix else ("믹스" if korean else "Mix"))
+        self.open_window_button.setText("AutoMix 전환 자세히 보기" if korean and self.automix else
+                                        "AutoMix transition details" if self.automix else
+                                        "전환 상세" if korean else "Transition details")
         self.open_window_button.setToolTip(
             "새 창에서 전체 믹스와 각 전환의 위치·방식·선택 근거, 대역별 음량 변화, 화면 전환 지점을 "
             "그래프로 보고 재생할 수 있습니다." if korean

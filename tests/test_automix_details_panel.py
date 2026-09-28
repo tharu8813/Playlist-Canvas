@@ -153,6 +153,54 @@ class AutoMixDetailsPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._style(self.panel.rows[0]), "보컬 보호 EQ")
         self.assertIn("최종 계획", self.panel.status_label.text())
 
+    def test_preparation_recovery_and_empty_state(self) -> None:
+        self.assertFalse(self.panel.open_window_button.isEnabled())
+        self.panel.set_plan(self.plan, self.tracks, state="provisional", ready_through=2)
+        self.panel.set_progress_message("Analyzing 3 / 3")
+        self.assertFalse(self.panel.progress_label.isHidden())
+        self.assertEqual(self.panel.progress_label.text(), "Analyzing 3 / 3")
+        self.panel.set_failed()
+        self.assertTrue(self.panel.progress_label.isHidden())
+        self.assertFalse(self.panel.explanation_label.isHidden())
+        self.panel.set_progress_message("Retrying")
+        self.assertFalse(self.panel._failed)
+        self.panel.set_plan(self.plan, self.tracks, state="final")
+        self.assertTrue(self.panel.progress_label.isHidden())
+        self.assertTrue(self.panel.explanation_label.isHidden())
+        self.panel.set_failed()
+        self.assertIn("keeping the previous mix", self.panel.status_label.text())
+        self.panel.set_plan(compile_playlist(self.tracks[:1]), self.tracks[:1], state="final")
+        self.assertIn("at least two", self.panel.status_label.text())
+        self.assertFalse(self.panel.open_window_button.isEnabled())
+
+    def test_settings_show_only_controls_and_help_for_selected_mode(self) -> None:
+        from PySide6.QtCore import QObject, Signal
+        from PySide6.QtGui import QPixmap
+        from app.dialogs.project_settings_dialog import ProjectSettingsDialog
+        from app.models.project import ProjectSettings
+
+        class TranslatorStub(QObject):
+            language_changed = Signal()
+            is_korean = False
+
+        translator = TranslatorStub()
+        dialog = ProjectSettingsDialog(ProjectSettings(), translator, QPixmap())
+        self.addCleanup(dialog.deleteLater)
+        self.assertTrue(dialog.crossfade_row.isHidden())
+        dialog.transition_crossfade_radio.setChecked(True)
+        dialog.crossfade_seconds_spin.setValue(4.5)
+        self.assertFalse(dialog.crossfade_row.isHidden())
+        dialog.transition_automix_radio.setChecked(True)
+        self.assertTrue(dialog.crossfade_row.isHidden())
+        self.assertIn("Transition details", dialog.automix_help.text())
+        translator.is_korean = True
+        dialog.retranslate()
+        self.assertIn("전환 상세", dialog.automix_help.text())
+        dialog.transition_crossfade_radio.setChecked(True)
+        self.assertEqual(dialog.crossfade_seconds_spin.value(), 4.5)
+        dialog._accept()
+        self.assertEqual(dialog.selected_settings.transition_mode, "crossfade")
+
 
 if __name__ == "__main__":
     unittest.main()

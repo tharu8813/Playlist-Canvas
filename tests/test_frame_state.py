@@ -60,6 +60,33 @@ class FrameStateTests(unittest.TestCase):
         self.assertFalse(state.transitioning)
         self.assertEqual(state.transition_progress, 1.0)
 
+    def test_held_cue_releases_its_highlight_across_a_gap(self) -> None:
+        track = _track([
+            {"start": 1.0, "end": 4.0, "text": "first"},
+            {"start": 10.0, "end": 12.0, "text": "second"},
+            {"start": 12.0, "end": 14.0, "text": "third"},
+        ])
+        active = resolve_lyrics_cue_state(track, 3.0, 0.0, 0.0, "glow", 0.5)
+        self.assertIsNone(active.release_progress)
+        halfway = resolve_lyrics_cue_state(track, 4.25, 0.0, 0.0, "glow", 0.5)
+        self.assertEqual(halfway.cue_index, 0)
+        self.assertAlmostEqual(halfway.release_progress, 0.5)
+        released = resolve_lyrics_cue_state(track, 8.0, 0.0, 0.0, "glow", 0.5)
+        self.assertEqual(released.release_progress, 1.0)
+        self.assertIsNone(
+            resolve_lyrics_cue_state(track, 4.25, 0.0, 0.0, "none", 0.5).release_progress,
+        )
+        # Before the first cue nothing was highlighted, so nothing releases.
+        self.assertIsNone(
+            resolve_lyrics_cue_state(track, 0.5, 0.0, 0.0, "glow", 0.5).release_progress,
+        )
+        # After the gap the previous cue hands over no highlight; back-to-back
+        # cues hand over all of it.
+        after_gap = resolve_lyrics_cue_state(track, 10.1, 0.0, 0.0, "glow", 0.5)
+        self.assertAlmostEqual(after_gap.previous_emphasis, 0.0)
+        contiguous = resolve_lyrics_cue_state(track, 12.1, 0.0, 0.0, "glow", 0.5)
+        self.assertAlmostEqual(contiguous.previous_emphasis, 1.0)
+
     def test_timing_offsets_shift_the_effective_elapsed_time(self) -> None:
         track = _track([{"start": 5.0, "text": "line"}], offset=2.0)
         # A +2s track offset plus a +1s per-source offset means elapsed=2.0

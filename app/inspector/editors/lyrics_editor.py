@@ -11,7 +11,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QSpinBox, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QDoubleSpinBox, QPushButton, QSpinBox, QWidget,
+)
 
 from app.inspector.editors.base import FieldSection, editing, show_fields
 from app.models.source import Source
@@ -33,6 +35,9 @@ class LyricsSection(FieldSection):
         ("subtitle_line_spacing", "sub_layout"),
         ("subtitle_previous_opacity", "sub_prev"),
         ("subtitle_previous_blur", "sub_prev"),
+        ("subtitle_current_scale", "sub_current"),
+        ("subtitle_accent_enabled", "sub_current"),
+        ("subtitle_accent_color", "sub_current"),
         ("subtitle_timing_offset", None),
     )
 
@@ -45,12 +50,16 @@ class LyricsSection(FieldSection):
         "subtitle_previous_opacity": ("이전 가사 투명도", "Previous lyric opacity"),
         "subtitle_previous_blur": ("이전 가사 블러", "Previous lyric blur"),
         "subtitle_timing_offset": ("가사 시간 보정 (초)", "Lyric timing offset (s)"),
+        "subtitle_current_scale": ("현재 줄 크기", "Current line size"),
+        "subtitle_accent_enabled": ("현재 줄 강조 색", "Current line accent"),
+        "subtitle_accent_color": ("강조 색", "Accent color"),
     }
 
     SECTION_TITLES = {
         "sub_transition": ("전환", "Transition"),
         "sub_layout": ("줄 배치", "Line layout"),
         "sub_prev": ("이전 줄", "Previous lines"),
+        "sub_current": ("현재 줄", "Current line"),
     }
 
     HELP = {
@@ -62,9 +71,15 @@ class LyricsSection(FieldSection):
         "previous_opacity": ("지나간 가사 줄을 얼마나 흐리게 표시할지 정합니다.", "Controls how faint previous lyric lines appear."),
         "previous_blur": ("지나간 가사 줄에 적용할 흐림 정도입니다.", "Blur applied to previous lyric lines."),
         "timing_offset": ("모든 곡의 가사를 초 단위로 앞당기거나 늦추는 공통 보정입니다. 곡별 보정값과 합산됩니다.", "Global timing adjustment for lyrics on every track. It is added to each track's individual offset."),
+        "current_scale": ("앞뒤 가사 줄에 비해 현재 줄을 얼마나 크게 표시할지 정합니다. 1이면 모든 줄이 같은 크기입니다.", "How much larger the current line is than the surrounding lines. 1 keeps every line the same size."),
+        "accent_enabled": ("현재 줄만 별도의 강조 색으로 표시합니다. 줄이 바뀔 때 색이 부드럽게 넘어갑니다.", "Shows the current line in its own accent color, blending smoothly as lines change."),
+        "accent_color": ("현재 가사 줄에 사용할 강조 색입니다.", "Accent color used for the current lyric line."),
     }
 
-    def __init__(self, spin: Callable[[float, float, float], QDoubleSpinBox]) -> None:
+    def __init__(
+        self, spin: Callable[[float, float, float], QDoubleSpinBox],
+        color_button: Callable[[], QPushButton],
+    ) -> None:
         animation = QComboBox()
         for label, value in (("Glow", "glow"), ("Rise", "rise"), ("None", "none")):
             animation.addItem(label, value)
@@ -81,15 +96,23 @@ class LyricsSection(FieldSection):
             "subtitle_line_spacing": spin(0, 120, 1),
             "subtitle_previous_opacity": spin(0.05, 0.9, 0.05),
             "subtitle_previous_blur": spin(0, 8, 0.5),
+            "subtitle_current_scale": spin(1.0, 2.0, 0.02),
+            "subtitle_accent_enabled": QCheckBox(),
+            "subtitle_accent_color": color_button(),
             "subtitle_timing_offset": spin(-5.0, 5.0, 0.01),
         }
 
     def hidden_when_off(self, source: Source) -> dict[str, bool]:
         """Previous-line styling only matters while previous lines are shown."""
         shows_previous = source.subtitle_context_lines != 0
-        return {"subtitle_previous_opacity": shows_previous, "subtitle_previous_blur": shows_previous}
+        return {
+            "subtitle_previous_opacity": shows_previous,
+            "subtitle_previous_blur": shows_previous,
+            "subtitle_accent_color": source.subtitle_accent_enabled,
+        }
 
     def retranslate(self, korean: bool) -> None:
+        self.widgets["subtitle_accent_enabled"].setText("사용" if korean else "Enabled")
         automatic = "자동" if korean else "Auto"
         self.widgets["subtitle_context_lines"].setSpecialValueText(automatic)
         self.widgets["subtitle_next_lines"].setSpecialValueText(automatic)

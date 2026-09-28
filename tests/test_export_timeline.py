@@ -179,7 +179,8 @@ class ExportTimelinePlannerTests(unittest.TestCase):
             file_path="transitions.mp3",
             title="Transitions",
             duration_seconds=2.0,
-            lyrics=[{"start": 0.25, "end": 0.9, "text": "Line"}],
+            # Runs to the track end, so no post-cue release fade is scheduled.
+            lyrics=[{"start": 0.25, "end": 2.0, "text": "Line"}],
         )
         sources = [
             Source(

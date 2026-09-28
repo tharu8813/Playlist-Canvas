@@ -1,16 +1,38 @@
-"""Canvas renderer for SourceType.LYRICS, split out of SourceItem._paint_legacy."""
+"""Canvas renderer for SourceType.LYRICS, split out of SourceItem._paint_legacy.
+
+Every row is painted from one *emphasis* value (0 = context, 1 = current):
+opacity, scale and blur all blend from it. A cue change is therefore one
+continuous motion -- the outgoing line dims, shrinks and softens while the
+incoming one brightens and grows -- instead of swapping fonts or alphas on a
+single frame. CanvasSnapshot supplies the transient timing state.
+"""
 
 from __future__ import annotations
 
+from math import pi, sin
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtGui import QColor, QPainter
 
-from app.canvas.renderers.base import paint_background, paint_selection_guide
+from app.canvas.renderers.base import (
+    device_pixel_ratio, paint_background, paint_selection_guide,
+)
 
 if TYPE_CHECKING:
     from app.canvas.source_item import SourceItem
+
+_ALIGNMENTS = {
+    "left": Qt.AlignmentFlag.AlignLeft,
+    "right": Qt.AlignmentFlag.AlignRight,
+}
+# Entrance travel for a cue that was not on screen before it started.
+_RISE_DISTANCE = 22.0
+_GLOW_DISTANCE = 6.0
+# The glow style keeps a soft halo on the current line and blooms it on entry.
+_GLOW_HALO = 0.3
+_GLOW_BLOOM = 0.35
+_VISIBLE = 0.004
 
 
 def render(
@@ -18,159 +40,157 @@ def render(
 ) -> None:
     rect, _fill, _pen = paint_background(item, painter)
     painter.drawRoundedRect(rect, item.source.border_radius, item.source.border_radius)
-    # Preview replaces the single editor placeholder with previous,
-    # current, and next timed cues. Keep that expanded stack inside the
-    # element's actual Canvas rectangle so its apparent position cannot
-    # drift beyond the resize handles, especially for older 90 px-high
-    # lyric elements.
+    paint_lines(item, painter, rect)
+    paint_selection_guide(item, painter, rect)
+
+
+def _mix(start: QColor, end: QColor, amount: float) -> QColor:
+    return QColor.fromRgbF(*(
+        a + (b - a) * amount
+        for a, b in zip(start.getRgbF(), end.getRgbF())
+    ))
+
+
+def paint_lines(item: "SourceItem", painter: QPainter, rect: QRectF) -> None:
+    source = item.source
+    # Preview replaces the single editor placeholder with previous, current,
+    # and next timed cues. Keep that expanded stack inside the element's
+    # actual Canvas rectangle so its apparent position cannot drift beyond the
+    # resize handles, especially for older 90 px-high lyric elements.
     painter.save()
     painter.setClipRect(rect)
-    lines = [line for line in (item._render_text() or item.source.subtitle_fallback).splitlines() if line.strip()]
-    current_line = item.source.subtitle_current_line
-    current_line_count = max(1, item.source.subtitle_current_line_count)
+    lines = [
+        line for line in (item._render_text() or source.subtitle_fallback).splitlines()
+        if line.strip()
+    ]
+    current_line = source.subtitle_current_line
+    current_line_count = max(1, source.subtitle_current_line_count)
     has_current_line = 0 <= current_line < len(lines)
     if not has_current_line:
         current_line = -1
     line_height = item._lyric_line_height()
     anchor_line = item._subtitle_anchor_line
-    anchor_count = max(1, item._subtitle_anchor_line_count)
-    if 0 <= anchor_line < len(lines):
-        # Keep the displayed cue vertically anchored. As the context
-        # window changes, CanvasSnapshot animates its old position into
-        # this one instead of re-centering the whole text block abruptly.
+    anchor_valid = 0 <= anchor_line < len(lines)
+    if anchor_valid:
+        # Keep the displayed cue vertically anchored. As the context window
+        # changes, CanvasSnapshot animates its old position into this one
+        # instead of re-centering the whole text block abruptly.
         y = (
             rect.center().y()
-            - (anchor_line + anchor_count / 2.0) * line_height
-            + item.source.subtitle_scroll_offset
+            - (anchor_line + max(1, item._subtitle_anchor_line_count) / 2.0) * line_height
+            + source.subtitle_scroll_offset
         )
     else:
-        total_height = line_height * len(lines)
-        y = (
-            rect.center().y() - total_height / 2
-            + item.source.subtitle_scroll_offset
-        )
-    transition = max(0.0, min(1.0, item._subtitle_transition_progress))
-    transition_style = item.source.subtitle_animation
-    is_animated = transition_style in {"glow", "rise"}
-    # Two deliberately different entrances.
-    #  * glow: the line materialises in place — alpha 0, a small lift,
-    #    a subtle upscale, and a soft blur that sharpens.
-    #  * rise: no blur, no scale; a crisp, longer upward slide with a
-    #    quicker partial fade.
-    if transition_style == "rise":
-        enter_alpha, enter_offset, enter_scale, enter_blur = 0.28, 22.0, 1.0, 0.0
-    else:  # glow (also the migrated default for older styles)
-        enter_alpha, enter_offset, enter_scale, enter_blur = 0.0, 4.0, 0.955, 7.0
-    steady_previous_alpha = max(
-        0.05, min(0.9, item.source.subtitle_previous_opacity),
+        y = rect.center().y() - line_height * len(lines) / 2 + source.subtitle_scroll_offset
+
+    t = max(0.0, min(1.0, item._subtitle_transition_progress))
+    transitioning = t < 1.0
+    style = source.subtitle_animation
+    rest_alpha = max(0.05, min(0.9, source.subtitle_previous_opacity))
+    previous_blur = max(0.0, float(source.subtitle_previous_blur))
+    # One font for every row: context rows are the same glyphs scaled down,
+    # so wrapping and weight never jump when a row changes role.
+    font = item._lyric_fonts["current"]
+    rest_scale = item._lyric_fonts["regular"].pointSizeF() / max(1.0, font.pointSizeF())
+    glow_radius = max(3.0, font.pointSizeF() * 0.22)
+    text_color = QColor(source.outline_color)
+    accent_color = QColor(source.subtitle_accent_color) if source.subtitle_accent_enabled else text_color
+    alignment = _ALIGNMENTS.get(source.text_alignment, Qt.AlignmentFlag.AlignHCenter)
+    flags = alignment | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap
+    content_width = rect.width() - 24
+    # Rows shrink toward the edge they are aligned to, so they stay flush.
+    scale_x = {
+        Qt.AlignmentFlag.AlignLeft: rect.left() + 12,
+        Qt.AlignmentFlag.AlignRight: rect.right() - 12,
+    }.get(alignment, rect.center().x())
+    pixel_ratio = device_pixel_ratio(painter)
+    base_opacity = painter.opacity()
+    boundary = current_line if has_current_line else (anchor_line if anchor_valid else -1)
+    previous_count = item._subtitle_previous_line_count if transitioning else 0
+    leaving_count = item._subtitle_leaving_line_count if transitioning else 0
+    entering_from = (
+        len(lines) - item._subtitle_entering_line_count if transitioning else len(lines)
     )
-    # When no previous line is kept on screen, the outgoing cue leaves
-    # entirely — fade it out over the transition instead of cutting it.
-    leaving_previous_target = (
-        steady_previous_alpha
-        if current_line > 0 or item.source.subtitle_context_lines > 0
-        else 0.0
-    )
+    painter.setFont(font)
+
     for index, line in enumerate(lines):
-        is_current = (
-            has_current_line
-            and current_line <= index < current_line + current_line_count
-        )
-        is_previous = has_current_line and index < current_line
-        line_color = QColor(item.source.outline_color)
-        if is_current and is_animated:
-            line_color.setAlphaF(
-                enter_alpha + (1.0 - enter_alpha) * transition
-            )
-        elif not is_current:
-            is_leaving = (
-                transition < 1.0
-                and item._subtitle_leaving_line_count > 0
-                and index < item._subtitle_leaving_line_count
-            )
-            immediate_previous = (
-                is_previous
-                and item._subtitle_previous_line_count > 0
-                and current_line - item._subtitle_previous_line_count
-                <= index < current_line
-            )
-            # Fade the oldest context cue to zero while it scrolls out.
-            # The immediately previous cue separately cross-fades from
-            # current emphasis toward its resting context opacity.
-            if is_leaving:
-                leaving_start_alpha = (
-                    1.0
-                    if current_line <= 0 and item.source.subtitle_context_lines == 0
-                    else steady_previous_alpha
-                )
-                line_alpha = leaving_start_alpha * (1.0 - transition)
-            elif immediate_previous and transition < 1.0:
-                line_alpha = (
-                    leaving_previous_target
-                    + (1.0 - leaving_previous_target) * (1.0 - transition)
-                )
-            else:
-                line_alpha = steady_previous_alpha
-            line_color.setAlphaF(line_alpha)
-            blur_radius = (
-                max(
-                    0,
-                    round(
-                        item.source.subtitle_previous_blur
-                        * (transition if immediate_previous else 1.0)
-                    ),
-                )
-                if is_previous else 0
-            )
-            if blur_radius:
-                ghost = QColor(line_color)
-                ghost.setAlpha(
-                    line_color.alpha() // 3
-                    if is_leaving else
-                    max(10, line_color.alpha() // 3)
-                )
-                ghost_pixmap = item._lyric_ghost_pixmap(
-                    line, ghost, blur_radius, rect.width() - 24, line_height,
-                )
-                painter.drawPixmap(
-                    round(rect.left() + 12 - blur_radius), round(y - blur_radius), ghost_pixmap,
-                )
-        lyric_font = QFont(item._lyric_fonts["current" if is_current else "regular"])
-        current_y = y
-        line_transform_saved = False
-        if is_current and is_animated:
-            current_y += enter_offset * (1.0 - transition)
-            line_scale = enter_scale + (1.0 - enter_scale) * transition
-            if line_scale < 0.9999:
-                line_center = QPointF(
-                    rect.center().x(), current_y + line_height / 2.0,
-                )
-                painter.save()
-                painter.translate(line_center)
-                painter.scale(line_scale, line_scale)
-                painter.translate(-line_center)
-                line_transform_saved = True
-            reveal_blur = enter_blur * (1.0 - transition)
-            if reveal_blur >= 0.75:
-                ghost = QColor(line_color)
-                ghost.setAlpha(max(8, round(line_color.alpha() * 0.18)))
-                ghost_pixmap = item._lyric_ghost_pixmap(
-                    line, ghost, max(1, round(reveal_blur)), rect.width() - 24, line_height,
-                )
-                painter.drawPixmap(
-                    round(rect.left() + 12 - reveal_blur),
-                    round(current_y - reveal_blur), ghost_pixmap,
-                )
-        painter.setFont(lyric_font)
-        painter.setPen(line_color)
-        item._draw_text(
-            painter,
-            QRectF(rect.left() + 12, current_y, rect.width() - 24, line_height),
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
-            line,
-        )
-        if line_transform_saved:
-            painter.restore()
+        row = QRectF(rect.left() + 12, y, content_width, line_height)
         y += line_height
+        is_current = (
+            has_current_line and current_line <= index < current_line + current_line_count
+        )
+        offset = 0.0
+        extra_scale = 1.0
+        reveal = 0.0      # share of the row still shown as its soft glow
+        glow = 0.0        # halo opacity behind the sharp row
+        blur_mix = 0.0    # share of the row shown with the previous-line blur
+        if is_current:
+            if transitioning:
+                emphasis = t
+                if item._subtitle_incoming_visible:
+                    # Already on screen as an upcoming row: the scroll moves
+                    # it, so only brighten it from its resting opacity.
+                    alpha = rest_alpha + (1.0 - rest_alpha) * t
+                elif style == "rise":
+                    alpha = min(1.0, t / 0.55)
+                    offset = _RISE_DISTANCE * (1.0 - t)
+                else:
+                    alpha = t
+                    offset = _GLOW_DISTANCE * (1.0 - t)
+                    extra_scale = 0.96 + 0.04 * t
+                    reveal = 1.0 - t
+            else:
+                emphasis = item._subtitle_emphasis
+                alpha = rest_alpha + (1.0 - rest_alpha) * emphasis
+            if style == "glow" and transitioning:
+                glow = _GLOW_BLOOM * sin(pi * t)
+        else:
+            emphasis = 0.0
+            alpha = rest_alpha
+            if 0 <= current_line - previous_count <= index < current_line:
+                # The cue that was current a moment ago hands its emphasis over.
+                emphasis = item._subtitle_previous_emphasis * (1.0 - t)
+                alpha = rest_alpha + (1.0 - rest_alpha) * emphasis
+                blur_mix = t
+            elif index < boundary:
+                blur_mix = 1.0
+            if index < leaving_count:
+                alpha *= 1.0 - t
+            elif index >= entering_from:
+                alpha *= t
+        if style == "glow":
+            glow += _GLOW_HALO * emphasis * alpha
+        if alpha <= _VISIBLE:
+            continue
+        if previous_blur < 0.5:
+            blur_mix = 0.0
+
+        painter.save()
+        scale = (rest_scale + (1.0 - rest_scale) * emphasis) * extra_scale
+        row.translate(0.0, offset)
+        if abs(scale - 1.0) > 1e-4:
+            center = QPointF(scale_x, row.center().y())
+            painter.translate(center)
+            painter.scale(scale, scale)
+            painter.translate(-center)
+        for radius, color, opacity in (
+            (glow_radius, accent_color, alpha * reveal + glow),
+            (previous_blur, text_color, alpha * blur_mix),
+        ):
+            if opacity > _VISIBLE:
+                pixmap, margin = item._lyric_blur_pixmap(
+                    line, color, radius, content_width, line_height, pixel_ratio, flags,
+                )
+                painter.setOpacity(base_opacity * min(1.0, opacity))
+                painter.drawPixmap(QPointF(row.left() - margin, row.top() - margin), pixmap)
+        sharp = alpha * (1.0 - reveal) * (1.0 - blur_mix)
+        if sharp > _VISIBLE:
+            # Opacity, not pen alpha, so the glyph outline dims with the fill.
+            painter.setOpacity(base_opacity * sharp)
+            painter.setPen(
+                _mix(text_color, accent_color, emphasis)
+                if source.subtitle_accent_enabled else text_color
+            )
+            item._draw_text(painter, row, flags, line)
+        painter.restore()
     painter.restore()
-    paint_selection_guide(item, painter, rect)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.animation.curves import ease_in_out_cubic
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source
 from app.services.lyrics_service import LyricsService
@@ -32,6 +33,12 @@ class LyricsCueState:
     transitioning: bool
     transition_progress: float
     cue_start_seconds: float | None
+    # Raw progress of the held cue's highlight fading out after its end, while
+    # a gap leaves it on screen (None: not in such a gap, or no animation).
+    release_progress: float | None = None
+    # Highlight the previous cue still had when this cue started: 1.0 for
+    # back-to-back cues, lower when a gap had already released it.
+    previous_emphasis: float = 1.0
 
 
 def resolve_lyrics_cue_state(
@@ -56,19 +63,37 @@ def resolve_lyrics_cue_state(
         and lyric_cue is not None
         and subtitle_animation != "none"
     )
+    duration = max(0.05, subtitle_animation_duration)
     transition_progress = 1.0
     cue_start_seconds: float | None = None
+    release_progress: float | None = None
+    previous_emphasis = 1.0
     if transitioning:
         cue_start_seconds = float(lyric_cue.get("start", lyric_elapsed)) - effective_offset
         transition_progress = max(0.0, min(1.0, (
-            (elapsed_seconds - cue_start_seconds) / max(0.05, subtitle_animation_duration)
+            (elapsed_seconds - cue_start_seconds) / duration
         )))
+        if cue_index > 0:
+            previous = track.lyrics[cue_index - 1]
+            previous_start = float(previous.get("start", 0.0))
+            gap = float(lyric_cue.get("start", 0.0)) - float(previous.get("end", previous_start + 8.0))
+            previous_emphasis = 1.0 - ease_in_out_cubic(gap / duration)
+    elif (
+        lyric_cue is not None and active_cue_index is None
+        and subtitle_animation != "none"
+    ):
+        cue_start = float(lyric_cue.get("start", 0.0))
+        cue_end = float(lyric_cue.get("end", cue_start + 8.0))
+        if lyric_elapsed >= cue_end:
+            release_progress = min(1.0, (lyric_elapsed - cue_end) / duration)
     return LyricsCueState(
         cue_index=cue_index,
         active_cue_index=active_cue_index,
         transitioning=transitioning,
         transition_progress=transition_progress,
         cue_start_seconds=cue_start_seconds,
+        release_progress=release_progress,
+        previous_emphasis=previous_emphasis,
     )
 
 

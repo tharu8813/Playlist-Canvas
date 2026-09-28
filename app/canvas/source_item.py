@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from math import atan2, cos, degrees, radians, sin
+from collections.abc import Callable
+from math import atan2, ceil, cos, degrees, radians, sin
 from pathlib import Path
 from time import monotonic
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QThreadPool, QUrl, Signal
+import numpy as np
+from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QThreadPool, QUrl, Signal
 from PySide6.QtGui import (
     QColor, QBrush, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter,
     QPainterPath, QPainterPathStroker, QPen, QPixmap, QTextLayout, QTextOption,
@@ -38,7 +40,8 @@ from app.canvas.renderers import (
     video_renderer,
     watermark_renderer,
 )
-from app.models.source import Source, SourceType
+from app.canvas.renderers.base import device_pixel_ratio, linear_gradient
+from app.models.source import TEXT_SOURCE_TYPES, Source, SourceType
 from app.models.source_registry import source_registry
 from app.preview.text_template import expand_placeholder_labels
 from app.utils.font_loader import load_application_font
@@ -47,11 +50,19 @@ from app.utils.level_meter_painter import paint_level_meter
 from app.utils.particle_painter import paint_particles
 from app.video.frame_filter import (
     VideoFrameFilterSettings, VideoFrameFilterSignals, VideoFrameFilterTask,
-    apply_color_filters,
+    _box_blur, _rgb_pixels, apply_color_filters,
 )
 from app.video.preview_decoder import (
     VideoDecoderStats, video_position_needs_seek, video_seek_tolerance_ms,
 )
+
+
+_CAPITALIZATION = {
+    "upper": QFont.Capitalization.AllUppercase,
+    "lower": QFont.Capitalization.AllLowercase,
+    "capitalize": QFont.Capitalization.Capitalize,
+    "small_caps": QFont.Capitalization.SmallCaps,
+}
 
 
 class SourceItem(QGraphicsObject):
@@ -139,10 +150,11 @@ class SourceItem(QGraphicsObject):
         self._raw_pixmap = QPixmap()
         self._raw_pixmap_path: str | None = None
         self._lyric_fonts: dict[str, QFont] = {}
-        self._lyric_ghost_cache: dict[tuple[object, ...], QPixmap] = {}
+        self._lyric_ghost_cache: dict[tuple[object, ...], tuple[QPixmap, float]] = {}
         self._lyric_resource_key: tuple[str, int, float, int] | None = None
         self._text_outline_path_key: tuple[object, ...] | None = None
         self._text_outline_path = QPainterPath()
+        self._text_shadow_cache: dict[tuple[object, ...], tuple[QPixmap, float]] = {}
         # Preview/export assigns this transient value while a timed lyric cue
         # enters. Keeping it on the graphics item avoids serializing render state.
         self._subtitle_transition_progress = 1.0
@@ -150,6 +162,10 @@ class SourceItem(QGraphicsObject):
         self._subtitle_anchor_line_count = 1
         self._subtitle_previous_line_count = 0
         self._subtitle_leaving_line_count = 0
+        self._subtitle_entering_line_count = 0
+        self._subtitle_emphasis = 1.0
+        self._subtitle_previous_emphasis = 1.0
+        self._subtitle_incoming_visible = True
         self.setFlags(
             QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemIsSelectable
@@ -923,50 +939,101 @@ class SourceItem(QGraphicsObject):
     def _rebuild_lyric_resources(self) -> None:
         """Create lyric fonts once per source edit instead of once per paint call."""
         base_size = max(10, min(96, int(self.source.font_size)))
+        current_size = max(base_size, round(base_size * self.source.subtitle_current_scale))
         resource_key = (
-            self.source.font_family, base_size,
+            self.source.font_family, base_size, current_size,
             self.source.subtitle_line_spacing,
             round(self.source.subtitle_previous_blur),
+            *self._typography_key(),
         )
         if resource_key == self._lyric_resource_key:
             return
-        regular = QFont(self.source.font_family, base_size)
-        regular.setWeight(QFont.Weight.Normal)
-        current = QFont(self.source.font_family, base_size + 2)
-        current.setWeight(QFont.Weight.Bold)
-        self._lyric_fonts = {"regular": regular, "current": current}
+        # Rows share one font; "regular" only sets the context rows' size.
+        self._lyric_fonts = {
+            "regular": self.text_font(base_size, self.source.font_weight),
+            "current": self.text_font(current_size, self.source.font_weight),
+        }
         self._lyric_ghost_cache.clear()
         self._lyric_resource_key = resource_key
 
-    def _lyric_ghost_pixmap(self, line: str, color: QColor, blur_radius: int,
-                            content_width: float, line_height: float) -> QPixmap:
-        """Cache the four-pass lyric ghost text until its visual inputs change."""
-        width = max(1, round(content_width))
-        radius = max(0, blur_radius)
-        height = max(1, round(line_height) + radius * 2)
-        key = (line, color.rgba(), radius, width, height)
-        cached = self._lyric_ghost_cache.get(key)
-        if cached is not None:
-            return cached
-        if len(self._lyric_ghost_cache) >= 96:
-            self._lyric_ghost_cache.clear()
-        pixmap = QPixmap(width + radius * 2, height)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        ghost_painter = QPainter(pixmap)
-        ghost_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        ghost_painter.setPen(color)
-        ghost_painter.setFont(self._lyric_fonts["regular"])
-        flags = (
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
-            | Qt.TextFlag.TextWordWrap
-        )
-        for offset_x, offset_y in ((-radius, 0), (radius, 0), (0, -radius), (0, radius)):
-            ghost_painter.drawText(
-                QRectF(radius + offset_x, radius + offset_y, width, line_height), flags, line,
+    def text_font(self, size: int, weight: int) -> QFont:
+        """A font for this source's text with its shared typography applied."""
+        font = QFont(self.source.font_family, size)
+        font.setWeight(QFont.Weight(weight))
+        font.setItalic(self.source.text_italic)
+        if self.source.text_letter_spacing:
+            font.setLetterSpacing(
+                QFont.SpacingType.AbsoluteSpacing, self.source.text_letter_spacing,
             )
-        ghost_painter.end()
-        self._lyric_ghost_cache[key] = pixmap
-        return pixmap
+        font.setCapitalization(_CAPITALIZATION.get(
+            self.source.text_case, QFont.Capitalization.MixedCase,
+        ))
+        return font
+
+    def _typography_key(self) -> tuple[object, ...]:
+        return (
+            self.source.font_weight, self.source.text_italic,
+            self.source.text_letter_spacing, self.source.text_case,
+        )
+
+    @staticmethod
+    def _blurred_raster(
+        paint: Callable[[QPainter], None], size: QSizeF, radius: float, pixel_ratio: float,
+    ) -> tuple[QPixmap, float]:
+        """Rasterise ``paint`` (logical coordinates within ``size``) and blur it.
+
+        Returns the pixmap and its logical margin. It is rendered at device
+        resolution, so callers cache it and only blit it with an opacity.
+        """
+        pixel_radius = max(1, round(radius * pixel_ratio))
+        # Two box passes per axis spread up to 2 * radius; keep that margin.
+        margin = pixel_radius * 2 + 2
+        image = QImage(
+            ceil(size.width() * pixel_ratio) + margin * 2,
+            ceil(size.height() * pixel_ratio) + margin * 2,
+            QImage.Format.Format_ARGB32_Premultiplied,
+        )
+        image.fill(Qt.GlobalColor.transparent)
+        raster_painter = QPainter(image)
+        raster_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        raster_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        raster_painter.translate(margin, margin)
+        raster_painter.scale(pixel_ratio, pixel_ratio)
+        paint(raster_painter)
+        raster_painter.end()
+        # Premultiplied channels blur together without dark fringes.
+        pixels = _rgb_pixels(image)
+        values = pixels.astype(np.float32)
+        for axis in (1, 0, 1, 0):
+            values = _box_blur(values, pixel_radius, axis)
+        pixels[:] = np.clip(values + 0.5, 0.0, 255.0).astype(np.uint8)
+        pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(pixel_ratio)
+        return pixmap, margin / pixel_ratio
+
+    def _lyric_blur_pixmap(self, line: str, color: QColor, radius: float,
+                           content_width: float, line_height: float,
+                           pixel_ratio: float, flags: int) -> tuple[QPixmap, float]:
+        """Return a Gaussian-like blurred lyric row and its logical margin."""
+        key = (line, color.rgba(), round(radius * pixel_ratio), round(content_width),
+               round(line_height), pixel_ratio, int(flags))
+        cached = self._lyric_ghost_cache.get(key)
+        if cached is None:
+            if len(self._lyric_ghost_cache) >= 96:
+                self._lyric_ghost_cache.clear()
+
+            def paint(blur_painter: QPainter) -> None:
+                blur_painter.setPen(color)
+                blur_painter.setFont(self._lyric_fonts["current"])
+                blur_painter.drawText(
+                    QRectF(0.0, 0.0, content_width, line_height), flags, line,
+                )
+
+            cached = self._blurred_raster(
+                paint, QSizeF(content_width, line_height), radius, pixel_ratio,
+            )
+            self._lyric_ghost_cache[key] = cached
+        return cached
 
     def _lyric_line_height(self) -> float:
         """Return a font-metric row that preserves Latin/Korean descenders."""
@@ -1084,8 +1151,8 @@ class SourceItem(QGraphicsObject):
         if style == "glass":
             background.setAlpha(min(190, max(72, background.alpha())))
         background_brush = QBrush(background)
-        if source.gradient.enabled:
-            gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        if source.gradient.enabled and not source.text_gradient:
+            gradient = linear_gradient(rect, source.gradient.angle)
             start = QColor(source.gradient.start_color)
             end = QColor(source.gradient.end_color)
             if style == "glass":
@@ -1152,11 +1219,10 @@ class SourceItem(QGraphicsObject):
             font_size = source.font_size * (
                 max(0.8, min(1.5, source.track_list_current_scale)) if is_current else 1.0
             )
-            font = QFont(source.font_family, max(8, min(120, round(font_size))))
-            font.setWeight(
-                QFont.Weight.Bold if is_current else QFont.Weight(source.font_weight)
-            )
-            painter.setFont(font)
+            painter.setFont(self.text_font(
+                max(8, min(120, round(font_size))),
+                QFont.Weight.Bold if is_current else source.font_weight,
+            ))
             color = QColor(
                 source.track_list_current_color if is_current
                 else source.track_list_inactive_color
@@ -1240,23 +1306,85 @@ class SourceItem(QGraphicsObject):
         Repainting glyphs at many integer offsets created scalloped edges,
         especially on diagonals and rounded Hangul/Latin glyphs.
         """
-        width = float(self.source.text_stroke_width)
+        source = self.source
+        is_text = source.source_type in TEXT_SOURCE_TYPES
+        width = float(source.text_stroke_width)
+        if source.shadow.enabled and source.text_shadow_glyph and is_text:
+            self._draw_glyph_shadow(painter, rect, flags, text, width)
         if width > 0.0:
             path = self._text_layout_path(painter, rect, flags, text)
             if not path.isEmpty():
-                stroker = QPainterPathStroker()
-                stroker.setWidth(width * 2.0)
-                stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
                 painter.save()
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
                 painter.fillPath(
-                    stroker.createStroke(path),
-                    QBrush(QColor(self.source.text_stroke_color)),
+                    self._glyph_stroke(path, width),
+                    QBrush(QColor(source.text_stroke_color)),
                 )
                 painter.restore()
-        painter.drawText(rect, flags, text)
+        if source.text_gradient and source.gradient.enabled and is_text:
+            # The caller's pen alpha (dimmed rows) carries into both stops.
+            pen_alpha = painter.pen().color().alphaF()
+            gradient = linear_gradient(self.content_rect(), source.gradient.angle)
+            for position, value in ((0.0, source.gradient.start_color),
+                                    (1.0, source.gradient.end_color)):
+                color = QColor(value)
+                color.setAlphaF(color.alphaF() * pen_alpha)
+                gradient.setColorAt(position, color)
+            painter.save()
+            painter.setPen(QPen(QBrush(gradient), 1.0))
+            painter.drawText(rect, flags, text)
+            painter.restore()
+        else:
+            painter.drawText(rect, flags, text)
+
+    @staticmethod
+    def _glyph_stroke(path: QPainterPath, width: float) -> QPainterPath:
+        stroker = QPainterPathStroker()
+        stroker.setWidth(width * 2.0)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        return stroker.createStroke(path)
+
+    def _draw_glyph_shadow(
+        self, painter: QPainter, rect: QRectF, flags: int, text: str, stroke: float,
+    ) -> None:
+        """Soft shadow/glow cast by the glyphs (and their outline) themselves."""
+        path = self._text_layout_path(painter, rect, flags, text)
+        if path.isEmpty():
+            return
+        shadow = self.source.shadow
+        bounds = path.boundingRect().adjusted(-stroke, -stroke, stroke, stroke)
+        pixel_ratio = device_pixel_ratio(painter)
+        radius = max(0.5, float(shadow.blur_radius) * 0.5)
+        color = QColor(shadow.color)
+        color.setAlpha(255)
+        # Position-independent: the raster is drawn at the path's own bounds.
+        key = (painter.font().key(), text, round(rect.width(), 3), round(rect.height(), 3),
+               int(flags), color.rgba(), round(radius * pixel_ratio), pixel_ratio, stroke)
+        cached = self._text_shadow_cache.get(key)
+        if cached is None:
+            if len(self._text_shadow_cache) >= 64:
+                self._text_shadow_cache.clear()
+            def paint(shadow_painter: QPainter) -> None:
+                shadow_painter.translate(-bounds.topLeft())
+                shadow_painter.fillPath(path, color)
+                if stroke > 0.0:
+                    shadow_painter.fillPath(self._glyph_stroke(path, stroke), color)
+
+            cached = self._blurred_raster(paint, bounds.size(), radius, pixel_ratio)
+            self._text_shadow_cache[key] = cached
+        pixmap, margin = cached
+        painter.save()
+        painter.setOpacity(
+            painter.opacity() * max(0.0, min(1.0, shadow.opacity))
+            * painter.pen().color().alphaF()
+        )
+        painter.drawPixmap(
+            bounds.topLeft() + QPointF(shadow.offset_x - margin, shadow.offset_y - margin),
+            pixmap,
+        )
+        painter.restore()
 
     def _text_layout_path(
         self, painter: QPainter, rect: QRectF, flags: int, text: str,
@@ -1265,8 +1393,8 @@ class SourceItem(QGraphicsObject):
         if not text or rect.width() <= 0.0 or rect.height() <= 0.0:
             return QPainterPath()
         cache_key = (
-            painter.font().key(), text, round(rect.width(), 3),
-            round(rect.height(), 3), str(flags),
+            painter.font().key(), text, round(rect.left(), 3), round(rect.top(), 3),
+            round(rect.width(), 3), round(rect.height(), 3), str(flags),
         )
         if cache_key == self._text_outline_path_key:
             return QPainterPath(self._text_outline_path)
@@ -1635,161 +1763,7 @@ class SourceItem(QGraphicsObject):
             )
         elif self.source.source_type is SourceType.LYRICS:
             painter.drawRoundedRect(rect, self.source.border_radius, self.source.border_radius)
-            # Preview replaces the single editor placeholder with previous,
-            # current, and next timed cues. Keep that expanded stack inside the
-            # element's actual Canvas rectangle so its apparent position cannot
-            # drift beyond the resize handles, especially for older 90 px-high
-            # lyric elements.
-            painter.save()
-            painter.setClipRect(rect)
-            lines = [line for line in (self._render_text() or self.source.subtitle_fallback).splitlines() if line.strip()]
-            current_line = self.source.subtitle_current_line
-            current_line_count = max(1, self.source.subtitle_current_line_count)
-            has_current_line = 0 <= current_line < len(lines)
-            if not has_current_line:
-                current_line = -1
-            line_height = self._lyric_line_height()
-            anchor_line = self._subtitle_anchor_line
-            anchor_count = max(1, self._subtitle_anchor_line_count)
-            if 0 <= anchor_line < len(lines):
-                # Keep the displayed cue vertically anchored. As the context
-                # window changes, CanvasSnapshot animates its old position into
-                # this one instead of re-centering the whole text block abruptly.
-                y = (
-                    rect.center().y()
-                    - (anchor_line + anchor_count / 2.0) * line_height
-                    + self.source.subtitle_scroll_offset
-                )
-            else:
-                total_height = line_height * len(lines)
-                y = (
-                    rect.center().y() - total_height / 2
-                    + self.source.subtitle_scroll_offset
-                )
-            transition = max(0.0, min(1.0, self._subtitle_transition_progress))
-            transition_style = self.source.subtitle_animation
-            is_animated = transition_style in {"glow", "rise"}
-            # Two deliberately different entrances.
-            #  * glow: the line materialises in place — alpha 0, a small lift,
-            #    a subtle upscale, and a soft blur that sharpens.
-            #  * rise: no blur, no scale; a crisp, longer upward slide with a
-            #    quicker partial fade.
-            if transition_style == "rise":
-                enter_alpha, enter_offset, enter_scale, enter_blur = 0.28, 22.0, 1.0, 0.0
-            else:  # glow (also the migrated default for older styles)
-                enter_alpha, enter_offset, enter_scale, enter_blur = 0.0, 4.0, 0.955, 7.0
-            steady_previous_alpha = max(
-                0.05, min(0.9, self.source.subtitle_previous_opacity),
-            )
-            # When no previous line is kept on screen, the outgoing cue leaves
-            # entirely — fade it out over the transition instead of cutting it.
-            leaving_previous_target = (
-                steady_previous_alpha
-                if current_line > 0 or self.source.subtitle_context_lines > 0
-                else 0.0
-            )
-            for index, line in enumerate(lines):
-                is_current = (
-                    has_current_line
-                    and current_line <= index < current_line + current_line_count
-                )
-                is_previous = has_current_line and index < current_line
-                line_color = QColor(self.source.outline_color)
-                if is_current and is_animated:
-                    line_color.setAlphaF(
-                        enter_alpha + (1.0 - enter_alpha) * transition
-                    )
-                elif not is_current:
-                    is_leaving = (
-                        transition < 1.0
-                        and self._subtitle_leaving_line_count > 0
-                        and index < self._subtitle_leaving_line_count
-                    )
-                    immediate_previous = (
-                        is_previous
-                        and self._subtitle_previous_line_count > 0
-                        and current_line - self._subtitle_previous_line_count
-                        <= index < current_line
-                    )
-                    # Fade the oldest context cue to zero while it scrolls out.
-                    # The immediately previous cue separately cross-fades from
-                    # current emphasis toward its resting context opacity.
-                    if is_leaving:
-                        leaving_start_alpha = (
-                            1.0
-                            if current_line <= 0 and self.source.subtitle_context_lines == 0
-                            else steady_previous_alpha
-                        )
-                        line_alpha = leaving_start_alpha * (1.0 - transition)
-                    elif immediate_previous and transition < 1.0:
-                        line_alpha = (
-                            leaving_previous_target
-                            + (1.0 - leaving_previous_target) * (1.0 - transition)
-                        )
-                    else:
-                        line_alpha = steady_previous_alpha
-                    line_color.setAlphaF(line_alpha)
-                    blur_radius = (
-                        max(
-                            0,
-                            round(
-                                self.source.subtitle_previous_blur
-                                * (transition if immediate_previous else 1.0)
-                            ),
-                        )
-                        if is_previous else 0
-                    )
-                    if blur_radius:
-                        ghost = QColor(line_color)
-                        ghost.setAlpha(
-                            line_color.alpha() // 3
-                            if is_leaving else
-                            max(10, line_color.alpha() // 3)
-                        )
-                        ghost_pixmap = self._lyric_ghost_pixmap(
-                            line, ghost, blur_radius, rect.width() - 24, line_height,
-                        )
-                        painter.drawPixmap(
-                            round(rect.left() + 12 - blur_radius), round(y - blur_radius), ghost_pixmap,
-                        )
-                lyric_font = QFont(self._lyric_fonts["current" if is_current else "regular"])
-                current_y = y
-                line_transform_saved = False
-                if is_current and is_animated:
-                    current_y += enter_offset * (1.0 - transition)
-                    line_scale = enter_scale + (1.0 - enter_scale) * transition
-                    if line_scale < 0.9999:
-                        line_center = QPointF(
-                            rect.center().x(), current_y + line_height / 2.0,
-                        )
-                        painter.save()
-                        painter.translate(line_center)
-                        painter.scale(line_scale, line_scale)
-                        painter.translate(-line_center)
-                        line_transform_saved = True
-                    reveal_blur = enter_blur * (1.0 - transition)
-                    if reveal_blur >= 0.75:
-                        ghost = QColor(line_color)
-                        ghost.setAlpha(max(8, round(line_color.alpha() * 0.18)))
-                        ghost_pixmap = self._lyric_ghost_pixmap(
-                            line, ghost, max(1, round(reveal_blur)), rect.width() - 24, line_height,
-                        )
-                        painter.drawPixmap(
-                            round(rect.left() + 12 - reveal_blur),
-                            round(current_y - reveal_blur), ghost_pixmap,
-                        )
-                painter.setFont(lyric_font)
-                painter.setPen(line_color)
-                self._draw_text(
-                    painter,
-                    QRectF(rect.left() + 12, current_y, rect.width() - 24, line_height),
-                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
-                    line,
-                )
-                if line_transform_saved:
-                    painter.restore()
-                y += line_height
-            painter.restore()
+            lyrics_renderer.paint_lines(self, painter, rect)
         elif self.source.source_type is SourceType.TRACK_LIST:
             self._paint_track_list(painter, rect)
         elif self.source.source_type is SourceType.NOW_PLAYING:

@@ -776,10 +776,18 @@ class CanvasSnapshot:
                     graphics_item._subtitle_anchor_line_count,
                     graphics_item._subtitle_previous_line_count,
                     graphics_item._subtitle_leaving_line_count,
+                    graphics_item._subtitle_entering_line_count,
+                    graphics_item._subtitle_emphasis,
+                    graphics_item._subtitle_previous_emphasis,
+                    graphics_item._subtitle_incoming_visible,
                 ))
                 graphics_item._subtitle_transition_progress = 1.0
                 graphics_item._subtitle_previous_line_count = 0
                 graphics_item._subtitle_leaving_line_count = 0
+                graphics_item._subtitle_entering_line_count = 0
+                graphics_item._subtitle_emphasis = 1.0
+                graphics_item._subtitle_previous_emphasis = 1.0
+                graphics_item._subtitle_incoming_visible = True
                 cue_state = resolve_lyrics_cue_state(
                     track, elapsed_seconds,
                     track.lyrics_timing_offset_seconds, source.subtitle_timing_offset,
@@ -833,9 +841,19 @@ class CanvasSnapshot:
                     graphics_item._subtitle_leaving_line_count = (
                         block_line_counts[0] if extra_leading else 0
                     )
-                    if active_cue_index == cue_index:
+                    releasing = (
+                        cue_state.release_progress is not None
+                        and cue_state.release_progress < 1.0
+                    )
+                    if active_cue_index == cue_index or releasing:
                         source.subtitle_current_line = anchor_line
                         source.subtitle_current_line_count = block_line_counts[relative_index]
+                        if releasing:
+                            # A gap follows: dim the held cue instead of cutting
+                            # its highlight on the frame it ends.
+                            graphics_item._subtitle_emphasis = 1.0 - ease_in_out_cubic(
+                                cue_state.release_progress,
+                            )
                     else:
                         source.subtitle_current_line = -1
                         source.subtitle_current_line_count = 1
@@ -861,6 +879,18 @@ class CanvasSnapshot:
                             1, len([line for line in previous_text.splitlines() if line.strip()])
                         )
                     graphics_item._subtitle_previous_line_count = previous_line_count
+                    graphics_item._subtitle_previous_emphasis = cue_state.previous_emphasis
+                    if cue_index is not None:
+                        # Cue 0 is shown (dimmed) before it starts; later cues
+                        # only if they were already visible as upcoming lines.
+                        graphics_item._subtitle_incoming_visible = (
+                            cue_index == 0 or next_context > 0
+                        )
+                        # The upcoming cue that scrolls in at the bottom was not
+                        # on screen before this transition: fade it in.
+                        if (cue_index > 0 and next_context > 0
+                                and last == cue_index + next_context + 1):
+                            graphics_item._subtitle_entering_line_count = block_line_counts[-1]
                     line_height = graphics_item._lyric_line_height()
                     source.subtitle_scroll_offset = (
                         previous_line_count * line_height * (1.0 - eased)
@@ -1174,12 +1204,17 @@ class CanvasSnapshot:
                 graphics_item.update()
             for (
                 graphics_item, anchor_line, anchor_count, previous_line_count,
-                leaving_line_count,
+                leaving_line_count, entering_line_count, emphasis,
+                previous_emphasis, incoming_visible,
             ) in original_subtitle_anchors:
                 graphics_item._subtitle_anchor_line = anchor_line
                 graphics_item._subtitle_anchor_line_count = anchor_count
                 graphics_item._subtitle_previous_line_count = previous_line_count
                 graphics_item._subtitle_leaving_line_count = leaving_line_count
+                graphics_item._subtitle_entering_line_count = entering_line_count
+                graphics_item._subtitle_emphasis = emphasis
+                graphics_item._subtitle_previous_emphasis = previous_emphasis
+                graphics_item._subtitle_incoming_visible = incoming_visible
                 graphics_item.update()
             for graphics_item, current_row in original_track_list_rows:
                 graphics_item.source.track_list_current_row = current_row

@@ -10,15 +10,40 @@ _paint_legacy.
 
 from __future__ import annotations
 
+from math import cos, hypot, radians, sin
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 
-from app.models.source import SourceType
+from app.models.source import TEXT_SOURCE_TYPES, SourceType
 
 if TYPE_CHECKING:
     from app.canvas.source_item import SourceItem
+
+
+def linear_gradient(rect: QRectF, angle: float) -> QLinearGradient:
+    """Gradient across ``rect``: top-left to bottom-right, rotated by ``angle``
+    degrees clockwise (0 keeps the original diagonal of older projects)."""
+    center = rect.center()
+    half = QPointF(rect.width() / 2.0, rect.height() / 2.0)
+    if angle:
+        turn = radians(angle)
+        half = QPointF(
+            half.x() * cos(turn) - half.y() * sin(turn),
+            half.x() * sin(turn) + half.y() * cos(turn),
+        )
+    return QLinearGradient(center - half, center + half)
+
+
+def device_pixel_ratio(painter: QPainter) -> float:
+    """Device pixels per logical pixel, so cached rasters stay sharp on export."""
+    transform = painter.worldTransform()
+    device = painter.device()
+    device_ratio = device.devicePixelRatioF() if device is not None else 1.0
+    scale = hypot(transform.m11(), transform.m12()) * device_ratio
+    # Quantised so a slowly animating scale keeps reusing cached pixmaps.
+    return max(1.0, min(4.0, round(scale * 2.0) / 2.0))
 
 
 def paint_background(item: "SourceItem", painter: QPainter) -> tuple[QRectF, QBrush, QPen]:
@@ -42,8 +67,11 @@ def paint_background(item: "SourceItem", painter: QPainter) -> tuple[QRectF, QBr
         else (lambda color: color)
     )
     fill = QBrush(tint(QColor(item.source.fill_color)))
-    if item.source.gradient.enabled:
-        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    text_owns_gradient = (
+        item.source.text_gradient and item.source.source_type in TEXT_SOURCE_TYPES
+    )
+    if item.source.gradient.enabled and not text_owns_gradient:
+        gradient = linear_gradient(rect, item.source.gradient.angle)
         gradient.setColorAt(0, tint(QColor(item.source.gradient.start_color)))
         gradient.setColorAt(1, tint(QColor(item.source.gradient.end_color)))
         fill = QBrush(gradient)
@@ -55,7 +83,10 @@ def paint_background(item: "SourceItem", painter: QPainter) -> tuple[QRectF, QBr
     painter.setPen(pen)
     painter.setBrush(fill)
 
-    if item.source.shadow.enabled:
+    glyph_shadow = (
+        item.source.text_shadow_glyph and item.source.source_type in TEXT_SOURCE_TYPES
+    )
+    if item.source.shadow.enabled and not glyph_shadow:
         shadow_color = QColor(item.source.shadow.color)
         shadow_color.setAlphaF(max(0.0, min(1.0, item.source.shadow.opacity)))
         painter.setPen(Qt.PenStyle.NoPen)
@@ -124,9 +155,9 @@ def paint_generic_fallback(item: "SourceItem", painter: QPainter, rect: QRectF) 
         else "#FFFFFF"
     )
     painter.setPen(QColor(text_color))
-    font = QFont(item.source.font_family, max(8, min(120, int(item.source.font_size))))
-    font.setWeight(QFont.Weight(item.source.font_weight))
-    painter.setFont(font)
+    painter.setFont(item.text_font(
+        max(8, min(120, int(item.source.font_size))), item.source.font_weight,
+    ))
     alignment = {
         "left": Qt.AlignmentFlag.AlignLeft,
         "right": Qt.AlignmentFlag.AlignRight,

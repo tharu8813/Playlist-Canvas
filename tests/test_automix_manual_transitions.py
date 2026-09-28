@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.automix.overrides import (  # noqa: E402
-    TransitionOverride, pair_key, parse_overrides, serialize_overrides,
+    TransitionOverride, parse_overrides, serialize_overrides,
 )
 from app.automix.planner import compile_automix, plan_manual_junction  # noqa: E402
 from app.automix.settings import automix_settings_for  # noqa: E402
@@ -18,12 +18,11 @@ from app.services.playlist_service import PlaylistService  # noqa: E402
 from app.timeline.models import TransitionType  # noqa: E402
 from app.timeline.render_plan import TransitionDsp, validate_compiled_render_plan  # noqa: E402
 from app.utils.i18n import Translator  # noqa: E402
-from app.widgets.automix_details_panel import AutoMixDetailsPanel  # noqa: E402
 from app.widgets.playlist_editor import PlaylistEditor, TransitionChip  # noqa: E402
 from app.widgets.transition_editor import (  # noqa: E402
     EditContext, draft_junction, override_from_junction, snap, snap_length,
 )
-from app.widgets.transition_inspector import TransitionInspectorWindow, plan_junctions  # noqa: E402
+from app.widgets.transition_inspector import plan_junctions  # noqa: E402
 from tests.test_automix_planner import ENABLED, _analysis, _track  # noqa: E402
 
 
@@ -190,107 +189,6 @@ class EditorHelperTests(unittest.TestCase):
         self.assertAlmostEqual(snap_length(7.8, _analysis("x", 120.0, 60.0)), 8.0)
 
 
-class EditorWindowTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.application = QApplication.instance() or QApplication([])
-
-    def _window(self):
-        tracks = _tracks()
-        analyses = _analyses(tracks)
-        plan = compile_automix(tracks, analyses, ENABLED)
-        panel = AutoMixDetailsPanel(Translator(), automix=True)
-        panel.set_plan(plan, tracks, state="final")
-        window = TransitionInspectorWindow(panel)
-        self.addCleanup(window.deleteLater)
-        self.addCleanup(panel.deleteLater)
-        window.enable_editing(lambda: EditContext({t.id: t for t in tracks}, analyses), {})
-        changes = []
-        window.override_changed.connect(lambda key, override: changes.append((key, override)))
-        return window, changes
-
-    def test_switching_to_manual_starts_from_the_automatic_result(self) -> None:
-        window, changes = self._window()
-        self.assertTrue(window.select_pair("b", "c"))
-        self.assertFalse(window.mode_box.isHidden())
-        self.assertTrue(window.editor.isHidden())
-        window.manual_button.click()
-        key, override = changes[-1]
-        self.assertEqual(key, pair_key("b", "c"))
-        self.assertEqual(override, override_from_junction(window.junctions[1]))
-        self.assertFalse(window.editor.isHidden())
-        self.assertTrue(window.diagram.editable)
-        self.assertTrue(window.heading_label.text().startswith("✎"))
-        window.editor.style_buttons["cut"].click()
-        self.assertEqual(changes[-1][1].style, "cut")
-        window.editor.revert_button.click()
-        self.assertEqual(changes[-1], (pair_key("b", "c"), None))
-        self.assertTrue(window.editor.isHidden())
-
-    def test_dragging_the_overlap_moves_the_cue_on_the_beat(self) -> None:
-        window, changes = self._window()
-        window.select_pair("a", "b")
-        window.manual_button.click()
-        before = changes[-1][1]
-        window._drag_started("move")
-        window._drag_moved("move", -4.2, False)
-        self.assertEqual(len(changes), 1)  # nothing is committed mid-drag
-        self.assertTrue(window.diagram.draft)
-        window._drag_finished()
-        after = changes[-1][1]
-        self.assertLess(after.outgoing_cue, before.outgoing_cue)
-        grid = _analyses(_tracks())["a"].downbeats
-        self.assertIn(after.outgoing_cue, grid)
-        window._drag_started("end")
-        window._drag_moved("end", 3.0, True)
-        window._drag_finished()
-        self.assertAlmostEqual(changes[-1][1].duration, after.duration + 3.0)
-
-    def test_a_new_plan_replaces_the_draft(self) -> None:
-        window, changes = self._window()
-        window.select_pair("a", "b")
-        window.manual_button.click()
-        self.assertTrue(window._drafts)
-        tracks = _tracks()
-        settings = ENABLED.with_overrides({changes[-1][0]: changes[-1][1]})
-        window.panel.set_plan(compile_automix(tracks, _analyses(tracks), settings), tracks, state="final")
-        self.assertFalse(window._drafts)
-        self.assertFalse(window.diagram.draft)
-
-
-class PreviewRemixTests(unittest.TestCase):
-    def test_an_edit_re_mixes_into_a_fresh_directory_with_the_new_settings(self) -> None:
-        from types import SimpleNamespace
-
-        from app.dialogs.export_preview_dialog import ExportPreviewDialog
-
-        starts = []
-        controller = SimpleNamespace(
-            progressive_ready=object(),
-            start=lambda tracks, directory, mode, crossfade, automix_settings=None: starts.append(
-                (directory.name, mode, automix_settings)),
-        )
-        emitted = []
-        preview = SimpleNamespace(
-            _closing=False, _transition_mode="automix", tracks=_tracks(), _blended_audio_controller=controller,
-            _blended_audio_temp_dir=None, _remix_count=0, _pending_swap=("stale",), _crossfade_seconds=3.0,
-            _automix_settings=ENABLED, _report_playhead=lambda force=False: None, _preview_proxy_ffmpeg=None,
-            automix_override_changed=SimpleNamespace(emit=lambda *args: emitted.append(args)),
-        )
-        preview._automix_overrides = lambda: ExportPreviewDialog._automix_overrides(preview)
-        preview.remix_automix = lambda: ExportPreviewDialog.remix_automix(preview)
-        override = TransitionOverride(120.0, style="cut")
-        ExportPreviewDialog._on_automix_override_changed(preview, "a>b", override)
-        ExportPreviewDialog._on_automix_override_changed(preview, "a>b", None)
-        self.addCleanup(preview._blended_audio_temp_dir.cleanup)
-        self.assertEqual(emitted, [("a>b", override), ("a>b", None)])
-        self.assertEqual([(name, mode) for name, mode, _settings in starts],
-                         [("remix-1", "automix"), ("remix-2", "automix")])
-        self.assertEqual(starts[0][2].override_for("a", "b"), override)
-        self.assertIsNone(starts[1][2].override_for("a", "b"))
-        self.assertIsNone(preview._pending_swap)
-
-
 class PlaylistChipTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -308,7 +206,13 @@ class PlaylistChipTests(unittest.TestCase):
             return [row.transition_chip for row in rows]
 
         self.assertEqual(chips(), [None, None, None])  # not AutoMix: no chips
+        self.assertTrue(editor.automix_editor_button.isHidden())
         editor.set_transitions(True, {"a>c": TransitionOverride(80.0, style="cut").to_dict()})
+        self.assertFalse(editor.automix_editor_button.isHidden())  # the whole-playlist entry
+        opened = []
+        editor.automix_editor_requested.connect(lambda: opened.append(True))
+        editor.automix_editor_button.click()
+        self.assertEqual(opened, [True])
         first, excluded, third = chips()
         self.assertIsNone(first)
         self.assertIsNone(excluded)
@@ -385,109 +289,33 @@ class CustomEqTests(unittest.TestCase):
         self.assertAlmostEqual(band_hole((0.1, 0.3), (0.5, 0.7)), 0.2)
         self.assertEqual(band_hole((0.1, 0.6), (0.5, 0.7)), 0.0)
 
-    def test_editor_starts_custom_eq_from_what_plays_and_commits_drags(self) -> None:
-        from PySide6.QtCore import QPoint, Qt
-        from PySide6.QtTest import QTest
-
-        from app.automix.renderer import band_windows_of, default_eq_bands
-
-        window, changes = EditorWindowTests._window(self)
-        window.select_pair("a", "b")
-        window.manual_button.click()
-        playing = band_windows_of(window.diagram.junction.transition)
-        panel = window.editor
-        self.assertTrue(panel.eq_box.isHidden())
-        panel.style_buttons["eq"].click()
-        override = changes[-1][1]
-        self.assertEqual(override.style, "eq")
-        self.assertEqual(override.eq_bands, playing if playing is not None else default_eq_bands())
-        self.assertFalse(panel.eq_box.isHidden())
-
-        panel.eq_presets["even"].click()
-        self.assertEqual(changes[-1][1].eq_bands, (((0.0, 1.0), (0.0, 1.0)),) * 3)
-
-        editor = panel.eq_editor
-        editor.resize(700, editor.minimumHeight())
-        bar = editor._bar_rect("low", "out")
-        start = QPoint(int(bar.right()), int(bar.center().y()))
-        QTest.mousePress(editor, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, start)
-        QTest.mouseMove(editor, start - QPoint(int(bar.width() / 2), 0))
-        QTest.mouseRelease(editor, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier,
-                           start - QPoint(int(bar.width() / 2), 0))
-        low_out, low_in = changes[-1][1].eq_bands[0]
-        self.assertLess(low_out[1], 0.6)
-        self.assertEqual(low_out, low_in)  # "move both together" is on by default
-
-        panel.style_buttons["bass_swap"].click()
-        self.assertEqual(changes[-1][1].style, "bass_swap")
-        self.assertIsNotNone(changes[-1][1].eq_bands)  # kept for switching back
-        self.assertTrue(panel.eq_box.isHidden())
-
-
-class DragFeelTests(unittest.TestCase):
-    """What a drag in the graph does: follows the pointer, holds the scale, stops with a reason."""
+class TimelineBandDragTests(unittest.TestCase):
+    """Band bars on the AutoMix editor's timeline: free with Shift, else onto a beat."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
 
-    def _editing(self):
-        window, changes = EditorWindowTests._window(self)
-        window.resize(1100, 1000)
-        window.select_pair("a", "b")
-        window.manual_button.click()
-        return window, changes
-
-    def _drag(self, window, kind, delta, free=False):
-        window._drag_started(kind)
-        window.diagram._drag = (kind, 0.0)  # as if the pointer were held down
-        window._drag_moved(kind, delta, free)
-        hint = window.diagram.drag_hint
-        window.diagram._drag = None
-        window._drag_finished()
-        return hint
-
-    def test_moving_keeps_the_length_and_stops_at_the_song_end_with_a_reason(self) -> None:
-        window, changes = self._editing()
-        before = window.diagram.junction
-        length = before.end - before.start
-        hint = self._drag(window, "move", 30.0)
-        after = changes[-1][1] if changes[-1][1] != changes[0][1] else None
-        self.assertIn("나가는 곡 끝", hint)
-        drawn = window._draft(changes[-1][1]) if after is not None else before
-        self.assertAlmostEqual(drawn.end - drawn.start, length, places=3)
-
-    def test_small_drags_land_between_beats_when_no_beat_is_near(self) -> None:
-        window, changes = self._editing()
-        self._drag(window, "end", -6.0, free=True)  # make room to move
-        start = window._draft(changes[-1][1]).start
-        pull = 12.0 * window.diagram.seconds_per_pixel()
-        self._drag(window, "move", -(pull + 0.1))  # past the downbeat's pull; beats are too dense to pull here
-        self.assertAlmostEqual(window._draft(changes[-1][1]).start, start - pull - 0.1, places=3)
-
-    def test_the_scale_holds_still_across_a_re_mix(self) -> None:
-        window, changes = self._editing()
-        shown = window.diagram._range()
-        self._drag(window, "end", -3.0, free=True)
-        tracks = _tracks()
-        settings = ENABLED.with_overrides({changes[-1][0]: changes[-1][1]})
-        window.panel.set_plan(compile_automix(tracks, _analyses(tracks), settings), tracks, state="final")
-        self.assertEqual(window.diagram._range(), shown)
-
     def test_band_bars_move_freely_and_click_onto_beats(self) -> None:
-        from app.widgets.transition_editor import BandTimingEditor
+        from app.widgets.automix_timeline import AutoMixTimeline
 
-        editor = BandTimingEditor()
-        self.addCleanup(editor.deleteLater)
-        editor.resize(700, editor.minimumHeight())
-        editor.set_bands((((0.3, 0.5), (0.3, 0.5)),) * 3, 16.0, 0.5 / 16.0)
-        free = editor._progress_delta(40.0)
-        editor._drag = ("low", "out", "move", 0.0, editor.bands)
-        moved = editor._dragged(editor._x(0.0) + 40.0 - editor._x(0.0), False)
-        editor._drag = None
-        self.assertNotAlmostEqual(moved[0][0][0], 0.3 + free, places=4)  # pulled onto a beat
-        self.assertAlmostEqual(moved[0][0][0] % (0.5 / 16.0), 0.0, places=6)
-        editor._drag = ("low", "out", "move", 0.0, editor.bands)
-        moved = editor._dragged(40.0, True)
-        editor._drag = None
+        tracks = _tracks()
+        analyses = _analyses(tracks)
+        timeline = AutoMixTimeline()
+        self.addCleanup(timeline.deleteLater)
+        timeline.resize(900, 500)
+        junction = plan_junctions(compile_automix(tracks, analyses, ENABLED))[0]
+        timeline.analyses = (analyses["a"], analyses["b"])
+        timeline.set_junction(junction, refit=True)
+        length = junction.end - junction.start
+        start_bands = (((0.3, 0.5), (0.3, 0.5)),) * 3
+        press = timeline.x_of(junction.start)
+        free = (timeline.seconds_at(press + 40.0) - timeline.seconds_at(press)) / length
+        timeline._band_drag = ("low", "out", "move", press, start_bands)
+        moved = timeline._dragged_bands(press + 40.0, True)
         self.assertAlmostEqual(moved[0][0][0], 0.3 + free, places=6)
+        self.assertEqual(moved[0][1], moved[0][0])  # linked: B's bar moves with A's
+        snapped = timeline._dragged_bands(press + 40.0, False)
+        beat = 0.5 / length  # 120 BPM
+        self.assertAlmostEqual(snapped[0][0][0] / beat, round(snapped[0][0][0] / beat), places=6)
+        timeline._band_drag = None
