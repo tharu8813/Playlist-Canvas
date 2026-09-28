@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
 import sys
@@ -22,7 +23,9 @@ from app.dialogs.crash_report_dialog import CrashReportDialog
 LOGGER = logging.getLogger(__name__)
 LOG_FILE_NAME = "playlist-canvas.log"
 RUN_MARKER_NAME = "running.marker"
+NATIVE_CRASH_FILE_NAME = "native-crash.log"
 _CRASH_BRIDGE: "_CrashBridge | None" = None
+_NATIVE_CRASH_FILE = None
 
 
 class _CrashBridge(QObject):
@@ -85,10 +88,31 @@ def configure_logging() -> Path | None:
         root.addHandler(file_handler)
     except OSError:
         root.warning("Could not create the application log file.", exc_info=True)
+    _enable_native_crash_trace()
     logging.captureWarnings(True)
     root._playlist_canvas_configured = True  # type: ignore[attr-defined]
     root._playlist_canvas_log_path = log_path  # type: ignore[attr-defined]
     return log_path
+
+
+def _enable_native_crash_trace() -> None:
+    """Write every thread's Python stack to a file when the process dies natively.
+
+    An access violation inside Qt/PySide never reaches sys.excepthook; without
+    this the log simply stops and the faulting Python call is unknown.
+    """
+    global _NATIVE_CRASH_FILE
+    if _NATIVE_CRASH_FILE is not None:
+        return
+    try:
+        directory = log_directory()
+        directory.mkdir(parents=True, exist_ok=True)
+        _NATIVE_CRASH_FILE = open(directory / NATIVE_CRASH_FILE_NAME, "a", encoding="utf-8")
+        _NATIVE_CRASH_FILE.write(f"\n=== session started {datetime.now(timezone.utc).isoformat()} ===\n")
+        _NATIVE_CRASH_FILE.flush()
+        faulthandler.enable(_NATIVE_CRASH_FILE, all_threads=True)
+    except OSError:
+        LOGGER.warning("Could not enable the native crash trace", exc_info=True)
 
 
 def install_exception_hook() -> None:
