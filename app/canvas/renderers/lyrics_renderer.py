@@ -13,7 +13,7 @@ from math import pi, sin
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QFontMetricsF, QPainter
 
 from app.canvas.renderers.base import (
     device_pixel_ratio, paint_background, paint_selection_guide,
@@ -33,6 +33,8 @@ _GLOW_DISTANCE = 6.0
 _GLOW_HALO = 0.3
 _GLOW_BLOOM = 0.35
 _VISIBLE = 0.004
+# Shrink an over-long row to at most this; anything longer wraps as before.
+_MIN_FIT = 0.55
 
 
 def render(
@@ -112,9 +114,20 @@ def paint_lines(item: "SourceItem", painter: QPainter, rect: QRectF) -> None:
         len(lines) - item._subtitle_entering_line_count if transitioning else len(lines)
     )
     painter.setFont(font)
+    metrics = QFontMetricsF(font)
 
     for index, line in enumerate(lines):
-        row = QRectF(rect.left() + 12, y, content_width, line_height)
+        # A row wider than the box is shrunk to fit instead of wrapping: a row
+        # is one line tall, so a wrapped second line was cut off. Laid out at
+        # its natural width and scaled with the row, it stays on one line.
+        advance = metrics.horizontalAdvance(line) + 2.0
+        fit = max(_MIN_FIT, min(1.0, content_width / advance)) if advance > content_width else 1.0
+        row_width = content_width if fit >= 1.0 else max(content_width, advance)
+        row_left = {
+            Qt.AlignmentFlag.AlignLeft: rect.left() + 12,
+            Qt.AlignmentFlag.AlignRight: rect.right() - 12 - row_width,
+        }.get(alignment, rect.center().x() - row_width / 2.0)
+        row = QRectF(row_left, y, row_width, line_height)
         y += line_height
         is_current = (
             has_current_line and current_line <= index < current_line + current_line_count
@@ -166,7 +179,7 @@ def paint_lines(item: "SourceItem", painter: QPainter, rect: QRectF) -> None:
             blur_mix = 0.0
 
         painter.save()
-        scale = (rest_scale + (1.0 - rest_scale) * emphasis) * extra_scale
+        scale = (rest_scale + (1.0 - rest_scale) * emphasis) * extra_scale * fit
         row.translate(0.0, offset)
         if abs(scale - 1.0) > 1e-4:
             center = QPointF(scale_x, row.center().y())
@@ -179,7 +192,7 @@ def paint_lines(item: "SourceItem", painter: QPainter, rect: QRectF) -> None:
         ):
             if opacity > _VISIBLE:
                 pixmap, margin = item._lyric_blur_pixmap(
-                    line, color, radius, content_width, line_height, pixel_ratio, flags,
+                    line, color, radius, row_width, line_height, pixel_ratio, flags,
                 )
                 painter.setOpacity(base_opacity * min(1.0, opacity))
                 painter.drawPixmap(QPointF(row.left() - margin, row.top() - margin), pixmap)

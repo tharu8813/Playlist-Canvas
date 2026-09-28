@@ -2325,6 +2325,53 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertLess(first_ink_column(render(lyric("left"))), 30)
         self.assertGreater(first_ink_column(render(lyric("center"))), 60)
 
+    def test_long_lyric_line_shrinks_to_one_line_instead_of_being_cut(self) -> None:
+        line = "A lyric line a little longer than its box"
+        probe = SourceItem(Source(SourceType.LYRICS, "L", font_size=28))
+        advance = QFontMetricsF(probe._lyric_fonts["current"]).horizontalAdvance(line)
+        width = round(advance * 0.75) + 24  # needs ~0.75 scale to fit
+
+        def ink(text: str) -> tuple[int, int, int]:
+            item = SourceItem(Source(
+                SourceType.LYRICS, "L", text=text, width=width, height=120,
+                fill_color="#00000000", outline_color="#FFFFFF", font_size=28,
+                subtitle_animation="none", subtitle_current_line=0,
+            ))
+            image = QImage(width, 120, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            painter = QPainter(image)
+            item.paint(painter, None)
+            painter.end()
+            points = [(x, y) for y in range(120) for x in range(width)
+                      if image.pixelColor(x, y).alpha() > 60]
+            xs, ys = [x for x, _ in points], [y for _, y in points]
+            return min(xs), max(xs), max(ys) - min(ys)
+
+        left, right, height = ink(line)
+        _short_left, _short_right, short_height = ink("Short line")
+        # All of it is visible inside the box, one line tall (a wrapped row
+        # showed the clipped halves of two lines: ~1.6x a single line).
+        self.assertGreaterEqual(left, 6)
+        self.assertLessEqual(right, width - 6)
+        self.assertLess(height, short_height * 1.2)
+
+    def test_every_design_preset_is_valid_and_renders(self) -> None:
+        from app.presets.preset_preview import render_preset_thumbnail
+        from app.presets.preset_service import PresetService
+
+        presets = PresetService.all()
+        self.assertEqual(len({preset.identifier for preset in presets}), len(presets))
+        lyric_presets = 0
+        for preset in presets:
+            with self.subTest(preset=preset.identifier):
+                sources = preset.builder()
+                # Project validation must accept every value a preset sets.
+                restored = [Source.from_dict(source.to_dict()) for source in sources]
+                self.assertEqual([s.to_dict() for s in restored], [s.to_dict() for s in sources])
+                lyric_presets += any(s.source_type is SourceType.LYRICS for s in sources)
+                self.assertFalse(render_preset_thumbnail(sources, 160, 90).isNull())
+        self.assertGreaterEqual(lyric_presets, 5)
+
     def test_mask_cuts_the_source_and_its_shadow_to_the_shape(self) -> None:
         def render(**options: object) -> QImage:
             item = SourceItem(Source(
