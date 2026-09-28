@@ -225,6 +225,11 @@ class VisualizerOverlay:
     animation_in_duration: float = 0.45
     animation_out_duration: float = 0.45
     animation_fit_mix: bool = False
+    loop_motion: str = "none"
+    loop_motion_period: float = 4.0
+    loop_motion_amount: float = 1.0
+    mask_shape: str = "none"
+    inner_radius: float = 0.55
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,9 +1,8 @@
 > [!NOTE]
-> Canvas 화면은 제한된 메모리 큐를 통해 무손실 중간 영상으로 바로 스트리밍됩니다.
-> 일반적인 내보내기에서는 더 이상 화면 상태마다 대량의 PNG 파일을 만들지 않습니다.
-> 중간 영상과 오디오를 위한 임시 공간은 필요하며, 내보내기 완료 또는 취소 시 자동으로
-> 정리됩니다. `libx264rgb` 또는 `ffv1`이 없는 사용자 지정 FFmpeg에서는 결과물 호환성을
-> 위해 기존 PNG 방식으로 자동 전환될 수 있습니다.
+> 내보내기는 Canvas 화면을 named pipe로 최종 FFmpeg 인코더에 바로 전달하므로 중간 영상을
+> 디스크에 만들지 않습니다. 실시간 전달이 실패하면 무손실 중간 영상 방식으로 자동 재시도하며,
+> 이때만 긴 프로젝트가 큰 임시 공간을 사용합니다. 자세한 내용은
+> [내보내기 임시 저장 방식](#내보내기-임시-저장-방식)을 참고하세요.
 
 <div align="center">
   <img src="docs/images/playlist-canvas-icon.png" width="128" alt="Playlist Canvas 아이콘">
@@ -11,7 +10,7 @@
   <p>음악, 가사, 비주얼 요소를 하나의 캔버스에서 편집해 플레이리스트 영상을 만드는 Windows 데스크톱 편집기</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-1.2.0.8-1685D1" alt="Version 1.2.0.8">
+    <img src="https://img.shields.io/badge/version-1.2.0.9-1685D1" alt="Version 1.2.0.9">
     <img src="https://img.shields.io/badge/platform-Windows%2064--bit-0078D4" alt="Windows 64-bit">
     <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python 3.12">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
@@ -55,7 +54,9 @@ Playlist Canvas는 정적인 이미지와 음악을 합치는 수준을 넘어, 
 
 ## 사용자 설치
 
-1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.2.0.8-setup.exe`를 받습니다.
+이 브랜치는 **1.2.0.9 Beta 1**입니다. 베타 설치 파일은 [사전 릴리즈](https://github.com/tharu8813/Playlist-Canvas/releases/tag/1.2.0.9-beta.1)의 `Playlist.Canvas-1.2.0.9-beta.1-setup.exe`이며, 정식 자동 업데이트에는 표시되지 않습니다. 아래 파일명은 기본 빌드 설정 기준입니다.
+
+1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.2.0.9-setup.exe`를 받습니다.
 2. Setup 파일을 실행하고 설치 언어를 선택합니다.
 3. 설치 위치와 바탕 화면 바로가기 생성 여부를 선택한 뒤 **설치**를 누릅니다.
 4. 설치가 완료되면 **Playlist Canvas 실행**을 선택하거나 시작 메뉴의 바로가기를 실행합니다. 설치 후에는 파일 탐색기의 `.pvsproj` 프로젝트를 더블클릭해 프로그램과 프로젝트를 바로 열 수도 있습니다.
@@ -79,17 +80,23 @@ FFmpeg는 애플리케이션 배포본에 포함되지 않습니다. 설정 화�
 
 ## 내보내기 임시 저장 방식
 
-내보내기는 편집 타임라인의 Canvas 상태를 순서대로 캡처하면서 동시에 FFmpeg에 전달합니다.
-불투명 기본 화면은 무손실 RGB 영상으로 저장하고, 비주얼라이저 사이에 놓이는 투명한 정적
-Z 레이어는 무손실 색상 트랙과 알파 트랙으로 나누어 저장한 뒤 최종 합성 시 다시 결합합니다.
-비주얼라이저·파형·레벨 미터·파티클은 기존의 알파 영상 렌더링을 유지하므로 레이어 순서와
-화면 결과는 이전 내보내기 방식과 같습니다.
+내보내기는 편집 타임라인의 Canvas 상태를 순서대로 캡처합니다. 불투명 기본 화면과, 비주얼라이저
+사이에 놓이는 투명한 정적 Z 레이어는 각각 별도 스트림이 됩니다. 비주얼라이저·파형·레벨 미터·
+파티클은 알파 영상으로 따로 렌더링되므로 레이어 순서와 화면 결과는 어느 경로에서나 같습니다.
+Canvas를 FFmpeg에 넘기는 방식은 다음 순서로 선택됩니다.
 
-정적 스트림은 기본 화면부터 Z 레이어까지 하나씩 순서대로 완성하므로 동시에 활성화되는
-무손실 FFmpeg 인코더는 하나뿐이며, 메모리에는 해당 스트림의 프레임 2~3개만 유지됩니다.
-앱이 관리 설치하는 FFmpeg에는 필요한 `libx264rgb`와 `ffv1` 인코더가 포함되어 있습니다.
-사용자 지정 FFmpeg에서 이 인코더를 사용할 수 없으면 내보내기를 막지 않고 검증된 PNG 호환
-경로를 사용합니다. 이 경우에만 긴 프로젝트가 더 많은 임시 디스크 공간을 사용할 수 있습니다.
+| 경로 | 언제 | 임시 디스크 사용 |
+|---|---|---|
+| 실시간 파이프 (기본) | Windows named pipe / POSIX FIFO를 쓸 수 있을 때 | 레이어당 정지 PNG 몇 장과 오디오 |
+| 무손실 중간 영상 | 실시간 파이프가 실패하거나 120초 동안 읽히지 않을 때 자동 재시도 | 레이어마다 원본 RGB의 약 40% × 영상 길이 |
+| PNG 호환 경로 | 사용자 지정 FFmpeg에 `libx264rgb`·`ffv1`이 없을 때 | 가장 큼 (프레임마다 PNG) |
+
+- 실시간 파이프는 스트림마다 전용 writer 스레드와 작은 큐(스트림당 프레임 몇 장)를 두므로 메모리
+  사용량이 영상 길이에 비례해 늘지 않습니다.
+- 디스크가 가득 차서 실패한 경우에는 더 큰 공간이 필요한 중간 영상 방식으로 재시도하지 않습니다.
+- 앱이 관리 설치하는 FFmpeg에는 `libx264rgb`와 `ffv1`이 포함되어 있습니다.
+- 문제 진단을 위해 환경 변수 `PLAYLIST_CANVAS_DISABLE_PIPED_EXPORT=1`로 실시간 파이프를 끌 수 있습니다.
+- 모든 임시 파일은 내보내기 완료 또는 취소 시 자동으로 정리됩니다.
 
 ## AutoMix (베타)
 
@@ -98,7 +105,7 @@ AutoMix는 **곡 사이를 템포에 맞춰 자동으로 부드럽게 이어주�
 - 켜면 Beat This!와 Open-Unmix의 ONNX 모델로 박자·다운비트·보컬 구간을, librosa와 Sonara로 조성·에너지·곡 구조를 분석합니다. 모델은 설치본에 포함되어 추가 다운로드 없이 로컬 CPU에서 동작합니다.
 - 곡의 박자와 보컬 구간에 맞춰 전환 방식과 길이를 자동 선택합니다. 반주 인트로·아웃트로를 우선 활용하고, 양쪽 곡이 끝과 시작에서 모두 노래하면 짧게 넘깁니다. 템포가 맞지 않거나 분석에 실패한 곡은 일반 크로스페이드 또는 이어서 재생으로 대체됩니다.
 - 분석 결과(BPM 등)는 플레이리스트 목록과 곡 정보 창에서 확인할 수 있습니다.
-- 분석 캐시는 `%LOCALAPPDATA%\PlaylistCanvas\automix-cache\`에 저장되며, 언제든 폴더를 삭제해 초기화할 수 있습니다. 프로젝트 파일에는 켜짐/꺼짐 여부만 저장되고 분석 데이터는 저장되지 않습니다.
+- 분석 캐시는 `%LOCALAPPDATA%\PlaylistCanvas\automix-cache\`(박자)와 `automix-structure-cache\`(곡 구조)에 저장됩니다. 180일 동안 쓰이지 않은 항목은 시작 시 자동으로 정리되며, 설정에서 언제든 비울 수 있습니다. 프로젝트 파일에는 AutoMix 사용 여부와 직접 편집한 전환만 저장되고 분석 데이터는 저장되지 않습니다.
 - **Preview와 내보내기:** Preview에서도 AutoMix가 적용됩니다. 분석이 끝난 곡까지의 부분 믹스를 먼저 들려주고, 전체 분석이 끝나면 내보내기와 같은 최종 믹스로 자동 교체됩니다. 앨범 커버·가사·트랙 전환 등 화면 타이밍과 전체 영상 길이도 AutoMix 전환 위치를 따릅니다.
 
   | 기능 | Preview | 내보내기 |
@@ -107,7 +114,7 @@ AutoMix는 **곡 사이를 템포에 맞춰 자동으로 부드럽게 이어주�
   | AutoMix 전환 위치·길이 | 예 | 예 |
   | AutoMix 오디오 처리(EQ·필터 등) | 예 | 예 |
   | 분석 중 부분 믹스 | 예 | 해당 없음 |
-- `librosa`와 그 의존 패키지(`scipy`, `numba` 등)가 설치되어 있지 않으면 AutoMix 분석/내보내기만 건너뛰고 나머지 기능은 정상 동작합니다.
+- 소스 실행에서 선택 패키지가 없을 때의 동작은 [의존성 구성](#의존성-구성)을 참고하세요. 공식 설치본에는 모두 포함되어 있습니다.
 
 ## 프로그램 업데이트
 
@@ -124,7 +131,7 @@ AutoMix는 **곡 사이를 템포에 맞춰 자동으로 부드럽게 이어주�
 
 - 누락된 번역은 영어로 표시됩니다.
 - 실행 코드가 없는 JSON 데이터만 허용합니다.
-- 잘못된 JSON, 호환되지 않는 스키마, 자리표시자 오류와 1MB 초과 파일은 거부합니다.
+- 잘못된 JSON, 호환되지 않는 스키마, 자리표시자 오류와 4MB 초과 파일은 거부합니다.
 - 형식과 예제는 [`docs/language-packs`](docs/language-packs/README.md)에서 확인할 수 있습니다.
 
 Windows에서는 첫 실행 시 `%LOCALAPPDATA%\PlaylistCanvas\languages\`에 기본
@@ -156,6 +163,20 @@ python -m pip install -r requirements-lock.txt
 python main.py
 ```
 
+### 의존성 구성
+
+| 구성 | 파일 | 내용 |
+|---|---|---|
+| 공식 Windows 배포본 | `requirements-lock.txt` | 모든 패키지를 고정 버전으로 포함 (Sonara 포함). 위 명령과 CI가 사용하며, `playlist_canvas.spec`은 AutoMix 패키지가 하나라도 없으면 빌드를 중단합니다. |
+| 최소 소스 실행 | `requirements.txt` | PySide6, mutagen, numpy, librosa, onnxruntime (범위 지정) |
+| 선택 도구 | 별도 설치 | `sonara`(곡 구조 분석), PyTorch 계열(`beat-this`, `openunmix`, `demucs` — `tools/`의 모델 변환·청취 리포트 전용) |
+
+선택 패키지가 없을 때:
+
+- `onnxruntime`이 없으면 AutoMix가 Beat This! ONNX 대신 librosa 기반 기본 분석기를 사용합니다.
+- `librosa`와 그 의존 패키지(`scipy`, `numba` 등)가 없으면 AutoMix 분석/내보내기만 건너뛰고 나머지 기능은 정상 동작합니다.
+- `sonara`가 없으면 곡 구조(인트로·아웃트로·구간) 데이터 없이 박자 분석만으로 전환을 계획합니다.
+
 ## 테스트
 
 ```powershell
@@ -182,7 +203,7 @@ python -m PyInstaller --noconfirm --clean playlist_canvas.spec
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 ```
 
-완성된 `output-setup\Playlist Canvas-1.2.0.8-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
+완성된 `output-setup\Playlist Canvas-1.2.0.9-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
 
 ## 프로젝트 구조
 

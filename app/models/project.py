@@ -96,6 +96,39 @@ class ProjectContent:
             self.name = Path(self.path).stem
 
 
+SUPPORTED_VERSIONS = (1, 2)
+CURRENT_VERSION = 2
+
+
+def migrate_project_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Bring a saved project of any supported version to the current layout.
+
+    Pure: returns a new dict and never mutates ``data``. Only renamed/removed
+    fields are handled here; ``ProjectDocument.from_dict`` validates the
+    result. v1 and v2 share one layout, and the settings fields below were
+    retired while files were already written as v2, so these steps run for
+    every version. A future layout change bumps CURRENT_VERSION and adds a
+    step keyed on the incoming version here.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Project root must be an object.")
+    version = int(data.get("version", 1))
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError("This project version is not supported.")
+    migrated = {**data, "version": CURRENT_VERSION}
+    settings = data.get("settings")
+    if isinstance(settings, dict):
+        settings = dict(settings)
+        if "transition_mode" not in settings and "automix_enabled" in settings:
+            # Before transition_mode, AutoMix was a plain on/off switch.
+            settings["transition_mode"] = "automix" if settings.get("automix_enabled") else "none"
+        settings.pop("automix_enabled", None)
+        # AutoMix's style is always automatic now; a saved listening preset is dropped.
+        settings.pop("automix_preset", None)
+        migrated["settings"] = settings
+    return migrated
+
+
 @dataclass(slots=True)
 class ProjectDocument:
     """Complete Playlist Canvas project document."""
@@ -108,7 +141,7 @@ class ProjectDocument:
     language: str = "ko"
     settings: ProjectSettings = field(default_factory=ProjectSettings)
     content_library: list[ProjectContent] = field(default_factory=list)
-    version: int = 2
+    version: int = CURRENT_VERSION
     app_version: str = __version__
 
     @property
@@ -133,12 +166,16 @@ class ProjectDocument:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ProjectDocument":
-        """Create a validated document from parsed JSON data."""
-        if not isinstance(data, dict):
-            raise ValueError("Project root must be an object.")
-        version = int(data.get("version", 1))
-        if version not in {1, 2}:
-            raise ValueError("This project version is not supported.")
+        """Create a validated document from parsed JSON data.
+
+        Policy: a value read from a file that is out of range is rejected
+        here (the file is damaged or from an unknown build), while
+        ``ProjectSettings.__post_init__`` clamps values the app itself
+        constructs. ``theme``/``language`` are legacy per-project metadata:
+        still validated and kept for round trips, but the app-wide
+        preference decides the UI.
+        """
+        data = migrate_project_payload(data)
         app_version = data.get("app_version", "")
         if not isinstance(app_version, str) or len(app_version) > 64:
             raise ValueError("Project application version must be a short string.")
@@ -166,17 +203,6 @@ class ProjectDocument:
         settings_data = data.get("settings", {})
         if not isinstance(settings_data, dict):
             settings_data = {}
-        else:
-            settings_data = dict(settings_data)
-        if "transition_mode" not in settings_data and "automix_enabled" in settings_data:
-            # Migrate a project saved before transition_mode existed: the old
-            # field was a plain on/off AutoMix switch.
-            settings_data["transition_mode"] = (
-                "automix" if settings_data.get("automix_enabled") else "none"
-            )
-        settings_data.pop("automix_enabled", None)
-        # AutoMix's style is always automatic now; a saved listening preset is dropped.
-        settings_data.pop("automix_preset", None)
         canvas_model = CanvasSettings(**canvas)
         for name in ("width", "height", "zoom"):
             value = getattr(canvas_model, name)
@@ -245,7 +271,7 @@ class ProjectDocument:
             raise ValueError("Project language is not supported.")
 
         return cls(
-            version=2,
+            version=CURRENT_VERSION,
             app_version=app_version,
             sources=source_models,
             groups=group_models,

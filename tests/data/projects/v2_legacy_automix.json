@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "app_version": "1.0.0",
+  "canvas": {"width": 1280, "height": 720, "show_grid": true, "snap_enabled": true, "zoom": 1.0},
+  "theme": "dark",
+  "language": "ko",
+  "settings": {
+    "title": "Old AutoMix",
+    "automix_enabled": true,
+    "automix_preset": "dj",
+    "crossfade_seconds": 4.0
+  },
+  "content_library": [],
+  "sources": [],
+  "groups": [],
+  "playlist": [
+    {"file_path": "C:/Music/a.mp3", "title": "A", "duration_seconds": 200.0, "id": "a"},
+    {"file_path": "C:/Music/b.mp3", "title": "B", "duration_seconds": 210.0, "id": "b"}
+  ]
+}

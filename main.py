@@ -113,6 +113,11 @@ def main() -> int:
     from app.utils.temp_cleanup import sweep_stale_temp_dirs
 
     threading.Thread(target=sweep_stale_temp_dirs, daemon=True).start()
+    from app.automix.cache import cache_directories, prune_caches
+
+    # Imports stay on this thread: a daemon thread still importing when the
+    # app quits hung interpreter shutdown. The thread only touches files.
+    threading.Thread(target=prune_caches, args=(cache_directories(),), daemon=True).start()
     from app.ui.main_window import MainWindow
 
     splash.set_status("작업 공간을 준비하는 중…", "Preparing the workspace…")

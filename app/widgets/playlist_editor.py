@@ -453,6 +453,8 @@ class PlaylistEditor(QFrame):
     """(outgoing track id, incoming track id): open Transition details on that junction."""
     transition_reset_requested = Signal(str)
     """A manual junction's pair key: put it back on automatic."""
+    automix_editor_requested = Signal()
+    """Open the AutoMix editor for the whole playlist (its first transition)."""
 
     def __init__(self, service: PlaylistService, translator: Translator,
                  parent: QWidget | None = None) -> None:
@@ -482,6 +484,9 @@ class PlaylistEditor(QFrame):
         self.summary.setObjectName("mutedLabel")
         self.add_button = QPushButton()
         self.order_editor_button = QPushButton()
+        self.automix_editor_button = QPushButton()
+        self.automix_editor_button.hide()
+        self.automix_editor_button.clicked.connect(self.automix_editor_requested)
         self.up_button = QPushButton("↑")
         self.down_button = QPushButton("↓")
         self.duplicate_button = QPushButton()
@@ -492,6 +497,7 @@ class PlaylistEditor(QFrame):
         header.addStretch()
         header.addWidget(self.add_button)
         header.addWidget(self.order_editor_button)
+        header.addWidget(self.automix_editor_button)
         header.addWidget(self.up_button)
         header.addWidget(self.down_button)
         header.addWidget(self.duplicate_button)
@@ -558,6 +564,12 @@ class PlaylistEditor(QFrame):
             if korean else
             "Edit the track order in a window with covers, details, and preview."
         )
+        self.automix_editor_button.setText("AutoMix 편집" if korean else "AutoMix editor")
+        self.automix_editor_button.setToolTip(
+            "곡 사이 전환을 두 곡 타임라인에서 직접 편집하고 그 구간만 들어 봅니다."
+            if korean else
+            "Edit the transitions between songs on a two-track timeline and hear just that part."
+        )
         self.duplicate_button.setText("복제" if korean else "Duplicate")
         self.details_button.setText(
             "곡 정보/설정" if korean else "Track information/settings"
@@ -578,6 +590,7 @@ class PlaylistEditor(QFrame):
 
     def set_transitions(self, automix: bool, overrides: dict[str, dict]) -> None:
         """Show AutoMix's junction chips (``automix``) and which ones were set by hand."""
+        self.automix_editor_button.setVisible(automix)
         if automix == self._automix and overrides == self._overrides:
             return
         self._automix = automix

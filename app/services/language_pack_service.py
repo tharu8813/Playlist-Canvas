@@ -20,7 +20,10 @@ from app.services.update_service import normalized_version
 
 LOGGER = logging.getLogger(__name__)
 LANGUAGE_PACK_SCHEMA = 1
-MAX_PACK_BYTES = 1024 * 1024
+# The blank template alone is ~0.9 MB (overrides plus source_references), so a
+# fully translated copy -- exactly what its instructions ask for -- passed the
+# old 1 MB cap. 4 MB leaves room for 3-byte scripts and a growing template.
+MAX_PACK_BYTES = 4 * 1024 * 1024
 # The generated full-program template now contains slightly more than 5,000
 # literals.  Keep a generous but bounded ceiling so complete community packs
 # remain valid without weakening the file-size and text-length safeguards.
@@ -171,7 +174,7 @@ class LanguagePackService:
         except OSError as error:
             raise LanguagePackError("The language pack file could not be read.") from error
         if size < 2 or size > MAX_PACK_BYTES:
-            raise LanguagePackError("Language packs must be between 2 bytes and 1 MB.")
+            raise LanguagePackError("Language packs must be between 2 bytes and 4 MB.")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:

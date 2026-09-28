@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
+import tempfile
 from tempfile import mkdtemp
 
 from PySide6.QtCore import QCoreApplication, QEvent, QStandardPaths
@@ -18,7 +19,18 @@ from PySide6.QtWidgets import QApplication
 
 _TEST_LOCAL_APP_DATA = mkdtemp(prefix="playlist-canvas-tests-")
 atexit.register(shutil.rmtree, _TEST_LOCAL_APP_DATA, ignore_errors=True)
-os.environ.setdefault("LOCALAPPDATA", _TEST_LOCAL_APP_DATA)
+# Assigned, not setdefault: Windows always defines LOCALAPPDATA, so setdefault
+# left the AutoMix cache, presets, language packs and logs writing into the
+# developer's real %LOCALAPPDATA%\PlaylistCanvas during test runs.
+os.environ["LOCALAPPDATA"] = _TEST_LOCAL_APP_DATA
+# Same for the temp folder: extracted .pvsproj caches and other app temp data
+# landed in the real %TEMP% (2.4 GB of project-cache in two weeks) and every
+# package load then rescanned them all. One folder per test process, removed
+# at exit; child processes (FFmpeg) inherit it through TEMP/TMP.
+_TEST_TEMP = mkdtemp(prefix="playlist-canvas-tests-tmp-")
+atexit.register(shutil.rmtree, _TEST_TEMP, ignore_errors=True)
+os.environ["TEMP"] = os.environ["TMP"] = os.environ["TMPDIR"] = _TEST_TEMP
+tempfile.tempdir = _TEST_TEMP
 QStandardPaths.setTestModeEnabled(True)
 
 

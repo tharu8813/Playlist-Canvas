@@ -36,7 +36,7 @@ ignored by the external-language scanner and never appear as duplicate entries.
 - Language packs are JSON data only. Python, JavaScript, commands, and plugins
   are not loaded or executed.
 
-Built-in locale codes `ko` and `en` are reserved. Packs larger than 1 MB,
+Built-in locale codes `ko` and `en` are reserved. Packs larger than 4 MB,
 incompatible schemas, invalid JSON, duplicate locales, unsafe metadata, or a
 `minimum_app_version` newer than the running application are ignored.
 

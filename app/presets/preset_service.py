@@ -433,6 +433,31 @@ def frost() -> list[Source]:
     ]
 
 
+def vinyl() -> list[Source]:
+    """A spinning record: circular cover inside a radial visualizer ring."""
+    ring = _visualizer(400, 40, 480, 480, "#F5D0FE", 3, style="radial", bars=48)
+    ring.visualizer_inner_radius = 0.56
+    ring.visualizer_line_width = 5.0
+    cover_size = 480 * 0.56 * 0.92
+    cover = _cover(640 - cover_size / 2, 280 - cover_size / 2, cover_size, "#1E1B2E", 4,
+                   frame="circle", animation_in="spin", animation_out="zoom_out")
+    cover.loop_motion = "spin"
+    cover.loop_motion_period = 14.0
+    title = _text("Song title", "%title%", 240, 532, 800, 60, "#FFFFFF", 32, 5,
+                  alignment="center", weight=800, animation_in="rise", animation_out="fade")
+    title.text_letter_spacing = 1.0
+    return [
+        _background("#1E1B2E", mode="album_art", ambient=True),
+        _particles("#F5D0FE", -1, style="dust", density=26, speed=0.35, opacity=0.18),
+        ring,
+        cover,
+        title,
+        _text("Artist", "%artist%", 240, 594, 800, 32, "#E9D5FF", 17, 6,
+              alignment="center", animation_in="rise", animation_out="fade"),
+        _progress(440, 650, 400, "#F5D0FE", 7, style="apple", track_color="#4C3D66"),
+    ]
+
+
 class PresetService:
     """Exposes the track-aware visual preset catalog."""
 
@@ -446,6 +471,7 @@ class PresetService:
         PresetDefinition("terminal", "터미널", "Terminal", "CRT 그린 모노스페이스 콘솔과 스펙트럼, 트랙 목록", "CRT-green monospace console with a spectrum and track list", terminal),
         PresetDefinition("gallery", "갤러리", "Gallery", "화이트 갤러리 벽의 액자형 커버와 캡션 메타데이터", "Framed cover on a white gallery wall with a museum caption", gallery),
         PresetDefinition("pulse", "펄스", "Pulse", "볼드 컬러블록과 대형 미러 비주얼라이저", "Bold colour-block layout with a large mirrored visualizer", pulse),
+        PresetDefinition("vinyl", "바이닐", "Vinyl", "원형 비주얼라이저 안에서 도는 원형 앨범 커버", "A spinning circular cover inside a radial visualizer ring", vinyl),
         PresetDefinition("frost", "프로스트", "Frost", "프로스트 글래스 블루 톤과 스테레오 레벨미터, 곡 시작 카드", "Frosted-glass blue tones with a stereo meter and track-start card", frost),
     ]
 

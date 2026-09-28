@@ -179,7 +179,8 @@ class ExportTimelinePlannerTests(unittest.TestCase):
             file_path="transitions.mp3",
             title="Transitions",
             duration_seconds=2.0,
-            lyrics=[{"start": 0.25, "end": 0.9, "text": "Line"}],
+            # Runs to the track end, so no post-cue release fade is scheduled.
+            lyrics=[{"start": 0.25, "end": 2.0, "text": "Line"}],
         )
         sources = [
             Source(
@@ -210,6 +211,20 @@ class ExportTimelinePlannerTests(unittest.TestCase):
 
         self.assertEqual(transition_frames_30, 30)
         self.assertEqual(transition_frames_60, 60)
+
+    def test_loop_motion_is_sampled_at_the_output_frame_rate(self) -> None:
+        track = PlaylistTrack(file_path="loop.mp3", title="Loop", duration_seconds=2.0)
+        still = [Source(SourceType.SHAPE, "Still")]
+        moving = [Source(SourceType.SHAPE, "Moving", loop_motion="float")]
+
+        def frame_samples(sources: list[Source]) -> int:
+            return sum(
+                abs(sample.duration_seconds - 1 / 30) < 1e-9
+                for sample in ExportTimelinePlanner.build([track], sources, 30)
+            )
+
+        self.assertEqual(frame_samples(still), 0)
+        self.assertGreaterEqual(frame_samples(moving), 59)
 
     def test_leading_gap_animation_and_clock_keep_existing_sample_contract(self) -> None:
         track = PlaylistTrack(

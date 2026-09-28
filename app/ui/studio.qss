@@ -191,6 +191,18 @@ QToolButton#eqPresetButton { background: @button; border: 1px solid @border; bor
 QToolButton#eqPresetButton:hover { background: @hover; border-color: #F5C66B; }
 #trackOrderRow[nowPlaying="true"] { background: #304B44; border: 1px solid @accent; border-radius: 3px; }
 
+/* --- AutoMix editor ------------------------------------------ */
+#automixEditorToolbar { background: @panel; border: 0; border-bottom: 1px solid @border; }
+#automixEditorToolbar QToolButton { padding: 5px 9px; }
+#automixTimelineArea, #automixTimelineArea > QWidget > QWidget { background: @window; }
+#automixPropertiesArea, #automixProperties { background: @panel; border: 0; border-left: 1px solid @border; }
+#automixModeChip { color: @muted; background: transparent; border: 1px solid @border; border-radius: 9px; padding: 2px 9px; font-size: 11px; }
+#automixModeChip[manual="true"] { background: #40392B; color: #F5C66B; border-color: #BEA77C; }
+#automixStateChip { color: @muted; background: transparent; border: 0; padding: 4px 8px; }
+#automixStateChip[state="ready"] { color: @accent; }
+#automixStateChip[state="waiting"], #automixStateChip[state="rendering"] { color: #F5C66B; }
+#automixStateChip[state="failed"], #automixStateChip[state="unavailable"] { color: #F29C9C; font-weight: 600; }
+
 /* --- Scroll bars & splitters ---------------------------------- */
 QScrollBar:vertical { background: transparent; width: 10px; margin: 3px; }
 QScrollBar::handle:vertical { background: @border; min-height: 28px; border-radius: 5px; }

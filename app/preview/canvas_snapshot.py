@@ -7,16 +7,12 @@ from math import ceil, floor
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QTransform
 
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.animation.curves import (
-    ease_in_out_cubic, ease_in_quint, ease_out_quint,
-    entrance_opacity as entrance_opacity_curve,
-    exit_opacity as exit_opacity_curve,
-    hidden_rotation_offset, hidden_scale_factor,
-    slide_distance,
+    animation_pose, ease_in_out_cubic, loop_pose, motion_padding,
 )
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
@@ -348,15 +344,11 @@ class CanvasSnapshot:
                 source.subtitle_previous_blur * 2.0 + 2.0
                 if source.source_type is SourceType.LYRICS else 0.0,
             ) * scale
-            animation_styles = {source.animation_in, source.animation_out}
-            if animation_styles & slide_styles:
-                padding += slide_distance(source.width, source.height) * scale
-            if "rotate" in animation_styles:
-                # The animation rotates up to 12 degrees around the centre.
-                padding += (
-                    (source.width ** 2 + source.height ** 2) ** 0.5
-                    * 0.22 * scale
-                )
+            padding += motion_padding(
+                {source.animation_in, source.animation_out},
+                source.loop_motion, source.loop_motion_amount,
+                source.width, source.height,
+            ) * scale
             if source.source_type is SourceType.NOW_PLAYING:
                 if source.now_playing_exit_animation in slide_styles:
                     padding += 24.0 * scale
@@ -456,7 +448,8 @@ class CanvasSnapshot:
         merely keeps the established sequential capture path, while a false
         positive could freeze a time-dependent element in the final video.
         """
-        if source.animation_in != "none" or source.animation_out != "none":
+        if (source.animation_in != "none" or source.animation_out != "none"
+                or source.loop_motion != "none"):
             return False
         if source.personal_color_enabled:
             return False
@@ -680,7 +673,7 @@ class CanvasSnapshot:
         )
         original_text: list[tuple[SourceItem, str]] = []
         original_transforms: list[
-            tuple[SourceItem, object, float, float, float]
+            tuple[SourceItem, object, float, float, float, QTransform]
         ] = []
         original_progress: list[tuple[SourceItem, float]] = []
         original_covers: list[tuple[SourceItem, QPixmap]] = []
@@ -776,10 +769,18 @@ class CanvasSnapshot:
                     graphics_item._subtitle_anchor_line_count,
                     graphics_item._subtitle_previous_line_count,
                     graphics_item._subtitle_leaving_line_count,
+                    graphics_item._subtitle_entering_line_count,
+                    graphics_item._subtitle_emphasis,
+                    graphics_item._subtitle_previous_emphasis,
+                    graphics_item._subtitle_incoming_visible,
                 ))
                 graphics_item._subtitle_transition_progress = 1.0
                 graphics_item._subtitle_previous_line_count = 0
                 graphics_item._subtitle_leaving_line_count = 0
+                graphics_item._subtitle_entering_line_count = 0
+                graphics_item._subtitle_emphasis = 1.0
+                graphics_item._subtitle_previous_emphasis = 1.0
+                graphics_item._subtitle_incoming_visible = True
                 cue_state = resolve_lyrics_cue_state(
                     track, elapsed_seconds,
                     track.lyrics_timing_offset_seconds, source.subtitle_timing_offset,
@@ -833,9 +834,19 @@ class CanvasSnapshot:
                     graphics_item._subtitle_leaving_line_count = (
                         block_line_counts[0] if extra_leading else 0
                     )
-                    if active_cue_index == cue_index:
+                    releasing = (
+                        cue_state.release_progress is not None
+                        and cue_state.release_progress < 1.0
+                    )
+                    if active_cue_index == cue_index or releasing:
                         source.subtitle_current_line = anchor_line
                         source.subtitle_current_line_count = block_line_counts[relative_index]
+                        if releasing:
+                            # A gap follows: dim the held cue instead of cutting
+                            # its highlight on the frame it ends.
+                            graphics_item._subtitle_emphasis = 1.0 - ease_in_out_cubic(
+                                cue_state.release_progress,
+                            )
                     else:
                         source.subtitle_current_line = -1
                         source.subtitle_current_line_count = 1
@@ -861,6 +872,18 @@ class CanvasSnapshot:
                             1, len([line for line in previous_text.splitlines() if line.strip()])
                         )
                     graphics_item._subtitle_previous_line_count = previous_line_count
+                    graphics_item._subtitle_previous_emphasis = cue_state.previous_emphasis
+                    if cue_index is not None:
+                        # Cue 0 is shown (dimmed) before it starts; later cues
+                        # only if they were already visible as upcoming lines.
+                        graphics_item._subtitle_incoming_visible = (
+                            cue_index == 0 or next_context > 0
+                        )
+                        # The upcoming cue that scrolls in at the bottom was not
+                        # on screen before this transition: fade it in.
+                        if (cue_index > 0 and next_context > 0
+                                and last == cue_index + next_context + 1):
+                            graphics_item._subtitle_entering_line_count = block_line_counts[-1]
                     line_height = graphics_item._lyric_line_height()
                     source.subtitle_scroll_offset = (
                         previous_line_count * line_height * (1.0 - eased)
@@ -924,6 +947,7 @@ class CanvasSnapshot:
                     original_transforms.append((
                         graphics_item, graphics_item.pos(), graphics_item.scale(),
                         graphics_item.rotation(), graphics_item.opacity(),
+                        graphics_item.transform(),
                     ))
                     graphics_item._suppress_position_sync = True
                     if source.now_playing_exit_animation == "fade":
@@ -1076,49 +1100,36 @@ class CanvasSnapshot:
                     track_duration=track.duration_seconds, phase_progress=animation_progress,
                     phase_duration=animation_phase_duration, junction=junction,
                 )
-            if edge is not None:
+            pose = loop_pose(
+                source.loop_motion, global_seconds, source.loop_motion_period,
+                source.loop_motion_amount, source.width, source.height,
+            )
+            if edge is not None and edge[1] != "none":
                 phase, style, local_progress = edge
-                if style != "none":
-                    motion_progress = (
-                        ease_out_quint(local_progress)
-                        if phase == "in" else
-                        1.0 - ease_in_quint(local_progress)
+                pose = animation_pose(
+                    style, local_progress, phase == "in", source.width, source.height,
+                ).combined(pose)
+            if not pose.is_identity:
+                original_transforms.append((
+                    graphics_item, graphics_item.pos(), graphics_item.scale(),
+                    graphics_item.rotation(), graphics_item.opacity(),
+                    graphics_item.transform(),
+                ))
+                graphics_item._suppress_position_sync = True
+                # Relative to the current placement, so a Now Playing exit
+                # (applied above) and this pose compose instead of replacing.
+                graphics_item.setOpacity(graphics_item.opacity() * pose.opacity)
+                graphics_item.setScale(graphics_item.scale() * pose.scale)
+                graphics_item.setRotation(graphics_item.rotation() + pose.rotation)
+                graphics_item.setPos(
+                    graphics_item.pos().x() + pose.dx, graphics_item.pos().y() + pose.dy,
+                )
+                if pose.scale_x != 1.0:
+                    center_x = source.width / 2.0
+                    graphics_item.setTransform(
+                        QTransform().translate(center_x, 0.0).scale(pose.scale_x, 1.0)
+                        .translate(-center_x, 0.0),
                     )
-                    opacity_progress = (
-                        entrance_opacity_curve(style, local_progress)
-                        if phase == "in" else
-                        exit_opacity_curve(style, local_progress)
-                    )
-                    original_transforms.append((
-                        graphics_item, graphics_item.pos(), graphics_item.scale(),
-                        graphics_item.rotation(), graphics_item.opacity(),
-                    ))
-                    graphics_item._suppress_position_sync = True
-                    graphics_item.setOpacity(opacity_progress)
-                    if style in {"zoom", "pop", "rotate"}:
-                        hidden_scale = hidden_scale_factor(style)
-                        graphics_item.setScale(
-                            source.scale
-                            * (hidden_scale + (1.0 - hidden_scale) * motion_progress)
-                        )
-                    if style == "rotate":
-                        graphics_item.setRotation(
-                            source.rotation
-                            + hidden_rotation_offset(style, phase == "in")
-                            * (1.0 - motion_progress)
-                        )
-                    distance = slide_distance(
-                        source.width, source.height,
-                    ) * (1.0 - motion_progress)
-                    offset = {
-                        "slide_left": (-distance, 0.0), "slide_right": (distance, 0.0),
-                        "slide_up": (0.0, -distance), "slide_down": (0.0, distance),
-                    }.get(style)
-                    if offset:
-                        graphics_item.setPos(
-                            graphics_item.pos().x() + offset[0],
-                            graphics_item.pos().y() + offset[1],
-                        )
         try:
             effective_capture_rect = capture_rect
             used_partial_render = False
@@ -1174,12 +1185,17 @@ class CanvasSnapshot:
                 graphics_item.update()
             for (
                 graphics_item, anchor_line, anchor_count, previous_line_count,
-                leaving_line_count,
+                leaving_line_count, entering_line_count, emphasis,
+                previous_emphasis, incoming_visible,
             ) in original_subtitle_anchors:
                 graphics_item._subtitle_anchor_line = anchor_line
                 graphics_item._subtitle_anchor_line_count = anchor_count
                 graphics_item._subtitle_previous_line_count = previous_line_count
                 graphics_item._subtitle_leaving_line_count = leaving_line_count
+                graphics_item._subtitle_entering_line_count = entering_line_count
+                graphics_item._subtitle_emphasis = emphasis
+                graphics_item._subtitle_previous_emphasis = previous_emphasis
+                graphics_item._subtitle_incoming_visible = incoming_visible
                 graphics_item.update()
             for graphics_item, current_row in original_track_list_rows:
                 graphics_item.source.track_list_current_row = current_row
@@ -1195,11 +1211,15 @@ class CanvasSnapshot:
                 graphics_item.update()
             for graphics_item, visible in original_visibility:
                 graphics_item.setVisible(visible)
-            for graphics_item, position, scale, rotation, opacity in original_transforms:
+            # Newest first: an item changed twice ends on its oldest state.
+            for (
+                graphics_item, position, scale, rotation, opacity, transform,
+            ) in reversed(original_transforms):
                 graphics_item.setPos(position)
                 graphics_item.setScale(scale)
                 graphics_item.setRotation(rotation)
                 graphics_item.setOpacity(opacity)
+                graphics_item.setTransform(transform)
                 graphics_item._suppress_position_sync = False
 
     @staticmethod

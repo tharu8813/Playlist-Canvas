@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QDoubleSpinBox, QPushButt
 
 from app.inspector.editors.audio_level_meter_editor import LevelMeterSection  # noqa: E402
 from app.inspector.editors.audio_visualizer_editor import VisualizerSection  # noqa: E402
+from app.inspector.editors.base import TypographySection  # noqa: E402
 from app.inspector.editors.lyrics_editor import LyricsSection  # noqa: E402
 from app.inspector.editors.now_playing_editor import NowPlayingSection  # noqa: E402
 from app.inspector.editors.particle_overlay_editor import ParticleSection  # noqa: E402
@@ -31,7 +32,7 @@ class LyricsSectionTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self) -> None:
-        self.section = LyricsSection(_spin)
+        self.section = LyricsSection(_spin, QPushButton)
 
     def test_every_field_is_a_source_attribute_with_a_label_row_and_help(self) -> None:
         source = Source(SourceType.LYRICS, "Lyrics")
@@ -43,7 +44,7 @@ class LyricsSectionTests(unittest.TestCase):
 
     def test_fill_then_edit_reports_model_updates(self) -> None:
         source = Source(SourceType.LYRICS, "Lyrics", subtitle_animation="rise", subtitle_timing_offset=-0.5)
-        self.section.fill(source)
+        self.section.fill(source, set_color=lambda _button, _value: None)
         self.assertEqual(self.section.widgets["subtitle_animation"].currentData(), "rise")
         self.assertEqual(self.section.widgets["subtitle_timing_offset"].value(), -0.5)
 
@@ -56,11 +57,45 @@ class LyricsSectionTests(unittest.TestCase):
     def test_bindings_kinds_and_previous_line_dependency(self) -> None:
         kinds = {key: kind for key, (_path, _widget, kind) in self.section.bindings().items()}
         self.assertEqual(kinds.pop("subtitle_animation"), "combo")
+        self.assertEqual(kinds.pop("subtitle_accent_enabled"), "check")
+        self.assertEqual(kinds.pop("subtitle_accent_color"), "color")
         self.assertEqual(set(kinds.values()), {"spin"})
         self.assertIsInstance(self.section.widgets["subtitle_animation"], QComboBox)
 
         hidden = self.section.hidden_when_off(Source(SourceType.LYRICS, "L", subtitle_context_lines=0))
-        self.assertEqual(hidden, {"subtitle_previous_opacity": False, "subtitle_previous_blur": False})
+        self.assertEqual(hidden, {
+            "subtitle_previous_opacity": False, "subtitle_previous_blur": False,
+            "subtitle_accent_color": False,
+        })
+
+
+class TypographySectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_fields_fill_edit_and_follow_their_toggles(self) -> None:
+        section = TypographySection(_spin)
+        source = Source(SourceType.TEXT, "T", text_case="upper", text_letter_spacing=2.5)
+        self.assertEqual({key for key, _ in TypographySection.ROWS}, set(section.widgets))
+        for key in section.widgets:
+            self.assertTrue(hasattr(source, key), key)
+            self.assertIn(key, TypographySection.LABELS)
+            self.assertIn(key.removeprefix("text_"), TypographySection.HELP)
+        section.retranslate(korean=True)
+        section.fill(source)
+        self.assertEqual(section.widgets["text_case"].currentText(), "대문자")
+        self.assertEqual(section.widgets["text_letter_spacing"].value(), 2.5)
+        updates: list[tuple[str, object]] = []
+        section.connect(
+            lambda key, value: updates.append((key, value)),
+            apply_mixed_checkbox=lambda _key, _checked: None,
+        )
+        section.widgets["text_italic"].click()
+        self.assertEqual(updates, [("text_italic", True)])
+        self.assertEqual(section.hidden_when_off(source), {
+            "text_shadow_glyph": False, "text_gradient": False,
+        })
 
 
 class LevelMeterSectionTests(unittest.TestCase):

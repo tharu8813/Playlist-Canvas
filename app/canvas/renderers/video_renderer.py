@@ -21,10 +21,10 @@ def render(
     if not item._pixmap.isNull():
         paint_image_content(item, painter, rect, "rounded")
     else:
-        painter.setClipping(True)
+        painter.save()
         clip_path = QPainterPath()
         clip_path.addRoundedRect(rect, item.source.border_radius, item.source.border_radius)
-        painter.setClipPath(clip_path)
+        painter.setClipPath(clip_path, Qt.ClipOperation.IntersectClip)
         painter.fillRect(rect, QColor("#10151D"))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(255, 255, 255, 210))
@@ -36,7 +36,7 @@ def render(
         play.lineTo(center.x() - size * 0.35, center.y() + size * 0.55)
         play.closeSubpath()
         painter.drawPath(play)
-        painter.setClipping(False)
+        painter.restore()
         paths = item.source.video_paths
         filename = Path(paths[0]).name if paths else "No video selected"
         suffix = f"  +{len(paths) - 1}" if len(paths) > 1 else ""

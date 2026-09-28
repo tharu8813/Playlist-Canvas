@@ -375,6 +375,26 @@ class MainWindowProjectTests(MainWindowTestCase):
         self.assertIsNotNone(self.window.store.get(marker.id))
         self.assertTrue(self.window.smooth_scroll._installed)
 
+    def test_close_waits_for_a_running_update_check_then_closes(self) -> None:
+        # Destroying a still-running QThread at exit aborts the process.
+        worker = MagicMock()
+        worker.isRunning.return_value = True
+        self.window._update_check_worker = worker
+        event = QCloseEvent()
+        self.window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        self.assertTrue(self.window.smooth_scroll._installed)
+
+        with patch("app.ui.main_window.normalized_version") as compare_versions:
+            self.window._update_release_found(MagicMock(version="999.0.0"))
+        compare_versions.assert_not_called()  # returned before any release UI
+        with patch.object(QTimer, "singleShot") as single_shot:
+            self.window._update_check_finished()
+        single_shot.assert_called_once_with(0, self.window.close)
+        worker.deleteLater.assert_called_once()
+        self.assertFalse(self.window._close_after_update_check)
+        self.assertIsNone(self.window._update_check_worker)
+
     def test_project_save_runs_in_background_and_preserves_newer_edits(self) -> None:
         with TemporaryDirectory(prefix="pvs-background-save-") as raw_directory:
             target = Path(raw_directory) / "many-tracks.pvsproj"

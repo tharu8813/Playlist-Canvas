@@ -31,6 +31,12 @@ class SourceType(str, Enum):
     PARTICLE_OVERLAY = "particle_overlay"
 
 
+TEXT_SOURCE_TYPES = frozenset({
+    SourceType.TEXT, SourceType.TIME, SourceType.LYRICS,
+    SourceType.TRACK_LIST, SourceType.NOW_PLAYING,
+})
+
+
 @dataclass(slots=True)
 class Shadow:
     """Drop-shadow appearance settings."""
@@ -44,6 +50,12 @@ class Shadow:
 
 
 SUBTITLE_ANIMATIONS = ("glow", "rise", "none")
+TEXT_CASES = ("none", "upper", "lower", "capitalize", "small_caps")
+PROGRESS_KNOBS = ("auto", "none", "circle", "bar")
+LOOP_MOTIONS = ("none", "float", "breathe", "pulse", "sway", "spin", "drift", "wobble")
+MASK_SHAPES = (
+    "none", "circle", "pill", "arch", "diamond", "triangle", "hexagon", "star", "heart",
+)
 
 # Projects saved before the lyric transitions were reduced to two distinct
 # styles used these identifiers. Map each onto its closest survivor.
@@ -109,6 +121,16 @@ class Source:
     text_overflow: str = "wrap"
     text_stroke_color: str = "#000000"
     text_stroke_width: float = 0.0
+    # Typography shared by every text-bearing source.
+    text_letter_spacing: float = 0.0
+    # Extra space between wrapped/multi-line rows of one text block.
+    text_line_gap: float = 0.0
+    text_italic: bool = False
+    text_case: str = "none"
+    # Paint the fill gradient into the glyphs instead of the box behind them.
+    text_gradient: bool = False
+    # Cast the shadow from the glyph shapes instead of the source box.
+    text_shadow_glyph: bool = False
     content_path: str = ""
     video_paths: list[str] = field(default_factory=list)
     video_timing_mode: str = "timeline"
@@ -133,6 +155,8 @@ class Source:
     progress_value: float = 0.62
     progress_track_color: str = "#303842"
     progress_mode: str = "track"
+    # "auto" keeps each style's own handle (only Spotify draws one).
+    progress_knob: str = "auto"
     group_id: str | None = None
     visualizer_style: str = "bars"
     visualizer_bars: int = 32
@@ -146,6 +170,8 @@ class Source:
     visualizer_release: float = 0.16
     visualizer_smoothing: float = 0.18
     visualizer_curve: float = 0.9
+    # Radial style: ring radius as a share of the circle that fits the source.
+    visualizer_inner_radius: float = 0.55
     subtitle_fallback: str = "Lyrics are not available for this track."
     subtitle_animation: str = "glow"
     subtitle_animation_duration: float = 0.36
@@ -158,6 +184,10 @@ class Source:
     subtitle_current_line_count: int = 1
     subtitle_scroll_offset: float = 0.0
     subtitle_timing_offset: float = 0.0
+    # Size of the current lyric row relative to the context rows.
+    subtitle_current_scale: float = 1.08
+    subtitle_accent_enabled: bool = False
+    subtitle_accent_color: str = "#FFE08A"
     track_list_count: int = 5
     track_list_style: str = "compact"
     track_list_window: str = "centered"
@@ -178,6 +208,9 @@ class Source:
     now_playing_duration: float = 3.0
     now_playing_exit_animation: str = "fade"
     now_playing_exit_duration: float = 0.35
+    # Small heading above the title; empty hides it.
+    now_playing_label: str = "NOW PLAYING"
+    now_playing_align: str = "left"
     album_frame_style: str = "rounded"
     waveform_style: str = "line"
     level_meter_mode: str = "stereo"
@@ -220,6 +253,12 @@ class Source:
     # overlap, where animation_in/out play. True stretches them over the mix:
     # the exit over the overlap's first half, the entrance over its second.
     animation_fit_mix: bool = False
+    # Idle motion repeated for as long as the source is shown.
+    loop_motion: str = "none"
+    loop_motion_period: float = 4.0
+    loop_motion_amount: float = 1.0
+    # Cut the whole source to a shape (see app.utils.mask_shapes).
+    mask_shape: str = "none"
     timeline_start: float = 0.0
     timeline_duration: float = 0.0
     id: str = field(default_factory=lambda: str(uuid4()))
@@ -348,6 +387,28 @@ class Source:
             raise ValueError(
                 f"Source '{source.name}' text stroke width must be between 0 and 12."
             )
+        for name, allowed in (
+            ("text_case", TEXT_CASES), ("progress_knob", PROGRESS_KNOBS),
+            ("loop_motion", LOOP_MOTIONS), ("mask_shape", MASK_SHAPES),
+            ("now_playing_align", ("left", "center", "right")),
+        ):
+            if getattr(source, name) not in allowed:
+                raise ValueError(f"Source '{source.name}' has an invalid {name}.")
+        if not isinstance(source.now_playing_label, str):
+            raise ValueError(f"Source '{source.name}' has an invalid now-playing label.")
+        for name, (minimum, maximum) in {
+            "text_letter_spacing": (-10.0, 60.0),
+            "text_line_gap": (-40.0, 200.0),
+            "subtitle_current_scale": (1.0, 2.0),
+            "visualizer_inner_radius": (0.1, 0.95),
+            "loop_motion_period": (0.2, 60.0),
+            "loop_motion_amount": (0.0, 5.0),
+        }.items():
+            if not minimum <= float(getattr(source, name)) <= maximum:
+                raise ValueError(
+                    f"Source '{source.name}' value for '{name}' must be between "
+                    f"{minimum:g} and {maximum:g}."
+                )
         bounded_integers = {
             "visualizer_bars": (4, 96),
             # -1 means that lyric context is derived from source height. Track

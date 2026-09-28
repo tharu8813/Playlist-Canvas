@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import errno
+import logging
 from math import floor
 import os
 from pathlib import Path
@@ -48,6 +49,7 @@ _CONNECT_POLL_SECONDS = 0.02
 _WRITE_POLL_MILLISECONDS = 50
 
 ENVIRONMENT_DISABLE = "PLAYLIST_CANVAS_DISABLE_PIPED_EXPORT"
+LOGGER = logging.getLogger(__name__)
 
 
 class CanvasPipeError(RuntimeError):
@@ -345,6 +347,9 @@ class PipedCanvasStream:
         self._finished = False
         self._stop = threading.Event()
         self.last_activity = monotonic()
+        self._submitted_states = 0
+        self._first_submit_at: float | None = None
+        self._connect_seconds: float | None = None
 
     # -- producer side (Qt thread) ------------------------------------
 
@@ -379,6 +384,25 @@ class PipedCanvasStream:
     @property
     def pending_frames(self) -> int:
         return self._pipeline.pending_count if self._pipeline is not None else 0
+
+    def diagnostics(self) -> dict[str, object]:
+        """What this stream did, for logs and bug reports; no frames or paths."""
+        pipeline = self._pipeline
+        return {
+            "stream": self.stream_key,
+            "size": f"{self._width}x{self._height}",
+            "submitted_states": self._submitted_states,
+            "submitted_seconds": round(self._submitted_seconds, 3),
+            "written_frames": self._frame_count,
+            "pending": self.pending_frames,
+            "peak_pending": pipeline.peak_buffered_items if pipeline is not None else 0,
+            "capacity": self.queue_capacity,
+            "connect_seconds": (
+                None if self._connect_seconds is None else round(self._connect_seconds, 3)
+            ),
+            "idle_seconds": round(monotonic() - self.last_activity, 3),
+            "reader_closed": self._reader_closed,
+        }
 
     def input_arguments(self) -> list[str]:
         """FFmpeg input options that read this pipe as raw CFR video."""
@@ -416,6 +440,9 @@ class PipedCanvasStream:
             self._pipeline.start()
         if image.width() != self._width or image.height() != self._height:
             raise CanvasPipeError("All streamed Canvas frames must use one resolution.")
+        if self._first_submit_at is None:
+            self._first_submit_at = monotonic()
+        self._submitted_states += 1
         self._submitted_seconds += duration_seconds
         try:
             self._pipeline.submit(
@@ -448,6 +475,7 @@ class PipedCanvasStream:
             self.cancel()
             raise CanvasPipeError(str(getattr(error, "cause", error))) from error
         self._endpoint.close()
+        LOGGER.info("Canvas pipe finished: %s", self.diagnostics())
         return PipedCanvasStreamResult(
             self._frame_count,
             self._written_seconds,
@@ -457,6 +485,8 @@ class PipedCanvasStream:
 
     def cancel(self) -> None:
         """Stop the writer, abandon queued frames, and close the pipe."""
+        if not self._stop.is_set():
+            LOGGER.info("Canvas pipe cancelled: %s", self.diagnostics())
         self._finished = True
         self._stop.set()
         pipeline = self._pipeline
@@ -491,6 +521,8 @@ class PipedCanvasStream:
                 return
             self._connected.set()
             self.last_activity = monotonic()
+            if self._first_submit_at is not None:
+                self._connect_seconds = self.last_activity - self._first_submit_at
         prepared = frame.image.convertToFormat(
             QImage.Format.Format_RGBA8888
             if self.preserve_alpha else QImage.Format.Format_RGB32

@@ -81,6 +81,12 @@ class TextComponent(SourceComponent):
     overflow: str = _legacy("text_overflow")
     stroke_color: str = _legacy("text_stroke_color")
     stroke_width: float = _legacy("text_stroke_width")
+    letter_spacing: float = _legacy("text_letter_spacing")
+    line_spacing_extra: float = _legacy("text_line_gap")
+    italic: bool = _legacy("text_italic")
+    case: str = _legacy("text_case")
+    gradient_fill: bool = _legacy("text_gradient")
+    shadow_glyph: bool = _legacy("text_shadow_glyph")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +108,9 @@ class LyricsComponent(TextComponent):
     current_line_count: int = _legacy("subtitle_current_line_count")
     scroll_offset: float = _legacy("subtitle_scroll_offset")
     timing_offset: float = _legacy("subtitle_timing_offset")
+    current_scale: float = _legacy("subtitle_current_scale")
+    accent_enabled: bool = _legacy("subtitle_accent_enabled")
+    accent_color: str = _legacy("subtitle_accent_color")
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +139,8 @@ class NowPlayingComponent(TextComponent):
     duration: float = _legacy("now_playing_duration")
     exit_animation: str = _legacy("now_playing_exit_animation")
     exit_duration: float = _legacy("now_playing_exit_duration")
+    label: str = _legacy("now_playing_label")
+    card_alignment: str = _legacy("now_playing_align")
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +154,7 @@ class ProgressComponent(SourceComponent):
     value: float = _legacy("progress_value")
     track_color: str = _legacy("progress_track_color")
     mode: str = _legacy("progress_mode")
+    knob: str = _legacy("progress_knob")
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +171,7 @@ class VisualizerComponent(SourceComponent):
     release: float = _legacy("visualizer_release")
     smoothing: float = _legacy("visualizer_smoothing")
     curve: float = _legacy("visualizer_curve")
+    inner_radius: float = _legacy("visualizer_inner_radius")
 
 
 @dataclass(frozen=True, slots=True)

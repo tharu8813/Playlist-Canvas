@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.animation.curves import motion_padding
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.models.playlist import PlaylistTrack
@@ -424,9 +425,6 @@ class OverlayFrameWorker(QThread):
 class ExportPreviewDialog(QDialog):
     """Play and inspect the complete playlist using export-equivalent visuals."""
 
-    automix_override_changed = Signal(str, object)
-    """A junction was set by hand in Transition details (pair key, TransitionOverride or None for auto)."""
-
     def __init__(self, scene: CanvasScene, tracks: list[PlaylistTrack], translator: Translator,
                  overlays: list[VisualizerOverlay] | None = None,
                  ffmpeg_executable: Path | None = None,
@@ -491,8 +489,6 @@ class ExportPreviewDialog(QDialog):
         self._crossfade_seconds = crossfade_seconds
         self._automix_settings = automix_settings
         self._remix_count = 0
-        self.analysis_fallback = None
-        """Optional () -> (analyses, structures) the editor may use before this Preview's own analysis lands."""
         self._blended_audio_path: Path | None = (
             preloaded_blended_audio[0] if preloaded_blended_audio is not None else None
         )
@@ -1220,50 +1216,9 @@ class ExportPreviewDialog(QDialog):
             window.set_volume(self.volume_slider.value())
             self.finished.connect(window.close)
             window.set_playhead(self.timeline.value() / TIMELINE_SCALE)
-            if self._transition_mode == "automix":
-                window.enable_editing(self._transition_edit_context, self._automix_overrides())
-                window.override_changed.connect(self._on_automix_override_changed)
         window.show()
         window.raise_()
         window.activateWindow()
-
-    def open_transition_editor(self, outgoing_track_id: str, incoming_track_id: str) -> None:
-        """Show Transition details on the junction between two tracks (the playlist's chip)."""
-        if self.automix_details is None:
-            return
-        self._open_transition_window()
-        self._transition_window.select_pair(outgoing_track_id, incoming_track_id)
-
-    def _automix_overrides(self) -> dict:
-        return dict(getattr(self._automix_settings, "overrides", ()) or ())
-
-    def _transition_edit_context(self):
-        from app.widgets.transition_editor import EditContext
-
-        analyses: dict = {}
-        structures: dict = {}
-        if self.analysis_fallback is not None:
-            fallback_analyses, fallback_structures = self.analysis_fallback()
-            analyses.update(fallback_analyses)
-            structures.update(fallback_structures)
-        snapshot = getattr(self._blended_audio_controller, "analysis_snapshot", None)
-        if snapshot is not None:
-            own_analyses, own_structures = snapshot()
-            analyses.update(own_analyses)
-            structures.update(own_structures)
-        return EditContext({track.id: track for track in self.tracks}, analyses, structures)
-
-    def _on_automix_override_changed(self, key: str, override) -> None:
-        from app.automix.settings import AUTOMIX_SETTINGS
-
-        overrides = self._automix_overrides()
-        if override is None:
-            overrides.pop(key, None)
-        else:
-            overrides[key] = override
-        self._automix_settings = (self._automix_settings or AUTOMIX_SETTINGS).with_overrides(overrides)
-        self.automix_override_changed.emit(key, override)
-        self.remix_automix()
 
     def remix_automix(self) -> None:
         """Re-plan and re-render the AutoMix with the current settings; the new mix swaps in when ready.
@@ -1884,6 +1839,7 @@ class ExportPreviewDialog(QDialog):
                     ))
             if (source.source_type in dynamic_types
                     or source.source_type is SourceType.TIME
+                    or source.loop_motion != "none"
                     or source.timeline_start > 0.0
                     or source.timeline_duration > 0.0
                     or any(token in source.text.lower() for token in time_tokens)):
@@ -2326,8 +2282,16 @@ class ExportPreviewDialog(QDialog):
                 padding += source.font_size + source.subtitle_line_spacing + source.subtitle_previous_blur + 8.0
             if source.source_type is SourceType.NOW_PLAYING:
                 padding += 28.0
-            if source.animation_in != "none" or source.animation_out != "none":
-                padding += min(180.0, max(72.0, max(source.width, source.height) * 0.22)) + 8.0
+            if (source.animation_in != "none" or source.animation_out != "none"
+                    or source.loop_motion != "none"):
+                padding += max(
+                    min(180.0, max(72.0, max(source.width, source.height) * 0.22)),
+                    motion_padding(
+                        {source.animation_in, source.animation_out},
+                        source.loop_motion, source.loop_motion_amount,
+                        source.width, source.height,
+                    ),
+                ) + 8.0
             rect = item.sceneBoundingRect().adjusted(-padding, -padding, padding, padding)
             rect = rect.intersected(self.scene.artboard_rect)
             if rect.isEmpty():
@@ -2458,19 +2422,21 @@ class ExportPreviewDialog(QDialog):
         crossfade/AutoMix handover, exactly as the rendered video does.
         """
         plan = getattr(self, "_compiled_plan", None)
-        if plan is None or not plan.presentation.windows:
+        windows: tuple = ()
+        if plan is not None and plan.presentation.windows:
+            cached = getattr(self, "_reactive_windows_cache", None)
+            if cached is None or cached[0] is not plan:
+                cached = self._reactive_windows_cache = (plan, reactive_layer_windows(plan))
+            windows = cached[1]
+        elif all(getattr(overlay, "loop_motion", "none") == "none" for overlay in overlays):
             return images
-        cached = getattr(self, "_reactive_windows_cache", None)
-        if cached is None or cached[0] is not plan:
-            cached = self._reactive_windows_cache = (plan, reactive_layer_windows(plan))
         animated = []
         for overlay, image in zip(overlays, images, strict=True):
-            state = PythonVisualizerRenderer._animation_state(timeline_seconds, cached[1], overlay)
-            if state is not None and not image.isNull():
-                style, progress, entering = state
-                image = PythonVisualizerRenderer._apply_animation(
-                    image, style, progress, entering,
-                    float(image.width()), float(image.height()),
+            if not image.isNull():
+                # The preview layer may be downscaled; size the motion to it.
+                image = PythonVisualizerRenderer.transform_layer(
+                    image, overlay, timeline_seconds, windows,
+                    (float(image.width()), float(image.height())),
                 )
             animated.append(image)
         return tuple(animated)

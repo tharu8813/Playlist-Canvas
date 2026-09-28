@@ -48,6 +48,8 @@ from app.inspector.editors import (
 )
 from app.inspector.editors.audio_level_meter_editor import LevelMeterSection
 from app.inspector.editors.audio_visualizer_editor import VisualizerSection
+from app.animation.curves import ANIMATION_STYLES
+from app.inspector.editors.base import MotionSection, TypographySection, shows_mask
 from app.inspector.editors.lyrics_editor import LyricsSection
 from app.inspector.editors.now_playing_editor import NowPlayingSection
 from app.inspector.editors.particle_overlay_editor import ParticleSection
@@ -113,6 +115,19 @@ class SourceInspector(QScrollArea):
     """Editable property panel with guarded, two-way SourceStore binding."""
 
     animation_preview_requested = Signal(str)
+
+    _ANIMATION_LABELS = {
+        "none": ("없음", "None"), "fade": ("페이드", "Fade"),
+        "slide_left": ("왼쪽 슬라이드", "Slide left"),
+        "slide_right": ("오른쪽 슬라이드", "Slide right"),
+        "slide_up": ("위쪽 슬라이드", "Slide up"),
+        "slide_down": ("아래쪽 슬라이드", "Slide down"),
+        "zoom": ("줌", "Zoom"), "zoom_out": ("줌 아웃", "Zoom out"),
+        "pop": ("팝", "Pop"), "bounce": ("통통 튀기", "Bounce"),
+        "rise": ("떠오르기", "Rise"), "drop": ("떨어지기", "Drop"),
+        "rotate": ("회전", "Rotate"), "spin": ("스핀", "Spin"),
+        "swing": ("흔들며 등장", "Swing"), "flip": ("뒤집기", "Flip"),
+    }
 
     IMAGE_BACKED_TYPES = {
         SourceType.IMAGE,
@@ -292,12 +307,19 @@ class SourceInspector(QScrollArea):
         self.progress_mode_combo = QComboBox()
         for label, value in (("Current track", "track"), ("Whole video", "video")):
             self.progress_mode_combo.addItem(label, value)
+        self.progress_knob_combo = QComboBox()
+        for label, value in (("Style default", "auto"), ("None", "none"),
+                             ("Circle", "circle"), ("Bar", "bar")):
+            self.progress_knob_combo.addItem(label, value)
         self.album_frame_combo = QComboBox()
         for label, value in (("Rounded", "rounded"), ("Circle", "circle"), ("Polaroid", "polaroid"), ("Glass", "glass")):
             self.album_frame_combo.addItem(label, value)
         self.track_list = TrackListSection(self._spin, self._color_button)
         self.now_playing = NowPlayingSection(self._spin)
-        self.lyrics = LyricsSection(self._spin)
+        self.lyrics = LyricsSection(self._spin, self._color_button)
+        self.typography = TypographySection(self._spin)
+        self.motion = MotionSection(self._spin)
+        self.visualizer_center_cover_button = QPushButton()
         self.waveform_style_combo = QComboBox()
         for label, value in (("Line", "line"), ("Filled", "filled"), ("Mirror", "mirror")):
             self.waveform_style_combo.addItem(label, value)
@@ -322,7 +344,11 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "progress_value", self.progress_value_spin)
         self._add_labeled_row(content_form, "progress_track_color", self.progress_track_color_button)
         self._add_labeled_row(content_form, "progress_mode", self.progress_mode_combo)
+        self._add_labeled_row(content_form, "progress_knob", self.progress_knob_combo)
         self.visualizer.add_rows(self._add_labeled_row, content_form, VisualizerSection.LATE_KEYS)
+        self._add_labeled_row(
+            content_form, "visualizer_center_cover", self.visualizer_center_cover_button,
+        )
         self._add_labeled_row(content_form, "album_frame", self.album_frame_combo)
         self.track_list.add_rows(self._add_labeled_row, content_form)
         self.now_playing.add_rows(self._add_labeled_row, content_form)
@@ -380,6 +406,8 @@ class SourceInspector(QScrollArea):
         self.gradient_check = QCheckBox()
         self.gradient_start_button = self._color_button()
         self.gradient_end_button = self._color_button()
+        self.gradient_angle_spin = self._spin(-180, 180, 5)
+        self._slider_spin_editor(self.gradient_angle_spin)
         self.blur_spin = self._spin(0, 40, 1)
         self.brightness_spin = self._spin(-100, 100, 1)
         self.contrast_spin = self._spin(-100, 100, 1)
@@ -397,11 +425,8 @@ class SourceInspector(QScrollArea):
         self.animation_in_combo = QComboBox()
         self.animation_out_combo = QComboBox()
         for combo in (self.animation_in_combo, self.animation_out_combo):
-            for label, value in (("None", "none"), ("Fade", "fade"), ("Slide left", "slide_left"),
-                                 ("Slide right", "slide_right"), ("Slide up", "slide_up"),
-                                 ("Slide down", "slide_down"), ("Zoom", "zoom"),
-                                 ("Pop", "pop"), ("Rotate", "rotate")):
-                combo.addItem(label, value)
+            for value in ANIMATION_STYLES:
+                combo.addItem(self._ANIMATION_LABELS[value][1], value)
         self.animation_in_duration_spin = self._spin(0.1, 3, 0.05)
         self.animation_out_duration_spin = self._spin(0.1, 3, 0.05)
         # Crossfade/AutoMix only: stretch the entrance/exit over the audio mix
@@ -422,6 +447,7 @@ class SourceInspector(QScrollArea):
             ("text_stroke_width", self.text_stroke_width_spin),
         ):
             self._add_labeled_row(text_form, key, widget)
+        self.typography.add_rows(self._add_labeled_row, text_form, TypographySection.TEXT_KEYS)
         for key, widget in (
             ("opacity", self.opacity_spin),
             ("shadow", self.shadow_check), ("shadow_color", self.shadow_color_button),
@@ -429,6 +455,8 @@ class SourceInspector(QScrollArea):
             ("shadow_x", self.shadow_x_spin), ("shadow_y", self.shadow_y_spin),
         ):
             self._add_labeled_row(shape_form, key, widget)
+        self.typography.add_rows(self._add_labeled_row, shape_form, ("text_shadow_glyph",))
+        self.motion.add_rows(self._add_labeled_row, shape_form, ("mask_shape",))
         for key, widget in (
             ("border_radius", self.radius_spin), ("outline", self.outline_spin),
             ("fill_color", self.fill_color_button),
@@ -436,8 +464,10 @@ class SourceInspector(QScrollArea):
             ("gradient", self.gradient_check),
             ("gradient_start", self.gradient_start_button),
             ("gradient_end", self.gradient_end_button),
+            ("gradient_angle", self.gradient_angle_spin),
         ):
             self._add_labeled_row(fill_form, key, widget)
+        self.typography.add_rows(self._add_labeled_row, fill_form, ("text_gradient",))
         for key, widget in (
             ("blur", self.blur_spin), ("brightness", self.brightness_spin),
             ("contrast", self.contrast_spin),
@@ -451,6 +481,7 @@ class SourceInspector(QScrollArea):
             ("animation_fit_mix", self.animation_fit_mix_check),
         ):
             self._add_labeled_row(animation_form, key, widget)
+        self.motion.add_rows(self._add_labeled_row, animation_form, MotionSection.LOOP_KEYS)
         animation_form.addRow("", self.animation_preview_button)
         self._add_labeled_row(other_form, "layer", self.z_spin)
         other_form.addRow(self.visible_check)
@@ -464,7 +495,9 @@ class SourceInspector(QScrollArea):
             self.x_spin, self.y_spin,
             self.text_alignment_combo, self.text_overflow_combo,
             self.image_fit_combo, self.progress_value_spin,
-            self.progress_mode_combo,
+            self.progress_mode_combo, self.progress_knob_combo,
+            *self.typography.widgets.values(), self.gradient_angle_spin,
+            *self.motion.widgets.values(), self.visualizer_center_cover_button,
             self.background_mode_combo, self.background_ambient_check,
             self.background_track_transition_check,
             self.background_track_transition_seconds_spin,
@@ -609,6 +642,10 @@ class SourceInspector(QScrollArea):
             "gradient": ("단색 대신 시작 색과 끝 색이 이어지는 그라데이션 채우기를 사용합니다.", "Uses a blend between start and end colors instead of a solid fill."),
             "gradient_start": ("그라데이션이 시작되는 쪽의 색상입니다.", "Color at the start of the gradient."),
             "gradient_end": ("그라데이션이 끝나는 쪽의 색상입니다.", "Color at the end of the gradient."),
+            "gradient_angle": ("그라데이션 방향을 기본 대각선(왼쪽 위→오른쪽 아래)에서 시계 방향으로 회전합니다.", "Rotates the gradient clockwise from its default top-left to bottom-right diagonal."),
+            "visualizer_center_cover": ("원형 비주얼라이저 안쪽 원에 맞춘 원형 앨범 커버를 추가하고, 비주얼라이저와 한 그룹으로 묶습니다.", "Adds a circular album cover sized to the radial visualizer's inner ring and groups the two together."),
+            **MotionSection.HELP,
+            "progress_knob": ("진행 위치에 표시할 핸들입니다. 원이나 막대를 고르면 트랙이 얇아지고 핸들이 강조됩니다.", "Handle drawn at the playback position. Circle or bar slims the track so the handle stands out."),
             "blur": ("이미지를 부드럽게 흐립니다. 높은 값은 미리보기와 렌더링 부하를 늘릴 수 있습니다.", "Softens the image. High values can increase preview and rendering cost."),
             "brightness": ("이미지를 어둡게 또는 밝게 보정합니다. 0은 원본 밝기입니다.", "Darkens or brightens the image. 0 preserves original brightness."),
             "contrast": ("밝고 어두운 영역의 차이를 줄이거나 강조합니다. 0은 원본 대비입니다.", "Reduces or emphasizes differences between light and dark areas. 0 preserves the original."),
@@ -638,6 +675,7 @@ class SourceInspector(QScrollArea):
             "subtitle_": LyricsSection.FAMILY,
             "level_meter_": LevelMeterSection.FAMILY,
             "particle_": ParticleSection.FAMILY,
+            "text_": TypographySection.FAMILY,
         }
         prefix = next((entry for entry in families if key.startswith(entry)), "")
         suffix = key[len(prefix):] if prefix else key
@@ -655,6 +693,7 @@ class SourceInspector(QScrollArea):
             **LyricsSection.HELP,
             **LevelMeterSection.HELP,
             **ParticleSection.HELP,
+            **TypographySection.HELP,
         }
         detail = details.get(suffix)
         if detail is None:
@@ -816,6 +855,8 @@ class SourceInspector(QScrollArea):
         )
         self._set_field_visible("text_stroke_color", source_type in text_types)
         self._set_field_visible("text_stroke_width", source_type in text_types)
+        for key in self.typography.widgets:
+            self._set_field_visible(key, source_type in text_types)
         self._set_field_visible(
             "text_color",
             source is not None and self._uses_primary_text_color(source),
@@ -836,7 +877,7 @@ class SourceInspector(QScrollArea):
         for key in (
             "visualizer_noise_gate", "visualizer_min_level", "visualizer_max_level",
             "visualizer_attack", "visualizer_release", "visualizer_smoothing",
-            "visualizer_curve",
+            "visualizer_curve", "visualizer_inner_radius", "visualizer_center_cover",
         ):
             self._set_field_visible(key, source_type is SourceType.AUDIO_VISUALIZER)
         self._set_field_visible("text_alignment", source_type in {SourceType.TEXT, SourceType.TIME, SourceType.LYRICS, SourceType.TRACK_LIST, SourceType.NOW_PLAYING})
@@ -861,6 +902,7 @@ class SourceInspector(QScrollArea):
         self._set_field_visible("progress_value", source_type is SourceType.PROGRESS_BAR)
         self._set_field_visible("progress_track_color", source_type is SourceType.PROGRESS_BAR)
         self._set_field_visible("progress_mode", source_type is SourceType.PROGRESS_BAR)
+        self._set_field_visible("progress_knob", source_type is SourceType.PROGRESS_BAR)
         self._set_field_visible("album_frame", source_type is SourceType.ALBUM_COVER)
         for key in (
             "track_list_count", "track_list_style", "track_list_window",
@@ -874,14 +916,8 @@ class SourceInspector(QScrollArea):
             self._set_field_visible(key, source_type is SourceType.TRACK_LIST)
         for key in self.now_playing.widgets:
             self._set_field_visible(key, source_type is SourceType.NOW_PLAYING)
-        self._set_field_visible("subtitle_animation", source_type is SourceType.LYRICS)
-        self._set_field_visible("subtitle_animation_duration", source_type is SourceType.LYRICS)
-        self._set_field_visible("subtitle_context_lines", source_type is SourceType.LYRICS)
-        self._set_field_visible("subtitle_next_lines", source_type is SourceType.LYRICS)
-        self._set_field_visible("subtitle_line_spacing", source_type is SourceType.LYRICS)
-        self._set_field_visible("subtitle_previous_opacity", source_type is SourceType.LYRICS)
-        self._set_field_visible("subtitle_previous_blur", source_type is SourceType.LYRICS)
-        self._set_field_visible("subtitle_timing_offset", source_type is SourceType.LYRICS)
+        for key in self.lyrics.widgets:
+            self._set_field_visible(key, source_type is SourceType.LYRICS)
         self._set_field_visible("waveform_style", source_type is SourceType.AUDIO_WAVEFORM)
         for key in (
             "level_meter_mode", "level_meter_style", "level_meter_orientation",
@@ -903,9 +939,10 @@ class SourceInspector(QScrollArea):
             self._set_field_visible(key, source_type in self.IMAGE_BACKED_TYPES)
         for key in (
             "shadow", "shadow_color", "shadow_opacity", "shadow_blur",
-            "shadow_x", "shadow_y",
+            "shadow_x", "shadow_y", *MotionSection.LOOP_KEYS,
         ):
             self._set_field_visible(key, source is not None)
+        self._set_field_visible("mask_shape", source is not None and shows_mask(source))
         self._hide_inactive_dependent_fields(source)
         self._refresh_property_tabs([source] if source else [])
 
@@ -922,6 +959,7 @@ class SourceInspector(QScrollArea):
         toggled_both_ways = {
             "gradient_start": source.gradient.enabled,
             "gradient_end": source.gradient.enabled,
+            "gradient_angle": source.gradient.enabled,
             # Text-like sources use outline_color as their primary glyph
             # colour.  Keep it editable even when the separate source outline
             # is disabled; non-text sources retain the old dependent behavior.
@@ -948,6 +986,9 @@ class SourceInspector(QScrollArea):
             "shadow_y": source.shadow.enabled,
             **self.level_meter.hidden_when_off(source),
             **self.lyrics.hidden_when_off(source),
+            **self.typography.hidden_when_off(source),
+            **self.motion.hidden_when_off(source),
+            **self.visualizer.hidden_when_off(source),
         }
         for key, active in hidden_when_off.items():
             if not active and key in self._field_widgets:
@@ -1060,7 +1101,22 @@ class SourceInspector(QScrollArea):
             apply_mixed_checkbox=self._apply_mixed_checkbox,
         )
         self.now_playing.connect(self._update)
-        self.lyrics.connect(self._update)
+        self.motion.connect(self._update)
+        self.motion.widgets["loop_motion"].currentIndexChanged.connect(
+            self._update_animation_preview_button
+        )
+        self.visualizer_center_cover_button.clicked.connect(self._add_center_cover)
+        for section in (self.lyrics, self.typography):
+            section.connect(
+                self._update, choose_color=self._choose_color,
+                apply_mixed_checkbox=self._apply_mixed_checkbox,
+            )
+        self.progress_knob_combo.currentIndexChanged.connect(
+            lambda _index: self._update("progress_knob", self.progress_knob_combo.currentData())
+        )
+        self.gradient_angle_spin.valueChanged.connect(
+            lambda value: self._update_nested("gradient", "angle", value)
+        )
         self.waveform_style_combo.currentIndexChanged.connect(lambda _index: self._update("waveform_style", self.waveform_style_combo.currentData()))
         self.level_meter.connect(
             self._update, choose_color=self._choose_color,
@@ -1412,6 +1468,7 @@ class SourceInspector(QScrollArea):
         has_animation = (
             self.animation_in_combo.currentData() != "none"
             or self.animation_out_combo.currentData() != "none"
+            or self.motion.widgets["loop_motion"].currentData() not in {None, "none"}
         )
         self.animation_preview_button.setEnabled(
             self._source_id is not None and has_animation
@@ -1428,6 +1485,39 @@ class SourceInspector(QScrollArea):
         if (self.animation_in_combo.currentData() != "none"
                 or self.animation_out_combo.currentData() != "none"):
             self.animation_preview_requested.emit(self._source_id)
+
+    def _add_center_cover(self) -> None:
+        """Put a circular album cover inside the radial visualizer's ring.
+
+        The cover is sized to the ring, stacked just above the visualizer and
+        grouped with it, so the pair moves and resizes as one design.
+        """
+        visualizer = self.store.get(self._source_id)
+        if visualizer is None or visualizer.source_type is not SourceType.AUDIO_VISUALIZER:
+            return
+        ring = min(visualizer.width, visualizer.height) * visualizer.scale
+        size = max(24.0, ring * visualizer.visualizer_inner_radius * 0.92)
+        center_x = visualizer.x + visualizer.width / 2.0
+        center_y = visualizer.y + visualizer.height / 2.0
+        korean = self.translator.is_korean
+        cover = Source(
+            SourceType.ALBUM_COVER, "앨범 커버" if korean else "Album Cover",
+            x=center_x - size / 2.0, y=center_y - size / 2.0, width=size, height=size,
+            album_frame_style="circle", fill_color="#1F2937",
+            z_index=visualizer.z_index + 1,
+            animation_in=visualizer.animation_in, animation_out=visualizer.animation_out,
+            animation_in_duration=visualizer.animation_in_duration,
+            animation_out_duration=visualizer.animation_out_duration,
+        )
+        visualizer_id = visualizer.id
+        self.store.add(cover)
+        if visualizer.group_id is not None:
+            self.store.assign_group([cover.id], visualizer.group_id)
+        else:
+            self.store.add_group(
+                "원형 비주얼라이저" if korean else "Radial visualizer",
+                [visualizer_id, cover.id],
+            )
 
     def _show_empty_state(self, visible: bool) -> None:
         """Swap the editor for a viewport-centered selection hint."""
@@ -1464,6 +1554,9 @@ class SourceInspector(QScrollArea):
             "text_stroke_width": ("글자 테두리 두께", "Text outline width"),
             "gradient": ("그라데이션", "Gradient"),
             "gradient_start": ("시작 색", "Start color"), "gradient_end": ("끝 색", "End color"),
+            "gradient_angle": ("그라데이션 회전", "Gradient rotation"),
+            "progress_knob": ("진행 핸들", "Progress handle"),
+            "visualizer_center_cover": ("앨범 커버 조합", "Album cover combo"),
             "blur": ("블러", "Blur"), "brightness": ("밝기", "Brightness"), "contrast": ("대비", "Contrast"),
             "shadow": ("그림자", "Shadow"), "shadow_color": ("그림자 색", "Shadow color"),
             "shadow_opacity": ("그림자 투명도", "Shadow opacity"), "shadow_blur": ("그림자 흐림", "Shadow blur"),
@@ -1490,6 +1583,8 @@ class SourceInspector(QScrollArea):
         labels.update(TrackListSection.LABELS)
         labels.update(NowPlayingSection.LABELS)
         labels.update(ParticleSection.LABELS)
+        labels.update(TypographySection.LABELS)
+        labels.update(MotionSection.LABELS)
         korean = self.translator.is_korean
         for key, label in self._form_labels.items():
             label.setText(labels[key][0 if korean else 1])
@@ -1546,19 +1641,24 @@ class SourceInspector(QScrollArea):
         )
         for index, label in enumerate(overflow_labels):
             self.text_overflow_combo.setItemText(index, label)
-        animation_labels = (
-            ("없음", "페이드", "왼쪽 슬라이드", "오른쪽 슬라이드",
-             "위쪽 슬라이드", "아래쪽 슬라이드", "줌", "팝", "회전")
-            if korean else
-            ("None", "Fade", "Slide left", "Slide right", "Slide up",
-             "Slide down", "Zoom", "Pop", "Rotate")
-        )
         for combo in (self.animation_in_combo, self.animation_out_combo):
-            for index, label in enumerate(animation_labels):
-                combo.setItemText(index, label)
+            for index in range(combo.count()):
+                combo.setItemText(
+                    index, self._ANIMATION_LABELS[combo.itemData(index)][0 if korean else 1],
+                )
+        self.motion.retranslate(korean)
+        self.visualizer_center_cover_button.setText(
+            "가운데에 앨범 커버 배치" if korean else "Place album cover in the centre"
+        )
         self.track_list.retranslate(korean)
         self.now_playing.retranslate(korean)
         self.lyrics.retranslate(korean)
+        self.typography.retranslate(korean)
+        for index, label in enumerate(
+            ("스타일 기본값", "없음", "원", "막대") if korean
+            else ("Style default", "None", "Circle", "Bar")
+        ):
+            self.progress_knob_combo.setItemText(index, label)
         # Field-specific guidance beyond _property_help_text. It is merged into
         # the hover help by _install_property_tooltips; a plain setToolTip here
         # would be overwritten by it.
@@ -1787,6 +1887,7 @@ class SourceInspector(QScrollArea):
             "image_fit_mode": self.image_fit_combo,
             "background_mode": self.background_mode_combo,
             "progress_mode": self.progress_mode_combo,
+            "progress_knob": self.progress_knob_combo,
             "album_frame_style": self.album_frame_combo,
             "waveform_style": self.waveform_style_combo,
             "font_family": self.font_family_combo,
@@ -1812,6 +1913,7 @@ class SourceInspector(QScrollArea):
             "shadow.blur_radius": self.shadow_blur_spin,
             "shadow.offset_x": self.shadow_x_spin,
             "shadow.offset_y": self.shadow_y_spin,
+            "gradient.angle": self.gradient_angle_spin,
         })
         add("check", {
             "background_ambient": self.background_ambient_check,
@@ -1836,6 +1938,8 @@ class SourceInspector(QScrollArea):
         bindings.update(self.track_list.bindings())
         bindings.update(self.now_playing.bindings())
         bindings.update(self.particle.bindings())
+        bindings.update(self.typography.bindings())
+        bindings.update(self.motion.bindings())
         # Text sources and drawable outlines share the legacy model field, but
         # expose it in separate, correctly named UI categories.
         bindings["text_color"] = (
@@ -1897,7 +2001,13 @@ class SourceInspector(QScrollArea):
             self.album_frame_combo.setCurrentIndex(max(0, self.album_frame_combo.findData(source.album_frame_style)))
             self.track_list.fill(source, set_color=self._set_color_button)
             self.now_playing.fill(source)
-            self.lyrics.fill(source)
+            self.lyrics.fill(source, set_color=self._set_color_button)
+            self.typography.fill(source)
+            self.motion.fill(source)
+            self.progress_knob_combo.setCurrentIndex(
+                max(0, self.progress_knob_combo.findData(source.progress_knob))
+            )
+            self.gradient_angle_spin.setValue(source.gradient.angle)
             self.waveform_style_combo.setCurrentIndex(max(0, self.waveform_style_combo.findData(source.waveform_style)))
             self.level_meter.fill(source, set_color=self._set_color_button)
             self.particle.fill(source, set_color=self._set_color_button)

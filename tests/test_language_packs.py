@@ -174,6 +174,28 @@ class LanguagePackTests(unittest.TestCase):
             self.assertEqual(translator.text("save"), "Save")
             self.assertEqual(translator.literal("Settings"), "Paramètres")
 
+    def test_fully_translated_template_fits_with_headroom(self) -> None:
+        # Following the template's own instructions (copy, fill every value)
+        # produced ~1.1 MB and was rejected by the old 1 MB cap.
+        from app.services.language_pack_service import MAX_PACK_BYTES, MAX_TRANSLATIONS
+
+        payload = json.loads(Path("app/resources/language-pack-template.json").read_text(encoding="utf-8"))
+        korean = json.loads(Path("app/resources/ko.json").read_text(encoding="utf-8"))["overrides"]
+        payload["metadata"].update({
+            "locale": "ja-JP", "name": "Japanese", "native_name": "日本語", "author": "Test translator",
+        })
+        # Hangul is 3 bytes per character in UTF-8, like CJK: a worst-case-ish full pack.
+        payload["overrides"] = {key: korean.get(key) or key for key in payload["overrides"]}
+        raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        # Fail early, long before real packs hit the caps as the template grows.
+        self.assertLessEqual(2 * len(raw), MAX_PACK_BYTES)
+        self.assertLessEqual(3 * len(payload["overrides"]) // 2, MAX_TRANSLATIONS)
+        with TemporaryDirectory(prefix="pc-language-pack-full-") as raw_directory:
+            path = Path(raw_directory) / "ja-JP.json"
+            path.write_bytes(raw)
+            pack = LanguagePackService(Path(raw_directory) / "installed").load_file(path)
+        self.assertEqual(pack.locale, "ja-JP")
+
 
 if __name__ == "__main__":
     unittest.main()

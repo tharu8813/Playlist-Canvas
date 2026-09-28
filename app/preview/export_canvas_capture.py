@@ -194,7 +194,7 @@ class ExportCanvasCapturer:
             transition = cue_state.transition_progress if cue_state.transitioning else None
             content_state = (
                 "lyrics", id(sample.track), cue_state.cue_index, cue_state.active_cue_index,
-                transition,
+                transition, cue_state.release_progress,
             )
         elif source.source_type is SourceType.TRACK_LIST:
             content_state = ("track_list", sample.track_number)
@@ -310,6 +310,9 @@ class ExportCanvasCapturer:
             )
             if edge is not None:
                 animation_state = edge
+        if source.loop_motion != "none":
+            # A looping motion changes every frame; key on the exact time.
+            animation_state = (*animation_state, "loop", round(global_seconds, 4))
         personal_color_state = (
             (
                 sample.track.file_path,

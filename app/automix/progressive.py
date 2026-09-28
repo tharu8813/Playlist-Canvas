@@ -28,14 +28,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from itertools import zip_longest
+from typing import NamedTuple
 
 from app.automix.models import TrackAnalysis
 from app.automix.planner import compile_automix
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
 from app.models.playlist import PlaylistTrack
+from app.automix.renderer import BAND_ENVELOPES, transition_dsp_style
 from app.renderer import loudness
-from app.timeline.render_plan import AudioRenderPlan, CompiledRenderPlan
+from app.timeline.render_plan import AudioRenderPlan, CompiledRenderPlan, TransitionDsp
 
 URGENT_HORIZON_SECONDS = 60.0
 """Render as soon as an unrendered transition starts within this much of the playhead."""
@@ -200,6 +202,76 @@ def render_prefix(plan: CompiledRenderPlan, track_count: int, gain: float) -> tu
         transitions=tuple(t for t in plan.audio.transitions if t.clip_a in clip_ids and t.clip_b in clip_ids),
     )
     return render, max((clip.timeline_end for clip in clips), default=0.0)
+
+
+AUDITION_PREROLL_SECONDS = 4.0
+AUDITION_POSTROLL_SECONDS = 3.0
+
+
+class AuditionWindow(NamedTuple):
+    """One junction rendered on its own (see ``render_window``)."""
+
+    plan: AudioRenderPlan
+    origin: float
+    """Timeline second of the rendered file's first sample."""
+    start: float
+    end: float
+    """The timeline seconds worth hearing."""
+    resting_dsp: dict[str, tuple[bool, bool]]
+    """``build_filter_graph``'s filters the neighbouring junctions run over these clips."""
+
+
+def render_window(
+    plan: CompiledRenderPlan, index: int, gain: float,
+    preroll: float = AUDITION_PREROLL_SECONDS, postroll: float = AUDITION_POSTROLL_SECONDS,
+) -> AuditionWindow:
+    """Junction ``index`` (0-based: clips ``index`` and ``index + 1``) alone, with a run-up and a tail.
+
+    Second ``t`` of the rendered file plays timeline second ``origin + t``,
+    and ``start..end`` is the part worth hearing. Only the outgoing clip's
+    head and the incoming clip's tail are cut, and the window never reaches
+    into the neighbouring transitions: it starts no later than the outgoing
+    tempo ramp and stops before the incoming one's, so every sample is placed
+    by the same clips, ramp steps and transition as in the full mix. An
+    outgoing clip with a tempo ramp keeps its whole head (``origin`` is then
+    its start): the stretcher's state depends on where it began, and cutting
+    it there put the ramp ~0.15 ms off the full mix. The band split or sweep
+    highpass a neighbouring junction runs over either clip comes along at
+    rest (``resting_dsp``): without it the phase differed from the full mix.
+    """
+    clips = plan.audio.clips
+    outgoing, incoming = clips[index], clips[index + 1]
+    by_pair = {(t.clip_a, t.clip_b): t for t in plan.audio.transitions}
+    transition = by_pair.get((outgoing.clip_id, incoming.clip_id))
+    before = by_pair.get((clips[index - 1].clip_id, outgoing.clip_id)) if index > 0 else None
+    after = by_pair.get((incoming.clip_id, clips[index + 2].clip_id)) if index + 2 < len(clips) else None
+    mix_start = transition.timeline_start if transition is not None else incoming.timeline_start
+    mix_end = mix_start + transition.duration if transition is not None else incoming.timeline_start
+
+    start = mix_start - preroll
+    if outgoing.tempo_ramp is not None:
+        start = min(start, outgoing.timeline_at(outgoing.tempo_ramp.source_start))
+    start = max(start, before.timeline_start + before.duration if before is not None else outgoing.timeline_start)
+    end = min(mix_end + postroll, incoming.timeline_end)
+    if after is not None:
+        end = min(end, after.timeline_start)
+    if incoming.tempo_ramp is not None:
+        end = min(end, incoming.timeline_at(incoming.tempo_ramp.source_start))
+    end = max(end, mix_end, incoming.timeline_start)
+
+    origin = outgoing.timeline_start if outgoing.tempo_ramp is not None else start
+    head = replace(outgoing, timeline_start=0.0, source_in=outgoing.source_at(origin), gain=outgoing.gain * gain)
+    tail = replace(incoming, timeline_start=incoming.timeline_start - origin, source_out=incoming.source_at(end),
+                   tempo_ramp=None, gain=incoming.gain * gain)
+    transitions = () if transition is None else (replace(transition, timeline_start=mix_start - origin),)
+
+    def at_rest(neighbour) -> tuple[bool, bool]:
+        style = transition_dsp_style(neighbour) if neighbour is not None else None
+        return style in BAND_ENVELOPES, style is TransitionDsp.FILTER_SWEEP
+
+    resting = {clip.clip_id: at_rest(neighbour) for clip, neighbour in ((head, before), (tail, after))}
+    return AuditionWindow(AudioRenderPlan(clips=(head, tail), transitions=transitions), origin, start, end,
+                          {clip_id: dsp for clip_id, dsp in resting.items() if any(dsp)})
 
 
 def preview_gain(measurements: Mapping[str, tuple[float, float]], durations: Mapping[str, float]) -> float:

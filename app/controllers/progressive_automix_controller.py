@@ -32,7 +32,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from app.automix.analysis.provider import (
     STEP_BARS, STEP_BEAT_MODEL, STEP_DECODE, STEP_KEY_ENERGY, STEP_RHYTHM, STEP_VOCALS,
 )
-from app.automix.cache import canonical_media_path
+from app.automix.cache import MEMO_CAPACITY, BoundedMemo, canonical_media_path
 from app.automix.progressive import (
     Action,
     ProgressiveAnalysis,
@@ -114,9 +114,7 @@ def measure_loudness(executable: Path, path: str, cancel_event: threading.Event)
 
 # (canonical path, size, mtime_ns) -> (LUFS, peak): each file is measured once per
 # app session, so reopening Preview knows its level at once.
-# ponytail: unbounded like cache._digest_memo, fine for playlist-sized sessions.
-_LEVELS: dict[tuple[str, int, int], tuple[float, float]] = {}
-_LEVELS_LOCK = threading.Lock()
+_LEVELS = BoundedMemo(MEMO_CAPACITY)
 
 
 def track_level(executable: Path, path: str, cancel_event: threading.Event) -> tuple[float, float]:
@@ -126,14 +124,12 @@ def track_level(executable: Path, path: str, cancel_event: threading.Event) -> t
         key = (canonical_media_path(path), stat.st_size, stat.st_mtime_ns)
     except OSError:
         return -math.inf, -math.inf
-    with _LEVELS_LOCK:
-        known = _LEVELS.get(key)
+    known = _LEVELS.get(key)
     if known is not None:
         return known
     level = measure_loudness(executable, path, cancel_event)
     if math.isfinite(level[0]) and not cancel_event.is_set():
-        with _LEVELS_LOCK:
-            _LEVELS[key] = level
+        _LEVELS.put(key, level)
     return level
 
 
@@ -195,6 +191,11 @@ class _AnalysisWorker(QThread):
         except Exception as error:  # noqa: BLE001 - degrade to the final render, never crash Preview
             LOGGER.warning("Progressive AutoMix rhythm analysis failed: %s", error)
         finally:
+            # Deliberately unbounded: the children emit on this QThread, so one
+            # abandoned past a timeout would emit on a deleted object after
+            # shutdown. Both honor cancel_event between tracks; the longest wait
+            # is one in-flight ffmpeg loudness scan (cancel-polled) or Sonara
+            # analyze_file() call, the same bound as the rhythm step above.
             for thread in threads:
                 thread.join()
 

@@ -10,15 +10,41 @@ _paint_legacy.
 
 from __future__ import annotations
 
+from math import cos, hypot, radians, sin
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 
-from app.models.source import SourceType
+from app.models.source import TEXT_SOURCE_TYPES, SourceType
+from app.utils.mask_shapes import mask_path
 
 if TYPE_CHECKING:
     from app.canvas.source_item import SourceItem
+
+
+def linear_gradient(rect: QRectF, angle: float) -> QLinearGradient:
+    """Gradient across ``rect``: top-left to bottom-right, rotated by ``angle``
+    degrees clockwise (0 keeps the original diagonal of older projects)."""
+    center = rect.center()
+    half = QPointF(rect.width() / 2.0, rect.height() / 2.0)
+    if angle:
+        turn = radians(angle)
+        half = QPointF(
+            half.x() * cos(turn) - half.y() * sin(turn),
+            half.x() * sin(turn) + half.y() * cos(turn),
+        )
+    return QLinearGradient(center - half, center + half)
+
+
+def device_pixel_ratio(painter: QPainter) -> float:
+    """Device pixels per logical pixel, so cached rasters stay sharp on export."""
+    transform = painter.worldTransform()
+    device = painter.device()
+    device_ratio = device.devicePixelRatioF() if device is not None else 1.0
+    scale = hypot(transform.m11(), transform.m12()) * device_ratio
+    # Quantised so a slowly animating scale keeps reusing cached pixmaps.
+    return max(1.0, min(4.0, round(scale * 2.0) / 2.0))
 
 
 def paint_background(item: "SourceItem", painter: QPainter) -> tuple[QRectF, QBrush, QPen]:
@@ -42,8 +68,11 @@ def paint_background(item: "SourceItem", painter: QPainter) -> tuple[QRectF, QBr
         else (lambda color: color)
     )
     fill = QBrush(tint(QColor(item.source.fill_color)))
-    if item.source.gradient.enabled:
-        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    text_owns_gradient = (
+        item.source.text_gradient and item.source.source_type in TEXT_SOURCE_TYPES
+    )
+    if item.source.gradient.enabled and not text_owns_gradient:
+        gradient = linear_gradient(rect, item.source.gradient.angle)
         gradient.setColorAt(0, tint(QColor(item.source.gradient.start_color)))
         gradient.setColorAt(1, tint(QColor(item.source.gradient.end_color)))
         fill = QBrush(gradient)
@@ -55,20 +84,33 @@ def paint_background(item: "SourceItem", painter: QPainter) -> tuple[QRectF, QBr
     painter.setPen(pen)
     painter.setBrush(fill)
 
-    if item.source.shadow.enabled:
+    glyph_shadow = (
+        item.source.text_shadow_glyph and item.source.source_type in TEXT_SOURCE_TYPES
+    )
+    if item.source.shadow.enabled and not glyph_shadow:
         shadow_color = QColor(item.source.shadow.color)
         shadow_color.setAlphaF(max(0.0, min(1.0, item.source.shadow.opacity)))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(shadow_color)
         shadow_rect = rect.translated(item.source.shadow.offset_x, item.source.shadow.offset_y)
         spread = max(0.0, item.source.shadow.blur_radius * 0.18)
-        painter.drawRoundedRect(
-            shadow_rect.adjusted(-spread, -spread, spread, spread),
-            item.source.border_radius + spread,
-            item.source.border_radius + spread,
-        )
+        if item.source.mask_shape != "none":
+            # A masked source casts the shadow of its mask.
+            painter.drawPath(mask_path(
+                shadow_rect.adjusted(-spread, -spread, spread, spread), item.source.mask_shape,
+            ))
+        else:
+            painter.drawRoundedRect(
+                shadow_rect.adjusted(-spread, -spread, spread, spread),
+                item.source.border_radius + spread,
+                item.source.border_radius + spread,
+            )
         painter.setPen(pen)
         painter.setBrush(fill)
+    if item.source.mask_shape != "none":
+        # Clip everything the type draws next; paint_selection_guide's
+        # restore() lifts it again before the selection handles.
+        painter.setClipPath(mask_path(rect, item.source.mask_shape), Qt.ClipOperation.IntersectClip)
     return rect, fill, pen
 
 
@@ -90,7 +132,9 @@ def paint_image_content(item: "SourceItem", painter: QPainter, rect: QRectF, fra
     else:
         painter.drawRoundedRect(rect, item.source.border_radius, item.source.border_radius)
         clip_path.addRoundedRect(rect, item.source.border_radius, item.source.border_radius)
-    painter.setClipPath(clip_path)
+    # Intersect, then restore: a mask set by paint_background must survive.
+    painter.save()
+    painter.setClipPath(clip_path, Qt.ClipOperation.IntersectClip)
     if item.source.image_fit_mode == "stretch":
         target = display_rect
     else:
@@ -105,7 +149,7 @@ def paint_image_content(item: "SourceItem", painter: QPainter, rect: QRectF, fra
             target = QRectF(display_rect.center().x() - display_rect.height() * ratio / 2, display_rect.top(),
                             display_rect.height() * ratio, display_rect.height())
     painter.drawPixmap(target, item._pixmap, item._pixmap.rect())
-    painter.setClipping(False)
+    painter.restore()
     if frame_style == "glass":
         painter.setBrush(QColor(255, 255, 255, 40))
         painter.setPen(QPen(QColor(255, 255, 255, 180), 1.5))
@@ -124,9 +168,9 @@ def paint_generic_fallback(item: "SourceItem", painter: QPainter, rect: QRectF) 
         else "#FFFFFF"
     )
     painter.setPen(QColor(text_color))
-    font = QFont(item.source.font_family, max(8, min(120, int(item.source.font_size))))
-    font.setWeight(QFont.Weight(item.source.font_weight))
-    painter.setFont(font)
+    painter.setFont(item.text_font(
+        max(8, min(120, int(item.source.font_size))), item.source.font_weight,
+    ))
     alignment = {
         "left": Qt.AlignmentFlag.AlignLeft,
         "right": Qt.AlignmentFlag.AlignRight,
@@ -142,11 +186,11 @@ def paint_generic_fallback(item: "SourceItem", painter: QPainter, rect: QRectF) 
             [" ".join(text.splitlines())]
         )
         metrics = painter.fontMetrics()
-        line_height = max(1, metrics.height())
+        line_height = max(1.0, metrics.height() + item.source.text_line_gap)
         block_height = line_height * len(lines)
         top = max(text_rect.top(), text_rect.center().y() - block_height / 2)
         painter.save()
-        painter.setClipRect(text_rect)
+        painter.setClipRect(text_rect, Qt.ClipOperation.IntersectClip)
         for index, line in enumerate(lines):
             if item.source.text_overflow == "ellipsis":
                 line = metrics.elidedText(line, Qt.TextElideMode.ElideRight, max(1, int(text_rect.width())))

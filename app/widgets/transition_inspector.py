@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QGuiApplication, QKeySequence, QMouseEvent, QPainter, QPainterPath,
     QPen, QShortcut,
@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 from app.automix.diagnostics import rows_to_json
 from app.automix.renderer import (
     BAND_ENVELOPES, DROP_IN_ATTACK_SECONDS, HIGH_CROSSOVER_HZ, LOW_CROSSOVER_HZ,
-    SWEEP_SHAPES, _CURVE_BY_TRANSITION_TYPE, _band_envelope, transition_dsp_style,
+    SWEEP_SHAPES, _CURVE_BY_TRANSITION_TYPE, _band_envelope, band_windows_of, transition_dsp_style,
 )
 from app.timeline.render_plan import (
     AudioRenderClip, AudioRenderTransition, CompiledRenderPlan, TransitionDsp, visual_segments,
@@ -298,38 +298,31 @@ class MixOverviewStrip(QWidget):
                          _clock(self.plan.duration_seconds))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.MouseButton.LeftButton or self.plan is None:
+            return
         index = self._junction_at(event.position().x())
         if index >= 0:
             self.selected.emit(index)
+        self.seek_requested.emit(self._seconds(event.position().x()))
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        self.seek_requested.emit(self._seconds(event.position().x()))
+        self.mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         index = self._junction_at(event.position().x())
         if index < 0:
             return
         junction = self.junctions[index]
-        hint = ("클릭: 전환 선택 · 더블클릭: 이 위치로 이동" if self.korean
-                else "Click: select transition · Double-click: seek here")
+        hint = ("클릭: 이 위치로 이동하고 가까운 전환 선택" if self.korean
+                else "Click: seek here and select the nearest transition")
         QToolTip.showText(event.globalPosition().toPoint(),
                           f"{junction.index:02d} → {junction.index + 1:02d} · {_clock(junction.start)}\n{hint}", self)
 
 
 class TransitionDiagram(QWidget):
-    """One junction up close: both clips, each band's gain curves, markers, the playhead.
-
-    With ``editable`` (a manual transition) the overlap and the incoming clip
-    can be dragged: ``drag_moved(kind, delta_seconds, free)`` reports how far
-    from where the drag began (``kind`` is "move", "start", "end" or
-    "incoming"; ``free``: Shift held, no snapping) and the window re-plans.
-    """
+    """One junction up close: both clips, each band's gain curves, markers, the playhead. Read-only."""
 
     seek_requested = Signal(float)
-    drag_started = Signal(str)
-    drag_moved = Signal(str, float, bool)
-    drag_finished = Signal()
-    EDGE_GRAB = 7.0
 
     LABEL_WIDTH = 104.0
     MARKER_AREA = 44.0
@@ -344,26 +337,16 @@ class TransitionDiagram(QWidget):
         self.titles: dict[str, str] = {}
         self.playhead = 0.0
         self.korean = True
-        self.editable = False
-        self.draft = False
-        """Drawn from an edit that is not mixed yet (drawn dashed)."""
-        self.beat_marks: tuple[tuple[float, ...], tuple[float, ...]] = ((), ())
-        """Timeline seconds of each clip's bars (outgoing, incoming), drawn as ticks while editing."""
-        self._drag: tuple[str, float] | None = None
-        self._frozen_range: tuple[float, float] | None = None
-        self._view: tuple[float, float] | None = None
-        """The shown seconds; while editing it holds still across re-mixes (see set_junction)."""
-        self._view_pair: tuple[str, str] | None = None
-        self.drag_hint = ""
-        """Shown over the graph during a drag: the value being set, and why it stops at a limit."""
+        self._curve_paths: dict = {}
+        self._curve_size = QSize()
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_height()
 
     def set_junction(self, junction: Junction | None) -> None:
+        self._curve_paths.clear()
         self.junction = junction
         self.lanes = mix_lanes(junction.transition) if junction and junction.transition else []
-        self._update_view()
         self._update_height()
         self.update()
 
@@ -375,32 +358,7 @@ class TransitionDiagram(QWidget):
     def sizeHint(self) -> QSize:
         return QSize(720, self.minimumHeight())
 
-    @property
-    def dragging(self) -> bool:
-        return self._drag is not None
-
-    def _update_view(self) -> None:
-        """Pick the shown range. While a manual junction is edited the scale holds still,
-        so what the user just dragged stays under the pointer after the re-mix; it only
-        widens to fit, and starts over for another junction or a much shorter overlap."""
-        junction = self.junction
-        if junction is None:
-            self._view, self._view_pair = None, None
-            return
-        natural = diagram_range(junction)
-        pair = (junction.outgoing.track_id, junction.incoming.track_id)
-        view = self._view
-        if self.editable and view is not None and pair == self._view_pair:
-            widened = (min(view[0], natural[0]), max(view[1], natural[1]))
-            if (natural[1] - natural[0]) >= 0.4 * (widened[1] - widened[0]):
-                natural = widened
-        self._view, self._view_pair = natural, pair
-
     def _range(self) -> tuple[float, float]:
-        if self._frozen_range is not None:  # the scale must not move under a drag
-            return self._frozen_range
-        if self._view is not None:
-            return self._view
         return diagram_range(self.junction) if self.junction else (0.0, 1.0)
 
     def seconds_per_pixel(self) -> float:
@@ -477,8 +435,6 @@ class TransitionDiagram(QWidget):
                     hatch = QBrush(color.darker(140), Qt.BrushStyle.BDiagPattern)
                     painter.fillRect(QRectF(ramp_left, y + 2, ramp_right - ramp_left, self.CLIP_LANE - 4), hatch)
             y += self.CLIP_LANE + 6
-        if self.editable:
-            self._draw_edit_overlay(painter, top, clamp_x)
 
         # Envelope lanes.
         for lane in self.lanes:
@@ -528,15 +484,6 @@ class TransitionDiagram(QWidget):
             rows_end[row] = label_left + width
             painter.setPen(color if color != muted else text_color)
             painter.drawText(QRectF(label_left, 4 + row * 17, width, 16), Qt.AlignmentFlag.AlignCenter, label)
-        if self._drag is not None and self.drag_hint:
-            metrics = painter.fontMetrics()
-            width = metrics.horizontalAdvance(self.drag_hint) + 16
-            box = QRectF(plot_right - width, 2, width, 20)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(20, 20, 24, 215))
-            painter.drawRoundedRect(box, 5, 5)
-            painter.setPen(QColor("#FDE68A"))
-            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, self.drag_hint)
         if start <= self.playhead <= end:
             x = self._x(self.playhead)
             painter.setPen(QPen(PLAYHEAD_COLOR, 2))
@@ -559,142 +506,55 @@ class TransitionDiagram(QWidget):
                              _clock(tick, precise=step < 1.0))
             tick += step
 
-    def _draw_edit_overlay(self, painter: QPainter, top: float, clamp_x: Callable[[float], float]) -> None:
-        """Bar ticks on both clips, and grab handles on the overlap's edges."""
-        junction = self.junction
-        start, end = self._range()
-        for lane, (marks, color) in enumerate(zip(self.beat_marks, (OUTGOING_COLOR, INCOMING_COLOR))):
-            y = top + lane * (self.CLIP_LANE + 6)
-            tick = QColor(color)
-            tick.setAlpha(150)
-            painter.setPen(QPen(tick, 1))
-            for seconds in marks:
-                if start <= seconds <= end:
-                    x = self._x(seconds)
-                    painter.drawLine(QPointF(x, y + self.CLIP_LANE - 8), QPointF(x, y + self.CLIP_LANE - 2))
-        accent = QColor("#FBBF24")
-        lanes_bottom = top + 2 * self.CLIP_LANE + 6
-        if junction.end > junction.start:
-            outline = QColor(accent)
-            outline.setAlpha(200)
-            painter.setPen(QPen(outline, 1.4, Qt.PenStyle.DashLine if self.draft else Qt.PenStyle.SolidLine))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(QRectF(clamp_x(junction.start), top - 3,
-                                    clamp_x(junction.end) - clamp_x(junction.start), lanes_bottom - top + 6))
-            for seconds in (junction.start, junction.end):
-                x = clamp_x(seconds)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(accent)
-                painter.drawRoundedRect(QRectF(x - 4, top + self.CLIP_LANE - 9, 8, 24), 3, 3)
-        else:
-            x = clamp_x(junction.start)
-            painter.setPen(QPen(accent, 2))
-            painter.drawLine(QPointF(x, top - 3), QPointF(x, lanes_bottom + 3))
-
-    def _edit_hit(self, x: float, y: float) -> str | None:
-        """Which part of a manual junction is under (x, y), if any."""
-        junction = self.junction
-        if not self.editable or junction is None or x < self.LABEL_WIDTH:
-            return None
-        top = self.MARKER_AREA
-        incoming_top = top + self.CLIP_LANE + 6
-        bottom = self.height() - self.AXIS
-        if not top - 4 <= y <= bottom:
-            return None
-        left, right = self._x(junction.start), self._x(junction.end)
-        if junction.end > junction.start:
-            if abs(x - left) <= self.EDGE_GRAB:
-                return "start"
-            if abs(x - right) <= self.EDGE_GRAB:
-                return "end"
-        elif abs(x - left) <= self.EDGE_GRAB and y < incoming_top:
-            return "move"
-        if incoming_top <= y <= incoming_top + self.CLIP_LANE:
-            clip = junction.incoming
-            if self._x(clip.timeline_start) - 2 <= x <= self._x(clip.timeline_end) + 2:
-                return "incoming"
-        if left <= x <= right and y <= incoming_top + self.CLIP_LANE + 3:
-            return "move"
-        return None
-
     def _draw_curve(self, painter: QPainter, rect: QRectF, gain: Callable[[float], float],
                     color: QColor, outgoing: bool) -> None:
-        junction = self.junction
-        start, end = self._range()
-        length = max(1e-6, junction.end - junction.start)
-        clip = junction.outgoing if outgoing else junction.incoming
-        steps = 160
-        path = QPainterPath()
-        points = []
-        for step in range(steps + 1):
-            seconds = start + (end - start) * step / steps
-            if not clip.timeline_start - 1e-6 <= seconds <= clip.timeline_end + 1e-6:
-                value = 0.0
-            elif junction.end <= junction.start:
-                value = 1.0
-            else:
-                value = gain(min(1.0, max(0.0, (seconds - junction.start) / length)))
-            points.append(QPointF(self._x(seconds), rect.bottom() - value * (rect.height() - 4)))
-        path.moveTo(QPointF(points[0].x(), rect.bottom()))
-        for point in points:
-            path.lineTo(point)
-        path.lineTo(QPointF(points[-1].x(), rect.bottom()))
+        if self._curve_size != self.size():
+            self._curve_paths.clear()
+            self._curve_size = self.size()
+        key = (gain, rect.x(), rect.y(), rect.width(), rect.height(), self._range())
+        cached = self._curve_paths.get(key)
+        if cached is None:
+            junction = self.junction
+            start, end = self._range()
+            length = max(1e-6, junction.end - junction.start)
+            clip = junction.outgoing if outgoing else junction.incoming
+            steps = 160
+            path = QPainterPath()
+            points = []
+            for step in range(steps + 1):
+                seconds = start + (end - start) * step / steps
+                if not clip.timeline_start - 1e-6 <= seconds <= clip.timeline_end + 1e-6:
+                    value = 0.0
+                elif junction.end <= junction.start:
+                    value = 1.0
+                else:
+                    value = gain(min(1.0, max(0.0, (seconds - junction.start) / length)))
+                points.append(QPointF(self._x(seconds), rect.bottom() - value * (rect.height() - 4)))
+            path.moveTo(QPointF(points[0].x(), rect.bottom()))
+            for point in points:
+                path.lineTo(point)
+            path.lineTo(QPointF(points[-1].x(), rect.bottom()))
+            line = QPainterPath(points[0])
+            for point in points[1:]:
+                line.lineTo(point)
+            self._curve_paths[key] = path, line
+        else:
+            path, line = cached
         fill = QColor(color)
         fill.setAlpha(60)
         painter.fillPath(path, fill)
-        line = QPainterPath(points[0])
-        for point in points[1:]:
-            line.lineTo(point)
         painter.setPen(QPen(color, 2, Qt.PenStyle.SolidLine if outgoing else Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(line)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         position = event.position()
-        kind = self._edit_hit(position.x(), position.y())
-        if kind is not None and event.button() == Qt.MouseButton.LeftButton:
-            self._frozen_range = self._range()
-            self._drag = (kind, self._seconds(position.x()))
-            self.setCursor(Qt.CursorShape.SizeHorCursor if kind in ("start", "end")
-                           else Qt.CursorShape.ClosedHandCursor)
-            self.drag_started.emit(kind)
-            return
-        if self.junction is not None and position.x() >= self.LABEL_WIDTH:
+        if (event.button() == Qt.MouseButton.LeftButton and self.junction is not None
+                and self.LABEL_WIDTH <= position.x() <= self.width() - 14):
             self.seek_requested.emit(max(0.0, self._seconds(position.x())))
-
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if self._drag is not None:
-            self._drag = None
-            self._frozen_range = None
-            self.drag_hint = ""
-            self._update_cursor(event.position().x(), event.position().y())
-            self.drag_finished.emit()
-            self.update()
-
-    def _update_cursor(self, x: float, y: float) -> None:
-        kind = self._edit_hit(x, y)
-        self.setCursor(Qt.CursorShape.SizeHorCursor if kind in ("start", "end")
-                       else Qt.CursorShape.OpenHandCursor if kind is not None
-                       else Qt.CursorShape.PointingHandCursor)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         position = event.position()
-        if self._drag is not None:
-            kind, origin = self._drag
-            free = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            self.drag_moved.emit(kind, self._seconds(position.x()) - origin, free)
-            return
-        if self.editable:
-            self._update_cursor(position.x(), position.y())
-            kind = self._edit_hit(position.x(), position.y())
-            if kind is not None:
-                QToolTip.showText(event.globalPosition().toPoint(), {
-                    "start": ("끌어서 믹스 시작 위치 바꾸기", "Drag to change where the mix starts"),
-                    "end": ("끌어서 겹침 길이 바꾸기", "Drag to change the overlap length"),
-                    "move": ("끌어서 전환 위치 옮기기", "Drag to move the transition"),
-                    "incoming": ("끌어서 들어오는 곡의 시작 지점 바꾸기", "Drag to change where the incoming song starts"),
-                }[kind][0 if self.korean else 1], self)
-                return
         if self.junction is None or position.x() < self.LABEL_WIDTH:
             return
         seconds = self._seconds(position.x())
@@ -770,17 +630,48 @@ class _TransitionItemDelegate(QStyledItemDelegate):
 class _SeekSlider(QSlider):
     """A playback bar: clicking the groove jumps there instead of paging toward it."""
 
+    def __init__(self, orientation, parent=None) -> None:
+        super().__init__(orientation, parent)
+        self.setTracking(False)
+        self._grab_offset = 0.0
+
+    def _move_handle(self, event: QMouseEvent) -> None:
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        handle = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderHandle, self)
+        groove = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderGroove, self)
+        self.setSliderPosition(QStyle.sliderValueFromPosition(
+            self.minimum(), self.maximum(),
+            round(event.position().x() - self._grab_offset - groove.x() - handle.width() / 2),
+            max(1, groove.width() - handle.width()), option.upsideDown))
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            option = QStyleOptionSlider()
-            self.initStyleOption(option)
-            handle = self.style().subControlRect(
-                QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderHandle, self)
-            if not handle.contains(event.position().toPoint()):
-                self.setValue(QStyle.sliderValueFromPosition(
-                    self.minimum(), self.maximum(), round(event.position().x() - handle.width() / 2),
-                    max(1, self.width() - handle.width())))
-        super().mousePressEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        handle = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderHandle, self)
+        self._grab_offset = (event.position().x() - (handle.x() + handle.width() / 2)
+                             if handle.contains(event.position().toPoint()) else 0.0)
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.setSliderDown(True)
+        self._move_handle(event)
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self.isSliderDown():
+            self._move_handle(event)
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.isSliderDown():
+            self._move_handle(event)
+            self.setSliderDown(False)
+            self.setValue(self.sliderPosition())
+            event.accept()
 
 
 class TransitionInspectorWindow(QDialog):
@@ -790,8 +681,6 @@ class TransitionInspectorWindow(QDialog):
     play_requested = Signal(float)
     playing_toggled = Signal(bool)
     volume_changed = Signal(int)
-    override_changed = Signal(str, object)
-    """A junction was set by hand (pair key, TransitionOverride) or put back on automatic (key, None)."""
 
     def __init__(self, panel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -805,13 +694,6 @@ class TransitionInspectorWindow(QDialog):
         self._plan = None
         self._rows = None
         self._language: bool | None = None
-        # Manual editing (enable_editing): Preview's overrides, and drafts drawn
-        # from an edit until the re-mixed plan arrives.
-        self._edit_context = None
-        self._overrides: dict[str, object] = {}
-        self._drafts: dict[str, Junction] = {}
-        self._drag_base = None
-        self._drag_override = None
 
         # Header: what this is and how far the mix is -- nothing else competes here.
         self.title_label = QLabel()
@@ -840,7 +722,7 @@ class TransitionInspectorWindow(QDialog):
         self.overview_hint.setObjectName("mutedLabel")
         self.overview = MixOverviewStrip()
         self.overview.selected.connect(self._user_select)
-        self.overview.seek_requested.connect(self.seek_requested)
+        self.overview.seek_requested.connect(self._request_seek)
         overview_header = QHBoxLayout()
         overview_header.addWidget(self.overview_title)
         overview_header.addStretch(1)
@@ -859,6 +741,9 @@ class TransitionInspectorWindow(QDialog):
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.currentRowChanged.connect(self._on_row_changed)
         self.list.itemDoubleClicked.connect(lambda _item: self._seek_to_selected(play=True))
+        self._loop_seek_timer = QTimer(self)
+        self._loop_seek_timer.setSingleShot(True)
+        self._loop_seek_timer.timeout.connect(self._restart_loop)
         self._sounding = -1
         list_header = QHBoxLayout()
         list_header.addWidget(self.list_title)
@@ -879,29 +764,6 @@ class TransitionInspectorWindow(QDialog):
         heading_font.setBold(True)
         self.heading_label.setFont(heading_font)
         self.heading_label.setWordWrap(True)
-        from app.widgets.transition_editor import TransitionEditorPanel
-
-        # Auto | Manual, beside the heading: the one switch this window edits.
-        self.auto_button = QPushButton()
-        self.manual_button = QPushButton()
-        self.mode_box = QFrame()
-        self.mode_box.setObjectName("transitionModeSwitch")
-        mode_layout = QHBoxLayout(self.mode_box)
-        mode_layout.setContentsMargins(0, 0, 0, 0)
-        mode_layout.setSpacing(0)
-        for button in (self.auto_button, self.manual_button):
-            button.setCheckable(True)
-            button.setAutoExclusive(True)
-            button.setMinimumWidth(72)
-            button.setObjectName("transitionModeButton")
-            mode_layout.addWidget(button)
-        self.auto_button.clicked.connect(lambda: self._set_manual(False))
-        self.manual_button.clicked.connect(lambda: self._set_manual(True))
-        self.mode_box.hide()
-        self.editor = TransitionEditorPanel()
-        self.editor.edited.connect(self._apply_edit)
-        self.editor.revert_requested.connect(lambda: self._set_manual(False))
-        self.editor.hide()
         self.description_label = QLabel()
         self.description_label.setWordWrap(True)
         self.description_label.setTextFormat(Qt.TextFormat.RichText)
@@ -921,10 +783,7 @@ class TransitionInspectorWindow(QDialog):
         facts.addWidget(self.jump_button)
         facts.addWidget(self.listen_button)
         self.diagram = TransitionDiagram()
-        self.diagram.seek_requested.connect(self.seek_requested)
-        self.diagram.drag_started.connect(self._drag_started)
-        self.diagram.drag_moved.connect(self._drag_moved)
-        self.diagram.drag_finished.connect(self._drag_finished)
+        self.diagram.seek_requested.connect(self._request_seek)
         self.legend_label = QLabel()
         self.legend_label.setObjectName("mutedLabel")
         self.legend_label.setWordWrap(True)
@@ -962,15 +821,11 @@ class TransitionInspectorWindow(QDialog):
         detail_layout = QVBoxLayout(detail)
         detail_layout.setContentsMargins(10, 0, 8, 8)
         detail_layout.setSpacing(10)
-        heading_row = QHBoxLayout()
-        heading_row.addWidget(self.heading_label, 1)
-        heading_row.addWidget(self.mode_box, 0, Qt.AlignmentFlag.AlignTop)
-        detail_layout.addLayout(heading_row)
+        detail_layout.addWidget(self.heading_label)
         detail_layout.addWidget(self.description_label)
         detail_layout.addLayout(facts)
         detail_layout.addWidget(self.diagram)
         detail_layout.addWidget(self.legend_label)
-        detail_layout.addWidget(self.editor)
         detail_layout.addSpacing(4)
         detail_layout.addWidget(self.metrics_title)
         detail_layout.addLayout(self.metrics_grid)
@@ -1033,6 +888,7 @@ class TransitionInspectorWindow(QDialog):
         self.position_slider = _SeekSlider(Qt.Orientation.Horizontal)
         self.position_slider.setObjectName("previewTimeline")
         self.position_slider.valueChanged.connect(self._on_position_changed)
+        self.position_slider.sliderMoved.connect(lambda value: self._update_position(value / 1000.0))
         self.time_label = QLabel("0:00.0 / 0:00")
         self.time_label.setObjectName("previewTimeLabel")
         self.time_label.setMinimumWidth(118)
@@ -1108,15 +964,34 @@ class TransitionInspectorWindow(QDialog):
 
     def _on_position_changed(self, value: int) -> None:
         if not self._syncing:
-            self.seek_requested.emit(value / 1000.0)
+            self._request_seek(value / 1000.0)
+
+    def _request_seek(self, seconds: float) -> None:
+        """User navigation keeps the inspected graph stable and can leave a loop."""
+        duration = self._plan.duration_seconds if self._plan is not None else 0.0
+        seconds = min(max(0.0, seconds), duration)
+        self.follow_check.setChecked(False)
+        if self.junction is not None:
+            start, end = self._loop_range(self.junction)
+            if not start <= seconds < end:
+                self.loop_check.setChecked(False)
+        self.seek_requested.emit(seconds)
 
     def _seek_relative(self, seconds: float) -> None:
         duration = self._plan.duration_seconds if self._plan is not None else 0.0
-        self.seek_requested.emit(min(max(0.0, self._playhead + seconds), duration))
+        self._request_seek(min(max(0.0, self._playhead + seconds), duration))
 
     def _loop_range(self, junction: Junction) -> tuple[float, float]:
         """The selected transition with a run-up before it and a little after."""
         return max(0.0, junction.start - 4.0), max(junction.end, junction.start) + 2.0
+
+    def _restart_loop(self) -> None:
+        # Preview emits playhead changes inside its frame update. Seek afterward,
+        # otherwise it treats the seek as another frame and never restarts audio.
+        if self.loop_check.isChecked() and self._playing and self.junction is not None:
+            start, end = self._loop_range(self.junction)
+            if self._playhead >= end:
+                self.seek_requested.emit(start)
 
     def _set_play_text(self) -> None:
         korean = self._korean()
@@ -1148,10 +1023,6 @@ class TransitionInspectorWindow(QDialog):
             widget.titles = titles
         if plan is not self._plan:
             self._plan = plan
-            if self._drafts:  # the re-mixed plan replaces what the drafts showed
-                self._drafts.clear()
-                self._rows = None
-                self.editor.set_status("")
             self.junctions = plan_junctions(plan) if plan is not None else []
             self.overview.plan = plan
             self.overview.junctions = self.junctions
@@ -1160,7 +1031,10 @@ class TransitionInspectorWindow(QDialog):
             self._syncing = False
             self._update_position(self._playhead)
         rows = self.panel.rows
-        self._retranslate(korean)
+        self.status_label.setText(self.panel.status_label.text())
+        self.status_label.setToolTip(self.panel.status_label.toolTip())
+        if korean != self._language:
+            self._retranslate(korean)
         if rows is self._rows and korean == self._language:
             return  # only the status line changed (e.g. preparation progress)
         self._rows, self._language = rows, korean
@@ -1178,15 +1052,19 @@ class TransitionInspectorWindow(QDialog):
             self._select(-1, force=True)
 
     def set_playhead(self, seconds: float) -> None:
+        previous_seconds = self._playhead
         self._playhead = seconds
+        if self.position_slider.isSliderDown():
+            return
         self.overview.playhead = seconds
         self.diagram.playhead = seconds
         self._update_position(seconds)
         junction = self.junction
         if self.loop_check.isChecked() and self._playing and junction is not None:
-            loop_start, loop_end = self._loop_range(junction)
+            _loop_start, loop_end = self._loop_range(junction)
             if seconds >= loop_end:
-                self.seek_requested.emit(loop_start)
+                if not self._loop_seek_timer.isActive():
+                    self._loop_seek_timer.start(0)
                 return
         sounding = self.panel.current_index
         if sounding != self._sounding:
@@ -1195,16 +1073,16 @@ class TransitionInspectorWindow(QDialog):
             for index in (previous, sounding):
                 if 0 <= index < len(rows) and index < self.list.count():
                     self._set_card(index, rows[index])
-        if self.follow_check.isChecked() and self.junctions:
+        if self.follow_check.isChecked() and not self.loop_check.isChecked() and self.junctions:
             # The transition playing now, else the next one coming up.
             upcoming = next((index for index, junction in enumerate(self.junctions)
-                             if seconds < junction.end), len(self.junctions) - 1)
+                             if seconds <= self._loop_range(junction)[1]), len(self.junctions) - 1)
             if upcoming != self._selected:
                 self._select(upcoming)
         if self.isVisible():
             self.overview.update()
-            start, end = diagram_range(self.junction) if self.junction else (0.0, 0.0)
-            if start - 1 <= seconds <= end + 1:
+            start, end = self.diagram._range()
+            if start - 1 <= seconds <= end + 1 or start - 1 <= previous_seconds <= end + 1:
                 self.diagram.update()
 
     @property
@@ -1265,7 +1143,11 @@ class TransitionInspectorWindow(QDialog):
             return
         # A few seconds of run-up, so the transition is heard from its approach.
         seconds = max(0.0, junction.start - 4.0) if play else junction.start
-        (self.play_requested if play else self.seek_requested).emit(seconds)
+        self.follow_check.setChecked(False)
+        if play:
+            self.play_requested.emit(seconds)
+        else:
+            self._request_seek(seconds)
 
     def _list_text(self, row: dict[str, object]) -> str:
         korean = self._korean()
@@ -1279,15 +1161,8 @@ class TransitionInspectorWindow(QDialog):
         rows = self.panel.rows
         junction = self.junction
         manual = self._is_manual(self._selected)
-        drawn = self._drafts.get(self._pair(self._selected), junction) if manual else junction
-        if self.diagram.dragging:  # a re-mix landed mid-drag: keep drawing the drag
-            drawn = self.diagram.junction
-        else:
-            self.diagram.editable = manual
-            self.diagram.draft = drawn is not junction
-            self.diagram.set_junction(drawn)
+        self.diagram.set_junction(junction)
         has_junction = junction is not None and 0 <= self._selected < len(rows)
-        self._show_editing(has_junction and rows[self._selected].get("type") != "gap", manual, drawn)
         for widget in (self.listen_button, self.jump_button, self.loop_check, self.details_button, self.diagram):
             widget.setEnabled(has_junction)
         for widget in (self.diagram, self.legend_label, self.details_button, *self.fact_labels,
@@ -1389,6 +1264,30 @@ class TransitionInspectorWindow(QDialog):
             return str(value)
 
         cards: list[tuple[str, str, str]] = []
+        junction = self.junction
+        if junction is not None:
+            cards.append((
+                "큐 (원본 시간)" if korean else "Cues (source time)",
+                f"A {_clock(junction.outgoing.source_at(junction.start), precise=True)} · "
+                f"B {_clock(junction.incoming.source_in, precise=True)}",
+                "A가 섞이기 시작하는 곳 · B가 재생을 시작하는 곳" if korean
+                else "Where A starts mixing · where B starts playing"))
+            transition = junction.transition
+            bands = band_windows_of(transition) if transition is not None else None
+            if bands is not None:
+                names = (("저음", "Lows"), ("중음", "Mids"), ("고음", "Highs"))
+                lines = [f"{name[0 if korean else 1]}  A {out[0] * 100:.0f}–{out[1] * 100:.0f}% · "
+                         f"B {into[0] * 100:.0f}–{into[1] * 100:.0f}%" for name, (out, into) in zip(names, bands)]
+                cards.append(("대역별 교대 (겹침 대비)" if korean else "Band handover (of the overlap)",
+                              lines[0], "\n".join(lines[1:])))
+            if transition is not None:
+                vocal_safe = transition_dsp_style(transition) is TransitionDsp.VOCAL_SAFE_EQ
+                handoff = transition.vocal_handoff if transition.vocal_handoff is not None else 0.525
+                cards.append(("보컬 보호" if korean else "Vocal protection",
+                              (f"{'예' if korean else 'yes'} · {handoff * 100:.0f}%" if vocal_safe
+                               else ("아니요" if korean else "no")),
+                              ("중음(보컬 대역)을 이 지점에서 짧게 맞바꿈" if korean
+                               else "The mids (voice band) swap around this point") if vocal_safe else ""))
         if number("outgoing_bpm") and number("incoming_bpm"):
             detail = []
             if number("target_bpm"):
@@ -1450,15 +1349,8 @@ class TransitionInspectorWindow(QDialog):
             self.metrics_grid.addWidget(card, position // columns, position % columns)
 
     def _retranslate(self, korean: bool) -> None:
-        self.auto_button.setText("자동" if korean else "Auto")
-        self.manual_button.setText("수동" if korean else "Manual")
-        self.auto_button.setToolTip("분석으로 전환 위치·길이·스타일을 자동으로 정합니다." if korean
-                                    else "Analysis decides where, how long and how this transition mixes.")
-        self.manual_button.setToolTip("이 전환을 직접 설정합니다. 지금 들리는 전환에서 출발합니다." if korean
-                                      else "Set this transition yourself, starting from what plays now.")
-        self.editor.retranslate(korean)
-        self.setWindowTitle("전환 상세" if korean else "Transition details")
-        self.title_label.setText("전환 상세" if korean else "Transition details")
+        self.setWindowTitle("AutoMix 전환 자세히 보기" if korean else "AutoMix transition details")
+        self.title_label.setText("AutoMix 전환 자세히 보기" if korean else "AutoMix transition details")
         self.status_label.setText(self.panel.status_label.text())
         self.status_label.setToolTip(self.panel.status_label.toolTip())
         self.follow_check.setText("자동 선택" if korean else "Auto-select")
@@ -1472,8 +1364,8 @@ class TransitionInspectorWindow(QDialog):
         self.copy_text_action.setText("모든 전환을 텍스트로 복사" if korean else "Copy all transitions as text")
         self.copy_json_action.setText("모든 전환을 JSON으로 복사" if korean else "Copy all transitions as JSON")
         self.overview_title.setText("전체 믹스" if korean else "Whole mix")
-        self.overview_hint.setText("색칠된 구간이 전환 · 클릭: 선택 · 더블클릭: 이동" if korean
-                                   else "Shaded spans are transitions · Click: select · Double-click: seek")
+        self.overview_hint.setText("색칠된 구간이 전환 · 클릭: 해당 위치로 이동" if korean
+                                   else "Shaded spans are transitions · Click to seek")
         self.metrics_title.setText("분석 수치" if korean else "Analysis")
         self.details_button.setText("자세한 정보 · 선택 근거와 전체 수치" if korean
                                     else "More details · reasons and all values")
@@ -1510,218 +1402,18 @@ class TransitionInspectorWindow(QDialog):
             "재생바 · 클릭하거나 끌어서 이동합니다" if korean else "Playback bar · click or drag to seek")
         self.volume_slider.setToolTip("볼륨" if korean else "Volume")
 
-    # -- manual editing ---------------------------------------------------------------
-
-    def enable_editing(self, context_provider: Callable[[], object], overrides: dict[str, object]) -> None:
-        """Let this window set junctions by hand.
-
-        ``context_provider`` returns a transition_editor.EditContext (tracks and
-        the analysis known so far); ``overrides`` is Preview's pair key ->
-        TransitionOverride map. Edits come back through ``override_changed``.
-        """
-        self._edit_context = context_provider
-        self._overrides = dict(overrides)
-        self._rows = None
-        self.refresh()
-
-    def set_overrides(self, overrides: dict[str, object]) -> None:
-        self._overrides = dict(overrides)
-        self._rows = None
-        self.refresh()
+    # -- selection from outside ------------------------------------------------------
 
     def select_pair(self, outgoing_track_id: str, incoming_track_id: str) -> bool:
-        """Select the junction between two tracks (e.g. from the playlist's chip)."""
+        """Select the junction between two tracks."""
         for index, junction in enumerate(self.junctions):
             if (junction.outgoing.track_id, junction.incoming.track_id) == (outgoing_track_id, incoming_track_id):
                 self._user_select(index)
                 return True
         return False
 
-    def _pair(self, index: int) -> str:
-        from app.automix.overrides import pair_key
-
-        if not 0 <= index < len(self.junctions):
-            return ""
-        junction = self.junctions[index]
-        return pair_key(junction.outgoing.track_id, junction.incoming.track_id)
-
     def _is_manual(self, index: int) -> bool:
-        return self._edit_context is not None and self._pair(index) in self._overrides
-
-    def _context(self):
-        return self._edit_context() if self._edit_context is not None else None
-
-    def _show_editing(self, editable: bool, manual: bool, drawn: Junction | None) -> None:
-        self.mode_box.setVisible(self._edit_context is not None and editable)
-        self.auto_button.setChecked(not manual)
-        self.manual_button.setChecked(manual)
-        self.editor.setVisible(manual and editable)
-        if not (manual and editable) or drawn is None:
-            self.diagram.beat_marks = ((), ())
-            return
-        context = self._context()
-        analyses = context.analyses if context is not None else {}
-        outgoing = analyses.get(drawn.outgoing.track_id)
-        incoming = analyses.get(drawn.incoming.track_id)
-        tracks = context.tracks if context is not None else {}
-        durations = tuple(tracks[clip.track_id].duration_seconds if clip.track_id in tracks else clip.source_out
-                          for clip in (drawn.outgoing, drawn.incoming))
-        from app.automix.renderer import band_windows_of
-
-        self.editor.set_current_bands(band_windows_of(drawn.transition) if drawn.transition is not None else None)
-        self.editor.set_override(self._overrides.get(self._pair(self._selected)), (outgoing, incoming), durations)
-
-        def marks(clip: AudioRenderClip, analysis) -> tuple[float, ...]:
-            from app.widgets.transition_editor import beat_grid
-
-            return tuple(clip.timeline_at(point) for point in beat_grid(analysis)
-                         if clip.source_in <= point <= clip.source_out)
-
-        self.diagram.beat_marks = (marks(drawn.outgoing, outgoing), marks(drawn.incoming, incoming))
-
-    def _set_manual(self, manual: bool) -> None:
-        junction = self.junction
-        if junction is None or self._edit_context is None:
-            return
-        key = self._pair(self._selected)
-        if manual == (key in self._overrides):
-            return
-        self.follow_check.setChecked(False)  # editing this junction: the playhead must not move the selection
-        if manual:
-            from app.widgets.transition_editor import override_from_junction
-
-            self._apply_edit(override_from_junction(junction))
-        else:
-            self._overrides.pop(key, None)
-            self._drafts.pop(key, None)
-            self.editor.set_status(self._remix_text())
-            self._rows = None
-            self.override_changed.emit(key, None)
-            self.refresh()
-
-    def _remix_text(self) -> str:
-        return "변경 사항으로 다시 믹싱하는 중…" if self._korean() else "Re-mixing with your change…"
-
-    def _draft(self, override) -> Junction | None:
-        from app.widgets.transition_editor import draft_junction
-
-        context = self._context()
-        if context is None or not 0 <= self._selected < len(self.junctions):
-            return None
-        return draft_junction(self.junctions, self._selected, override, context)
-
-    def _apply_edit(self, override, *, commit: bool = True) -> None:
-        """Show ``override`` on the selected junction; ``commit`` stores it and asks Preview to re-mix."""
-        key = self._pair(self._selected)
-        if not key:
-            return
-        draft = self._draft(override)
-        if draft is not None:
-            self._drafts[key] = draft
-        if commit:
-            self._overrides[key] = override
-            self.editor.set_status(self._remix_text())
-            self.override_changed.emit(key, override)
-            self._rows = None
-            self.refresh()
-        else:
-            if draft is not None:
-                self.diagram.draft = True
-                self.diagram.set_junction(draft)
-            self.editor.set_override(override, self.editor._analyses)
-
-    def _drag_started(self, _kind: str) -> None:
-        self.follow_check.setChecked(False)
-        key = self._pair(self._selected)
-        override = self._overrides.get(key)
-        drawn = self.diagram.junction
-        self._drag_base = (override, drawn) if override is not None and drawn is not None else None
-        self._drag_override = None
-
-    def _drag_moved(self, kind: str, delta: float, free: bool) -> None:
-        """Re-plan the dragged junction: the part under the pointer follows it, clicks onto
-        nearby bars and beats (not with Shift), and stops at what the songs allow, saying so."""
-        from app.automix.overrides import MAX_DURATION_SECONDS
-        from app.widgets.transition_editor import MIN_EDIT_SECONDS, magnet, ramp_floor, snap_length
-
-        if self._drag_base is None:
-            return
-        base, drawn = self._drag_base
-        korean = self._korean()
-        context = self._context()
-        analyses = context.analyses if context is not None else {}
-        tracks = context.tracks if context is not None else {}
-        outgoing_analysis = analyses.get(drawn.outgoing.track_id)
-        incoming_analysis = analyses.get(drawn.incoming.track_id)
-        snapping = self.editor.snapping and not free
-        tolerance = 12.0 * self.diagram.seconds_per_pixel()  # a bar or beat pulls from 12 px away
-        outgoing_track = tracks.get(drawn.outgoing.track_id)
-        incoming_track = tracks.get(drawn.incoming.track_id)
-        head = replace(drawn.outgoing, source_out=max(drawn.outgoing.source_out,
-                                                      outgoing_track.duration_seconds if outgoing_track else 0.0))
-        incoming_length = (incoming_track.duration_seconds if incoming_track is not None
-                           else drawn.incoming.source_out)
-        floor = head.timeline_at(ramp_floor(self.junctions, self._selected)) if self.junctions else head.timeline_start
-        length = drawn.end - drawn.start
-        limit = ""
-        changes: dict[str, float] = {}
-        if kind in ("move", "start"):
-            start = drawn.start + delta
-            if snapping:
-                start = head.timeline_at(magnet(head.source_at(start), outgoing_analysis, tolerance))
-            latest = (head.timeline_end - length if kind == "move" else drawn.end - MIN_EDIT_SECONDS)
-            if start > latest:
-                start, limit = latest, ("나가는 곡 끝" if korean else "outgoing song ends")
-            if start < floor:
-                start, limit = floor, ("앞 전환 끝" if korean else "previous transition")
-            if kind == "start" and drawn.end - start > MAX_DURATION_SECONDS:
-                start, limit = drawn.end - MAX_DURATION_SECONDS, ("최대 60초" if korean else "60 s max")
-            changes["outgoing_cue"] = max(0.0, head.source_at(start))
-            changes["duration"] = length if kind == "move" else drawn.end - start
-            label = "믹스 시작" if korean else "Mix starts"
-            hint = f"{label} {_clock(start, precise=True)} · {changes['duration']:.1f}s"
-        elif kind == "end":
-            new_length = length + delta
-            if snapping:
-                new_length = snap_length(new_length, incoming_analysis, tolerance)
-            longest = min(MAX_DURATION_SECONDS, head.timeline_end - drawn.start,
-                          incoming_length - base.incoming_cue)
-            if new_length > longest:
-                new_length = longest
-                which = (0 if longest >= MAX_DURATION_SECONDS - 1e-6
-                         else 1 if longest >= head.timeline_end - drawn.start - 1e-6 else 2)
-                limit = (("최대 60초", "나가는 곡 끝", "들어오는 곡 끝") if korean
-                         else ("60 s max", "outgoing song ends", "incoming song ends"))[which]
-            if new_length < MIN_EDIT_SECONDS:
-                new_length, limit = MIN_EDIT_SECONDS, ("최소 길이" if korean else "shortest")
-            changes["duration"] = new_length
-            hint = f"{'겹침' if korean else 'Overlap'} {new_length:.1f}s"
-        else:  # "incoming": slide the incoming song under its window (skip or keep its intro)
-            cue = base.incoming_cue - delta
-            if snapping:
-                cue = magnet(cue, incoming_analysis, tolerance)
-                if abs(cue) <= tolerance:
-                    cue = 0.0
-            latest = max(0.0, incoming_length - length)
-            if cue < 0.0:
-                cue, limit = 0.0, ("곡의 맨 앞" if korean else "start of the song")
-            elif cue > latest:
-                cue, limit = latest, ("들어오는 곡 끝" if korean else "incoming song ends")
-            changes["incoming_cue"] = cue
-            hint = f"{'들어오는 곡' if korean else 'Incoming from'} {_clock(cue, precise=True)}"
-        if "duration" in changes:
-            changes["duration"] = min(MAX_DURATION_SECONDS, max(MIN_EDIT_SECONDS, changes["duration"]))
-        if limit:
-            hint += f"  ▸ {limit}에서 멈춤" if korean else f"  ▸ stops at {limit}"
-        self.diagram.drag_hint = hint
-        try:
-            override = replace(base, **changes)
-        except ValueError:
-            return
-        self._drag_override = override
-        self._apply_edit(override, commit=False)
-
-    def _drag_finished(self) -> None:
-        override, self._drag_override, self._drag_base = self._drag_override, None, None
-        if override is not None and override != self._overrides.get(self._pair(self._selected)):
-            self._apply_edit(override)
+        """Whether the playing plan mixes junction ``index`` as the user set it (the planner records it)."""
+        if not 0 <= index < len(self.junctions) or self.junctions[index].transition is None:
+            return False
+        return dict(self.junctions[index].transition.details).get("mode") == "manual"

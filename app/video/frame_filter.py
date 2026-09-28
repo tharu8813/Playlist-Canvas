@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from math import ceil
 
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal, Slot
 from PySide6.QtGui import QImage
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,13 +53,34 @@ class VideoFrameFilterTask(QRunnable):
     def run(self) -> None:
         try:
             filtered = filter_video_frame(self.image, self.settings)
-        except Exception:
+        except Exception as error:  # noqa: BLE001 - a bad frame must not kill Preview
+            _log_filter_failure(error, self.image, self.settings)
             filtered = QImage()
         try:
             self.signals.finished.emit(self.generation, filtered)
         except RuntimeError:
             # The owning Canvas may have closed after this bounded task began.
             pass
+
+
+_LOGGED_FAILURES: set[tuple[str, str]] = set()
+_MAX_LOGGED_FAILURES = 32
+
+
+def _log_filter_failure(
+    error: Exception, image: QImage, settings: VideoFrameFilterSettings,
+) -> None:
+    """Log each distinct failure once; the same one repeats on every frame."""
+    signature = (type(error).__name__, str(error))
+    if signature in _LOGGED_FAILURES or len(_LOGGED_FAILURES) >= _MAX_LOGGED_FAILURES:
+        return
+    _LOGGED_FAILURES.add(signature)
+    LOGGER.warning(
+        "Preview video filter failed; showing an empty frame instead "
+        "(input %dx%d format=%s, settings=%s)",
+        image.width(), image.height(), image.format().name, settings,
+        exc_info=error,
+    )
 
 
 def filter_video_frame(

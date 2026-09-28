@@ -2222,6 +2222,25 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 panel.open_window_button.click()
                 self.assertIs(preview._transition_window, window)  # reused, not duplicated
 
+    def test_transition_loop_restarts_audio_after_the_preview_frame_returns(self) -> None:
+        with TemporaryDirectory(prefix="playlist-progressive-") as directory:
+            preview, _tracks, plans, files = self._open_progressive_preview(directory)
+            patches = self._media_patches(preview)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                preview._apply_blended_audio(files["final"], plans[3])
+                preview._open_transition_window()
+                window = preview._transition_window
+                window._user_select(0)
+                window.loop_check.setChecked(True)
+                window.set_playing(True)
+                junction = window.junction
+                with patch.object(preview, "_start_audio_at_playhead") as restart:
+                    self._play_at(preview, junction.end + 2.1)
+                    restart.assert_not_called()
+                    self.application.processEvents()
+                    restart.assert_called_once()
+                    self.assertAlmostEqual(preview._playhead_seconds, junction.start - 4, places=2)
+
     def test_background_mix_progress_clears_on_failure_or_when_preview_closes(self) -> None:
         track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)
         track_b = PlaylistTrack("b.wav", "B", duration_seconds=90.0)

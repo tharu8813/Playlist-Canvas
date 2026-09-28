@@ -583,6 +583,11 @@ class ProjectController:
         last_progress: list[tuple[int, int]] = []
 
         def on_progress(done: int, total: int) -> None:
+            # After Cancel the loop quits with progress still queued; delivered
+            # later, it would touch the deleted dialog and revive the finished
+            # "project_load" activity row.
+            if worker.cancel_event.is_set():
+                return
             last_progress[:] = [(done, total)]
             fraction = done / total if total > 0 else 0.0
             sizes = f"{format_bytes(done)} / {format_bytes(total)}"

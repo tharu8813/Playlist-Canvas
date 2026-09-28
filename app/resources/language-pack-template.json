@@ -818,7 +818,7 @@
     "<p><b>Design Presets</b> replace Canvas sources while keeping the playlist. Use <code>Ctrl+Z</code> to undo.</p><p><b>AI Project Builder</b> creates a self-contained prompt for another AI to build a compatible project; it does not run an AI inside this application.</p><p>Enter a project brief for one-shot generation and configure question policy, output, media handling, aspect ratio, style, and feature scope.</p>": "",
     "<p><b>Tools → Settings</b> manages:</p><ul><li><b>General</b>: theme, language, and smooth scrolling</li><li><b>Export</b>: output folder and render defaults</li><li><b>FFmpeg</b>: executable, status, and managed installation</li></ul><p>Smooth scrolling can be disabled or adjusted from 80–420 ms. It does not intercept Canvas <code>Ctrl+wheel</code> zoom.</p>": "",
     "<p><b>도구 → LRC 파일 생성기</b>에서 프로젝트 콘텐츠 또는 로컬 오디오를 선택해 동기화 가사를 만들 수 있습니다.</p><ol><li>가사를 한 줄에 하나씩 입력하고 <b>가사 줄 준비</b>를 누릅니다.</li><li>오디오를 재생하면서 각 가사가 시작되는 순간 <code>Space</code> 또는 <b>현재 줄 기록</b>을 누릅니다.</li><li><b>실시간 테스트</b>로 기록된 시간에 맞춰 가사가 표시되는지 확인합니다.</li><li>필요하면 선택 줄 재기록, ±0.1초 보정, 입력 지연 보정, 기록 취소/다시 실행을 사용합니다.</li><li><b>LRC 저장</b>을 누르면 표준 UTF-8 LRC 파일을 만들고 프로젝트 콘텐츠에 바로 추가할 수 있습니다.</li></ol><div class='note'>가사 입력 칸에 포커스가 있을 때는 Space가 정상적인 공백 입력으로 동작합니다.</div>": "",
-    "<p><b>도구 → 설정 → 일반 → 외부 언어팩</b>에서 다른 국가의 JSON 번역 패치를 관리합니다.</p>\n                <ul><li><b>가져오기</b>: 검증한 UTF-8 JSON 언어팩을 사용자 폴더에 설치</li><li><b>제거</b>: 선택한 외부 언어팩 삭제</li><li><b>폴더 열기</b>: 언어팩 파일을 직접 관리</li><li><b>새로고침</b>: 폴더 변경 내용을 다시 읽기</li></ul>\n                <p>누락된 문자열은 영어로 표시됩니다. 손상된 파일, 실행 중인 앱보다 새 버전을 요구하는 파일, 자리표시자가 잘못된 파일과 1MB 초과 파일은 불러오지 않습니다.</p>": "",
+    "<p><b>도구 → 설정 → 일반 → 외부 언어팩</b>에서 다른 국가의 JSON 번역 패치를 관리합니다.</p>\n                <ul><li><b>가져오기</b>: 검증한 UTF-8 JSON 언어팩을 사용자 폴더에 설치</li><li><b>제거</b>: 선택한 외부 언어팩 삭제</li><li><b>폴더 열기</b>: 언어팩 파일을 직접 관리</li><li><b>새로고침</b>: 폴더 변경 내용을 다시 읽기</li></ul>\n                <p>누락된 문자열은 영어로 표시됩니다. 손상된 파일, 실행 중인 앱보다 새 버전을 요구하는 파일, 자리표시자가 잘못된 파일과 4MB 초과 파일은 불러오지 않습니다.</p>": "",
     "<p><b>도구 → 설정</b>에서 애플리케이션 전체 기본값을 관리합니다.</p>\n                <ul><li><b>일반</b>: 라이트/다크/자동 테마, 한국어/영어, 부드러운 스크롤</li><li><b>내보내기</b>: 기본 출력 폴더, 해상도, FPS, 인코더, 품질</li><li><b>FFmpeg</b>: 실행 파일 경로, 상태 확인, 자동 설치</li></ul>\n                <p>부드러운 스크롤은 끄거나 80~420ms 범위에서 조절할 수 있습니다. 값이 높을수록 더 천천히 부드럽게 이동하며, <code>Ctrl+휠</code> 캔버스 확대/축소에는 영향을 주지 않습니다.</p>": "",
     "<p><b>요소</b> 탭 또는 <b>추가</b> 메뉴에서 캔버스 구성 요소를 넣습니다. 요소 버튼을 클릭하면 기본 위치에 추가되고, 버튼을 캔버스로 드래그하면 놓은 위치에 추가됩니다. 버튼에 마우스를 올리면 해당 요소의 용도와 주요 설정을 확인할 수 있습니다.</p>\n                <div class='note'>이미지의 로고·워터마크, 텍스트의 시간 표시는 부모 요소의 토글을 열어 선택하는 속성 템플릿입니다. 추가 후에는 부모 요소와 같은 속성 및 렌더링 방식을 사용합니다.</div>\n                <h2>자주 쓰는 요소</h2><ul><li><b>배경·이미지·로고·워터마크</b>: 이미지 기반 장면 구성</li>\n                <li><b>텍스트·시간</b>: 고정 문구 또는 곡 정보/재생 시간 토큰</li><li><b>앨범 커버·현재 곡·트랙 목록</b>: 재생 곡에 맞춰 자동 갱신</li>\n                <li><b>진행 바·가사</b>: 곡 진행률과 타임코드 가사 표시</li><li><b>비주얼라이저·파형·레벨 미터·파티클</b>: 음악 반응형 표현</li></ul>\n                <p>추가된 요소는 레이어 패널에서 이름, 표시 여부, 잠금과 앞뒤 순서를 관리합니다. 캔버스 요소를 우클릭하면 잘라내기·복제·삭제뿐 아니라 레이어 순서, 다중 정렬, 그룹, 표시와 잠금 명령을 사용할 수 있습니다.</p>": "",
     "<p><b>프로젝트 콘텐츠</b> 탭은 현재 프로젝트에서 사용하는 이미지와 오디오 같은 미디어를 모아 확인하고 다시 사용하는 공간입니다.</p>\n                <ul><li><b>전체·이미지·오디오·가사/자막·폰트</b> 필터로 필요한 형식만 빠르게 찾을 수 있습니다.</li><li>상단의 <b>목록·격자·간단</b> 보기 버튼으로 상세 정보, 큰 이미지 썸네일, 조밀한 목록 사이를 전환할 수 있습니다. 선택한 보기는 다음 실행에도 유지됩니다.</li><li>오디오와 영상을 미리보기하면 재생·일시정지·정지, 5초 이동, 재생 위치 탐색, 볼륨과 음소거를 사용할 수 있습니다. 볼륨은 다른 미리보기 화면과 공유됩니다.</li><li>콘텐츠를 캔버스 요소나 플레이리스트로 추가할 수 있습니다.</li><li>항목을 우클릭하면 프로젝트에 추가, 목록에서 제거, 파일 정보 확인 메뉴가 표시됩니다. 빈 영역을 우클릭하면 새 콘텐츠를 가져올 수 있습니다.</li><li>같은 파일을 반복해서 찾지 않고 프로젝트 안에서 재사용할 수 있습니다.</li>\n                <li>원본 파일을 이동하거나 삭제하면 프로젝트를 열 때 누락 미디어로 표시될 수 있습니다.</li></ul>\n                <p>다른 컴퓨터로 프로젝트를 옮길 때는 미디어가 포함되는 <code>.pvsproj</code> 패키지 저장을 권장합니다.</p>": "",
@@ -2096,7 +2096,7 @@
     "Language pack error": "",
     "Language pack folder error": "",
     "Language pack installed": "",
-    "Language packs must be between 2 bytes and 1 MB.": "",
+    "Language packs must be between 2 bytes and 4 MB.": "",
     "Late Night Playlist": "",
     "Latest release notes": "",
     "Layer": "",
@@ -7610,7 +7610,7 @@
     "<p><b>도구 → LRC 파일 생성기</b>에서 프로젝트 콘텐츠 또는 로컬 오디오를 선택해 동기화 가사를 만들 수 있습니다.</p><ol><li>가사를 한 줄에 하나씩 입력하고 <b>가사 줄 준비</b>를 누릅니다.</li><li>오디오를 재생하면서 각 가사가 시작되는 순간 <code>Space</code> 또는 <b>현재 줄 기록</b>을 누릅니다.</li><li><b>실시간 테스트</b>로 기록된 시간에 맞춰 가사가 표시되는지 확인합니다.</li><li>필요하면 선택 줄 재기록, ±0.1초 보정, 입력 지연 보정, 기록 취소/다시 실행을 사용합니다.</li><li><b>LRC 저장</b>을 누르면 표준 UTF-8 LRC 파일을 만들고 프로젝트 콘텐츠에 바로 추가할 수 있습니다.</li></ol><div class='note'>가사 입력 칸에 포커스가 있을 때는 Space가 정상적인 공백 입력으로 동작합니다.</div>": [
       "app/dialogs/help_dialog.py"
     ],
-    "<p><b>도구 → 설정 → 일반 → 외부 언어팩</b>에서 다른 국가의 JSON 번역 패치를 관리합니다.</p>\n                <ul><li><b>가져오기</b>: 검증한 UTF-8 JSON 언어팩을 사용자 폴더에 설치</li><li><b>제거</b>: 선택한 외부 언어팩 삭제</li><li><b>폴더 열기</b>: 언어팩 파일을 직접 관리</li><li><b>새로고침</b>: 폴더 변경 내용을 다시 읽기</li></ul>\n                <p>누락된 문자열은 영어로 표시됩니다. 손상된 파일, 실행 중인 앱보다 새 버전을 요구하는 파일, 자리표시자가 잘못된 파일과 1MB 초과 파일은 불러오지 않습니다.</p>": [
+    "<p><b>도구 → 설정 → 일반 → 외부 언어팩</b>에서 다른 국가의 JSON 번역 패치를 관리합니다.</p>\n                <ul><li><b>가져오기</b>: 검증한 UTF-8 JSON 언어팩을 사용자 폴더에 설치</li><li><b>제거</b>: 선택한 외부 언어팩 삭제</li><li><b>폴더 열기</b>: 언어팩 파일을 직접 관리</li><li><b>새로고침</b>: 폴더 변경 내용을 다시 읽기</li></ul>\n                <p>누락된 문자열은 영어로 표시됩니다. 손상된 파일, 실행 중인 앱보다 새 버전을 요구하는 파일, 자리표시자가 잘못된 파일과 4MB 초과 파일은 불러오지 않습니다.</p>": [
       "app/dialogs/help_dialog.py"
     ],
     "<p><b>도구 → 설정</b>에서 애플리케이션 전체 기본값을 관리합니다.</p>\n                <ul><li><b>일반</b>: 라이트/다크/자동 테마, 한국어/영어, 부드러운 스크롤</li><li><b>내보내기</b>: 기본 출력 폴더, 해상도, FPS, 인코더, 품질</li><li><b>FFmpeg</b>: 실행 파일 경로, 상태 확인, 자동 설치</li></ul>\n                <p>부드러운 스크롤은 끄거나 80~420ms 범위에서 조절할 수 있습니다. 값이 높을수록 더 천천히 부드럽게 이동하며, <code>Ctrl+휠</code> 캔버스 확대/축소에는 영향을 주지 않습니다.</p>": [
@@ -11661,7 +11661,7 @@
     "Language pack installed": [
       "app/dialogs/settings_dialog.py"
     ],
-    "Language packs must be between 2 bytes and 1 MB.": [
+    "Language packs must be between 2 bytes and 4 MB.": [
       "app/services/language_pack_service.py"
     ],
     "Late Night Playlist": [

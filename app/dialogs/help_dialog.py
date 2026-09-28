@@ -277,7 +277,7 @@ class HelpDialog(QDialog):
             HelpTopic("language_packs", "외부 언어팩", "언어 번역 language pack json 가져오기 제거 새로고침",
                 """<p><b>도구 → 설정 → 일반 → 외부 언어팩</b>에서 다른 국가의 JSON 번역 패치를 관리합니다.</p>
                 <ul><li><b>가져오기</b>: 검증한 UTF-8 JSON 언어팩을 사용자 폴더에 설치</li><li><b>제거</b>: 선택한 외부 언어팩 삭제</li><li><b>폴더 열기</b>: 언어팩 파일을 직접 관리</li><li><b>새로고침</b>: 폴더 변경 내용을 다시 읽기</li></ul>
-                <p>누락된 문자열은 영어로 표시됩니다. 손상된 파일, 실행 중인 앱보다 새 버전을 요구하는 파일, 자리표시자가 잘못된 파일과 1MB 초과 파일은 불러오지 않습니다.</p>"""),
+                <p>누락된 문자열은 영어로 표시됩니다. 손상된 파일, 실행 중인 앱보다 새 버전을 요구하는 파일, 자리표시자가 잘못된 파일과 4MB 초과 파일은 불러오지 않습니다.</p>"""),
             HelpTopic("shortcuts", "자주 사용하는 단축키", "키보드 shortcut ctrl alt shift f1",
                 """<ul><li><code>Ctrl+N / Ctrl+O / Ctrl+S</code>: 새 프로젝트 / 열기 / 저장</li><li><code>Ctrl+Alt+3</code>: 미리보기 / <code>Ctrl+E</code>: 영상 내보내기</li><li><code>Ctrl+Z / Ctrl+Shift+Z</code>: 실행 취소 / 다시 실행</li><li><code>Ctrl+X / Ctrl+C / Ctrl+V</code>: 요소 잘라내기 / 복사 / 붙여넣기</li><li><code>Ctrl+D</code>: 선택 요소 복제</li><li><code>Delete</code>: 삭제</li><li><code>Esc</code>: 선택 해제</li><li><code>F</code>, <code>Home</code> 또는 <code>Ctrl+0</code>: 캔버스 맞춤</li><li><code>Ctrl+= / Ctrl+-</code>: 캔버스 확대 / 축소</li><li><code>Space+드래그</code>: 캔버스 이동</li><li><code>F1</code>: 이 도움말 열기</li></ul>
                 <p>전체 목록은 <b>도움말 → 단축키 안내</b>에서 확인할 수 있습니다. 텍스트 입력 중에는 일반 편집 키가 우선합니다.</p>"""),

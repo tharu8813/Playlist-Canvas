@@ -132,7 +132,7 @@ class ProjectSettingsDialog(QDialog):
             self.transition_none_radio, self.transition_crossfade_radio, self.transition_automix_radio,
         ):
             transition_buttons.addButton(radio)
-        crossfade_row = QWidget()
+        crossfade_row = self.crossfade_row = QWidget()
         crossfade_row_layout = QHBoxLayout(crossfade_row)
         crossfade_row_layout.setContentsMargins(24, 0, 0, 0)
         self.crossfade_seconds_label = QLabel()
@@ -148,6 +148,8 @@ class ProjectSettingsDialog(QDialog):
         self.automix_help = QLabel()
         self.automix_help.setObjectName("mutedLabel")
         self.automix_help.setWordWrap(True)
+        self.automix_help.setContentsMargins(24, 4, 0, 4)
+        self.crossfade_seconds_label.setBuddy(self.crossfade_seconds_spin)
         transition_layout.addWidget(self.transition_none_radio)
         transition_layout.addWidget(self.transition_crossfade_radio)
         transition_layout.addWidget(crossfade_row)
@@ -158,10 +160,8 @@ class ProjectSettingsDialog(QDialog):
             "crossfade": self.transition_crossfade_radio,
             "automix": self.transition_automix_radio,
         }[settings.transition_mode].setChecked(True)
-        self.transition_crossfade_radio.toggled.connect(
-            self.crossfade_seconds_spin.setEnabled
-        )
-        self.crossfade_seconds_spin.setEnabled(self.transition_crossfade_radio.isChecked())
+        for radio in (self.transition_none_radio, self.transition_crossfade_radio, self.transition_automix_radio):
+            radio.toggled.connect(self._update_transition_help)
         root.addWidget(self.transition_group)
 
         self.thumbnail_group = QGroupBox()
@@ -288,24 +288,7 @@ class ProjectSettingsDialog(QDialog):
         )
         self.crossfade_seconds_label.setText("전환 길이" if korean else "Crossfade length")
         self.transition_automix_radio.setText("AutoMix (베타, 템포 인식 자동 전환)" if korean else "AutoMix (beta, tempo-aware)")
-        self.automix_help.setText(
-            "크로스페이드는 각 곡이 끝나기 지정한 초 전부터 다음 곡이 서서히 겹쳐 재생됩니다(분석 없음).\n\n"
-            "AutoMix는 곡을 분석해 템포에 맞춰 자연스럽게 이어줍니다. 분석에 실패하거나 템포가 맞지 않는 "
-            "곡은 자동으로 크로스페이드로 대체됩니다.\n\n"
-            "두 방식 모두 미리듣기와 내보내기에 적용됩니다. 앨범 커버·가사·트랙 전환과 챕터는 "
-            "믹스된 오디오의 시간을 따르며, 곡이 겹치는 만큼 전체 재생 시간이 짧아집니다. "
-            "미리듣기는 믹스 준비가 완료되면 전환됩니다. 이 설정은 프로젝트별로 저장됩니다."
-            if korean else
-            "Crossfade overlaps each track's last few seconds with the next track's start, for "
-            "however many seconds you set (no analysis).\n\n"
-            "AutoMix analyzes tracks and blends between them using tempo-aware transitions. A "
-            "track that cannot be analyzed, or whose tempo does not match, automatically falls "
-            "back to a plain crossfade.\n\n"
-            "Both affect preview and export. On-screen timing (album art, lyrics, "
-            "track switches) and chapters follow the mixed audio. Overlaps shorten the "
-            "video. Preview switches to the mix when preparation finishes. This setting "
-            "is saved with the project, not the application."
-        )
+        self._update_transition_help()
         self.thumbnail_group.setTitle("프로젝트 썸네일" if korean else "Project thumbnail")
         self.canvas_radio.setText("현재 캔버스를 자동 사용" if korean else "Use the current canvas")
         self.custom_radio.setText("사용자 이미지 사용" if korean else "Use a custom image")
@@ -317,6 +300,35 @@ class ProjectSettingsDialog(QDialog):
             "취소" if korean else "Cancel"
         )
         self._update_canvas_summary()
+
+    def _update_transition_help(self) -> None:
+        korean = self.translator.is_korean
+        crossfade = self.transition_crossfade_radio.isChecked()
+        self.crossfade_row.setVisible(crossfade)
+        self.crossfade_seconds_spin.setEnabled(crossfade)
+        if self.transition_automix_radio.isChecked():
+            text = (
+                "곡의 템포를 분석해 전환 위치와 방식을 자동으로 정합니다.\n"
+                "저장 후 플레이리스트의 AutoMix 편집에서 직접 조정하고, 미리듣기의 전환 상세에서 결과를 확인하세요.\n"
+                "준비 중에도 재생할 수 있습니다. 섞기 어려운 곡은 기본 크로스페이드 또는 이어서 재생으로 연결합니다."
+                if korean else
+                "Analyzes tempo to choose where and how tracks blend.\n"
+                "Save, then adjust transitions in the playlist's AutoMix editor and inspect the result in Preview → Transition details.\n"
+                "Playback continues during preparation. Tracks that cannot blend use a plain crossfade or play back to back."
+            )
+        elif crossfade:
+            text = (
+                "앞 곡의 끝과 다음 곡의 시작을 지정한 길이만큼 겹쳐 재생합니다. 곡 분석은 필요하지 않습니다."
+                if korean else
+                "Overlaps the end of each track with the next for the selected duration. No analysis needed."
+            )
+        else:
+            text = ("앞 곡이 끝나면 다음 곡을 겹침 없이 재생합니다." if korean
+                    else "Plays the next track when the previous one ends, without overlap.")
+        if self.transition_automix_radio.isChecked() or crossfade:
+            text += ("\n미리듣기와 내보내기에 적용되며, 곡이 겹치는 만큼 전체 길이가 줄어듭니다." if korean
+                     else "\nApplies to preview and export. Overlaps shorten the total duration.")
+        self.automix_help.setText(text)
 
     def _choose_thumbnail(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(

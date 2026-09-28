@@ -1,0 +1,11 @@
+{
+  "canvas": {"width": 1920, "height": 1080, "show_grid": false, "snap_enabled": true, "zoom": 0.5},
+  "theme": "light",
+  "language": "en",
+  "settings": {"title": "Version one", "content_mode": "reference"},
+  "sources": [],
+  "groups": [],
+  "playlist": [
+    {"file_path": "C:/Music/first.mp3", "title": "First", "duration_seconds": 180.0, "id": "track-1"}
+  ]
+}

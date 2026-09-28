@@ -180,6 +180,34 @@ class PreviewAudioControllerShutdownTests(unittest.TestCase):
             self.assertIsNone(controller._pending)
             self.assertIsNone(controller._worker)
 
+    def test_sync_prepare_tears_the_worker_down_through_the_shared_helper(self) -> None:
+        import shiboken6
+
+        from app.controllers import preview_audio_controller as module
+
+        stopped: list[QThread] = []
+
+        def recording_stop(worker: QThread) -> None:
+            stopped.append(worker)
+            module_stop(worker)
+
+        module_stop = module.stop_qthread_now
+        with TemporaryDirectory(prefix="preview-audio-sync-") as directory:
+            renderer = _renderer()
+            output = Path(directory) / "out.flac"
+            with (
+                patch.object(renderer, "prepare_playlist_audio", return_value=output),
+                patch.object(module, "stop_qthread_now", recording_stop),
+            ):
+                path, plan = module.prepare_audio_for_ui(
+                    renderer, [_track("a.mp3")], Path(directory), "automix", 3.0,
+                    None, threading.Event(),
+                )
+        self.assertEqual(path, output)
+        self.assertEqual(plan.duration_seconds, 30.0)
+        self.assertEqual(len(stopped), 1)
+        self.assertFalse(shiboken6.isValid(stopped[0]))
+
 
 if __name__ == "__main__":
     unittest.main()

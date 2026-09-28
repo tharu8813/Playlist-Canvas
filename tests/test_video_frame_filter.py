@@ -87,6 +87,42 @@ class VideoFrameFilterTests(unittest.TestCase):
         self.assertEqual((blurred.width(), blurred.height()), (1920, 1080))
         self.assertLess(elapsed, 0.12)
 
+    def test_task_failure_emits_empty_frame_and_logs_each_error_once(self) -> None:
+        from app.video import frame_filter
+        from app.video.frame_filter import VideoFrameFilterSignals, VideoFrameFilterTask
+
+        signals = VideoFrameFilterSignals()
+        results: list[QImage] = []
+        signals.finished.connect(lambda _generation, image: results.append(image))
+        image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+        settings = VideoFrameFilterSettings(8, 8, blur=2.0)
+        errors = [ValueError("bad shape")] * 100 + [MemoryError("out of memory")]
+        with (
+            patch.object(frame_filter, "_LOGGED_FAILURES", set()),
+            patch.object(frame_filter, "filter_video_frame", side_effect=errors),
+            self.assertLogs(frame_filter.LOGGER, "WARNING") as logs,
+        ):
+            for _ in errors:
+                VideoFrameFilterTask(image, settings, 1, signals).run()
+
+        self.assertEqual(len(results), 101)
+        self.assertTrue(all(result.isNull() for result in results))
+        self.assertEqual(len(logs.records), 2)
+        self.assertIn("8x8", logs.output[0])
+        self.assertIn("blur=2.0", logs.output[0])
+        self.assertIs(logs.records[1].exc_info[0], MemoryError)
+
+    def test_task_survives_a_deleted_result_receiver(self) -> None:
+        from app.video.frame_filter import VideoFrameFilterSignals, VideoFrameFilterTask
+
+        signals = VideoFrameFilterSignals()
+        task = VideoFrameFilterTask(
+            QImage(8, 8, QImage.Format.Format_RGBA8888),
+            VideoFrameFilterSettings(8, 8), 1, signals,
+        )
+        shiboken6.delete(signals)
+        task.run()  # must not raise
+
     def test_image_element_filters_change_the_rendered_pixmap_quickly(self) -> None:
         with TemporaryDirectory(prefix="playlist-image-filter-") as directory:
             path = Path(directory) / "sample.png"
