@@ -171,6 +171,7 @@ class PreparedAudio:
 def build_filter_graph(
     clips: Sequence[AudioRenderClip], transitions: Sequence[AudioRenderTransition],
     *, transition_dsp: bool = True, ramp_filter: str | None = "rubberband",
+    resting_dsp: Mapping[str, tuple[bool, bool]] | None = None,
 ) -> tuple[str, str]:
     """Build the filter_complex graph for ``clips``, in input order.
 
@@ -181,7 +182,12 @@ def build_filter_graph(
     as its type's plain legacy acrossfade (BEAT_MATCH: qsin) -- the fallback
     when the DSP filters are unavailable. Timing is identical either way.
     ``ramp_filter`` is how tempo ramps stretch (see _clip_filter_chain).
+    ``resting_dsp`` maps a clip id to (band split, sweep highpass) that a
+    junction *outside* ``clips`` runs over that clip in the full mix: they
+    are applied at rest (no envelope), so a render of part of a plan keeps
+    the phase the full mix gives those clips. Empty for a whole plan.
     """
+    resting_dsp = resting_dsp if transition_dsp and resting_dsp else {}
     if not clips:
         raise AutoMixRenderError("Cannot render an AudioRenderPlan with no clips.")
 
@@ -208,16 +214,18 @@ def build_filter_graph(
     for index, clip in enumerate(clips):
         incoming, outgoing = band_side(index - 1), band_side(index)
         sweep_in, sweep_out = sweep_side(index - 1), sweep_side(index)
-        if incoming is None and outgoing is None and sweep_in is None and sweep_out is None:
+        rest_bands, rest_sweep = resting_dsp.get(clip.clip_id, (False, False))
+        if (incoming is None and outgoing is None and sweep_in is None and sweep_out is None
+                and not rest_bands and not rest_sweep):
             filters.append(_clip_filter_chain(index, clip, labels[index], ramp_filter=ramp_filter))
             continue
         current = f"{labels[index]}pre"
         filters.append(_clip_filter_chain(index, clip, current, ramp_filter=ramp_filter))
-        if sweep_in is not None or sweep_out is not None:
+        if sweep_in is not None or sweep_out is not None or rest_sweep:
             swept = f"{labels[index]}swept"
             filters.append(_sweep_filter(index, current, swept, clip.duration, sweep_in, sweep_out))
             current = swept
-        if incoming is None and outgoing is None:
+        if incoming is None and outgoing is None and not rest_bands:
             filters.append(f"[{current}]anull[{labels[index]}]")
         else:
             filters.extend(_band_filters(current, labels[index], clip.duration, incoming, outgoing))
@@ -440,7 +448,7 @@ def _sweep_filter(
     parts = [
         # Small frames: a biquad takes new coefficients per frame. p=0: never pad (exact duration).
         f"asetnsamples=n={round(SWEEP_STEP_SECONDS * SAMPLE_RATE)}:p=0",
-        f"asendcmd=c='{commands}'",
+        *([f"asendcmd=c='{commands}'"] if commands else []),  # none: resting (see build_filter_graph)
         f"{name}=f={initial:.2f}:r=f64",
     ]
     if incoming is not None:
@@ -567,6 +575,7 @@ class AutoMixAudioPipeline:
         cancel_event: threading.Event | None = None,
         progress: ProgressCallback | None = None,
         container: str = "nut",
+        resting_dsp: Mapping[str, tuple[bool, bool]] | None = None,
     ) -> PreparedAudio:
         """Render ``plan`` using ``track_paths`` (track_id -> source file) for its clips.
 
@@ -590,7 +599,7 @@ class AutoMixAudioPipeline:
             raise AutoMixRenderError(f"Audio file is missing for track: {missing[0].track_id}")
 
         report("Preparing clips", 0.05, f"Preparing {len(clips)} clip(s)")
-        use_dsp = any(transition_dsp_style(t) is not None for t in plan.transitions)
+        use_dsp = any(transition_dsp_style(t) is not None for t in plan.transitions) or bool(resting_dsp)
         if use_dsp and not ffmpeg_supports_transition_dsp(str(self.ffmpeg_executable)):
             LOGGER.warning("FFmpeg lacks the transition DSP filters; styled transitions use their legacy crossfade.")
             use_dsp = False
@@ -620,7 +629,7 @@ class AutoMixAudioPipeline:
 
         def command(dsp: bool) -> list[str]:
             filter_complex, output_label = build_filter_graph(
-                clips, plan.transitions, transition_dsp=dsp, ramp_filter=ramp_filter,
+                clips, plan.transitions, transition_dsp=dsp, ramp_filter=ramp_filter, resting_dsp=resting_dsp,
             )
             graph = ["-filter_complex", filter_complex]
             if len(filter_complex) > INLINE_FILTER_GRAPH_LIMIT:

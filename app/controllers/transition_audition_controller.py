@@ -120,10 +120,10 @@ class _WindowWorker(QThread):
                 self._executable, self._tracks, self._cancel)
             if gain is None or self._cancel.is_set():
                 return
-            window, origin, start, end = render_window(self._plan, self._index, gain)
+            window = render_window(self._plan, self._index, gain)
             prepared = AutoMixAudioPipeline(self._executable).render(
-                window, {track.id: track.file_path for track in self._tracks}, self._directory,
-                cancel_event=self._cancel, container="flac",
+                window.plan, {track.id: track.file_path for track in self._tracks}, self._directory,
+                cancel_event=self._cancel, container="flac", resting_dsp=window.resting_dsp,
             )
         except AutoMixRenderCancelled:
             return
@@ -132,7 +132,8 @@ class _WindowWorker(QThread):
                 self.failed.emit(self._generation, str(error))
             return
         if not self._cancel.is_set():
-            self.ready.emit(self._generation, self._key, str(prepared.path), origin, start, end, gain)
+            self.ready.emit(self._generation, self._key, str(prepared.path), window.origin, window.start,
+                            window.end, gain)
 
 
 class TransitionAuditionController(QObject):
@@ -179,9 +180,9 @@ class TransitionAuditionController(QObject):
         if self._executable is None:
             self._set_state(UNAVAILABLE)
             return
-        window = render_window(plan, index, 1.0)[0]
+        window = render_window(plan, index, 1.0)
         paths = {track.id: track.file_path for track in tracks}
-        key = (repr(window), tuple(file_identity(paths.get(clip.track_id, "")) for clip in window.clips))
+        key = (repr(window), tuple(file_identity(paths.get(clip.track_id, "")) for clip in window.plan.clips))
         cached = self._cache.get(key)
         if cached is not None and Path(cached[0]).is_file():
             self._cache.move_to_end(key)
