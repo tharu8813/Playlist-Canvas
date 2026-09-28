@@ -103,8 +103,13 @@ def compile_automix(
     bonuses/candidates for that side of a pair (see
     ``app.automix.candidates.generate_candidates``) -- rhythm-only
     planning behaves exactly as it did before this parameter existed.
+
+    A track of zero length (its duration could not be read) has nothing to
+    place; it is skipped like a disabled one instead of producing a window
+    that starts together with the next and failing plan validation. Export
+    rejects such a playlist up front; Preview still has to plan it.
     """
-    selected = [track for track in tracks if track.enabled]
+    selected = [track for track in tracks if track.enabled and track.duration_seconds > 0.0]
     structures = structures or {}
     analyses = {
         track_id: _with_lyric_vocals(track, analyses[track_id])
