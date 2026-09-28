@@ -182,6 +182,86 @@ class ProjectServiceTests(unittest.TestCase):
                 ProjectService._MAX_ASSET_BASENAME_LENGTH + 13,
             )
 
+    @staticmethod
+    def _write_package(package: Path, track_path: str, entries: dict[str, bytes]) -> None:
+        document = ProjectDocument(
+            playlist=[PlaylistTrack(track_path, "Track")],
+            settings=ProjectSettings(content_mode="embed"),
+        )
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr(
+                ProjectService.MANIFEST_NAME,
+                json.dumps(document.to_dict()).encode("utf-8"),
+            )
+            for name, payload in entries.items():
+                archive.writestr(name, payload)
+
+    def test_package_rejects_internal_references_that_were_not_extracted(self) -> None:
+        with TemporaryDirectory(prefix="pvs-project-unsafe-") as raw_directory:
+            directory = Path(raw_directory)
+            (directory / "secret.txt").write_text("secret", encoding="utf-8")
+            real = {"assets/0123456789ab_track.mp3": b"audio"}
+            for reference in (
+                "assets/../../secret.txt",
+                "assets/../secret.txt",
+                "assets/missing.mp3",
+                "assets\\..\\..\\secret.txt",
+                "assets/%2e%2e/secret.txt",
+                "assets//0123456789ab_track.mp3",
+                "assets/./0123456789ab_track.mp3",
+                "Assets/0123456789ab_track.mp3",
+                "assets",
+            ):
+                with self.subTest(reference=reference):
+                    package = directory / "unsafe.pvsproj"
+                    self._write_package(package, reference, real)
+                    with self.assertRaises(ProjectError):
+                        ProjectService.load(package)
+
+    def test_package_rejects_duplicate_and_case_colliding_asset_entries(self) -> None:
+        with TemporaryDirectory(prefix="pvs-project-dupe-") as raw_directory:
+            package = Path(raw_directory) / "dupe.pvsproj"
+            self._write_package(package, "assets/a_track.mp3", {
+                "assets/a_track.mp3": b"one", "assets/A_track.mp3": b"two",
+            })
+            with self.assertRaises(ProjectError):
+                ProjectService.load(package)
+            with patch("warnings.warn"):  # zipfile warns on duplicate names
+                self._write_package(package, "assets/a_track.mp3", {})
+                with zipfile.ZipFile(package, "a") as archive:
+                    archive.writestr("assets/a_track.mp3", b"one")
+                    archive.writestr("assets/a_track.mp3", b"two")
+            with self.assertRaises(ProjectError):
+                ProjectService.load(package)
+
+    def test_package_keeps_valid_internal_and_external_references(self) -> None:
+        with TemporaryDirectory(prefix="pvs-project-valid-") as raw_directory:
+            directory = Path(raw_directory)
+            package = directory / "valid.pvsproj"
+            name = "assets/0123456789ab_곡 ♪.mp3"
+            self._write_package(package, name, {name: b"audio"})
+            restored = Path(ProjectService.load(package).playlist[0].file_path)
+            self.assertEqual(restored.read_bytes(), b"audio")
+
+            # A leading slash is an (external) absolute path, never an asset.
+            external = str((directory / "outside.mp3").resolve())
+            for reference in ("/assets/file.mp3", external):
+                with self.subTest(reference=reference):
+                    self._write_package(package, reference, {})
+                    self.assertEqual(
+                        ProjectService.load(package).playlist[0].file_path, reference,
+                    )
+
+    def test_legacy_json_keeps_external_absolute_paths(self) -> None:
+        with TemporaryDirectory(prefix="pvs-project-json-") as raw_directory:
+            directory = Path(raw_directory)
+            external = str((directory / "elsewhere" / "track.mp3").resolve())
+            project = directory / "legacy.json"
+            project.write_text(json.dumps(ProjectDocument(
+                playlist=[PlaylistTrack(external, "Track")],
+            ).to_dict()), encoding="utf-8")
+            self.assertEqual(ProjectService.load(project).playlist[0].file_path, external)
+
 
 if __name__ == "__main__":
     unittest.main()

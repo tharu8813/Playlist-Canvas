@@ -427,6 +427,7 @@ class MainWindow(QMainWindow):
         self._update_service = GitHubUpdateService()
         self._update_check_worker: UpdateCheckWorker | None = None
         self._update_check_manual = False
+        self._close_after_update_check = False
         self._update_download_worker: UpdateDownloadWorker | None = None
         self._update_download_dialog: UpdateDownloadDialog | None = None
         self._downloaded_update_path: Path | None = None
@@ -3387,6 +3388,8 @@ class MainWindow(QMainWindow):
 
     def _update_release_found(self, release: ReleaseInfo) -> None:
         """Compare versions, honor automatic dismissal, and show release notes."""
+        if self._close_after_update_check:
+            return  # the user is closing; don't pop release notes on the way out
         manual = self._update_check_manual
         korean = self.translator.is_korean
         try:
@@ -3436,7 +3439,7 @@ class MainWindow(QMainWindow):
     def _update_check_failed(self, message: str) -> None:
         """Keep automatic network failures quiet but explain manual failures."""
         LOGGER.warning("Update check failed: %s", message)
-        if self._update_check_manual:
+        if self._update_check_manual and not self._close_after_update_check:
             korean = self.translator.is_korean
             QMessageBox.warning(
                 self,
@@ -3452,6 +3455,9 @@ class MainWindow(QMainWindow):
         if self._update_check_worker:
             self._update_check_worker.deleteLater()
         self._update_check_worker = None
+        if self._close_after_update_check:
+            self._close_after_update_check = False
+            QTimer.singleShot(0, self.close)
 
     def _start_update_download(self, release: ReleaseInfo) -> None:
         """Download the selected GitHub Setup into the per-user update directory."""
@@ -5086,6 +5092,19 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(message, 5000)
             event.ignore()
             return
+        if self._update_check_worker and self._update_check_worker.isRunning():
+            # The request can't be interrupted (bounded by its urlopen timeout),
+            # and a QThread destroyed at exit while still running aborts the
+            # whole process, so close once it finishes instead.
+            self._close_after_update_check = True
+            message = (
+                "업데이트 확인이 끝난 뒤 종료합니다."
+                if self.translator.is_korean else
+                "Closing after the update check finishes..."
+            )
+            self.statusBar().showMessage(message, 5000)
+            event.ignore()
+            return
         if self._update_download_worker and self._update_download_worker.isRunning():
             self._update_download_worker.cancel()
             message = "업데이트 다운로드를 취소하는 중입니다." if self.translator.is_korean else "Cancelling update download..."
@@ -5123,9 +5142,11 @@ class MainWindow(QMainWindow):
         self._autosave_debounce_timer.stop()
         # Let a running recovery write finish before _clear_recovery(), otherwise
         # its atomic replace re-creates the file we just deleted and the next
-        # launch offers a stale recovery after a clean exit.
+        # launch offers a stale recovery after a clean exit. No timeout: a slow
+        # disk past a bounded wait would leave the QThread running at exit, and
+        # destroying a running QThread aborts the process.
         if self._autosave_worker is not None and self._autosave_worker.isRunning():
-            self._autosave_worker.wait(3000)
+            self._autosave_worker.wait()
         self._save_workspace_layout()
         QSettings().sync()
         self._clear_recovery()

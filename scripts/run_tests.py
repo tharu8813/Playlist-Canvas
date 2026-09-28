@@ -26,6 +26,9 @@ def main() -> int:
     )
     environment = os.environ.copy()
     environment.setdefault("QT_QPA_PLATFORM", "offscreen")
+    # Korean log lines otherwise hit the locale codec (cp949) and kill the
+    # output reader, dropping exactly the text a failure report needs.
+    environment.setdefault("PYTHONIOENCODING", "utf-8")
     failures: list[str] = []
 
     for module in modules:
@@ -35,6 +38,8 @@ def main() -> int:
                 cwd=root,
                 env=environment,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
                 timeout=args.timeout,
             )

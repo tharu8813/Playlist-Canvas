@@ -195,6 +195,11 @@ class _AnalysisWorker(QThread):
         except Exception as error:  # noqa: BLE001 - degrade to the final render, never crash Preview
             LOGGER.warning("Progressive AutoMix rhythm analysis failed: %s", error)
         finally:
+            # Deliberately unbounded: the children emit on this QThread, so one
+            # abandoned past a timeout would emit on a deleted object after
+            # shutdown. Both honor cancel_event between tracks; the longest wait
+            # is one in-flight ffmpeg loudness scan (cancel-polled) or Sonara
+            # analyze_file() call, the same bound as the rhythm step above.
             for thread in threads:
                 thread.join()
 

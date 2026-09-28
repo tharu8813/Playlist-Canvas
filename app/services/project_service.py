@@ -251,6 +251,7 @@ class ProjectService:
                 raise OSError("Not enough temporary disk space to open this project safely.")
             data = json.loads(archive.read(cls.MANIFEST_NAME).decode("utf-8"))
             extracted_assets: dict[str, Path] = {}
+            extracted_destinations: set[str] = set()
             extracted_bytes = 0
             if progress is not None:
                 progress(0, required_bytes)
@@ -263,6 +264,12 @@ class ProjectService:
                 archive_path = PurePosixPath(info.filename).as_posix()
                 local_path = cls._asset_archive_path(archive_path, parts[-1])
                 destination = cache_root.joinpath(*PurePosixPath(local_path).parts)
+                # Duplicate or case-only-different entries map to the same file
+                # on Windows; the second would silently overwrite the first.
+                destination_key = str(destination).casefold()
+                if archive_path in extracted_assets or destination_key in extracted_destinations:
+                    raise ValueError("Duplicate asset entry in project package.")
+                extracted_destinations.add(destination_key)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 # Chunked (not copyfileobj) so one multi-GB video can still be
                 # cancelled promptly. A partial file is harmless: every load of
@@ -284,16 +291,7 @@ class ProjectService:
         document = ProjectDocument.from_dict(data)
 
         def resolved(raw_path: str) -> str:
-            if not raw_path:
-                return ""
-            parts = PurePosixPath(raw_path).parts
-            if parts and parts[0] == "assets":
-                archive_path = PurePosixPath(raw_path).as_posix()
-                candidate = extracted_assets.get(
-                    archive_path, cache_root.joinpath(*parts),
-                )
-                return str(candidate.resolve())
-            return raw_path
+            return cls._resolve_package_asset(raw_path, extracted_assets)
 
         for source in document.sources:
             source.content_path = resolved(source.content_path)
@@ -310,6 +308,24 @@ class ProjectService:
                 and thumbnail_cache.is_file()):
             document.settings.thumbnail_path = str(thumbnail_cache.resolve())
         return document
+
+    @staticmethod
+    def _resolve_package_asset(raw_path: str, extracted_assets: dict[str, Path]) -> str:
+        """Map a manifest path to its extracted file; external paths pass through.
+
+        An internal ``assets/...`` reference is only honoured when it is the
+        exact archive path of an entry that was validated and extracted. Anything
+        else that claims to be internal (``..``, backslashes, missing entries) is
+        rejected instead of being resolved against the cache folder, where it
+        could point outside of it.
+        """
+        if not raw_path:
+            return ""
+        if raw_path in extracted_assets:
+            return str(extracted_assets[raw_path].resolve())
+        if raw_path.replace("\\", "/").split("/", 1)[0].casefold() == "assets":
+            raise ValueError(f"Project package references a missing or unsafe asset: {raw_path!r}")
+        return raw_path
 
     @classmethod
     def cleanup_cache(cls, max_age_days: int = 30,

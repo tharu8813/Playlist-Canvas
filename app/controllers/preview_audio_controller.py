@@ -43,8 +43,10 @@ def prepare_audio_for_ui(renderer, tracks, directory, mode, crossfade_seconds,
     worker.finished.connect(loop.quit)
     worker.start()
     loop.exec()
-    worker.wait()
-    worker.deleteLater()
+    # The loop quits on finished, so this is normally the already-finished case
+    # of the shared teardown; it deletes the QThread now rather than in whichever
+    # nested loop happens to run next.
+    stop_qthread_now(worker)
     if cancel_event.is_set():
         raise RenderCancelledError("Audio preparation was cancelled.")
     if not results:
