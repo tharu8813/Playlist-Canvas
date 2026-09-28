@@ -2325,6 +2325,137 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertLess(first_ink_column(render(lyric("left"))), 30)
         self.assertGreater(first_ink_column(render(lyric("center"))), 60)
 
+    def test_mask_cuts_the_source_and_its_shadow_to_the_shape(self) -> None:
+        def render(**options: object) -> QImage:
+            item = SourceItem(Source(
+                SourceType.SHAPE, "S", width=200, height=200, fill_color="#FFFFFF",
+                **options,
+            ))
+            image = QImage(200, 200, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            painter = QPainter(image)
+            item.paint(painter, None)
+            painter.end()
+            return image
+
+        plain, circle, star = render(), render(mask_shape="circle"), render(mask_shape="star")
+        self.assertGreater(plain.pixelColor(3, 3).alpha(), 0)
+        self.assertEqual(circle.pixelColor(3, 3).alpha(), 0)
+        self.assertGreater(circle.pixelColor(100, 100).alpha(), 0)
+        self.assertEqual(star.pixelColor(100, 196).alpha(), 0)  # between the lower points
+
+    def test_loop_motion_moves_the_capture_and_restores_the_item(self) -> None:
+        scene = CanvasScene()
+        source = Source(
+            SourceType.SHAPE, "Floating", x=300, y=200, width=160, height=160,
+            fill_color="#FFFFFF", loop_motion="float", loop_motion_period=4.0,
+            loop_motion_amount=2.0,
+        )
+        item = SourceItem(source)
+        scene.addItem(item)
+        track = PlaylistTrack("t.wav", "T", duration_seconds=20.0)
+        positions: list[float] = []
+
+        def observe(*_args: object, **_kwargs: object) -> QImage:
+            positions.append(item.pos().y())
+            return QImage(1, 1, QImage.Format.Format_ARGB32)
+
+        with patch.object(CanvasSnapshot, "capture", side_effect=observe):
+            for elapsed in (0.0, 1.0, 3.0):
+                CanvasSnapshot.capture_track(scene, track, 1, 1, 0.0, elapsed_seconds=elapsed)
+
+        rest, up, down = positions
+        self.assertAlmostEqual(rest, 200.0)
+        self.assertLess(up, 200.0)
+        self.assertGreater(down, 200.0)
+        self.assertAlmostEqual(item.pos().y(), 200.0)
+        self.assertFalse(CanvasSnapshot.source_is_capture_invariant(source, 60.0))
+
+    def test_text_line_gap_spreads_multi_line_text(self) -> None:
+        def ink_height(gap: float) -> int:
+            item = SourceItem(Source(
+                SourceType.TEXT, "T", text="One\nTwo\nThree", width=300, height=300,
+                fill_color="#00000000", outline_color="#FFFFFF", font_size=24,
+                text_line_gap=gap,
+            ))
+            image = QImage(300, 300, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            painter = QPainter(image)
+            item.paint(painter, None)
+            painter.end()
+            rows = [y for y in range(300) if any(
+                image.pixelColor(x, y).alpha() > 60 for x in range(0, 300, 2)
+            )]
+            return rows[-1] - rows[0]
+
+        self.assertGreater(ink_height(30.0), ink_height(0.0) + 40)
+        self.assertLess(ink_height(-6.0), ink_height(0.0))
+
+    def test_now_playing_label_text_and_alignment(self) -> None:
+        def render(**options: object) -> QImage:
+            item = SourceItem(Source(
+                SourceType.NOW_PLAYING, "NP", width=440, height=170,
+                fill_color="#00000000", outline_color="#FFFFFF",
+                text="NOW PLAYING\nTitle\nArtist", now_playing_style="minimal", **options,
+            ))
+            image = QImage(440, 170, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            painter = QPainter(image)
+            item.paint(painter, None)
+            painter.end()
+            return image
+
+        def ink_columns(image: QImage, top: int, bottom: int) -> list[int]:
+            return [x for x in range(image.width()) if any(
+                image.pixelColor(x, y).alpha() > 60 for y in range(top, bottom)
+            )]
+
+        default = render()
+        self.assertTrue(ink_columns(default, 12, 30))  # heading drawn
+        self.assertFalse(ink_columns(render(now_playing_label=""), 12, 22))
+        self.assertNotEqual(render(now_playing_label="지금 재생 중"), default)
+        right = ink_columns(render(now_playing_align="right"), 12, 30)
+        self.assertGreater(min(right), max(ink_columns(default, 12, 30)) - 60)
+
+    def test_center_cover_joins_a_radial_visualizer(self) -> None:
+        from app.inspector.source_inspector import SourceInspector
+        from app.services.source_store import SourceStore
+
+        store = SourceStore()
+        inspector = SourceInspector(store, Translator())
+        try:
+            visualizer = Source(
+                SourceType.AUDIO_VISUALIZER, "Ring", x=100, y=50, width=400, height=400,
+                visualizer_style="radial", visualizer_inner_radius=0.5, z_index=3,
+            )
+            store.add(visualizer)
+            inspector._add_center_cover()
+            covers = [s for s in store.sources() if s.source_type is SourceType.ALBUM_COVER]
+            self.assertEqual(len(covers), 1)
+            cover = covers[0]
+            self.assertEqual(cover.album_frame_style, "circle")
+            self.assertAlmostEqual(cover.x + cover.width / 2, 300.0)
+            self.assertAlmostEqual(cover.y + cover.height / 2, 250.0)
+            self.assertLess(cover.width, 400 * 0.5)
+            self.assertGreater(cover.z_index, visualizer.z_index)
+            self.assertIsNotNone(cover.group_id)
+            self.assertEqual(cover.group_id, visualizer.group_id)
+        finally:
+            inspector.deleteLater()
+
+        # The ring itself paints on the Canvas and in reactive export layers.
+        image = PythonVisualizerRenderer.preview_image(
+            200, 200, SimpleNamespace(
+                style="radial", kind="visualizer", color="#FFFFFF", opacity=1.0,
+                line_width=4.0, inner_radius=0.5,
+            ),
+            np.full(24, 0.8, dtype=np.float32), 0, processed=True,
+        )
+        self.assertEqual(image.pixelColor(100, 100).alpha(), 0)  # free centre
+        self.assertTrue(any(  # bars radiate above the ring
+            image.pixelColor(x, y).alpha() > 0 for x in range(92, 109) for y in range(15, 45)
+        ))
+
     def test_progress_knob_styles_draw_a_handle(self) -> None:
         def render(knob: str) -> QImage:
             item = SourceItem(Source(

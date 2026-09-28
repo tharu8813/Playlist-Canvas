@@ -10,6 +10,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 from app.canvas.renderers.base import paint_background, paint_selection_guide
+from app.utils.radial_visualizer import paint_radial_bars
 
 if TYPE_CHECKING:
     from app.canvas.source_item import SourceItem
@@ -47,6 +48,11 @@ def render(
                 y = rect.center().y() - sin(index * 0.42) * level * rect.height() * 0.36
             path.lineTo(x, y)
         painter.drawPath(path)
+    elif style == "radial":
+        paint_radial_bars(
+            painter, rect, levels, QColor(item.source.fill_color),
+            item.source.visualizer_line_width, item.source.visualizer_inner_radius,
+        )
     elif style == "arc":
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for index, level in enumerate(levels):

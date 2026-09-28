@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.animation.curves import motion_padding
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.models.playlist import PlaylistTrack
@@ -1838,6 +1839,7 @@ class ExportPreviewDialog(QDialog):
                     ))
             if (source.source_type in dynamic_types
                     or source.source_type is SourceType.TIME
+                    or source.loop_motion != "none"
                     or source.timeline_start > 0.0
                     or source.timeline_duration > 0.0
                     or any(token in source.text.lower() for token in time_tokens)):
@@ -2280,8 +2282,16 @@ class ExportPreviewDialog(QDialog):
                 padding += source.font_size + source.subtitle_line_spacing + source.subtitle_previous_blur + 8.0
             if source.source_type is SourceType.NOW_PLAYING:
                 padding += 28.0
-            if source.animation_in != "none" or source.animation_out != "none":
-                padding += min(180.0, max(72.0, max(source.width, source.height) * 0.22)) + 8.0
+            if (source.animation_in != "none" or source.animation_out != "none"
+                    or source.loop_motion != "none"):
+                padding += max(
+                    min(180.0, max(72.0, max(source.width, source.height) * 0.22)),
+                    motion_padding(
+                        {source.animation_in, source.animation_out},
+                        source.loop_motion, source.loop_motion_amount,
+                        source.width, source.height,
+                    ),
+                ) + 8.0
             rect = item.sceneBoundingRect().adjusted(-padding, -padding, padding, padding)
             rect = rect.intersected(self.scene.artboard_rect)
             if rect.isEmpty():
@@ -2412,19 +2422,21 @@ class ExportPreviewDialog(QDialog):
         crossfade/AutoMix handover, exactly as the rendered video does.
         """
         plan = getattr(self, "_compiled_plan", None)
-        if plan is None or not plan.presentation.windows:
+        windows: tuple = ()
+        if plan is not None and plan.presentation.windows:
+            cached = getattr(self, "_reactive_windows_cache", None)
+            if cached is None or cached[0] is not plan:
+                cached = self._reactive_windows_cache = (plan, reactive_layer_windows(plan))
+            windows = cached[1]
+        elif all(getattr(overlay, "loop_motion", "none") == "none" for overlay in overlays):
             return images
-        cached = getattr(self, "_reactive_windows_cache", None)
-        if cached is None or cached[0] is not plan:
-            cached = self._reactive_windows_cache = (plan, reactive_layer_windows(plan))
         animated = []
         for overlay, image in zip(overlays, images, strict=True):
-            state = PythonVisualizerRenderer._animation_state(timeline_seconds, cached[1], overlay)
-            if state is not None and not image.isNull():
-                style, progress, entering = state
-                image = PythonVisualizerRenderer._apply_animation(
-                    image, style, progress, entering,
-                    float(image.width()), float(image.height()),
+            if not image.isNull():
+                # The preview layer may be downscaled; size the motion to it.
+                image = PythonVisualizerRenderer.transform_layer(
+                    image, overlay, timeline_seconds, windows,
+                    (float(image.width()), float(image.height())),
                 )
             animated.append(image)
         return tuple(animated)

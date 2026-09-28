@@ -1249,7 +1249,7 @@ class SourceItem(QGraphicsObject):
                     line, Qt.TextElideMode.ElideRight, max(1, round(text_rect.width()))
                 )
             painter.save()
-            painter.setClipRect(text_rect)
+            painter.setClipRect(text_rect, Qt.ClipOperation.IntersectClip)
             flags = alignment | Qt.AlignmentFlag.AlignVCenter
             if source.text_overflow != "wrap":
                 flags |= Qt.TextFlag.TextSingleLine
@@ -1322,6 +1322,7 @@ class SourceItem(QGraphicsObject):
                     QBrush(QColor(source.text_stroke_color)),
                 )
                 painter.restore()
+        brush = painter.pen().brush()
         if source.text_gradient and source.gradient.enabled and is_text:
             # The caller's pen alpha (dimmed rows) carries into both stops.
             pen_alpha = painter.pen().color().alphaF()
@@ -1331,12 +1332,23 @@ class SourceItem(QGraphicsObject):
                 color = QColor(value)
                 color.setAlphaF(color.alphaF() * pen_alpha)
                 gradient.setColorAt(position, color)
-            painter.save()
-            painter.setPen(QPen(QBrush(gradient), 1.0))
-            painter.drawText(rect, flags, text)
-            painter.restore()
+            brush = QBrush(gradient)
+        painter.save()
+        if self._line_spacing(flags):
+            # drawText has no line-spacing control; fill the spaced glyph path.
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.fillPath(self._text_layout_path(painter, rect, flags, text), brush)
         else:
+            painter.setPen(QPen(brush, 1.0))
             painter.drawText(rect, flags, text)
+        painter.restore()
+
+    def _line_spacing(self, flags: int) -> float:
+        """Extra space between the rows of a multi-line text draw."""
+        if (self.source.source_type not in TEXT_SOURCE_TYPES
+                or flags & Qt.TextFlag.TextSingleLine):
+            return 0.0
+        return float(self.source.text_line_gap)
 
     @staticmethod
     def _glyph_stroke(path: QPainterPath, width: float) -> QPainterPath:
@@ -1361,7 +1373,8 @@ class SourceItem(QGraphicsObject):
         color.setAlpha(255)
         # Position-independent: the raster is drawn at the path's own bounds.
         key = (painter.font().key(), text, round(rect.width(), 3), round(rect.height(), 3),
-               int(flags), color.rgba(), round(radius * pixel_ratio), pixel_ratio, stroke)
+               int(flags), color.rgba(), round(radius * pixel_ratio), pixel_ratio, stroke,
+               self._line_spacing(flags))
         cached = self._text_shadow_cache.get(key)
         if cached is None:
             if len(self._text_shadow_cache) >= 64:
@@ -1392,9 +1405,10 @@ class SourceItem(QGraphicsObject):
         """Build a vector glyph path matching the surrounding drawText layout."""
         if not text or rect.width() <= 0.0 or rect.height() <= 0.0:
             return QPainterPath()
+        spacing = self._line_spacing(flags)
         cache_key = (
             painter.font().key(), text, round(rect.left(), 3), round(rect.top(), 3),
-            round(rect.width(), 3), round(rect.height(), 3), str(flags),
+            round(rect.width(), 3), round(rect.height(), 3), str(flags), spacing,
         )
         if cache_key == self._text_outline_path_key:
             return QPainterPath(self._text_outline_path)
@@ -1426,6 +1440,8 @@ class SourceItem(QGraphicsObject):
                 if not line.isValid():
                     break
                 line.setLineWidth(rect.width())
+                if runs or y_cursor > 0.0:
+                    y_cursor += spacing
                 line.setPosition(QPointF(0.0, y_cursor))
                 y_cursor += line.height()
                 runs.extend(line.glyphRuns())
@@ -1767,45 +1783,7 @@ class SourceItem(QGraphicsObject):
         elif self.source.source_type is SourceType.TRACK_LIST:
             self._paint_track_list(painter, rect)
         elif self.source.source_type is SourceType.NOW_PLAYING:
-            card_color = QColor(self.source.fill_color)
-            text_color = QColor(self.source.outline_color)
-            if self.source.now_playing_style == "minimal":
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(Qt.PenStyle.NoPen)
-            elif self.source.now_playing_style == "glass":
-                if card_color.lightness() > 185:
-                    card_color = QColor("#1B2638")
-                    text_color = QColor("#F8FAFC")
-                card_color.setAlpha(205)
-                painter.setBrush(card_color)
-                outline = QColor(text_color)
-                outline.setAlpha(185)
-                painter.setPen(QPen(outline, 1.5))
-            elif card_color.lightness() > 220 and text_color.lightness() > 190:
-                text_color = QColor("#172033")
-            painter.drawRoundedRect(rect, self.source.border_radius, self.source.border_radius)
-            lines = [line for line in (self._render_text() or "NOW PLAYING").splitlines() if line.strip()]
-            label = lines[0] if lines else "NOW PLAYING"
-            title = lines[1] if len(lines) > 1 else self.source.name
-            details = " · ".join(lines[2:]) if len(lines) > 2 else ""
-            painter.setPen(text_color)
-            label_font = QFont(self.source.font_family, max(9, min(20, int(self.source.font_size * 0.56))))
-            label_font.setWeight(QFont.Weight.DemiBold)
-            painter.setFont(label_font)
-            self._draw_text(painter, rect.adjusted(16, 12, -16, -8), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, label.upper())
-            title_font = QFont(self.source.font_family, max(14, min(52, int(self.source.font_size * 1.22))))
-            title_font.setWeight(QFont.Weight.Bold)
-            painter.setFont(title_font)
-            self._draw_text(painter, rect.adjusted(16, rect.height() * 0.25, -16, -rect.height() * 0.34),
-                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap, title)
-            if details:
-                detail_color = QColor(text_color)
-                detail_color.setAlpha(190)
-                painter.setPen(detail_color)
-                detail_font = QFont(self.source.font_family, max(10, min(24, int(self.source.font_size * 0.68))))
-                painter.setFont(detail_font)
-                self._draw_text(painter, rect.adjusted(16, rect.height() * 0.66, -16, -10),
-                                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom | Qt.TextFlag.TextWordWrap, details)
+            now_playing_renderer.paint_card(self, painter, rect)
         else:
             painter.drawRoundedRect(rect, self.source.border_radius,
                                     self.source.border_radius)

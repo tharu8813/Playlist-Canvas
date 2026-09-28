@@ -17,6 +17,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 
 from app.models.source import TEXT_SOURCE_TYPES, SourceType
+from app.utils.mask_shapes import mask_path
 
 if TYPE_CHECKING:
     from app.canvas.source_item import SourceItem
@@ -93,13 +94,23 @@ def paint_background(item: "SourceItem", painter: QPainter) -> tuple[QRectF, QBr
         painter.setBrush(shadow_color)
         shadow_rect = rect.translated(item.source.shadow.offset_x, item.source.shadow.offset_y)
         spread = max(0.0, item.source.shadow.blur_radius * 0.18)
-        painter.drawRoundedRect(
-            shadow_rect.adjusted(-spread, -spread, spread, spread),
-            item.source.border_radius + spread,
-            item.source.border_radius + spread,
-        )
+        if item.source.mask_shape != "none":
+            # A masked source casts the shadow of its mask.
+            painter.drawPath(mask_path(
+                shadow_rect.adjusted(-spread, -spread, spread, spread), item.source.mask_shape,
+            ))
+        else:
+            painter.drawRoundedRect(
+                shadow_rect.adjusted(-spread, -spread, spread, spread),
+                item.source.border_radius + spread,
+                item.source.border_radius + spread,
+            )
         painter.setPen(pen)
         painter.setBrush(fill)
+    if item.source.mask_shape != "none":
+        # Clip everything the type draws next; paint_selection_guide's
+        # restore() lifts it again before the selection handles.
+        painter.setClipPath(mask_path(rect, item.source.mask_shape), Qt.ClipOperation.IntersectClip)
     return rect, fill, pen
 
 
@@ -121,7 +132,9 @@ def paint_image_content(item: "SourceItem", painter: QPainter, rect: QRectF, fra
     else:
         painter.drawRoundedRect(rect, item.source.border_radius, item.source.border_radius)
         clip_path.addRoundedRect(rect, item.source.border_radius, item.source.border_radius)
-    painter.setClipPath(clip_path)
+    # Intersect, then restore: a mask set by paint_background must survive.
+    painter.save()
+    painter.setClipPath(clip_path, Qt.ClipOperation.IntersectClip)
     if item.source.image_fit_mode == "stretch":
         target = display_rect
     else:
@@ -136,7 +149,7 @@ def paint_image_content(item: "SourceItem", painter: QPainter, rect: QRectF, fra
             target = QRectF(display_rect.center().x() - display_rect.height() * ratio / 2, display_rect.top(),
                             display_rect.height() * ratio, display_rect.height())
     painter.drawPixmap(target, item._pixmap, item._pixmap.rect())
-    painter.setClipping(False)
+    painter.restore()
     if frame_style == "glass":
         painter.setBrush(QColor(255, 255, 255, 40))
         painter.setPen(QPen(QColor(255, 255, 255, 180), 1.5))
@@ -173,11 +186,11 @@ def paint_generic_fallback(item: "SourceItem", painter: QPainter, rect: QRectF) 
             [" ".join(text.splitlines())]
         )
         metrics = painter.fontMetrics()
-        line_height = max(1, metrics.height())
+        line_height = max(1.0, metrics.height() + item.source.text_line_gap)
         block_height = line_height * len(lines)
         top = max(text_rect.top(), text_rect.center().y() - block_height / 2)
         painter.save()
-        painter.setClipRect(text_rect)
+        painter.setClipRect(text_rect, Qt.ClipOperation.IntersectClip)
         for index, line in enumerate(lines):
             if item.source.text_overflow == "ellipsis":
                 line = metrics.elidedText(line, Qt.TextElideMode.ElideRight, max(1, int(text_rect.width())))

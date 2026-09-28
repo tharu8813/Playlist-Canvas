@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import (
-    QEasingCurve, QObject, QPointF, QParallelAnimationGroup, QPauseAnimation,
-    QPropertyAnimation, QSequentialAnimationGroup, Signal,
+    QObject, QPauseAnimation, QPointF, QSequentialAnimationGroup, QVariantAnimation,
+    Signal,
 )
+from PySide6.QtGui import QTransform
 
 from app.canvas.source_item import SourceItem
 from app.models.source import Source
-from app.animation.curves import (
-    hidden_opacity_factor, hidden_rotation_offset, hidden_scale_factor,
-    slide_distance,
-)
+from app.animation.curves import AnimationPose, animation_pose, loop_pose
 
 
 class CanvasAnimationPreviewController(QObject):
@@ -24,46 +24,57 @@ class CanvasAnimationPreviewController(QObject):
         super().__init__(parent)
         self._group: QSequentialAnimationGroup | None = None
         self._item: SourceItem | None = None
-        self._original: tuple[QPointF, float, float, float, bool] | None = None
+        self._original: tuple[QPointF, float, float, float, QTransform, bool] | None = None
 
     @property
     def active(self) -> bool:
         return self._group is not None
 
     def preview(self, item: SourceItem, source: Source) -> bool:
-        """Play configured entrance and exit styles without changing the model."""
+        """Play the entrance, a stretch of the loop motion and the exit."""
         if self.active or (
             source.animation_in == "none" and source.animation_out == "none"
+            and source.loop_motion == "none"
         ):
             return False
         self._item = item
         self._original = (
             QPointF(item.pos()), item.scale(), item.rotation(), item.opacity(),
-            item.isSelected(),
+            item.transform(), item.isSelected(),
         )
         item._suppress_position_sync = True
         self._set_selected_without_signal(item, False)
 
-        entrance_duration = max(
-            100, min(3000, round(source.animation_in_duration * 1000)),
-        )
-        exit_duration = max(
-            100, min(3000, round(source.animation_out_duration * 1000)),
-        )
+        def milliseconds(seconds: float) -> int:
+            return max(100, min(3000, round(seconds * 1000)))
+
+        width, height = source.width, source.height
         sequence = QSequentialAnimationGroup(self)
         if source.animation_in != "none":
-            sequence.addAnimation(
-                self._phase(
-                    item, source, source.animation_in, entrance_duration, entering=True,
-                )
-            )
+            self._apply(item, source, animation_pose(source.animation_in, 0.0, True, width, height))
+            sequence.addAnimation(self._phase(
+                item, source, milliseconds(source.animation_in_duration),
+                lambda progress: animation_pose(
+                    source.animation_in, progress, True, width, height,
+                ),
+            ))
+        if source.loop_motion != "none":
+            loop_seconds = max(1.5, min(6.0, source.loop_motion_period * 2.0))
+            sequence.addAnimation(self._phase(
+                item, source, round(loop_seconds * 1000),
+                lambda progress: loop_pose(
+                    source.loop_motion, progress * loop_seconds, source.loop_motion_period,
+                    source.loop_motion_amount, width, height,
+                ),
+            ))
         if source.animation_out != "none":
             sequence.addAnimation(QPauseAnimation(320))
-            sequence.addAnimation(
-                self._phase(
-                    item, source, source.animation_out, exit_duration, entering=False,
-                )
-            )
+            sequence.addAnimation(self._phase(
+                item, source, milliseconds(source.animation_out_duration),
+                lambda progress: animation_pose(
+                    source.animation_out, progress, False, width, height,
+                ),
+            ))
         sequence.finished.connect(self._restore)
         self._group = sequence
         sequence.start()
@@ -75,77 +86,32 @@ class CanvasAnimationPreviewController(QObject):
             self._restore()
 
     def _phase(
-        self, item: SourceItem, source: Source, style: str, duration: int,
-        entering: bool,
-    ) -> QParallelAnimationGroup:
-        normal_position = QPointF(source.x, source.y)
-        normal_scale = source.scale
-        distance = slide_distance(source.width, source.height)
-        offset = {
-            "slide_left": QPointF(-distance, 0.0),
-            "slide_right": QPointF(distance, 0.0),
-            "slide_up": QPointF(0.0, -distance),
-            "slide_down": QPointF(0.0, distance),
-        }.get(style, QPointF())
-        hidden_position = normal_position + offset
-        hidden_scale = normal_scale * hidden_scale_factor(style)
-        normal_rotation = source.rotation
-        hidden_rotation = normal_rotation + hidden_rotation_offset(style, entering)
+        self, item: SourceItem, source: Source, duration: int,
+        pose_at: Callable[[float], AnimationPose],
+    ) -> QVariantAnimation:
+        animation = QVariantAnimation()
+        animation.setDuration(duration)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.valueChanged.connect(
+            lambda value: self._apply(item, source, pose_at(float(value)))
+        )
+        return animation
+
+    @staticmethod
+    def _apply(item: SourceItem, source: Source, pose: AnimationPose) -> None:
         # Source opacity is already applied inside SourceItem.paint(). Graphics
-        # opacity is only the animation multiplier; including source.opacity here
-        # would square semi-transparent elements during preview/export.
-        normal_opacity = 1.0
-        hidden_opacity = normal_opacity * hidden_opacity_factor(style)
-
-        group = QParallelAnimationGroup()
-        motion_easing = (
-            QEasingCurve.Type.OutQuint if entering
-            else QEasingCurve.Type.InQuint
+        # opacity is only the animation multiplier; including source.opacity
+        # here would square semi-transparent elements.
+        item.setPos(source.x + pose.dx, source.y + pose.dy)
+        item.setScale(source.scale * pose.scale)
+        item.setRotation(source.rotation + pose.rotation)
+        item.setOpacity(pose.opacity)
+        center_x = source.width / 2.0
+        item.setTransform(
+            QTransform().translate(center_x, 0.0).scale(pose.scale_x, 1.0).translate(-center_x, 0.0)
+            if pose.scale_x != 1.0 else QTransform()
         )
-
-        def add_property_animation(
-            property_name: bytes, start_value: object, end_value: object,
-            easing: QEasingCurve.Type,
-        ) -> None:
-            """Add only properties that actually move during this style."""
-            if start_value == end_value:
-                return
-            animation = QPropertyAnimation(item, property_name)
-            animation.setDuration(duration)
-            animation.setStartValue(start_value)
-            animation.setEndValue(end_value)
-            animation.setEasingCurve(easing)
-            group.addAnimation(animation)
-
-        if entering:
-            item.setPos(hidden_position)
-            item.setScale(hidden_scale)
-            item.setRotation(hidden_rotation)
-            item.setOpacity(hidden_opacity)
-            start_position, end_position = hidden_position, normal_position
-            start_scale, end_scale = hidden_scale, normal_scale
-            start_rotation, end_rotation = hidden_rotation, normal_rotation
-            start_opacity, end_opacity = hidden_opacity, normal_opacity
-        else:
-            item.setPos(normal_position)
-            item.setScale(normal_scale)
-            item.setRotation(normal_rotation)
-            item.setOpacity(normal_opacity)
-            start_position, end_position = normal_position, hidden_position
-            start_scale, end_scale = normal_scale, hidden_scale
-            start_rotation, end_rotation = normal_rotation, hidden_rotation
-            start_opacity, end_opacity = normal_opacity, hidden_opacity
-
-        add_property_animation(b"pos", start_position, end_position, motion_easing)
-        add_property_animation(b"scale", start_scale, end_scale, motion_easing)
-        add_property_animation(
-            b"rotation", start_rotation, end_rotation, motion_easing,
-        )
-        add_property_animation(
-            b"opacity", start_opacity, end_opacity,
-            QEasingCurve.Type.InOutCubic,
-        )
-        return group
 
     def _restore(self) -> None:
         group = self._group
@@ -155,11 +121,12 @@ class CanvasAnimationPreviewController(QObject):
         self._item = None
         self._original = None
         if item is not None and original is not None:
-            position, scale, rotation, opacity, selected = original
+            position, scale, rotation, opacity, transform, selected = original
             item.setPos(position)
             item.setScale(scale)
             item.setRotation(rotation)
             item.setOpacity(opacity)
+            item.setTransform(transform)
             item._suppress_position_sync = False
             self._set_selected_without_signal(item, selected)
             item.update()

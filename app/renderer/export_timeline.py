@@ -447,6 +447,14 @@ class ExportTimelinePlanner:
                 for step in range(flow_steps + 1)
             )
 
+        if any(source.loop_motion != "none" for source in sources):
+            # Looping idle motion never rests, so sample it at the output rate.
+            loop_steps = max(1, round(stable * animation_fps))
+            sample_points.update(
+                intro + stable * step / loop_steps
+                for step in range(loop_steps + 1)
+            )
+
         if track_number >= 2:
             fade_seconds = max(
                 (source.background_track_transition_seconds for source in sources

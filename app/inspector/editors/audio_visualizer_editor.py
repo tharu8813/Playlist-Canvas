@@ -29,7 +29,7 @@ class VisualizerSection(FieldSection):
     # rest after the progress fields; keeping both spots keeps the row order.
     EARLY_KEYS = ("visualizer_style", "visualizer_bars")
     LATE_KEYS = (
-        "visualizer_line_width", "visualizer_sensitivity", "visualizer_reactivity",
+        "visualizer_line_width", "visualizer_inner_radius", "visualizer_sensitivity", "visualizer_reactivity",
         "visualizer_attack", "visualizer_release", "visualizer_smoothing", "visualizer_curve",
         "visualizer_noise_gate", "visualizer_min_level", "visualizer_max_level",
     )
@@ -38,6 +38,7 @@ class VisualizerSection(FieldSection):
         ("visualizer_style", "vz_display"),
         ("visualizer_bars", "vz_display"),
         ("visualizer_line_width", "vz_display"),
+        ("visualizer_inner_radius", "vz_display"),
         ("visualizer_sensitivity", "vz_response"),
         ("visualizer_reactivity", "vz_response"),
         ("visualizer_attack", "vz_response"),
@@ -53,6 +54,7 @@ class VisualizerSection(FieldSection):
         "visualizer_style": ("비주얼라이저 스타일", "Visualizer style"),
         "visualizer_bars": ("막대 / 점 개수", "Bars / dots"),
         "visualizer_line_width": ("선 두께", "Line width"),
+        "visualizer_inner_radius": ("원 안쪽 크기", "Inner circle size"),
         "visualizer_sensitivity": ("비주얼라이저 감도", "Visualizer sensitivity"),
         "visualizer_reactivity": ("반응 속도", "Response speed"),
         "visualizer_noise_gate": ("노이즈 게이트", "Noise gate"),
@@ -75,6 +77,7 @@ class VisualizerSection(FieldSection):
     HELP = {
         "bars": ("표시할 막대 또는 점의 개수입니다. 많을수록 세밀하지만 렌더링 부하가 늘어납니다.", "Number of bars or dots. More detail can increase rendering cost."),
         "line_width": ("선을 그리는 두께입니다. 값이 클수록 효과가 굵고 강하게 보입니다.", "Stroke width. Larger values make the effect heavier and stronger."),
+        "inner_radius": ("원형 스타일에서 막대가 시작되는 원의 크기입니다. 가운데 앨범 커버가 들어갈 공간입니다.", "Radial style: size of the ring the bars grow from, leaving room for a centred cover."),
         "reactivity": ("오디오 변화에 따라 움직이는 민감도입니다. 높을수록 움직임이 빠르고 역동적입니다.", "Movement response to audio changes. Higher values feel faster and more dynamic."),
         "noise_gate": ("이 값보다 작은 입력은 무음으로 처리합니다. 0이면 게이트를 사용하지 않습니다.", "Treats input below this value as silence. Set to 0 to disable the gate."),
         "smoothing": ("인접한 주파수 구간의 높이 차이를 평균화해 움직임을 부드럽게 합니다.", "Averages neighboring frequency bands for smoother movement."),
@@ -87,7 +90,7 @@ class VisualizerSection(FieldSection):
             ("Bars", "bars"), ("Wave", "wave"), ("Dots", "dots"),
             ("Line", "line"), ("Mirror", "mirror"), ("Spectrum", "spectrum"),
             ("LED bars", "led"), ("Center bars", "center"), ("Capsules", "capsule"),
-            ("Arc", "arc"),
+            ("Arc", "arc"), ("Radial", "radial"),
         ):
             style.addItem(label, value)
         bars = QSpinBox()
@@ -98,6 +101,7 @@ class VisualizerSection(FieldSection):
             "visualizer_style": style,
             "visualizer_bars": bars,
             "visualizer_line_width": spin(1, 30, 0.5),
+            "visualizer_inner_radius": spin(0.1, 0.95, 0.05),
             "visualizer_sensitivity": spin(0.25, 3.0, 0.05),
             "visualizer_reactivity": spin(0.05, 0.8, 0.05),
             "visualizer_noise_gate": noise_gate,
@@ -108,6 +112,10 @@ class VisualizerSection(FieldSection):
             "visualizer_smoothing": spin(0.0, 1.0, 0.05),
             "visualizer_curve": spin(0.25, 3.0, 0.05),
         }
+
+    def hidden_when_off(self, source: Source) -> dict[str, bool]:
+        radial = source.visualizer_style == "radial"
+        return {"visualizer_inner_radius": radial, "visualizer_center_cover": radial}
 
     def notes(self, korean: bool) -> dict[str, str]:
         return {
@@ -122,7 +130,11 @@ class VisualizerSection(FieldSection):
         }
 
 
-_OWN_FIELD_KEYS = tuple(key for key, _section in VisualizerSection.ROWS)
+_OWN_FIELD_KEYS = (
+    *(key for key, _section in VisualizerSection.ROWS),
+    # A SourceInspector button, not a model field (see _add_center_cover).
+    "visualizer_center_cover",
+)
 
 
 def edit(inspector: "SourceInspector", source: Source) -> None:

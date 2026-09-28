@@ -58,7 +58,7 @@ def paint_lines(item: "SourceItem", painter: QPainter, rect: QRectF) -> None:
     # actual Canvas rectangle so its apparent position cannot drift beyond the
     # resize handles, especially for older 90 px-high lyric elements.
     painter.save()
-    painter.setClipRect(rect)
+    painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
     lines = [
         line for line in (item._render_text() or source.subtitle_fallback).splitlines()
         if line.strip()

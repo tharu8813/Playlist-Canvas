@@ -23,9 +23,13 @@ from collections.abc import Callable, Collection, Iterable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, ClassVar
 
-from PySide6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QFormLayout, QLineEdit, QPushButton, QWidget,
+)
 
-from app.models.source import TEXT_CASES, TEXT_SOURCE_TYPES, Source
+from app.models.source import (
+    LOOP_MOTIONS, MASK_SHAPES, TEXT_CASES, TEXT_SOURCE_TYPES, Source, SourceType,
+)
 
 if TYPE_CHECKING:
     from app.inspector.source_inspector import SourceInspector
@@ -66,6 +70,8 @@ class FieldSection:
             return "check"
         if isinstance(widget, QPushButton):
             return "color"
+        if isinstance(widget, QLineEdit):
+            return "line"
         return "spin"
 
     def add_rows(
@@ -99,6 +105,10 @@ class FieldSection:
                 widget.clicked.connect(
                     lambda _checked=False, key=key, button=widget: choose_color(key, button)
                 )
+            elif kind == "line":
+                widget.editingFinished.connect(
+                    lambda key=key, edit=widget: update(key, edit.text())
+                )
             else:
                 widget.valueChanged.connect(lambda value, key=key: update(key, value))
 
@@ -126,6 +136,8 @@ class FieldSection:
                 widget.setChecked(value)
             elif kind == "color":
                 set_color(widget, value)
+            elif kind == "line":
+                widget.setText(str(value))
             else:
                 widget.setValue(value)
 
@@ -150,9 +162,10 @@ class TypographySection(FieldSection):
     """
 
     FAMILY = ("글자", "typography")
-    TEXT_KEYS = ("text_letter_spacing", "text_italic", "text_case")
+    TEXT_KEYS = ("text_letter_spacing", "text_line_gap", "text_italic", "text_case")
     ROWS = (
         ("text_letter_spacing", None),
+        ("text_line_gap", None),
         ("text_italic", None),
         ("text_case", None),
         ("text_shadow_glyph", None),
@@ -160,6 +173,7 @@ class TypographySection(FieldSection):
     )
     LABELS = {
         "text_letter_spacing": ("자간", "Letter spacing"),
+        "text_line_gap": ("줄 간격", "Line spacing"),
         "text_italic": ("기울임꼴", "Italic"),
         "text_case": ("대소문자", "Letter case"),
         "text_shadow_glyph": ("글자 모양 그림자", "Glyph-shaped shadow"),
@@ -168,6 +182,7 @@ class TypographySection(FieldSection):
     SECTION_TITLES: ClassVar[dict[str, tuple[str, str]]] = {}
     HELP = {
         "letter_spacing": ("글자 사이 간격(px)입니다. 음수는 좁히고 양수는 넓힙니다.", "Extra space between letters in pixels. Negative values tighten, positive values widen."),
+        "line_gap": ("여러 줄 텍스트의 줄 사이에 더할 간격(px)입니다. 음수는 줄을 좁힙니다.", "Extra space in pixels between the lines of multi-line text. Negative values tighten them."),
         "italic": ("글자를 기울임꼴로 표시합니다.", "Shows the text in italics."),
         "case": ("원문은 그대로 두고 대문자, 소문자, 단어 첫 글자 대문자 또는 작은 대문자로 표시합니다.", "Displays the text in upper, lower, title case or small caps without changing it."),
         "shadow_glyph": ("그림자를 요소 상자가 아닌 글자 모양을 따라 드리웁니다. 오프셋을 0으로 두면 글로우처럼 보입니다.", "Casts the shadow from the letters instead of the source box. With zero offset it reads as a glow."),
@@ -179,6 +194,7 @@ class TypographySection(FieldSection):
             case.addItem(value, value)
         self.widgets: dict[str, QWidget] = {
             "text_letter_spacing": spin(-10, 60, 0.5),
+            "text_line_gap": spin(-40, 200, 1),
             "text_italic": QCheckBox(),
             "text_case": case,
             "text_shadow_glyph": QCheckBox(),
@@ -206,6 +222,77 @@ class TypographySection(FieldSection):
         ):
             self.widgets[key].setText(text)
 
+
+class MotionSection(FieldSection):
+    """Looping idle motion and the clip mask, shared by every source.
+
+    LOOP_KEYS go to the animation tab and ``mask_shape`` to the appearance
+    tab. Help is keyed by the full field name (no family prefix).
+    """
+
+    FAMILY = ("모션", "motion")
+    LOOP_KEYS = ("loop_motion", "loop_motion_period", "loop_motion_amount")
+    ROWS = (
+        ("loop_motion", None),
+        ("loop_motion_period", None),
+        ("loop_motion_amount", None),
+        ("mask_shape", None),
+    )
+    LABELS = {
+        "loop_motion": ("반복 모션", "Loop motion"),
+        "loop_motion_period": ("반복 주기 (초)", "Loop period (s)"),
+        "loop_motion_amount": ("모션 세기", "Motion strength"),
+        "mask_shape": ("마스크 모양", "Mask shape"),
+    }
+    SECTION_TITLES: ClassVar[dict[str, tuple[str, str]]] = {}
+    HELP = {
+        "loop_motion": ("요소가 화면에 있는 동안 계속 반복되는 움직임입니다. 등장·퇴장 애니메이션과 함께 적용됩니다.", "Movement repeated for as long as the source is on screen, on top of its entrance and exit."),
+        "loop_motion_period": ("움직임 한 번에 걸리는 시간입니다. 회전은 이 시간마다 한 바퀴 돕니다.", "Seconds per cycle. Spin turns once per period."),
+        "loop_motion_amount": ("움직임의 크기입니다. 0이면 멈추고, 1이 기본입니다.", "Size of the movement. 0 stops it; 1 is the default."),
+        "mask_shape": ("요소 전체를 원·별·하트 같은 모양으로 잘라 냅니다. 그림자도 이 모양을 따릅니다.", "Cuts the whole source to a shape such as a circle, star or heart. Its shadow follows the shape."),
+    }
+    LOOP_LABELS = {
+        "none": ("없음", "None"), "float": ("둥실 떠다니기", "Float"),
+        "breathe": ("숨쉬기", "Breathe"), "pulse": ("맥박", "Pulse"),
+        "sway": ("흔들림", "Sway"), "spin": ("회전", "Spin"),
+        "drift": ("떠돌기", "Drift"), "wobble": ("출렁임", "Wobble"),
+    }
+    MASK_LABELS = {
+        "none": ("없음", "None"), "circle": ("원", "Circle"), "pill": ("알약", "Pill"),
+        "arch": ("아치", "Arch"), "diamond": ("다이아몬드", "Diamond"),
+        "triangle": ("삼각형", "Triangle"), "hexagon": ("육각형", "Hexagon"),
+        "star": ("별", "Star"), "heart": ("하트", "Heart"),
+    }
+
+    def __init__(self, spin: Callable[[float, float, float], QWidget]) -> None:
+        loop = QComboBox()
+        for value in LOOP_MOTIONS:
+            loop.addItem(value, value)
+        mask = QComboBox()
+        for value in MASK_SHAPES:
+            mask.addItem(value, value)
+        self.widgets: dict[str, QWidget] = {
+            "loop_motion": loop,
+            "loop_motion_period": spin(0.2, 60.0, 0.25),
+            "loop_motion_amount": spin(0.0, 5.0, 0.1),
+            "mask_shape": mask,
+        }
+
+    def hidden_when_off(self, source: Source) -> dict[str, bool]:
+        moving = source.loop_motion != "none"
+        return {"loop_motion_period": moving, "loop_motion_amount": moving}
+
+    def retranslate(self, korean: bool) -> None:
+        for key, labels in (("loop_motion", self.LOOP_LABELS), ("mask_shape", self.MASK_LABELS)):
+            combo = self.widgets[key]
+            for index in range(combo.count()):
+                combo.setItemText(index, labels[combo.itemData(index)][0 if korean else 1])
+
+
+def shows_mask(source: Source) -> bool:
+    """Video is composited by FFmpeg outside the Canvas, so it cannot be masked."""
+    return source.source_type is not SourceType.VIDEO
+
 # Every field key _update_legacy_source_specific_fields toggles purely by
 # source_type. Excludes shadow_* (every source shows it, see
 # apply_shared_fields) and the toggle-dependent rows
@@ -224,6 +311,7 @@ TYPE_SPECIFIC_FIELD_KEYS: tuple[str, ...] = (
     "visualizer_sensitivity", "visualizer_reactivity", "visualizer_noise_gate",
     "visualizer_min_level", "visualizer_max_level", "visualizer_attack",
     "visualizer_release", "visualizer_smoothing", "visualizer_curve",
+    "visualizer_inner_radius", "visualizer_center_cover",
     "background_mode", "background_ambient", "background_track_transition",
     "background_track_transition_seconds",
     "album_frame",
@@ -234,7 +322,7 @@ TYPE_SPECIFIC_FIELD_KEYS: tuple[str, ...] = (
     "track_list_current_background", "track_list_inactive_opacity",
     "track_list_current_scale", "track_list_show_dividers",
     "now_playing_style", "now_playing_duration", "now_playing_exit",
-    "now_playing_exit_duration",
+    "now_playing_exit_duration", "now_playing_label", "now_playing_align",
     "subtitle_animation", "subtitle_animation_duration", "subtitle_context_lines",
     "subtitle_next_lines", "subtitle_line_spacing", "subtitle_previous_opacity",
     "subtitle_previous_blur", "subtitle_timing_offset", "subtitle_current_scale",
@@ -281,6 +369,8 @@ def apply_shared_fields(inspector: "SourceInspector", source: Source) -> None:
         source.source_type in TEXT_SOURCE_TYPES,
     )
     show_fields(inspector, _ALWAYS_VISIBLE_FIELD_KEYS)
+    show_fields(inspector, MotionSection.LOOP_KEYS)
+    inspector._set_field_visible("mask_shape", shows_mask(source))
 
 
 def apply_image_backed_fields(inspector: "SourceInspector", source: Source, *, show_file: bool) -> None:

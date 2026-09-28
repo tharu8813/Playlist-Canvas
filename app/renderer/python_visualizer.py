@@ -16,11 +16,12 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 
 from app.animation.curves import (
-    ease_in_out_cubic, ease_in_quint, ease_out_quint,
-    hidden_rotation_offset, hidden_scale_factor, slide_distance,
+    AnimationPose, animation_pose, ease_in_out_cubic, loop_pose,
 )
 from app.utils.level_meter_painter import paint_level_meter
+from app.utils.mask_shapes import mask_path
 from app.utils.particle_painter import paint_particles
+from app.utils.radial_visualizer import paint_radial_bars
 from app.utils.subprocess_utils import hidden_process_kwargs
 
 
@@ -463,16 +464,9 @@ class PythonVisualizerRenderer:
                     channel_values=channel_values, image_buffer=frame_buffer,
                     frame_rate=fps, peak_values=peak_values,
                 )
-                animation = self._animation_state(
-                    frame_seconds, track_windows, overlay,
+                frame_buffer = self.transform_layer(
+                    frame_buffer, overlay, frame_seconds, track_windows,
                 )
-                if animation is not None:
-                    style, progress, entering = animation
-                    frame_buffer = self._apply_animation(
-                        frame_buffer, style, progress, entering,
-                        float(getattr(overlay, "width", width)),
-                        float(getattr(overlay, "height", height)),
-                    )
             else:
                 image_format = QImage.Format.Format_RGBA8888
                 if (frame_buffer.width() != width or frame_buffer.height() != height
@@ -561,22 +555,54 @@ class PythonVisualizerRenderer:
                 return index
         return -1
 
+    @classmethod
+    def transform_layer(
+        cls, image: QImage, overlay: object, seconds: float,
+        track_windows: Sequence[tuple[float, ...]], size: tuple[float, float] | None = None,
+    ) -> QImage:
+        """Apply the source's entrance/exit and its looping motion at ``seconds``.
+
+        ``size`` is the layer size the motion is scaled to (default: the overlay's).
+        """
+        width, height = size or (
+            float(getattr(overlay, "width", image.width())),
+            float(getattr(overlay, "height", image.height())),
+        )
+        loop = loop_pose(
+            str(getattr(overlay, "loop_motion", "none")), seconds,
+            float(getattr(overlay, "loop_motion_period", 4.0)),
+            float(getattr(overlay, "loop_motion_amount", 1.0)), width, height,
+        )
+        state = cls._animation_state(seconds, track_windows, overlay)
+        if state is None and loop.is_identity:
+            return image
+        style, progress, entering = state or ("none", 1.0, True)
+        return cls._apply_animation(image, style, progress, entering, width, height, loop)
+
     @staticmethod
     def _apply_animation(
         image: QImage, style: str, raw_progress: float, entering: bool,
         source_width: float | None = None, source_height: float | None = None,
+        loop: AnimationPose = AnimationPose(),
     ) -> QImage:
-        """Apply Canvas-compatible opacity, slide, and zoom to a reactive layer."""
-        raw_progress = max(0.0, min(1.0, raw_progress))
-        motion_progress = (
-            ease_out_quint(raw_progress)
-            if entering else 1.0 - ease_in_quint(raw_progress)
+        """Apply the Canvas animation pose (plus any loop motion) to a reactive layer."""
+        width = float(image.width())
+        height = float(image.height())
+        pose = animation_pose(
+            style, raw_progress, entering,
+            source_width if source_width is not None else width,
+            source_height if source_height is not None else height,
         )
-        opacity_progress = (
-            ease_in_out_cubic(raw_progress)
-            if entering else 1.0 - ease_in_out_cubic(raw_progress)
-        )
-        if opacity_progress <= 0.0:
+        if style != "none":
+            # Reactive layers keep a balanced fade: their motion is clipped to
+            # the layer box, so the fade carries more of the transition.
+            raw_progress = max(0.0, min(1.0, raw_progress))
+            pose = replace(pose, opacity=(
+                ease_in_out_cubic(raw_progress)
+                if entering else 1.0 - ease_in_out_cubic(raw_progress)
+            ))
+        pose = pose.combined(loop)
+        if pose.opacity <= 0.0:
             transparent = QImage(image.size(), QImage.Format.Format_RGBA8888)
             transparent.fill(0)
             return transparent
@@ -584,39 +610,12 @@ class PythonVisualizerRenderer:
         result.fill(0)
         painter = QPainter(result)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.setOpacity(opacity_progress)
-        width = float(image.width())
-        height = float(image.height())
-        if style in {"zoom", "pop", "rotate"}:
-            hidden_scale = hidden_scale_factor(style)
-            scale = hidden_scale + (1.0 - hidden_scale) * motion_progress
-            target_width = width * scale
-            target_height = height * scale
-            target = QRectF(
-                (width - target_width) / 2.0,
-                (height - target_height) / 2.0,
-                target_width,
-                target_height,
-            )
-        else:
-            distance = slide_distance(
-                source_width if source_width is not None else width,
-                source_height if source_height is not None else height,
-            )
-            remaining = distance * (1.0 - motion_progress)
-            dx, dy = {
-                "slide_left": (-remaining, 0.0),
-                "slide_right": (remaining, 0.0),
-                "slide_up": (0.0, -remaining),
-                "slide_down": (0.0, remaining),
-            }.get(style, (0.0, 0.0))
-            target = QRectF(dx, dy, width, height)
-        if style == "rotate":
-            angle = hidden_rotation_offset(style, entering) * (1.0 - motion_progress)
-            painter.translate(width / 2.0, height / 2.0)
-            painter.rotate(angle)
-            painter.translate(-width / 2.0, -height / 2.0)
-        painter.drawImage(target, image)
+        painter.setOpacity(pose.opacity)
+        painter.translate(width / 2.0 + pose.dx, height / 2.0 + pose.dy)
+        painter.rotate(pose.rotation)
+        painter.scale(pose.scale * pose.scale_x, pose.scale)
+        painter.translate(-width / 2.0, -height / 2.0)
+        painter.drawImage(QPointF(0.0, 0.0), image)
         painter.end()
         return result
 
@@ -804,6 +803,9 @@ class PythonVisualizerRenderer:
         gap = max(1.0, rect.width() * 0.012 / count)
         bar_width = max(1.0, (rect.width() - gap * (count - 1)) / count)
         painter.setPen(QPen(color, line_width))
+        mask_shape = str(getattr(overlay, "mask_shape", "none"))
+        if mask_shape != "none":
+            painter.setClipPath(mask_path(rect, mask_shape))
         if kind == "waveform":
             path = QPainterPath(QPointF(rect.left(), rect.center().y()))
             for index, level in enumerate(levels):
@@ -879,6 +881,11 @@ class PythonVisualizerRenderer:
                     y = rect.center().y() - math.sin(index * 0.42) * float(level) * rect.height() * 0.36
                 path.lineTo(x, y)
             painter.drawPath(path)
+        elif style == "radial":
+            paint_radial_bars(
+                painter, rect, [float(level) for level in levels], color, line_width,
+                float(getattr(overlay, "inner_radius", 0.55)),
+            )
         elif style == "arc":
             painter.setBrush(Qt.BrushStyle.NoBrush)
             for index, level in enumerate(levels):
