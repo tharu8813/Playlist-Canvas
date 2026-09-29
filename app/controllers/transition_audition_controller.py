@@ -129,6 +129,10 @@ class _WindowWorker(QThread):
             prepared = AutoMixAudioPipeline(self._executable).render(
                 window.plan, {track.id: track.file_path for track in self._tracks}, self._directory,
                 cancel_event=self._cancel, container="flac", resting_dsp=window.resting_dsp,
+                track_filters={track.id: track.audio_filter for track in self._tracks},
+                # Each clip on its own, as the full mix renders it: a tempo ramp
+                # then plays the very samples the full mix plays.
+                workers=2,
             )
         except AutoMixRenderCancelled:
             return

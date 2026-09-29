@@ -831,10 +831,10 @@ class MainWindowPlaylistTests(MainWindowTestCase):
             dialog = TrackDetailsDialog(track, self.window.translator, self.window)
             try:
                 self.assertEqual(dialog.windowTitle(), "곡 정보/설정")
-                self.assertEqual(dialog.tabs.count(), 4)
+                self.assertEqual(dialog.tabs.count(), 5)
                 self.assertEqual(
-                    [dialog.tabs.tabText(index) for index in range(4)],
-                    ["곡 정보", "분석", "가사 설정", "이 곡의 영상"],
+                    [dialog.tabs.tabText(index) for index in range(5)],
+                    ["곡 정보", "분석", "가사 설정", "이 곡의 영상", "오디오"],
                 )
                 self.assertIs(dialog.tabs.widget(1), dialog.analysis_tab)
                 self.assertTrue(dialog.info_tab.isAncestorOf(dialog.info_group))

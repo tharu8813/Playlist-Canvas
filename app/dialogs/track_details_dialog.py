@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+import subprocess
 import sys
+import threading
 
 from mutagen import File as MutagenFile
-from PySide6.QtCore import QProcess, Qt, QUrl, Signal
+from PySide6.QtCore import QProcess, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -37,14 +41,22 @@ from PySide6.QtWidgets import (
 from app.automix.analysis.key import key_to_camelot
 from app.automix.models import TrackAnalysis
 from app.automix.structure.models import TrackStructureAnalysis
-from app.models.playlist import PlaylistTrack
+from app.models.playlist import (
+    EQ_BANDS_HZ, EQ_LIMIT_DB, VOLUME_RANGE_DB, PlaylistTrack, track_audio_filter,
+)
+from app.widgets.activity_progress import activity_for
 from app.widgets.track_analysis_panel import TrackAnalysisPanel
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.services.lyrics_service import LyricsError, LyricsService
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.preview.album_art import extract_track_cover
 from app.utils.i18n import Translator
+from app.utils.subprocess_utils import hidden_process_kwargs
 from app.utils.time_format import format_clock
+
+EQ_PREVIEW_LIMITER = "alimiter=limit=0.95:level=0"
+"""A boost past full scale would clip in the preview file; the export has float headroom instead."""
+EQ_ACTIVITY = "track_eq_preview"
 
 
 def audio_file_facts(path: str) -> dict[str, object]:
@@ -72,6 +84,8 @@ class TrackDetailsDialog(QDialog):
 
     analysis_requested = Signal()
     """The user asked to analyze this track (MainWindow runs it and reports back)."""
+    eq_rendered = Signal(int, str, str, str)
+    """generation, filter, rendered file ("" on failure), error -- from the EQ preview thread."""
 
     def __init__(
         self, track: PlaylistTrack, translator: Translator,
@@ -79,9 +93,25 @@ class TrackDetailsDialog(QDialog):
         content_lyrics: list[tuple[str, str]] | None = None,
         analysis: TrackAnalysis | None = None,
         structure: TrackStructureAnalysis | None = None,
+        ffmpeg_executable: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self.track = track
+        # EQ preview: the player swaps to a copy of the track rendered with the
+        # current volume/EQ (Qt Multimedia cannot filter audio itself).
+        self.ffmpeg_executable = ffmpeg_executable
+        self._eq_dir: TemporaryDirectory | None = None
+        self._eq_generation = 0
+        self._eq_playing_filter = ""
+        self._eq_rendering_filter = ""
+        self._eq_state = "original"
+        self._eq_error = ""
+        self._pending_resume: tuple[int, bool] | None = None
+        self._eq_timer = QTimer(self)
+        self._eq_timer.setSingleShot(True)
+        self._eq_timer.setInterval(400)
+        self._eq_timer.timeout.connect(self._update_audio_source)
+        self.eq_rendered.connect(self._eq_render_finished)
         self.translator = translator
         self.analysis = analysis
         self._analysis_error = ""
@@ -96,6 +126,8 @@ class TrackDetailsDialog(QDialog):
         self.selected_album = track.album
         self.selected_cover_path = track.cover_path
         self.selected_video_paths = list(track.video_paths)
+        self.selected_volume_db = float(track.volume_db)
+        self.selected_eq_db = [float(gain) for gain in track.eq_db]
         saved_volume = preview_volume()
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(saved_volume / 100.0)
@@ -407,6 +439,7 @@ class TrackDetailsDialog(QDialog):
         video_layout.addWidget(self.video_help)
         video_layout.addWidget(self.video_list_group, 1)
         self.tabs.addTab(self.video_tab, "")
+        self.tabs.addTab(self._build_audio_tab(), "")
         root.addWidget(self.tabs, 1)
 
         self.buttons = QDialogButtonBox(
@@ -443,12 +476,15 @@ class TrackDetailsDialog(QDialog):
         self.media_player.durationChanged.connect(self._playback_duration_changed)
         self.media_player.playbackStateChanged.connect(self._playback_state_changed)
         self.media_player.errorOccurred.connect(self._playback_error)
+        self.media_player.mediaStatusChanged.connect(self._media_status_changed)
         translator.language_changed.connect(self.retranslate)
         self.retranslate()
         self._refresh_cover()
         self._refresh_preview()
         self._playback_duration_changed(round(track.duration_seconds * 1000))
         self._update_track_video_ui()
+        self._eq_timer.stop()
+        self._update_audio_source()  # a saved EQ plays from the first Play
 
     # -- header ---------------------------------------------------------------
 
@@ -481,6 +517,225 @@ class TrackDetailsDialog(QDialog):
         layout.addWidget(self.header_cover, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(text, 1)
         return header
+
+    # -- audio: volume and EQ -----------------------------------------------------
+
+    def _db_slider(self, orientation: Qt.Orientation, limits: tuple[float, float], value: float) -> QSlider:
+        """A slider in 0.5 dB steps."""
+        slider = QSlider(orientation)
+        slider.setRange(round(limits[0] * 2), round(limits[1] * 2))
+        slider.setPageStep(2)
+        slider.setValue(round(value * 2))
+        slider.valueChanged.connect(self._refresh_audio_labels)
+        return slider
+
+    def _build_audio_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        self.track_volume_group = QGroupBox()
+        volume_row = QHBoxLayout(self.track_volume_group)
+        self.track_volume_slider = self._db_slider(
+            Qt.Orientation.Horizontal, VOLUME_RANGE_DB, self.selected_volume_db,
+        )
+        self.track_volume_value = QLabel()
+        self.track_volume_value.setMinimumWidth(64)
+        self.track_volume_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        volume_row.addWidget(self.track_volume_slider, 1)
+        volume_row.addWidget(self.track_volume_value)
+
+        self.eq_group = QGroupBox()
+        eq_row = QHBoxLayout(self.eq_group)
+        eq_row.setSpacing(18)
+        gains = self.selected_eq_db + [0.0] * (len(EQ_BANDS_HZ) - len(self.selected_eq_db))
+        self.eq_sliders: list[QSlider] = []
+        self.eq_values: list[QLabel] = []
+        for frequency, gain in zip(EQ_BANDS_HZ, gains):
+            column = QVBoxLayout()
+            value = QLabel()
+            value.setObjectName("mutedLabel")
+            value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            slider = self._db_slider(Qt.Orientation.Vertical, (-EQ_LIMIT_DB, EQ_LIMIT_DB), gain)
+            slider.setMinimumHeight(160)
+            name = QLabel(f"{frequency // 1000}k" if frequency >= 1000 else str(frequency))
+            name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            column.addWidget(value)
+            column.addWidget(slider, 1, Qt.AlignmentFlag.AlignHCenter)
+            column.addWidget(name)
+            eq_row.addLayout(column)
+            self.eq_sliders.append(slider)
+            self.eq_values.append(value)
+
+        actions = QHBoxLayout()
+        self.eq_bypass_check = QCheckBox()
+        self.eq_bypass_check.toggled.connect(self._update_audio_source)
+        actions.addWidget(self.eq_bypass_check)
+        actions.addStretch(1)
+        self.reset_audio_button = QPushButton()
+        self.reset_audio_button.clicked.connect(self._reset_audio)
+        actions.addWidget(self.reset_audio_button)
+
+        # The same player as the Lyrics tab, with its own transport here.
+        self.audition_group = QGroupBox()
+        audition = QVBoxLayout(self.audition_group)
+        transport = QHBoxLayout()
+        self.audio_play_button = QPushButton()
+        self.audio_stop_button = QPushButton()
+        self.audio_play_button.clicked.connect(self._toggle_playback)
+        self.audio_stop_button.clicked.connect(self._stop_playback)
+        self.audio_time = QLabel()
+        self.audio_time.setObjectName("mutedLabel")
+        self.eq_status = QLabel()
+        self.eq_status.setObjectName("mutedLabel")
+        transport.addWidget(self.audio_play_button)
+        transport.addWidget(self.audio_stop_button)
+        transport.addWidget(self.eq_status, 1)
+        transport.addWidget(self.audio_time)
+        self.audio_position_slider = QSlider(Qt.Orientation.Horizontal)
+        self.audio_position_slider.setRange(0, self.playback_slider.maximum())
+        self.audio_position_slider.setPageStep(5_000)
+        self.audio_position_slider.sliderMoved.connect(self._playback_position_changed)
+        self.audio_position_slider.sliderReleased.connect(self._seek_playback)
+        audition.addLayout(transport)
+        audition.addWidget(self.audio_position_slider)
+
+        self.audio_help = QLabel()
+        self.audio_help.setObjectName("mutedLabel")
+        self.audio_help.setWordWrap(True)
+        layout.addWidget(self.track_volume_group)
+        layout.addWidget(self.eq_group, 1)
+        layout.addLayout(actions)
+        layout.addWidget(self.audition_group)
+        layout.addWidget(self.audio_help)
+        self._refresh_audio_labels()
+        return tab
+
+    def _refresh_audio_labels(self, *_args: object) -> None:
+        if not hasattr(self, "reset_audio_button"):
+            return  # still building the tab
+        self.track_volume_value.setText(f"{self.track_volume_slider.value() / 2:+.1f} dB")
+        for slider, label in zip(self.eq_sliders, self.eq_values):
+            label.setText(f"{slider.value() / 2:+.1f}")
+        self.reset_audio_button.setEnabled(
+            any(slider.value() for slider in (self.track_volume_slider, *self.eq_sliders))
+        )
+        self._eq_timer.start()
+
+    def _reset_audio(self) -> None:
+        for slider in (self.track_volume_slider, *self.eq_sliders):
+            slider.setValue(0)
+
+    def _wanted_filter(self) -> str:
+        if self.eq_bypass_check.isChecked():
+            return ""
+        return track_audio_filter(
+            self.track_volume_slider.value() / 2, [slider.value() / 2 for slider in self.eq_sliders],
+        )
+
+    def _update_audio_source(self, *_args: object) -> None:
+        """Point the player at the original or at a copy rendered with the current volume/EQ."""
+        if not self._audio_available:
+            return
+        wanted = self._wanted_filter()
+        if self._eq_state == "rendering" and wanted == self._eq_rendering_filter:
+            return
+        self._eq_generation += 1  # whatever is still rendering is stale now
+        self._eq_rendering_filter = wanted
+        if wanted == self._eq_playing_filter:
+            self._set_eq_state("eq" if wanted else "original")
+        elif not wanted:
+            self._swap_source(Path(self.track.file_path), "")
+            self._set_eq_state("original")
+        elif self.ffmpeg_executable is None:
+            self._set_eq_state("no_ffmpeg")
+        else:
+            if self._eq_dir is None:
+                self._eq_dir = TemporaryDirectory(prefix="track-eq-", ignore_cleanup_errors=True)
+            output = Path(self._eq_dir.name) / f"eq_{self._eq_generation}.flac"
+            self._set_eq_state("rendering")
+            # ponytail: a superseded render still runs to its end (~1-2 s per track); kill it if that ever shows.
+            threading.Thread(
+                target=self._render_eq, args=(self._eq_generation, wanted, output), daemon=True,
+            ).start()
+
+    def _render_eq(self, generation: int, audio_filter: str, output: Path) -> None:
+        """Worker thread: the whole track through ``audio_filter`` into ``output``."""
+        command = [
+            str(self.ffmpeg_executable), "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-i", self.track.file_path, "-vn", "-map", "0:a:0",
+            "-af", f"{audio_filter},{EQ_PREVIEW_LIMITER}",
+            "-c:a", "flac", "-compression_level", "0", "-y", str(output),
+        ]
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, errors="replace", check=False,
+                **hidden_process_kwargs(),
+            )
+            error = "" if result.returncode == 0 else (
+                result.stderr.strip().splitlines() or [f"FFmpeg exited with {result.returncode}"])[-1]
+        except OSError as exc:
+            error = str(exc)
+        try:
+            self.eq_rendered.emit(generation, audio_filter, "" if error else str(output), error)
+        except RuntimeError:
+            pass  # the dialog closed meanwhile
+
+    def _eq_render_finished(self, generation: int, audio_filter: str, path: str, error: str) -> None:
+        if generation != self._eq_generation:
+            if path:
+                Path(path).unlink(missing_ok=True)
+            return
+        if error:
+            self._eq_error = error
+            self._set_eq_state("failed")
+            return
+        self._swap_source(Path(path), audio_filter)
+        self._set_eq_state("eq")
+
+    def _swap_source(self, path: Path, audio_filter: str) -> None:
+        """Change what the player plays, resuming at the same position."""
+        playing = self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self._pending_resume = (self.media_player.position(), playing)
+        previous = self.media_player.source().toLocalFile()
+        self._eq_playing_filter = audio_filter
+        self.media_player.setSource(QUrl.fromLocalFile(str(path.resolve())))
+        if self._eq_dir is not None and previous.startswith(Path(self._eq_dir.name).as_posix()):
+            try:
+                Path(previous).unlink(missing_ok=True)
+            except OSError:
+                pass  # still held by the player; the folder goes when the dialog closes
+
+    def _media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if self._pending_resume is None or status not in (
+            QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia,
+        ):
+            return
+        position, playing = self._pending_resume
+        self._pending_resume = None
+        self.media_player.setPosition(position)
+        if playing:
+            self.media_player.play()
+
+    def _set_eq_state(self, state: str) -> None:
+        self._eq_state = state
+        korean = self.translator.is_korean
+        bar = activity_for(self)
+        if bar is not None and state == "rendering":
+            bar.update(EQ_ACTIVITY, None, label="음량·EQ 미리듣기 준비" if korean else "Preparing volume/EQ preview",
+                       detail=self.track.title or Path(self.track.file_path).name)
+        elif bar is not None:
+            bar.finish(EQ_ACTIVITY)
+        self.eq_status.setText({
+            "original": "원본 소리" if korean else "Original sound",
+            "rendering": "EQ 적용 중…" if korean else "Applying EQ…",
+            "eq": "볼륨/EQ 적용된 소리" if korean else "With volume/EQ",
+            "failed": (f"EQ 미리듣기 실패: {self._eq_error}" if korean
+                       else f"EQ preview failed: {self._eq_error}"),
+            "no_ffmpeg": ("FFmpeg가 없어 원본으로 재생합니다" if korean
+                          else "No FFmpeg: playing the original"),
+        }[state])
 
     def _refresh_header(self, *_args: object) -> None:
         if not hasattr(self, "video_list"):
@@ -855,33 +1110,42 @@ class TrackDetailsDialog(QDialog):
         self.media_player.setPosition(0)
         self._playback_position_changed(0)
 
+    def _position_sliders(self) -> tuple[QSlider, ...]:
+        """The Lyrics tab's and the Audio tab's position sliders (one player)."""
+        audio = getattr(self, "audio_position_slider", None)
+        return (self.playback_slider,) if audio is None else (self.playback_slider, audio)
+
     def _seek_playback(self) -> None:
-        """Seek audio to the position chosen on the preview slider."""
+        """Seek audio to the position chosen on whichever preview slider moved."""
+        sender = self.sender()
+        slider = sender if isinstance(sender, QSlider) else self.playback_slider
         if self._audio_available:
-            self.media_player.setPosition(self.playback_slider.value())
-        self._playback_position_changed(self.playback_slider.value())
+            self.media_player.setPosition(slider.value())
+        self._playback_position_changed(slider.value())
 
     def _playback_position_changed(self, position_ms: int) -> None:
-        if not self.playback_slider.isSliderDown():
-            self.playback_slider.setValue(max(0, position_ms))
+        for slider in self._position_sliders():
+            if not slider.isSliderDown():
+                slider.setValue(max(0, position_ms))
         total_ms = max(self.playback_slider.maximum(), round(self.track.duration_seconds * 1000))
-        self.playback_time.setText(
-            f"{self._clock(position_ms)} / {self._clock(total_ms)}"
-        )
+        text = f"{self._clock(position_ms)} / {self._clock(total_ms)}"
+        self.playback_time.setText(text)
+        if hasattr(self, "audio_time"):
+            self.audio_time.setText(text)
         self._update_live_lyrics(position_ms)
 
     def _playback_duration_changed(self, duration_ms: int) -> None:
         duration = max(1, duration_ms, round(self.track.duration_seconds * 1000))
-        self.playback_slider.setRange(0, duration)
+        for slider in self._position_sliders():
+            slider.setRange(0, duration)
         self._playback_position_changed(self.media_player.position())
 
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         korean = self.translator.is_korean
         playing = state == QMediaPlayer.PlaybackState.PlayingState
-        if playing:
-            self.play_button.setText("일시정지" if korean else "Pause")
-        else:
-            self.play_button.setText("재생" if korean else "Play")
+        text = ("일시정지" if korean else "Pause") if playing else ("재생" if korean else "Play")
+        self.play_button.setText(text)
+        self.audio_play_button.setText(text)
 
     def _playback_error(
         self, _error: QMediaPlayer.Error, message: str = "",
@@ -999,11 +1263,23 @@ class TrackDetailsDialog(QDialog):
             self.video_list.item(index).text()
             for index in range(self.video_list.count())
         ]
+        self.selected_volume_db = self.track_volume_slider.value() / 2
+        eq = [slider.value() / 2 for slider in self.eq_sliders]
+        self.selected_eq_db = eq if any(eq) else []
         self.accept()
 
     def done(self, result: int) -> None:
         """Never leave preview audio playing after the form closes."""
         self.media_player.stop()
+        self._eq_timer.stop()
+        self._eq_generation += 1  # drop any render still on its way
+        bar = activity_for(self)
+        if bar is not None:
+            bar.finish(EQ_ACTIVITY)
+        if self._eq_dir is not None:
+            self.media_player.setSource(QUrl())  # release the rendered file first
+            self._eq_dir.cleanup()
+            self._eq_dir = None
         super().done(result)
 
     def retranslate(self) -> None:
@@ -1013,6 +1289,26 @@ class TrackDetailsDialog(QDialog):
         self.tabs.setTabText(1, "분석" if korean else "Analysis")
         self.tabs.setTabText(2, "가사 설정" if korean else "Lyrics settings")
         self.tabs.setTabText(3, "이 곡의 영상" if korean else "Videos for this track")
+        self.tabs.setTabText(4, "오디오" if korean else "Audio")
+        self.track_volume_group.setTitle("곡 볼륨" if korean else "Track volume")
+        self.eq_group.setTitle("이퀄라이저 (dB)" if korean else "Equalizer (dB)")
+        self.reset_audio_button.setText("초기화" if korean else "Reset")
+        self.eq_bypass_check.setText("원본과 비교 (볼륨/EQ 끄기)" if korean else "Compare with original (bypass)")
+        self.audition_group.setTitle("미리듣기" if korean else "Listen")
+        self.audio_stop_button.setText("정지" if korean else "Stop")
+        for button in (self.audio_play_button, self.audio_stop_button, self.eq_bypass_check):
+            button.setEnabled(self._audio_available)
+        self.audio_position_slider.setEnabled(self._audio_available)
+        self._set_eq_state(self._eq_state)
+        self.audio_help.setText(
+            "이 곡에만 적용되며 미리보기와 내보내기에 반영됩니다. 전체 믹스는 여전히 -14 LUFS로 "
+            "맞춰지므로, 볼륨은 다른 곡과 비교한 상대적인 크기를 조절합니다. "
+            "값을 바꾸면 잠시 뒤 재생 중인 소리에 반영됩니다."
+            if korean else
+            "Applies to this track only, in Preview and Export. The whole mix is still normalized "
+            "to -14 LUFS, so volume sets this track's level relative to the others. "
+            "Changes reach the playing sound after a moment."
+        )
         self.analysis_panel.retranslate(korean)
         self.video_scope_badge.setText(
             "적용 범위 · 이 곡이 재생되는 동안만"

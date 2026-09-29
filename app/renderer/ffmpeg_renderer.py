@@ -1601,6 +1601,7 @@ class FFmpegRenderer:
                 progress=lambda _stage, fraction, message: self._report(
                     progress_callback, "Preparing audio", 0.2 + fraction * 0.3, message,
                 ),
+                track_filters={track.id: track.audio_filter for track in active_tracks},
             )
         except AutoMixRenderError as error:
             if cancel_event.is_set():

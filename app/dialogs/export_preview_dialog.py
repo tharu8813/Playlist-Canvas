@@ -538,7 +538,8 @@ class ExportPreviewDialog(QDialog):
                     level_ready.connect(self._on_playback_level)
                 # Attach right away (paused at 0), so the first transition renders before Play.
                 QTimer.singleShot(0, self, lambda: self._report_playhead(force=True))
-        elif self._transition_mode != "none" and self._preview_proxy_ffmpeg is not None and self.tracks:
+        elif ((self._transition_mode != "none" or any(track.audio_filter for track in self.tracks))
+              and self._preview_proxy_ffmpeg is not None and self.tracks):
             self._blended_audio_temp_dir = TemporaryDirectory(prefix="playlist-preview-audio-", ignore_cleanup_errors=True)
             self._blended_audio_controller = PreviewAudioController(
                 FFmpegRenderer(self._preview_proxy_ffmpeg), self,
@@ -3171,6 +3172,8 @@ class ExportPreviewDialog(QDialog):
         else:
             index, track, elapsed, _start = selected
             target_index = index
+            # Until the mix lands, the raw file plays: its volume applies here, its EQ cannot.
+            self._active_track_gain = 10 ** (track.volume_db / 20)
             url = QUrl.fromLocalFile(str(Path(track.file_path).resolve()))
             target_ms = round(elapsed * 1000)
 
@@ -3673,8 +3676,9 @@ class ExportPreviewDialog(QDialog):
         slider = getattr(self, "volume_slider", None)
         if slider is None or not hasattr(self, "audio_output"):
             return
-        gain = 1.0 if self._active_track_index == _BLENDED_AUDIO_TRACK_INDEX else getattr(self, "_per_track_gain", 1.0)
-        self.audio_output.setVolume(slider.value() / 100.0 * gain)
+        gain = 1.0 if self._active_track_index == _BLENDED_AUDIO_TRACK_INDEX else (
+            getattr(self, "_per_track_gain", 1.0) * getattr(self, "_active_track_gain", 1.0))
+        self.audio_output.setVolume(min(1.0, slider.value() / 100.0 * gain))
 
     def _apply_blended_audio(self, path: Path, plan, covered_until: float = math.inf,
                              *, playhead: float | None = None) -> None:

@@ -10,6 +10,29 @@ from uuid import uuid4
 
 from app.utils.time_format import format_clock
 
+EQ_BANDS_HZ = (60, 250, 1000, 4000, 12000)
+"""Per-track graphic EQ: a low shelf, three peaks, a high shelf."""
+EQ_LIMIT_DB = 12.0
+VOLUME_RANGE_DB = (-24.0, 12.0)
+
+
+def track_audio_filter(volume_db: float, eq_db: list[float]) -> str:
+    """FFmpeg filters for a volume and EQ_BANDS_HZ gains; "" when neutral."""
+    parts = []
+    last = len(EQ_BANDS_HZ) - 1
+    for index, (frequency, gain) in enumerate(zip(EQ_BANDS_HZ, eq_db)):
+        if abs(gain) < 0.05:
+            continue
+        if index == 0:
+            parts.append(f"lowshelf=f={frequency}:g={gain:.2f}")
+        elif index == last:
+            parts.append(f"highshelf=f={frequency}:g={gain:.2f}")
+        else:
+            parts.append(f"equalizer=f={frequency}:t=o:w=2:g={gain:.2f}")
+    if abs(volume_db) >= 0.05:
+        parts.append(f"volume={volume_db:.2f}dB")
+    return ",".join(parts)
+
 
 @dataclass(slots=True)
 class PlaylistTrack:
@@ -28,6 +51,14 @@ class PlaylistTrack:
     id: str = field(default_factory=lambda: str(uuid4()))
     cover_path: str = ""
     video_paths: list[str] = field(default_factory=list)
+    volume_db: float = 0.0
+    eq_db: list[float] = field(default_factory=list)
+    """Gain per EQ_BANDS_HZ band; empty is flat."""
+
+    @property
+    def audio_filter(self) -> str:
+        """FFmpeg filters for this track's volume/EQ, applied before any mixing; "" when neutral."""
+        return track_audio_filter(self.volume_db, self.eq_db)
 
     @property
     def filename(self) -> str:
@@ -74,6 +105,14 @@ class PlaylistTrack:
         if (not isinstance(offset, (int, float)) or isinstance(offset, bool)
                 or not isfinite(float(offset)) or abs(float(offset)) > 3_600):
             raise ValueError(f"Track '{track.title}' has an invalid lyric timing offset.")
+        low, high = VOLUME_RANGE_DB
+        if (not isinstance(track.volume_db, (int, float)) or isinstance(track.volume_db, bool)
+                or not low <= track.volume_db <= high):
+            raise ValueError(f"Track '{track.title}' has an invalid volume.")
+        if (not isinstance(track.eq_db, list) or len(track.eq_db) > len(EQ_BANDS_HZ)
+                or not all(isinstance(gain, (int, float)) and not isinstance(gain, bool)
+                           and abs(gain) <= EQ_LIMIT_DB for gain in track.eq_db)):
+            raise ValueError(f"Track '{track.title}' has invalid EQ settings.")
         for cue in track.lyrics:
             if not isinstance(cue, dict) or not isinstance(cue.get("text", ""), str):
                 raise ValueError(f"Track '{track.title}' contains an invalid lyric cue.")

@@ -175,6 +175,7 @@ class PlaylistService(QObject):
                     enabled=track.enabled, lyrics_path=track.lyrics_path,
                     lyrics=[cue.copy() for cue in track.lyrics],
                     lyrics_timing_offset_seconds=track.lyrics_timing_offset_seconds,
+                    volume_db=track.volume_db, eq_db=list(track.eq_db),
                 ))
         changed = len(result) != len(self._tracks)
         self._tracks = result

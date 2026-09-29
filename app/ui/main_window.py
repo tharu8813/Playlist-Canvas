@@ -2518,10 +2518,15 @@ class MainWindow(QMainWindow):
             for content in self.project_content_service.items
             if content.media_type == "lyrics"
         ]
+        try:
+            ffmpeg_executable = FFmpegRenderer.find_executable(self.settings_service.current.ffmpeg_path or None)
+        except FFmpegNotFoundError:
+            ffmpeg_executable = None  # the dialog plays the original, without EQ
         dialog = TrackDetailsDialog(
             track, self.translator, self, content_lyrics=content_lyrics,
             analysis=self.automix_analyses.get(track_id),
             structure=self.automix_structures.get(track_id),
+            ffmpeg_executable=ffmpeg_executable,
         )
         controller = self.track_analysis_controller
         dialog.analysis_requested.connect(lambda: self._analyze_track(track_id, dialog))
@@ -2545,6 +2550,8 @@ class MainWindow(QMainWindow):
                 lyrics_path=dialog.selected_lyrics_path,
                 lyrics=dialog.selected_lyrics,
                 lyrics_timing_offset_seconds=dialog.selected_timing_offset,
+                volume_db=dialog.selected_volume_db,
+                eq_db=dialog.selected_eq_db,
             )
 
     def _choose_audio_files(self) -> None:
