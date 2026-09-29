@@ -2259,7 +2259,8 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 self.assertEqual(panel.current_index, 0)
                 preview._apply_blended_audio(files["final"], plans[3])
                 self.assertEqual(panel._state, ("final", None))
-                self.assertIn(("bars", 8), plans[3].audio.transitions[1].details)
+                # With C analysed, the final plan beat-matches B -> C (its length is the scorer's call).
+                self.assertIn(("strategy", "beat_match"), plans[3].audio.transitions[1].details)
                 # "Open window": the drawn view follows the same plan and seeks Preview.
                 panel.open_window_button.click()
                 window = preview._transition_window
