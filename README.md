@@ -51,6 +51,7 @@ Playlist Canvas는 정적인 이미지와 음악을 합치는 수준을 넘어, 
 - H.264/H.265 및 지원되는 GPU 인코더를 이용한 MP4 내보내기
 - FFmpeg 자동 다운로드, SHA-256 검증, 설치 및 즉시 적용
 - GitHub Releases 기반 자동 업데이트 확인, 릴리즈 노트 표시와 검증된 Setup 실행
+- 오프라인 사용 설명서: 창마다 나뉜 탭, 태그·전체 검색, 번호가 표시된 스크린샷, 어느 창에서든 **F1**로 그 창의 도움말 열기
 
 ## 사용자 설치
 
@@ -187,6 +188,18 @@ python scripts/run_tests.py
 각각 별도 프로세스에서 실행됩니다. Windows GitHub Actions에서도 같은 컴파일,
 회귀 테스트, PyInstaller 빌드와 패키지 스모크 테스트를 실행합니다.
 
+## 사용 설명서 스크린샷 갱신
+
+도움말(`app/dialogs/help_content.py`)의 스크린샷은 샘플 프로젝트로 각 창을 열어 자동으로
+촬영합니다. 화면이 바뀌었다면 FFmpeg가 PATH에 있는 상태에서 다시 생성하세요. 번호 표시는 본문의
+①②③ 목록과 맞춰져 있습니다.
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+python tools/capture_help_images.py            # 한국어·영어 모두
+python tools/capture_help_images.py --lang ko  # 한 언어만
+```
+
 ## Windows 배포본 빌드
 
 먼저 PyInstaller로 설치 프로그램에 포함할 애플리케이션 폴더를 생성합니다.
@@ -209,6 +222,7 @@ python -m PyInstaller --noconfirm --clean playlist_canvas.spec
 playlist_project/
 ├─ app/                    # 편집기 UI, 모델, 서비스와 렌더러
 ├─ app/resources/          # 앱·프로젝트 파일 아이콘과 기본 언어팩
+├─ app/resources/help/     # 사용 설명서 스크린샷 (tools/capture_help_images.py로 다시 생성)
 ├─ docs/images/            # README 이미지
 ├─ tests/                  # 회귀 및 배포 계약 테스트
 ├─ tools/                  # 개발 보조 도구

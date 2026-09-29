@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.models.playlist import PlaylistTrack
 from app.preview.album_art import track_cover_thumbnail
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
@@ -195,6 +196,7 @@ class TrackOrderDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "playlist"), translator)
         self.translator = translator
         korean = translator.is_korean
         self._tracks_by_id: dict[str, PlaylistTrack] = {t.id: t for t in tracks}

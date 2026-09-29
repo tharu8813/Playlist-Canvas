@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.models.project import (
     DEFAULT_CROSSFADE_SECONDS, MAX_CROSSFADE_SECONDS, MIN_CROSSFADE_SECONDS, ProjectSettings,
 )
@@ -64,6 +65,7 @@ class NewProjectDialog(QDialog):
         preview_sources: PreviewSources | None = None,
     ) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "start"), translator)
         self.translator = translator
         self._preview_sources = preview_sources
         self._preview_cache: dict[tuple[str, int, int], QPixmap] = {}

@@ -554,11 +554,11 @@ AUTOMIX_GUIDE = (
         ("<b>Space</b>로 선택한 전환 구간만 재생하고, <b>L</b>로 구간 반복, <b>B</b>로 자동 버전과 번갈아 "
          "비교합니다. 미리듣기에는 FFmpeg가 필요합니다.<br><br>"
          "<b>복사 · 붙여넣기 · 프리셋</b>으로 설정을 다른 전환에 재사용하고, Ctrl+Backspace로 자동 전환으로 "
-         "되돌립니다. 전체 단축키는 <b>F1</b>에서 볼 수 있습니다.",
+         "되돌립니다. <b>F1</b>은 도움말, <b>Shift+F1</b>은 전체 단축키입니다.",
          "<b>Space</b> plays just the selected transition, <b>L</b> loops it and <b>B</b> switches to the "
          "automatic version to compare. Listening needs FFmpeg.<br><br>"
          "Reuse settings on other transitions with <b>Copy · Paste · Presets</b>, and Ctrl+Backspace puts a "
-         "transition back on automatic. <b>F1</b> lists every shortcut."),
+         "transition back on automatic. <b>F1</b> opens the help and <b>Shift+F1</b> lists every shortcut."),
         _art_editor_listen,
     ),
 )

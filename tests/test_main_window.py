@@ -2188,40 +2188,69 @@ class MainWindowWorkspaceTests(MainWindowTestCase):
         about_dialog.assert_called_once()
         about_dialog.return_value.exec.assert_called_once()
 
-    def test_help_action_opens_searchable_offline_guide(self) -> None:
+    def test_help_action_opens_the_guide_for_what_is_in_use(self) -> None:
         with patch("app.ui.main_window.HelpDialog") as help_dialog:
             self.window._show_help()
-        help_dialog.assert_called_once_with(self.window.translator, self.window)
+        help_dialog.assert_called_once_with(
+            self.window.translator, self.window, tab="canvas", topic="workspace",
+        )
         help_dialog.return_value.exec.assert_called_once()
         self.assertEqual(self.window.help_action.shortcut().toString(), "F1")
-
-    def test_help_dialog_filters_topics_and_shows_no_result_state(self) -> None:
-        dialog = HelpDialog(self.window.translator, self.window)
+        focus = self.window.playlist_editor.findChildren(QWidget)[0]
+        with patch("app.ui.main_window.QApplication.focusWidget", return_value=focus):
+            self.assertEqual(self.window._help_context(), ("canvas", "playlist"))
+        with patch("app.ui.main_window.QApplication.focusWidget", return_value=self.window.layer_panel):
+            self.assertEqual(self.window._help_context(), ("canvas", "layers"))
+        self.window._inline_preview = MagicMock()
         try:
-            self.assertGreaterEqual(dialog.topic_list.count(), 20)
-            self.assertEqual(dialog.current_topic_id, "start")
-            all_identifiers = {
-                dialog.topic_list.item(row).data(Qt.ItemDataRole.UserRole)
-                for row in range(dialog.topic_list.count())
-            }
-            self.assertTrue({
-                "workspace", "sources", "project_content", "lyrics",
-                "audio_visuals", "full_preview", "export_process", "performance",
-            }.issubset(all_identifiers))
+            self.assertEqual(self.window._help_context(), ("preview", "full_preview"))
+        finally:
+            self.window._inline_preview = None
+
+    def test_help_dialog_has_a_tab_per_window_with_tagged_topics(self) -> None:
+        dialog = HelpDialog(self.window.translator, self.window, tab="automix_editor")
+        try:
+            self.assertEqual(dialog.tab_bar.count(), 6)
+            self.assertEqual(
+                [dialog.tab_bar.tabText(index) for index in range(6)],
+                ["캔버스", "미리보기", "가사 편집기", "AutoMix 편집기", "곡 정보/설정", "기타"],
+            )
+            self.assertEqual(dialog.current_tab_id, "automix_editor")
+            self.assertIn("automix_timeline", dialog.visible_topic_ids())
+            self.assertIn("#AutoMix", dialog.browser.toPlainText())
+            dialog.select_topic("lrc_timing")
+            self.assertEqual(dialog.current_tab_id, "lyrics_editor")
+            self.assertEqual(dialog.current_topic_id, "lrc_timing")
+            dialog._open_link(QUrl("topic:track_audio"))
+            self.assertEqual((dialog.current_tab_id, dialog.current_topic_id), ("track", "track_audio"))
+            self.assertTrue(dialog.browser.images, "the topic's screenshot is rendered")
+            dialog._open_link(QUrl("tag:단축키"))
+            self.assertEqual(dialog.tag_combo.currentData(), "단축키")
+            for index, tab in enumerate(("canvas", "preview", "lyrics_editor", "automix_editor")):
+                dialog.select_tab(tab)
+                self.assertTrue(dialog.tab_bar.tabText(index).endswith("1"), dialog.tab_bar.tabText(index))
+                self.assertTrue(all(
+                    "단축키" in dialog._topic(identifier).tags for identifier in dialog.visible_topic_ids()
+                ))
+            dialog.set_tag_filter(None)
+            self.assertEqual(dialog.tab_bar.tabText(0), "캔버스")
+        finally:
+            dialog.close()
+
+    def test_help_search_spans_every_tab_and_shows_a_no_result_state(self) -> None:
+        dialog = HelpDialog(self.window.translator, self.window, tab="other")
+        try:
             dialog.search_edit.setText("볼륨")
-            volume_identifiers = {
-                dialog.topic_list.item(row).data(Qt.ItemDataRole.UserRole)
-                for row in range(dialog.topic_list.count())
-            }
-            self.assertIn("lyrics", volume_identifiers)
-            self.assertIn("full_preview", volume_identifiers)
+            found = set()
+            for tab in ("canvas", "preview", "lyrics_editor", "automix_editor", "track", "other"):
+                dialog.select_tab(tab)
+                found.update(dialog.visible_topic_ids())
+            self.assertTrue({"preview_controls", "track_audio", "lrc_timing"}.issubset(found))
             dialog.search_edit.setText("FFmpeg")
-            self.assertGreaterEqual(dialog.topic_list.count(), 1)
-            identifiers = {
-                dialog.topic_list.item(row).data(Qt.ItemDataRole.UserRole)
-                for row in range(dialog.topic_list.count())
-            }
-            self.assertIn("ffmpeg", identifiers)
+            self.assertEqual(dialog.current_tab_id, "other")
+            self.assertEqual(dialog.visible_topic_ids()[0], "ffmpeg")  # title matches rank first
+            dialog.search_edit.setText("#AutoMix")
+            self.assertEqual(dialog.current_tab_id, "automix_editor", "jumps to a tab that has matches")
             dialog.search_edit.setText("__NO_HELP_RESULT__")
             self.assertEqual(dialog.topic_list.count(), 0)
             self.assertIn("검색 결과 없음", dialog.browser.toPlainText())

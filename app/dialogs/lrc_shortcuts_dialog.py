@@ -58,11 +58,12 @@ class LrcShortcutsDialog(QDialog):
             ("Ctrl+Z", "마지막 타이밍 기록 취소" if korean else "Undo the last timing change"),
             ("Ctrl+Y / Ctrl+Shift+Z", "취소한 타이밍 다시 실행" if korean else "Redo the last undone timing change"),
             ("Ctrl+S", "현재 기록을 LRC 파일로 저장" if korean else "Save current timing as an LRC file"),
-            ("F1", "이 단축키 안내 창 열기" if korean else "Open this shortcut reference"),
+            ("F1", "가사 편집기 도움말 열기" if korean else "Open the lyrics editor help"),
             ("Ctrl+Space", "오디오 재생 또는 일시정지" if korean else "Play or pause audio"),
             ("← / →", "재생 위치를 1초 앞뒤로 이동" if korean else "Seek backward or forward by one second"),
             ("F2", "선택한 가사 내용 편집" if korean else "Edit the selected lyric"),
             ("Delete", "확인 후 선택한 가사와 타이밍 삭제" if korean else "Delete the selected lyric and timing after confirmation"),
+            ("Shift+F1", "이 단축키 안내 창 열기" if korean else "Open this shortcut reference"),
         ]
         self.table.setRowCount(len(entries))
         for row, (key_text, action) in enumerate(entries):

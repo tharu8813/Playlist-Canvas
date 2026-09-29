@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QSplitter, QVBoxLayout, QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.services.ai_project_prompt_service import (
     AIProjectPromptService, AIProjectPromptSettings,
 )
@@ -20,6 +21,7 @@ class AIProjectBuilderDialog(QDialog):
 
     def __init__(self, translator: Translator, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "presets_ai"), translator)
         self.translator = translator
         self.prompt_service = AIProjectPromptService(self)
         self._updating = False

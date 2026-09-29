@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 from app.automix.analysis.key import key_to_camelot
 from app.automix.models import TrackAnalysis
 from app.automix.structure.models import TrackStructureAnalysis
+from app.dialogs.help_dialog import install_help_shortcut
 from app.models.playlist import (
     EQ_BANDS_HZ, EQ_LIMIT_DB, VOLUME_RANGE_DB, PlaylistTrack, track_audio_filter,
 )
@@ -79,6 +80,10 @@ def audio_file_facts(path: str) -> dict[str, object]:
     return facts
 
 
+_TAB_HELP_TOPICS = ("track_info", "track_analysis", "track_lyrics", "track_videos", "track_audio")
+"""F1 opens the help topic of the tab being shown (tabs in this order)."""
+
+
 class TrackDetailsDialog(QDialog):
     """Edit timed lyrics and synchronization without mutating the track on Cancel."""
 
@@ -96,6 +101,9 @@ class TrackDetailsDialog(QDialog):
         ffmpeg_executable: Path | None = None,
     ) -> None:
         super().__init__(parent)
+        install_help_shortcut(
+            self, lambda dialog: ("track", _TAB_HELP_TOPICS[max(0, dialog.tabs.currentIndex())]), translator,
+        )
         self.track = track
         # EQ preview: the player swaps to a copy of the track rendered with the
         # current volume/EQ (Qt Multimedia cannot filter audio itself).

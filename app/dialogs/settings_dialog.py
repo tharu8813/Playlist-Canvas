@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.services.app_settings_service import (
     ENCODING_PRESETS,
     RESOLUTIONS,
@@ -61,6 +62,10 @@ from app.renderer.ffmpeg_renderer import (
 from app.services.export_validation_service import EXPORT_FPS_OPTIONS
 
 
+_TAB_HELP_TOPICS = ("settings", "export", "ffmpeg", "lyrics_files", "export_process", "maintenance")
+"""F1 opens the help topic of the tab being shown (General, Export, FFmpeg, Content, Notifications, Maintenance)."""
+
+
 class SettingsDialog(QDialog):
     """Edits app-wide render, appearance, and localization preferences."""
 
@@ -74,6 +79,9 @@ class SettingsDialog(QDialog):
                  translator: Translator, parent: object | None = None, *,
                  active_preview_backend: str | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(
+            self, lambda dialog: ("other", _TAB_HELP_TOPICS[max(0, dialog.tabs.currentIndex())]), translator,
+        )
         self.setObjectName("appSettingsDialog")
         self.translator = translator
         self.setMinimumSize(720, 520)

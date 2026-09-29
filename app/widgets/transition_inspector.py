@@ -31,6 +31,7 @@ from app.automix.renderer import (
     _CURVE_BY_TRANSITION_TYPE, _band_envelope, band_windows_of, echo_beat, tape_entry, tape_stop_schedule,
     transition_dsp_style,
 )
+from app.dialogs.help_dialog import install_help_shortcut
 from app.timeline.render_plan import (
     AudioRenderClip, AudioRenderTransition, CompiledRenderPlan, TransitionDsp, visual_segments,
 )
@@ -726,6 +727,7 @@ class TransitionInspectorWindow(QDialog):
 
     def __init__(self, panel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("preview", "transition_details"))
         self.panel = panel
         self.setObjectName("automixInspector")
         self.setWindowFlag(Qt.WindowType.Window, True)

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from app import __version__
+from app.dialogs.help_dialog import install_help_shortcut
 from app.utils.i18n import Translator
 
 
@@ -36,6 +37,7 @@ class AboutDialog(QDialog):
     def __init__(self, translator: Translator, ffmpeg_path: Path | None,
                  log_directory: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("other", "troubleshooting"))
         self.translator = translator
         self.ffmpeg_path = ffmpeg_path
         self.log_directory = log_directory

@@ -69,7 +69,10 @@ analysis = Analysis(
         (str(project_root / "app" / "assets" / "icons" / "spin_down.svg"), "assets/icons"),
         (str(project_root / "app" / "assets" / "icons" / "spin_up.svg"), "assets/icons"),
         (str(project_root / "LICENSE.txt"), "."),
-    ] + [(str(AUTOMIX_MODEL_DIRECTORY / name), "app/automix/analysis/models") for name in AUTOMIX_MODEL_FILES],
+    ] + [(str(AUTOMIX_MODEL_DIRECTORY / name), "app/automix/analysis/models") for name in AUTOMIX_MODEL_FILES]
+    # User Guide screenshots (tools/capture_help_images.py), one folder per language.
+    + [(str(path), f"app/resources/help/{path.parent.name}")
+       for path in sorted((project_root / "app" / "resources" / "help").glob("*/*.png"))],
     hiddenimports=numpy_hiddenimports + automix_hiddenimports + [
         "PySide6.QtSvg", "PySide6.QtMultimedia", "PySide6.QtOpenGLWidgets",
     ],

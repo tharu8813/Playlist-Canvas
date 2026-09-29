@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source
 from app.preview.album_art import adjust_personal_color, extract_track_personal_color
@@ -87,6 +88,7 @@ class ColorEditorDialog(QDialog):
         tracks: list[PlaylistTrack] | None = None,
     ) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "properties"), translator)
         self.translator = translator
         self._korean = translator.is_korean
         self._tracks = list(tracks or [])

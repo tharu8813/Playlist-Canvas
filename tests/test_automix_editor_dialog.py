@@ -7,6 +7,7 @@ from types import SimpleNamespace  # noqa: E402
 from unittest.mock import Mock, patch  # noqa: E402
 
 from PySide6.QtCore import QPoint, QSettings, Qt  # noqa: E402
+from PySide6.QtGui import QShortcut  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
@@ -64,6 +65,19 @@ class AutoMixEditorTests(unittest.TestCase):
         self.assertFalse(editor.play_button.isEnabled())
         controller.edit_transition()  # the playlist's "AutoMix editor" button: first transition
         self.assertEqual([e._index for e in host.findChildren(AutoMixEditorDialog)][-1], 0)
+
+    def test_f1_opens_its_help_tab_and_shift_f1_the_shortcut_summary(self):
+        _host, editor = self._editor()
+        keys = {shortcut.key().toString() for shortcut in editor.findChildren(QShortcut)}
+        self.assertTrue({"F1", "Shift+F1"}.issubset(keys))
+        with patch("app.dialogs.help_dialog.HelpDialog") as help_dialog:
+            editor.help_button.click()
+        _translator, parent = help_dialog.call_args.args
+        self.assertIs(parent, editor)
+        self.assertEqual(help_dialog.call_args.kwargs, {"tab": "automix_editor", "topic": "automix_editor"})
+        help_dialog.return_value.exec.assert_called_once()
+        with patch.object(QApplication, "focusWidget", return_value=editor.properties):
+            self.assertEqual(editor._help_context(), ("automix_editor", "automix_properties"))
 
     def test_it_can_be_maximized_and_reopens_the_way_it_was_left(self):
         if not QApplication.organizationName():  # QSettings stores nothing without one

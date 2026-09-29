@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.services.export_storage_service import (
     ExportStorageEstimate,
     ExportStorageSnapshot,
@@ -183,6 +184,7 @@ class ExportProgressDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("other", "export_process"))
         self.setModal(False)
         # Grow the window to fit its content instead of letting QVBoxLayout
         # crush word-wrapped labels and cards when a status line wraps to more

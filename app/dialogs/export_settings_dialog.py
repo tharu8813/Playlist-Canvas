@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.services.app_settings_service import (
     AUDIO_BITRATES,
     ENCODING_PRESETS,
@@ -59,6 +60,7 @@ class ExportSettingsDialog(QDialog):
                  canvas_size: tuple[int, int] | None = None,
                  estimated_layer_count: int = 1) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("other", "export"), translator)
         self.translator = translator
         self._base_settings = settings
         self.canvas_size = canvas_size

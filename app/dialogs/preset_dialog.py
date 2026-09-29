@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.presets.preset_service import PresetDefinition
 from app.presets.preset_preview import render_preset_thumbnail
 from app.presets.user_preset_service import (
@@ -27,6 +28,7 @@ class DesignPresetDialog(QDialog):
 
     def __init__(self, translator: Translator, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "presets_ai"), translator)
         self.translator = translator
         self._preview_cache: dict[str, QPixmap] = {}
         self._presets: list[PresetDefinition] = []
