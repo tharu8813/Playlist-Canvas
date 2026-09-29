@@ -46,7 +46,9 @@ from app.automix.candidates import (
     vocal_intro_end,
     vocal_outro_start,
 )
+from app.automix.analysis.key import harmonic_shift, shift_key
 from app.automix.compatibility import evaluate_compatibility
+from app.automix.exits import CUT_SECONDS, plan_phrase_exit
 from app.automix.models import TrackAnalysis
 from app.automix.overrides import STYLE_AUTO, STYLE_CUT, STYLE_EQ, STYLE_LEGACY, TransitionOverride
 from app.automix.settings import AutoMixTransitionSettings
@@ -72,6 +74,7 @@ _STRATEGY_TRANSITION_TYPES = {
     TransitionStrategy.BEAT_MATCH: TransitionType.BEAT_MATCH,
     TransitionStrategy.BEAT_ALIGNED_CROSSFADE: TransitionType.EQUAL_POWER,
     TransitionStrategy.FIXED_CROSSFADE: TransitionType.CROSSFADE,
+    TransitionStrategy.PHRASE_EXIT: TransitionType.EQUAL_POWER,
 }
 """CUT is deliberately absent: a CUT candidate means no overlap at all, so
 no AudioRenderTransition is emitted for that boundary (see _place_tracks).
@@ -184,6 +187,7 @@ def _place_tracks(
                           if into_previous is not None else previous.source_in)
             outgoing_clip, timeline_start, source_in, transition = _plan_overlap(
                 previous, tracks[index - 1], track, analyses, structures, settings, ramp_floor, log_diagnostics,
+                previous_style=into_previous.dsp if into_previous is not None else None,
             )
             # AudioRenderClip is immutable: the outgoing clip's trimmed tail
             # (and tempo ramp) replaces the one appended last iteration.
@@ -214,6 +218,24 @@ bars before their overlap (fewer when the track has no room): one phrase, the
 way a DJ rides the pitch fader instead of jumping it."""
 
 
+BRIDGE_RAMP_BARS = 16
+"""A tempo bridge (beyond max_tempo_change_percent) spreads its larger change over
+two phrases, so no single bar moves more than a direct match's ramp would."""
+KEY_GLIDE_SECONDS = 8.0
+"""A hand-set key shift on a track without a tempo glides over this long before the cue."""
+KEY_SHIFT_MIN_CONFIDENCE = 0.7
+"""Both key estimates must be at least this sure before a tail is re-pitched:
+a shift chosen from a wrong key makes the clash worse, not better."""
+
+
+def _key_shift(outgoing: TrackAnalysis, incoming: TrackAnalysis) -> int | None:
+    """Semitones to glide the outgoing tail by so the two keys mix (None: leave it)."""
+    if (outgoing.key is None or incoming.key is None
+            or min(outgoing.key_confidence, incoming.key_confidence) < KEY_SHIFT_MIN_CONFIDENCE):
+        return None
+    return harmonic_shift(outgoing.key, incoming.key, max_semitones=1)
+
+
 def _audible_start(analysis: TrackAnalysis | None, settings: AutoMixTransitionSettings) -> float:
     return audible_start(analysis) if analysis is not None and settings.enabled else 0.0
 
@@ -234,6 +256,7 @@ def _plan_overlap(
     settings: AutoMixTransitionSettings,
     ramp_floor: float,
     log_diagnostics: bool = True,
+    previous_style: TransitionDsp | None = None,
 ) -> tuple[AudioRenderClip, float, float, AudioRenderTransition | None]:
     """Decide how ``track`` follows ``previous_clip`` with no explicit gap.
 
@@ -269,6 +292,16 @@ def _plan_overlap(
         incoming_structure=structures.get(track.id),
     )
     best = select_best_candidate(candidates)
+    phrase_exit = None
+    if best is None or best.strategy in (TransitionStrategy.FIXED_CROSSFADE, TransitionStrategy.CUT):
+        # No shared tempo: leave on a phrase boundary instead of the same end fade every time.
+        phrase_exit = plan_phrase_exit(
+            outgoing_analysis, incoming_analysis,
+            structures.get(previous_track.id), structures.get(track.id),
+            outgoing_rate=previous_clip.playback_rate, earliest=ramp_floor, previous_style=previous_style,
+        )
+        if phrase_exit is not None:
+            best = phrase_exit.candidate
     if best is None or best.duration_seconds <= 0.0:
         return fallback
     if best.strategy is TransitionStrategy.CUT:
@@ -278,14 +311,25 @@ def _plan_overlap(
     cue = best.outgoing_source_time
     outgoing_clip = replace(previous_clip, source_out=best.outgoing_source_out)
     ramp_seconds = 0.0
+    key_shift = None
+    selector_outgoing = outgoing_analysis
     if abs(best.outgoing_rate - 1.0) > 1e-9:
         # Walk the outgoing track onto the incoming tempo over its last bars
         # before the cue, then hold that rate through the overlap: its beats
         # land on the incoming ones, and the incoming track never changes speed.
+        # A tempo bridge (beyond the direct budget) takes a longer ramp.
+        bridge = abs(best.outgoing_rate - 1.0) * 100.0 > settings.max_tempo_change_percent + 1e-9
+        bars = BRIDGE_RAMP_BARS if bridge else RAMP_BARS
         bar = (outgoing_analysis.meter_numerator or 4) * 60.0 / outgoing_analysis.bpm
-        ramp_start = min(cue, max(cue - RAMP_BARS * bar, ramp_floor, previous_clip.source_in))
+        ramp_start = min(cue, max(cue - bars * bar, ramp_floor, previous_clip.source_in))
         ramp_seconds = cue - ramp_start
-        outgoing_clip = replace(outgoing_clip, tempo_ramp=TempoRamp(ramp_start, cue, best.outgoing_rate))
+        key_shift = _key_shift(outgoing_analysis, incoming_analysis)
+        end_pitch = 2.0 ** (key_shift / 12.0) if key_shift else 1.0
+        if key_shift:
+            # The selector hears the tail as it will play: in the shifted, compatible key.
+            selector_outgoing = replace(outgoing_analysis, key=shift_key(outgoing_analysis.key, key_shift))
+        outgoing_clip = replace(outgoing_clip, tempo_ramp=TempoRamp(
+            ramp_start, cue, best.outgoing_rate, end_pitch=end_pitch))
 
     # Anchor timestamps are in the original media, not the playlist clock.
     timeline_start = outgoing_clip.timeline_at(cue)
@@ -301,9 +345,9 @@ def _plan_overlap(
     # DSP Phase 2: the mixing style is decided here, where the analysis and
     # the exact window both exist, and travels in the plan -- the renderer
     # never re-derives it. Timing above is already final and is not touched.
-    decision = select_transition_dsp(
-        best, compatibility, outgoing_analysis, incoming_analysis,
-        structures.get(previous_track.id), structures.get(track.id),
+    decision = phrase_exit.decision if phrase_exit is not None else select_transition_dsp(
+        best, compatibility, selector_outgoing, incoming_analysis,
+        structures.get(previous_track.id), structures.get(track.id), previous_style=previous_style,
     )
     outgoing_structure = structures.get(previous_track.id)
     incoming_structure = structures.get(track.id)
@@ -339,12 +383,14 @@ def _plan_overlap(
         ("incoming_structure_anchor", _structure_incoming_anchor(incoming_structure)),
         ("outgoing_key", outgoing_analysis.key),
         ("incoming_key", incoming_analysis.key),
+        ("key_shift_semitones", key_shift),
         *decision.metrics,
     )
     transition = AudioRenderTransition(
         clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
         timeline_start=timeline_start, duration=overlap, type=transition_type,
         dsp=decision.dsp, dsp_reasons=decision.reasons, details=details, vocal_handoff=decision.vocal_handoff,
+        beat_seconds=phrase_exit.beat_seconds if phrase_exit is not None else None,
     )
     # One line per transition in the app log, for tuning against real music.
     if log_diagnostics:
@@ -400,20 +446,36 @@ def _plan_manual(
     rate = 1.0
     if override.tempo_match and bpms_known:
         matched = _nearest_octave_rate(incoming_analysis.bpm / outgoing_analysis.bpm, settings)
-        if abs(matched - 1.0) * 100.0 <= settings.max_tempo_change_percent:
+        if abs(matched - 1.0) * 100.0 <= settings.max_bridge_tempo_percent:
             rate = matched
     duration = min(float(override.duration), (outgoing_end - cue) / rate, incoming_end - incoming_cue)
+    if override.style == TransitionDsp.DOWNBEAT_CUT.value:
+        duration = min(duration, CUT_SECONDS)  # a cut: the window only keeps it from clicking
     if duration < MIN_MANUAL_OVERLAP_SECONDS:
         return cut()
     outgoing_out = min(outgoing_end, cue + duration * rate)
 
     outgoing_clip = replace(previous_clip, source_out=outgoing_out)
     ramp_seconds = 0.0
-    if abs(rate - 1.0) > 1e-9:
-        bar = (outgoing_analysis.meter_numerator or 4) * 60.0 / outgoing_analysis.bpm
-        ramp_start = min(cue, max(cue - RAMP_BARS * bar, ramp_floor, previous_clip.source_in))
+    # Key: a hand-set shift always applies; "automatic" does what the planner
+    # does -- only alongside a tempo match, and only for confident key estimates.
+    key_shift = override.key_shift
+    if key_shift is None:
+        key_shift = (_key_shift(outgoing_analysis, incoming_analysis)
+                     if abs(rate - 1.0) > 1e-9 and outgoing_analysis is not None and incoming_analysis is not None
+                     else None)
+    end_pitch = 2.0 ** (key_shift / 12.0) if key_shift else 1.0
+    if abs(rate - 1.0) > 1e-9 or end_pitch != 1.0:
+        bpm = outgoing_analysis.bpm if outgoing_analysis is not None else None
+        bar = (outgoing_analysis.meter_numerator or 4) * 60.0 / bpm if bpm else KEY_GLIDE_SECONDS / RAMP_BARS
+        bars = BRIDGE_RAMP_BARS if abs(rate - 1.0) * 100.0 > settings.max_tempo_change_percent + 1e-9 else RAMP_BARS
+        # The editor's "tempo change starts" handle sets the length; else a phrase, as automatic does.
+        length = override.ramp_seconds if override.ramp_seconds is not None else bars * bar
+        ramp_start = min(cue, max(cue - length, ramp_floor, previous_clip.source_in))
         ramp_seconds = cue - ramp_start
-        outgoing_clip = replace(outgoing_clip, tempo_ramp=TempoRamp(ramp_start, cue, rate))
+        # A key glide alone keeps the clip's rate (TempoRamp to the same rate).
+        end_rate = rate if abs(rate - 1.0) > 1e-9 else previous_clip.playback_rate
+        outgoing_clip = replace(outgoing_clip, tempo_ramp=TempoRamp(ramp_start, cue, end_rate, end_pitch=end_pitch))
     timeline_start = outgoing_clip.timeline_at(cue)
     if timeline_start <= previous_clip.timeline_start:
         return fallback
@@ -442,8 +504,10 @@ def _plan_manual(
                 strategy=strategy, reasons=("manual",),
             )
             compatibility = evaluate_compatibility(outgoing_analysis, incoming_analysis, settings)
+            heard = (replace(outgoing_analysis, key=shift_key(outgoing_analysis.key, key_shift))
+                     if key_shift and outgoing_analysis.key else outgoing_analysis)
             decision = select_transition_dsp(
-                candidate, compatibility, outgoing_analysis, incoming_analysis,
+                candidate, compatibility, heard, incoming_analysis,
                 outgoing_structure, incoming_structure,
             )
             dsp, reasons, metrics = decision.dsp, decision.reasons, decision.metrics
@@ -489,6 +553,7 @@ def _plan_manual(
         ("incoming_structure_anchor", _structure_incoming_anchor(incoming_structure)),
         ("outgoing_key", outgoing_analysis.key if outgoing_analysis is not None else None),
         ("incoming_key", incoming_analysis.key if incoming_analysis is not None else None),
+        ("key_shift_semitones", key_shift or None),
         *metrics,
     )
     style_name = STYLE_EQ if band_windows is not None else dsp.value if dsp is not None else "legacy"
@@ -497,6 +562,9 @@ def _plan_manual(
         timeline_start=timeline_start, duration=duration, type=transition_type,
         dsp=dsp, dsp_reasons=(f"* manual: {style_name}", *reasons[1:]), details=details, vocal_handoff=handoff,
         band_windows=band_windows,
+        beat_seconds=(60.0 / outgoing_analysis.bpm / rate * override.echo_beats
+                      if outgoing_analysis is not None and outgoing_analysis.bpm else None),
+        echo_feedback=override.echo_feedback, echo_low_cut=override.echo_low_cut, tape_entry=override.tape_entry,
     )
     if log_diagnostics:
         LOGGER.info("AutoMix transition (manual): %s", describe_transition(

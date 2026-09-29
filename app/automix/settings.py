@@ -34,6 +34,9 @@ class AutoMixTransitionSettings:
     enabled: bool = False
     preferred_bars: int = 8
     max_tempo_change_percent: float = 8.0
+    max_bridge_tempo_percent: float = 16.0
+    """Two reliable beat grids further apart than ``max_tempo_change_percent`` but
+    within this are still beat-matched, with a longer ramp (planner.BRIDGE_RAMP_BARS)."""
     min_transition_seconds: float = 2.0
     max_transition_seconds: float = 20.0
     allow_half_double_tempo: bool = True

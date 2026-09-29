@@ -58,7 +58,7 @@ class AutoMixDetailsPanelTests(unittest.TestCase):
                           presentation=plan.presentation, metadata=plan.metadata,
                           duration_seconds=plan.duration_seconds)
         self.panel.set_plan(plan, self.tracks[:2], state="final")
-        self.assertEqual(self.panel._style(self.panel.rows[0]), "Plain crossfade")
+        self.assertEqual(self.panel._style(self.panel.rows[0]), "Crossfade")
         self.assertIn("No selection reasons recorded", self.panel.detail_text(0, korean=False))
 
     def test_provisional_state_reports_how_far_automix_is_ready(self) -> None:

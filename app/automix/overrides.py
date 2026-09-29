@@ -28,9 +28,15 @@ STYLE_EQ = "eq"
 """Hand-set band timing: when each band (lows, mids, highs) of each track fades."""
 MANUAL_STYLES = (
     STYLE_AUTO, "bass_swap", "vocal_safe_eq", "filter_sweep", "filter_blend",
-    "short_fade", "drop_in", STYLE_LEGACY, STYLE_CUT, STYLE_EQ,
+    "short_fade", "drop_in", "echo_out", "tape_stop", "downbeat_cut", STYLE_LEGACY, STYLE_CUT, STYLE_EQ,
 )
+STYLE_ALIASES = {"legacy": "short_fade", STYLE_CUT: "downbeat_cut"}
+"""Saved styles the editor shows as another one: a plain crossfade is the short
+fade without its peak limiter, a cut the downbeat cut without its click guard.
+Both still load and plan exactly as saved."""
+ECHO_BEAT_CHOICES = (0.5, 1.0, 2.0)
 MAX_DURATION_SECONDS = 60.0
+MAX_RAMP_SECONDS = 120.0
 MAX_OVERRIDES = 20_000
 EQ_BANDS = ("low", "mid", "high")
 """The renderer's crossover bands, in the order ``TransitionOverride.eq_bands`` stores them."""
@@ -65,6 +71,15 @@ class TransitionOverride:
     band changes hands (``None``: the style's default).
     ``eq_bands``: eq only, each band's fade windows (see ``BandWindows``);
     ``None``: start from the bass swap's.
+    ``echo_beats``/``echo_feedback``/``echo_low_cut``: echo_out only -- the
+    delay in outgoing beats, each repeat's level against the previous one,
+    and whether the repeats lose their lows.
+    ``tape_entry``: tape_stop only, 0..1 of the window where the incoming song enters.
+    ``key_shift``: semitones the outgoing tail glides by to meet the incoming
+    key (0: never; ``None``: automatic, as the planner decides).
+    ``ramp_seconds``: with a tempo match (or key glide), how long -- in outgoing
+    source seconds before the cue -- the outgoing track takes to reach the new
+    tempo (0: at once; ``None``: automatic, 8 bars or 16 for a tempo bridge).
     """
 
     outgoing_cue: float
@@ -74,6 +89,12 @@ class TransitionOverride:
     tempo_match: bool = True
     vocal_handoff: float | None = None
     eq_bands: BandWindows | None = None
+    echo_beats: float = 1.0
+    echo_feedback: float = 0.55
+    echo_low_cut: bool = True
+    tape_entry: float = 0.6
+    key_shift: int | None = None
+    ramp_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not _number(self.outgoing_cue) or self.outgoing_cue < 0.0:
@@ -92,6 +113,22 @@ class TransitionOverride:
             raise ValueError("Manual transition vocal_handoff must be between 0.1 and 0.9.")
         if self.eq_bands is not None:
             object.__setattr__(self, "eq_bands", _band_windows(self.eq_bands))
+        if not _number(self.echo_beats) or self.echo_beats not in ECHO_BEAT_CHOICES:
+            raise ValueError("Manual transition echo_beats must be one of 0.5, 1, 2 beats.")
+        if not _number(self.echo_feedback) or not 0.2 <= self.echo_feedback <= 0.8:
+            raise ValueError("Manual transition echo_feedback must be between 0.2 and 0.8.")
+        if not isinstance(self.echo_low_cut, bool):
+            raise ValueError("Manual transition echo_low_cut must be a boolean.")
+        if not _number(self.tape_entry) or not 0.2 <= self.tape_entry <= 0.95:
+            raise ValueError("Manual transition tape_entry must be between 0.2 and 0.95.")
+        if self.key_shift is not None and (
+            not isinstance(self.key_shift, int) or isinstance(self.key_shift, bool) or abs(self.key_shift) > 2
+        ):
+            raise ValueError("Manual transition key_shift must be a whole number of semitones within 2.")
+        if self.ramp_seconds is not None and (
+            not _number(self.ramp_seconds) or not 0.0 <= self.ramp_seconds <= MAX_RAMP_SECONDS
+        ):
+            raise ValueError("Manual transition ramp_seconds must be between 0 and 120 seconds.")
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -101,6 +138,12 @@ class TransitionOverride:
             "style": self.style,
             "tempo_match": self.tempo_match,
             "vocal_handoff": None if self.vocal_handoff is None else float(self.vocal_handoff),
+            "echo_beats": float(self.echo_beats),
+            "echo_feedback": float(self.echo_feedback),
+            "echo_low_cut": self.echo_low_cut,
+            "tape_entry": float(self.tape_entry),
+            "key_shift": self.key_shift,
+            "ramp_seconds": None if self.ramp_seconds is None else float(self.ramp_seconds),
         }
         if self.eq_bands is not None:
             data["eq"] = {
@@ -121,6 +164,12 @@ class TransitionOverride:
             tempo_match=data.get("tempo_match", True),
             vocal_handoff=data.get("vocal_handoff"),
             eq_bands=_eq_from_dict(data.get("eq")),
+            echo_beats=data.get("echo_beats", 1.0),
+            echo_feedback=data.get("echo_feedback", 0.55),
+            echo_low_cut=data.get("echo_low_cut", True),
+            tape_entry=data.get("tape_entry", 0.6),
+            key_shift=data.get("key_shift"),
+            ramp_seconds=data.get("ramp_seconds"),
         )
 
 

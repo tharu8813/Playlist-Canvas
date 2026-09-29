@@ -111,7 +111,7 @@ class _FakePipeline:
         pass
 
     def render(self, plan, track_paths, output_directory, *, cancel_event=None, container="nut", progress=None,
-               resting_dsp=None):
+               resting_dsp=None, track_filters=None, workers=1):
         type(self).calls.append(plan)
         if type(self).gate is not None:
             type(self).gate.wait(5)

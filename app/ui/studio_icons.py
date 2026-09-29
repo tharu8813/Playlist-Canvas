@@ -6,9 +6,9 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QProxyStyle, QStyle
 
 
-def _render(shape: str) -> QIcon:
+def _pixmap(shape: str, color: str = "#B7C2BF", fill: str = "none") -> QPixmap:
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
-           '<g fill="none" stroke="#B7C2BF" stroke-width="1.6" '
+           f'<g fill="{fill}" stroke="{color}" stroke-width="1.6" '
            f'stroke-linecap="round" stroke-linejoin="round">{shape}</g></svg>')
     pixmap = QPixmap(48, 48)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -16,7 +16,22 @@ def _render(shape: str) -> QIcon:
     QSvgRenderer(QByteArray(svg.encode())).render(painter)
     painter.end()
     pixmap.setDevicePixelRatio(2)
-    return QIcon(pixmap)
+    return pixmap
+
+
+def _render(shape: str) -> QIcon:
+    return QIcon(_pixmap(shape))
+
+
+_PIN = '<path d="M8 3h8 M9.5 3v5.5L6 13h12l-3.5-4.5V3z M12 13v8"/>'
+_PIN_ACCENT = "#79C7B4"  # design_system COLORS["accent"]
+
+
+def pin_icon() -> QIcon:
+    """A checkable pin: an outline when off, a filled accent pin when on."""
+    icon = QIcon(_pixmap(_PIN))
+    icon.addPixmap(_pixmap(_PIN, _PIN_ACCENT, _PIN_ACCENT), QIcon.Mode.Normal, QIcon.State.On)
+    return icon
 
 
 _SOURCE_SHAPES = {
@@ -44,6 +59,42 @@ def source_icon(source_type: str) -> QIcon | None:
     """A glyph depicting one Canvas source type (``SourceType.value``), or None if unknown."""
     shape = _SOURCE_SHAPES.get(source_type)
     return _render(shape) if shape is not None else None
+
+
+_DASHED_FRAME = 'M4 7V4h3 M10 4h4 M17 4h3v3 M20 10v4 M20 17v3h-3 M14 20h-4 M7 20H4v-3 M4 14v-4'
+_MENU_SHAPES = {
+    "save_as": '<path d="M11 21H4V3h11l3 3v4 M8 3v5h7V3"/><path d="m13 21 .8-3.2 5.4-5.4 2.4 2.4-5.4 5.4z"/>',
+    "recent": '<path d="M3 12a9 9 0 1 0 2.6-6.4 M3 4v5h5 M12 7v5l3 2"/>',
+    "import_playlist": '<path d="M3 5h10 M3 10h10 M3 15h6 M18 4v12 m-3-3 3 3 3-3"/>',
+    "export_playlist": '<path d="M3 5h10 M3 10h10 M3 15h6 M18 16V4 m-3 3 3-3 3 3"/>',
+    "exit": '<path d="M10 4H5v16h5 M15 8l4 4-4 4 M19 12H9"/>',
+    "project_settings": '<path d="M4 6h10 M4 12h4 M12 12h8 M4 18h12"/>'
+                        '<circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
+    "save_preset": '<path d="M6 3h12v18l-6-4-6 4z M12 7v6 M9 10h6"/>',
+    "upgrade": '<circle cx="12" cy="12" r="9"/><path d="M12 16V8 m-4 4 4-4 4 4"/>',
+    "cut": '<circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8 16 19 4 M16 16 5 4"/>',
+    "copy": '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+    "paste": '<path d="M9 4H6a1 1 0 0 0-1 1v15a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1h-3"/>'
+             '<rect x="9" y="2" width="6" height="4" rx="1"/>',
+    "duplicate": '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V5a1 1 0 0 1 1-1h11 M14.5 11.5v6 M11.5 14.5h6"/>',
+    "select_all": f'<path d="{_DASHED_FRAME} m4 5 3 3 5-6"/>',
+    "clear_selection": f'<path d="{_DASHED_FRAME} M9 9l6 6 m0-6-6 6"/>',
+    "add_basic": '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 8v8 M8 12h8"/>',
+    "reset_layout": '<path d="M4 10a8 8 0 1 1 1 8 M4 4v6h6"/>',
+    "timeline": '<rect x="3" y="5" width="10" height="5" rx="1"/><rect x="9" y="14" width="12" height="5" rx="1"/>',
+    "automix": '<path d="M3 6c6 0 12 12 18 12 M3 18c6 0 12-12 18-12"/>',
+    "language": '<circle cx="12" cy="12" r="9"/><path d="M3 12h18 M12 3a14 14 0 0 1 0 18 M12 3a14 14 0 0 0 0 18"/>',
+    "help": '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6 M12 17v.5"/>',
+    "shortcuts": '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h1 M11 10h1 M16 10h1 M7 14h10"/>',
+    "check_updates": '<path d="M20 12a8 8 0 1 1-2.3-5.7 M20 4v5h-5"/>',
+    "about": '<circle cx="12" cy="12" r="9"/><path d="M12 11v6 M12 7v1"/>',
+    "clear": '<path d="M3 6h18 M9 6V3h6v3 M6 6l1 15h10l1-15"/>',
+}
+
+
+def menu_icon(name: str) -> QIcon:
+    """A menu-row glyph by name (``_MENU_SHAPES``, else a source type's)."""
+    return _render(_MENU_SHAPES.get(name) or _SOURCE_SHAPES[name])
 
 
 class StudioIconStyle(QProxyStyle):

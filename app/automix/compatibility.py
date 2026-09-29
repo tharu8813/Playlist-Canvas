@@ -34,6 +34,8 @@ class TransitionCompatibility:
     incoming_bpm: float | None
     incoming_effective_bpm: float | None
     reasons: tuple[str, ...]
+    bridgeable: bool = False
+    """Not ``compatible``, but within ``max_bridge_tempo_percent``: a tempo bridge can match it."""
 
 
 def evaluate_compatibility(
@@ -72,6 +74,7 @@ def evaluate_compatibility(
             best_used_half_double = used_half_double
 
     compatible = best_shift_percent <= settings.max_tempo_change_percent
+    bridgeable = not compatible and best_shift_percent <= settings.max_bridge_tempo_percent
     reasons: list[str] = []
     if best_used_half_double:
         reasons.append(
@@ -91,6 +94,7 @@ def evaluate_compatibility(
         outgoing_bpm=outgoing.bpm, incoming_bpm=incoming.bpm,
         incoming_effective_bpm=best_effective_bpm,
         reasons=tuple(reasons),
+        bridgeable=bridgeable,
     )
 
 

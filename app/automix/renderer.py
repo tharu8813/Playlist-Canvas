@@ -28,16 +28,19 @@ without one renders exactly as before.
 from __future__ import annotations
 
 import logging
+import math
+import os
 import subprocess
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
 from app.timeline.models import TransitionType
 from app.timeline.render_plan import AudioRenderClip, AudioRenderPlan, AudioRenderTransition, TransitionDsp
-from app.utils.subprocess_utils import hidden_process_kwargs
+from app.utils.subprocess_utils import hidden_process_kwargs, lower_thread_if_background
 
 LOGGER = logging.getLogger(__name__)
 
@@ -148,8 +151,32 @@ INLINE_FILTER_GRAPH_LIMIT = 16000
 """Longer graphs go to FFmpeg as a file (``-/filter_complex``, FFmpeg 7+);
 shorter ones stay inline so typical playlists run exactly as before."""
 _DSP_REQUIRED_FILTERS = frozenset({"acrossover", "afade", "amix", "alimiter", "asplit", "acrossfade"})
-"""FILTER_SWEEP's asendcmd/asetnsamples/highpass are not required here: a build
-lacking them fails that render, which retries with legacy crossfades."""
+
+# Exit effects: styles that end the outgoing track inside the window by
+# themselves (their own envelope), whatever the incoming track does.
+ECHO_FEEDBACK = 0.55
+"""Each echo repeat's level against the previous one (-5.2 dB per beat)."""
+ECHO_FIRST_LEVEL = 0.9
+"""The first repeat's level. With the low cut, 0.55 there left it 17 dB under the dry track."""
+ECHO_MAX_REPEATS = 16
+ECHO_LOW_CUT_HZ = 200.0
+"""Echoes are thinned below this so their bass never muddies the incoming kick."""
+ECHO_DEFAULT_BEAT_SECONDS = 0.5
+TAPE_STOP_MIN_RATE = 0.08
+"""Where the turntable's speed (and pitch) ends; below this rubberband only smears."""
+TAPE_STOP_STEP_SECONDS = 0.02
+TAPE_STOP_REACH = 0.7
+"""Window progress by which the commands reach TAPE_STOP_MIN_RATE. The stretcher
+lags its commands: scheduled over the whole window, a 440 Hz tone had only
+fallen to 220 Hz by the window's end (measured, FFmpeg 9 rubberband)."""
+TAPE_STOP_FADE = (0.55, 1.0)
+"""The outgoing level's qsin fade while it stops, as window progress."""
+TAPE_STOP_ENTRY = 0.6
+"""Where in the window the incoming track enters (the planner puts its downbeat there)."""
+ENTRY_ATTACK_SECONDS = 0.02
+"""FILTER_SWEEP's asendcmd/asetnsamples/highpass and ECHO_OUT's aecho are not
+required here: a build lacking them fails that render, which retries with
+legacy crossfades."""
 
 
 class AutoMixRenderError(RuntimeError):
@@ -172,6 +199,7 @@ def build_filter_graph(
     clips: Sequence[AudioRenderClip], transitions: Sequence[AudioRenderTransition],
     *, transition_dsp: bool = True, ramp_filter: str | None = "rubberband",
     resting_dsp: Mapping[str, tuple[bool, bool]] | None = None,
+    track_filters: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
     """Build the filter_complex graph for ``clips``, in input order.
 
@@ -186,7 +214,26 @@ def build_filter_graph(
     junction *outside* ``clips`` runs over that clip in the full mix: they
     are applied at rest (no envelope), so a render of part of a plan keeps
     the phase the full mix gives those clips. Empty for a whole plan.
+    ``track_filters`` maps a track id to its own volume/EQ filters
+    (PlaylistTrack.audio_filter), run on the source before anything else.
     """
+    per_clip, fold, output_label = graph_parts(
+        clips, transitions, transition_dsp=transition_dsp, ramp_filter=ramp_filter,
+        resting_dsp=resting_dsp, track_filters=track_filters,
+    )
+    return ";".join([*(line for lines in per_clip for line in lines), *fold]), output_label
+
+
+def graph_parts(
+    clips: Sequence[AudioRenderClip], transitions: Sequence[AudioRenderTransition],
+    *, transition_dsp: bool = True, ramp_filter: str | None = "rubberband",
+    resting_dsp: Mapping[str, tuple[bool, bool]] | None = None,
+    track_filters: Mapping[str, str] | None = None,
+) -> tuple[list[list[str]], list[str], str]:
+    """``build_filter_graph`` in its two halves: (each clip's own filters, reading
+    input ``[i:a]`` and ending in ``[ci]``; the fold that overlaps the ``[ci]``
+    into the mix; the mix's label). Every clip's half depends on that clip
+    alone, so the clips can be rendered apart and folded afterwards."""
     resting_dsp = resting_dsp if transition_dsp and resting_dsp else {}
     if not clips:
         raise AutoMixRenderError("Cannot render an AudioRenderPlan with no clips.")
@@ -209,27 +256,46 @@ def build_filter_graph(
             return None
         return transition_by_pair[(clips[index].clip_id, clips[index + 1].clip_id)].duration
 
-    filters: list[str] = []
+    def exit_side(index: int) -> AudioRenderTransition | None:
+        if not 0 <= index < len(styles) or styles[index] not in EXIT_EFFECTS:
+            return None
+        return transition_by_pair[(clips[index].clip_id, clips[index + 1].clip_id)]
+
+    per_clip: list[list[str]] = []
     labels = [f"c{index}" for index in range(len(clips))]
     for index, clip in enumerate(clips):
+        filters: list[str] = []
+        per_clip.append(filters)
+        source = f"{index}:a"
+        if (track_filters or {}).get(clip.track_id):
+            source = f"src{index}"
+            filters.append(f"[{index}:a]{track_filters[clip.track_id]}[{source}]")
         incoming, outgoing = band_side(index - 1), band_side(index)
         sweep_in, sweep_out = sweep_side(index - 1), sweep_side(index)
         rest_bands, rest_sweep = resting_dsp.get(clip.clip_id, (False, False))
+        exit_transition = exit_side(index)
+        # The exit effect (if any) runs last, on what the band/sweep stages made.
+        body = labels[index] if exit_transition is None else f"{labels[index]}body"
         if (incoming is None and outgoing is None and sweep_in is None and sweep_out is None
                 and not rest_bands and not rest_sweep):
-            filters.append(_clip_filter_chain(index, clip, labels[index], ramp_filter=ramp_filter))
-            continue
-        current = f"{labels[index]}pre"
-        filters.append(_clip_filter_chain(index, clip, current, ramp_filter=ramp_filter))
-        if sweep_in is not None or sweep_out is not None or rest_sweep:
-            swept = f"{labels[index]}swept"
-            filters.append(_sweep_filter(index, current, swept, clip.duration, sweep_in, sweep_out))
-            current = swept
-        if incoming is None and outgoing is None and not rest_bands:
-            filters.append(f"[{current}]anull[{labels[index]}]")
+            filters.append(_clip_filter_chain(index, clip, body, ramp_filter=ramp_filter, source=source))
         else:
-            filters.extend(_band_filters(current, labels[index], clip.duration, incoming, outgoing))
+            current = f"{labels[index]}pre"
+            filters.append(_clip_filter_chain(index, clip, current, ramp_filter=ramp_filter, source=source))
+            if sweep_in is not None or sweep_out is not None or rest_sweep:
+                swept = f"{labels[index]}swept"
+                filters.append(_sweep_filter(index, current, swept, clip.duration, sweep_in, sweep_out))
+                current = swept
+            if incoming is None and outgoing is None and not rest_bands:
+                filters.append(f"[{current}]anull[{body}]")
+            else:
+                filters.extend(_band_filters(current, body, clip.duration, incoming, outgoing))
+        if exit_transition is not None:
+            filters.extend(_exit_filters(
+                index, body, labels[index], clip.duration, styles[index], exit_transition, ramp_filter,
+            ))
 
+    filters = []
     running_label = labels[0]
     if clips[0].timeline_start > _GAP_EPSILON:
         filters.append(f"anullsrc=r={SAMPLE_RATE}:cl=stereo:d={clips[0].timeline_start:.6f}[lead]")
@@ -261,20 +327,23 @@ def build_filter_graph(
             else:
                 filters.append(f"[{running_label}][{labels[index]}]concat=n=2:v=0:a=1[{next_label}]")
         running_label = next_label
-    return ";".join(filters), running_label
+    return per_clip, filters, running_label
 
 
-def _clip_filter_chain(index: int, clip: AudioRenderClip, label: str, *, ramp_filter: str | None = "rubberband") -> str:
+def _clip_filter_chain(index: int, clip: AudioRenderClip, label: str, *, ramp_filter: str | None = "rubberband",
+                       source: str | None = None) -> str:
     """One clip, trimmed/stretched/gained to exactly its planned placement.
 
     A TempoRamp renders with ``ramp_filter`` (a time-stretcher taking timed
     ``tempo`` commands); ``None`` renders its rate steps as separate,
     sample-pinned segments instead (same timing, a stretcher restart per step).
+    ``source``: the stream label to read (default input ``index``'s audio).
     """
+    source = source or f"{index}:a"
     if clip.tempo_ramp is not None and ramp_filter is None:
-        return _segmented_clip_filters(index, clip, label)
+        return _segmented_clip_filters(index, clip, label, source)
     parts = [
-        f"[{index}:a]atrim=start={clip.source_in:.6f}:end={clip.source_out:.6f}",
+        f"[{source}]atrim=start={clip.source_in:.6f}:end={clip.source_out:.6f}",
         "asetpts=PTS-STARTPTS",
     ]
     if clip.tempo_ramp is None:
@@ -307,15 +376,22 @@ def _tempo_ramp_filters(index: int, clip: AudioRenderClip, ramp_filter: str) -> 
     """
     name = f"{ramp_filter}@ramp{index}"
     segments = clip.rate_segments()
-    commands = ";".join(f"{start - clip.source_in:.6f} {name} tempo {rate:.6f}" for start, _end, rate in segments[1:])
+    ramp = clip.tempo_ramp
+
+    def command(start: float, end: float, rate: float) -> str:
+        text = f"{start - clip.source_in:.6f} {name} tempo {rate:.6f}"
+        if ramp.end_pitch != 1.0:  # key matching glides the pitch along the same steps
+            text += f", {name} pitch {ramp.pitch_at((start + end) / 2):.6f}"
+        return text
+
     return [
         f"asetnsamples=n={RAMP_COMMAND_FRAME_SAMPLES}:p=0",
-        f"asendcmd=c='{commands}'",
+        f"asendcmd=c='{';'.join(command(*segment) for segment in segments[1:])}'",
         f"{name}=tempo={segments[0][2]:.6f}",
     ]
 
 
-def _segmented_clip_filters(index: int, clip: AudioRenderClip, label: str) -> str:
+def _segmented_clip_filters(index: int, clip: AudioRenderClip, label: str, source: str | None = None) -> str:
     """Fallback ramp without a command-driven stretcher: one atempo per rate step.
 
     Each step is pinned to the sample count the plan gives it (boundaries
@@ -326,7 +402,7 @@ def _segmented_clip_filters(index: int, clip: AudioRenderClip, label: str) -> st
     """
     segments = clip.rate_segments()
     names = [f"r{index}s{k}" for k in range(len(segments))]
-    filters = [f"[{index}:a]asplit={len(segments)}" + "".join(f"[{name}]" for name in names)]
+    filters = [f"[{source or f'{index}:a'}]asplit={len(segments)}" + "".join(f"[{name}]" for name in names)]
     edge, elapsed = 0, 0.0
     for name, (start, end, rate) in zip(names, segments):
         elapsed += (end - start) / rate
@@ -483,7 +559,96 @@ def _band_filters(
     return filters
 
 
-DROP_IN_ATTACK_SECONDS = 0.02
+EXIT_EFFECTS = frozenset({TransitionDsp.ECHO_OUT, TransitionDsp.TAPE_STOP})
+
+
+def echo_taps(duration: float, beat: float, feedback: float | None = None) -> list[tuple[float, float]]:
+    """(delay seconds, level) of each ECHO_OUT repeat that starts inside the window."""
+    feedback = ECHO_FEEDBACK if feedback is None else feedback
+    count = max(1, min(ECHO_MAX_REPEATS, int(duration / beat + 1e-9)))
+    return [(beat * k, ECHO_FIRST_LEVEL * feedback ** (k - 1)) for k in range(1, count + 1)]
+
+
+def echo_beat(transition: AudioRenderTransition) -> float:
+    """The echo delay ``transition`` renders with, clamped to what aecho handles well."""
+    return min(max(transition.beat_seconds or ECHO_DEFAULT_BEAT_SECONDS, 0.1), 2.0)
+
+
+def tape_entry(transition: AudioRenderTransition) -> float:
+    return TAPE_STOP_ENTRY if transition.tape_entry is None else transition.tape_entry
+
+
+def tape_stop_schedule(duration: float) -> list[tuple[float, float]]:
+    """(input second, rate) commands for TAPE_STOP over a ``duration``-second window.
+
+    The rate falls from 1.0 to TAPE_STOP_MIN_RATE along a quarter sine over
+    the window's output time -- slow at first, then quickly, like a platter
+    losing its drive -- and each command is placed at the *input* second
+    the stretcher reaches at that output moment (asendcmd sees input time).
+    """
+    steps = max(1, round(duration / TAPE_STOP_STEP_SECONDS))
+    schedule, consumed = [], 0.0
+    for step in range(steps):
+        progress = min(1.0, (step + 0.5) / steps / TAPE_STOP_REACH)
+        rate = 1.0 - (1.0 - TAPE_STOP_MIN_RATE) * (1.0 - math.cos(progress * math.pi / 2))
+        schedule.append((consumed, rate))
+        consumed += rate * duration / steps
+    return schedule
+
+
+def _exit_filters(
+    index: int, source: str, output: str, clip_duration: float, style: TransitionDsp,
+    transition: AudioRenderTransition, stretcher: str | None,
+) -> list[str]:
+    """End ``source`` inside its outgoing window with ``style``'s own envelope."""
+    duration = transition.duration
+    window = max(0.0, clip_duration - duration)
+    if style is TransitionDsp.ECHO_OUT:
+        beat = echo_beat(transition)
+        taps = echo_taps(duration, beat, transition.echo_feedback)
+        low_cut = f"highpass=f={ECHO_LOW_CUT_HZ:.0f}," if transition.echo_low_cut else ""
+        # The window's first beat (the outgoing track's last hit) plays dry and
+        # feeds the echo; after it the dry track fades within half a beat and
+        # only the repeats of that hit are left.
+        feed_start = window
+        feed_end = window + min(beat, duration / 2)
+        dry_fade = min(beat / 2, clip_duration - feed_end)
+        tail = min(beat, duration / 2)
+        dry, wet = f"{output}dry", f"{output}wet"
+        return [
+            f"[{source}]asplit=2[{dry}][{wet}src]",
+            f"[{dry}]afade=t=out:st={feed_end:.6f}:d={max(0.01, dry_fade):.6f}:curve=qsin[{dry}f]",
+            f"[{wet}src]afade=t=in:st={feed_start:.6f}:d=0.01,"
+            f"afade=t=out:st={feed_end - 0.03:.6f}:d=0.03,"
+            f"aecho=in_gain=0:out_gain=1:delays={'|'.join(f'{d * 1000:.3f}' for d, _ in taps)}"
+            f":decays={'|'.join(f'{level:.4f}' for _, level in taps)},"
+            f"{low_cut}"
+            f"afade=t=out:st={clip_duration - tail:.6f}:d={tail:.6f}[{wet}]",
+            f"[{dry}f][{wet}]amix=inputs=2:normalize=0:duration=first[{output}]",
+        ]
+    fade_start, fade_end = TAPE_STOP_FADE
+    fade = f"afade=t=out:st={duration * fade_start:.6f}:d={duration * (fade_end - fade_start):.6f}:curve=qsin"
+    if stretcher != "rubberband":
+        # No command-driven stretcher to slow it down: the level fade alone.
+        return [f"[{source}]afade=t=out:st={window + duration * fade_start:.6f}"
+                f":d={duration * (fade_end - fade_start):.6f}:curve=qsin[{output}]"]
+    name = f"rubberband@stop{index}"
+    head_samples = round(window * SAMPLE_RATE)
+    tail_samples = max(1, round(duration * SAMPLE_RATE))
+    commands = ";".join(f"{second:.4f} {name} tempo {rate:.4f}, {name} pitch {rate:.4f}"
+                        for second, rate in tape_stop_schedule(duration)[1:])
+    return [
+        f"[{source}]asplit=2[{output}head][{output}tail]",
+        f"[{output}head]atrim=end_sample={head_samples}[{output}h]",
+        f"[{output}tail]atrim=start_sample={head_samples},asetpts=PTS-STARTPTS,"
+        f"asetnsamples=n={RAMP_COMMAND_FRAME_SAMPLES}:p=0,asendcmd=c='{commands}',"
+        f"{name}=tempo=1:pitch=1,{fade},"
+        f"apad=whole_len={tail_samples},atrim=end_sample={tail_samples}[{output}t]",
+        f"[{output}h][{output}t]concat=n=2:v=0:a=1[{output}]",
+    ]
+
+
+DROP_IN_ATTACK_SECONDS = ENTRY_ATTACK_SECONDS
 """DROP_IN's incoming fade-in: just long enough not to click."""
 
 
@@ -502,24 +667,41 @@ def _limited_overlap_filters(
     start = transition.timeline_start
     end = start + transition.duration
     summed = f"{output}sum"
-    enveloped = style in BAND_ENVELOPES or style is TransitionDsp.FILTER_SWEEP
+    enveloped = style in BAND_ENVELOPES or style is TransitionDsp.FILTER_SWEEP or style in EXIT_EFFECTS
     curve = "nofade" if enveloped else "qsin"
-    incoming_curve = "nofade" if style is TransitionDsp.DROP_IN else curve
+    # DROP_IN and ECHO_OUT: the incoming track is at full level from the start
+    # of the window; TAPE_STOP: from TAPE_STOP_ENTRY on, silent before it.
+    entry = {TransitionDsp.DROP_IN: 0.0, TransitionDsp.ECHO_OUT: 0.0,
+             TransitionDsp.TAPE_STOP: tape_entry(transition) * transition.duration}.get(style)
+    incoming_curve = "nofade" if entry is not None else curve
     attack = []
-    if style is TransitionDsp.DROP_IN:
-        attack = [f"[{incoming}]afade=t=in:d={DROP_IN_ATTACK_SECONDS}[{output}attack]"]
+    if entry is not None:
+        start_at = f"st={entry:.6f}:" if entry > 0.0 else ""
+        attack = [f"[{incoming}]afade=t=in:{start_at}d={ENTRY_ATTACK_SECONDS}[{output}attack]"]
         incoming = f"{output}attack"
+    # The limiter gets the window in small frames plus a little silence, and
+    # the window is cut back to its own length after it: alimiter's latency
+    # compensation holds its look-ahead until more input comes, so a window
+    # arriving as one frame (acrossfade emits its overlap that way) came out
+    # empty -- 3.6 s of a mix missing -- and a padless one ~8 ms short.
+    first, last = round(start * SAMPLE_RATE), round(end * SAMPLE_RATE)
     return [
         *attack,
-        f"[{running}][{incoming}]acrossfade=d={transition.duration:.6f}:curve1={curve}:curve2={incoming_curve}"
-        f"[{summed}]",
+        f"[{running}][{incoming}]acrossfade=d={transition.duration:.6f}:curve1={curve}:curve2={incoming_curve},"
+        f"asetpts=N/SR/TB[{summed}]",
         f"[{summed}]asplit=3[{output}a][{output}b][{output}c]",
-        f"[{output}a]atrim=end={start:.6f}[{output}pre]",
-        f"[{output}b]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS,"
-        f"alimiter=limit={DSP_PEAK_LIMIT}:level=0:latency=1[{output}win]",
-        f"[{output}c]atrim=start={end:.6f},asetpts=PTS-STARTPTS[{output}post]",
+        f"[{output}a]atrim=end_sample={first}[{output}pre]",
+        f"[{output}b]atrim=start_sample={first}:end_sample={last},asetpts=PTS-STARTPTS,"
+        f"asetnsamples=n={LIMITER_FRAME_SAMPLES}:p=0,apad=pad_len={LIMITER_FLUSH_SAMPLES},"
+        f"alimiter=limit={DSP_PEAK_LIMIT}:level=0:latency=1,atrim=end_sample={last - first}[{output}win]",
+        f"[{output}c]atrim=start_sample={last},asetpts=PTS-STARTPTS[{output}post]",
         f"[{output}pre][{output}win][{output}post]concat=n=3:v=0:a=1[{output}]",
     ]
+
+
+LIMITER_FRAME_SAMPLES = 1024
+LIMITER_FLUSH_SAMPLES = SAMPLE_RATE // 10
+"""Silence fed after a limited window so the limiter releases its look-ahead (100 ms; attack is 5 ms)."""
 
 
 @lru_cache(maxsize=None)
@@ -560,6 +742,11 @@ ProgressCallback = Callable[[str, float, str], None]
 """(stage, fraction 0..1, message) -> None."""
 
 
+def render_workers() -> int:
+    """FFmpegs one mix runs at once: all cores but two (the UI and playback), at most 12."""
+    return max(2, min(12, (os.cpu_count() or 4) - 2))
+
+
 class AutoMixAudioPipeline:
     """Renders one AudioRenderPlan into one mixed audio file via FFmpeg."""
 
@@ -576,8 +763,17 @@ class AutoMixAudioPipeline:
         progress: ProgressCallback | None = None,
         container: str = "nut",
         resting_dsp: Mapping[str, tuple[bool, bool]] | None = None,
+        track_filters: Mapping[str, str] | None = None,
+        workers: int = 1,
     ) -> PreparedAudio:
         """Render ``plan`` using ``track_paths`` (track_id -> source file) for its clips.
+
+        ``track_filters``: track_id -> that track's volume/EQ filters (see build_filter_graph).
+        ``workers`` > 1 renders each clip's own filters (decode, resample,
+        stretch, band split, effects: the heavy part) in that many FFmpegs at
+        once, then folds the clip files in one more -- the same graph cut in
+        two, so the same samples; one FFmpeg alone ran the whole thing in one
+        thread (47 s for 96 min of music).
 
         ``container="flac"`` writes a directly playable lossless file instead
         of the PCM/NUT intermediate -- for progressive Preview, whose partial
@@ -623,32 +819,76 @@ class AutoMixAudioPipeline:
         codec = ["-c:a", "flac", "-compression_level", "0"] if container == "flac" else ["-c:a", "pcm_f32le"]
         expected_duration = max(clip.timeline_end for clip in clips)
 
-        # Tempo ramps need a stretcher that takes timed tempo commands.
-        ramp_filter = "rubberband" if any(clip.tempo_ramp for clip in clips) and (
+        # Tempo ramps and tape stops need a stretcher that takes timed commands.
+        needs_stretcher = any(clip.tempo_ramp for clip in clips) or any(
+            transition_dsp_style(t) is TransitionDsp.TAPE_STOP for t in plan.transitions)
+        ramp_filter = "rubberband" if needs_stretcher and (
             "rubberband" in ffmpeg_filter_names(str(self.ffmpeg_executable))) else None
 
-        def command(dsp: bool) -> list[str]:
-            filter_complex, output_label = build_filter_graph(
-                clips, plan.transitions, transition_dsp=dsp, ramp_filter=ramp_filter, resting_dsp=resting_dsp,
-            )
+        def command(inputs: Sequence[str], filter_complex: str, output_label: str, output: Path,
+                    output_codec: Sequence[str], output_format: str, name: str) -> list[str]:
             graph = ["-filter_complex", filter_complex]
             if len(filter_complex) > INLINE_FILTER_GRAPH_LIMIT:
                 # Windows caps a command line at 32,767 characters; a band-DSP
                 # graph passes that around 33 tracks, and CreateProcess then
                 # failed outright, silently dropping every DSP transition.
-                script = output_directory / "automix_graph.txt"
+                script = output_directory / f"{name}_graph.txt"
                 script.write_text(filter_complex, encoding="utf-8")
                 graph = ["-/filter_complex", str(script)]
             arguments = [str(self.ffmpeg_executable), "-hide_banner", "-loglevel", "error", "-nostdin"]
-            for clip in clips:
-                arguments.extend(["-i", str(Path(track_paths[clip.track_id]))])
+            for path in inputs:
+                arguments.extend(["-i", str(path)])
             arguments.extend([
                 *graph,
                 "-map", f"[{output_label}]",
-                *codec, "-ar", str(SAMPLE_RATE), "-ac", "2", "-f", container,
-                "-progress", "pipe:1", "-nostats", "-y", str(output_path),
+                *output_codec, "-ar", str(SAMPLE_RATE), "-ac", "2", "-f", output_format,
+                "-progress", "pipe:1", "-nostats", "-y", str(output),
             ])
             return arguments
+
+        sources = [str(Path(track_paths[clip.track_id])) for clip in clips]
+        clip_directory = output_directory / "automix_clips"
+
+        def mix(dsp: bool) -> None:
+            per_clip, fold, output_label = graph_parts(
+                clips, plan.transitions, transition_dsp=dsp, ramp_filter=ramp_filter, resting_dsp=resting_dsp,
+                track_filters=track_filters,
+            )
+            if workers <= 1 or len(clips) < 2:
+                self._run(command(sources, ";".join([*(line for lines in per_clip for line in lines), *fold]),
+                                  output_label, output_path, codec, container, "automix"),
+                          cancel_event, on_progress_line)
+                return
+            clip_directory.mkdir(parents=True, exist_ok=True)
+            clip_paths = [clip_directory / f"clip_{index:03d}.nut" for index in range(len(clips))]
+            finished = [0]
+            lock = threading.Lock()
+
+            def render_clip(index: int) -> None:
+                # This clip's half of the graph, reading its source as input 0.
+                graph = ";".join(line.replace(f"[{index}:a]", "[0:a]") for line in per_clip[index])
+                self._run(command([sources[index]], graph, f"c{index}", clip_paths[index],
+                                  ["-c:a", "pcm_f32le"], "nut", f"clip_{index:03d}"), cancel_event, None)
+                with lock:
+                    finished[0] += 1
+                    done = finished[0]
+                report("Rendering clips", 0.1 + 0.5 * done / len(clips), f"Rendering clips {done}/{len(clips)}")
+
+            try:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="automix-clip",
+                                        initializer=lower_thread_if_background) as pool:
+                    futures = [pool.submit(render_clip, index) for index in range(len(clips))]
+                errors = [future.exception() for future in futures if future.exception() is not None]
+                if errors:  # the clip that failed, not one a cancel stopped
+                    raise next((error for error in errors if not isinstance(error, AutoMixRenderCancelled)),
+                               errors[0])
+                inputs = "".join(f"[{index}:a]anull[c{index}];" for index in range(len(clips)))
+                self._run(command([str(path) for path in clip_paths], inputs + ";".join(fold) if fold
+                                  else inputs.rstrip(";"), output_label, output_path, codec, container, "fold"),
+                          cancel_event, on_fold_progress)
+            finally:
+                for path in clip_directory.glob("*"):
+                    path.unlink(missing_ok=True)
 
         report("Rendering transitions", 0.1, "Rendering AutoMix transitions")
 
@@ -656,9 +896,13 @@ class AutoMixAudioPipeline:
             fraction = 0.1 + 0.75 * min(1.0, seconds / max(0.01, expected_duration))
             report("Combining mix", fraction, f"Combining mix {seconds:.1f}s / {expected_duration:.1f}s")
 
+        def on_fold_progress(seconds: float) -> None:
+            fraction = 0.6 + 0.25 * min(1.0, seconds / max(0.01, expected_duration))
+            report("Combining mix", fraction, f"Combining mix {seconds:.1f}s / {expected_duration:.1f}s")
+
         try:
             try:
-                self._run(command(use_dsp), cancel_event, on_progress_line)
+                mix(use_dsp)
             except AutoMixRenderCancelled:
                 raise
             except AutoMixRenderError as error:
@@ -667,7 +911,7 @@ class AutoMixAudioPipeline:
                 # Same plan, same geometry -- only the transition mixing DSP degrades.
                 LOGGER.warning("Transition DSP render failed (%s); retrying with legacy crossfades.", error)
                 output_path.unlink(missing_ok=True)  # never let a partial DSP file survive into the retry
-                self._run(command(False), cancel_event, on_progress_line)
+                mix(False)
         except AutoMixRenderCancelled:
             output_path.unlink(missing_ok=True)
             raise
@@ -686,7 +930,8 @@ class AutoMixAudioPipeline:
     def _run(
         self, arguments: list[str], cancel_event: threading.Event,
         on_progress_seconds: Callable[[float], None] | None,
-    ) -> None:
+    ) -> str:
+        """Run FFmpeg to completion; returns what it wrote to stderr."""
         try:
             process = subprocess.Popen(
                 arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -733,7 +978,8 @@ class AutoMixAudioPipeline:
             raise AutoMixRenderCancelled("AutoMix rendering was cancelled.")
         if process.returncode != 0:
             message = "".join(stderr_lines).strip() or "unknown FFmpeg error"
-            raise AutoMixRenderError(f"FFmpeg could not render the AutoMix mix: {message}")
+            raise AutoMixRenderError(f"FFmpeg could not render the AutoMix mix: {message[-2000:]}")
+        return "".join(stderr_lines)
 
     def _probe_duration(self, path: Path) -> float:
         probe = self._ffprobe_executable()

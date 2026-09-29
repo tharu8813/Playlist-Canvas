@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
     QListView,
+    QMenu,
     QMessageBox,
     QScrollArea,
     QSizePolicy,
@@ -142,6 +143,23 @@ class MainWindowWorkspaceTests(MainWindowTestCase):
             self.assertIn(self.window.settings_action, self.window.tools_menu.actions())
             self.assertIn(self.window.lrc_generator_action, self.window.tools_menu.actions())
             self.assertEqual(self.window.lrc_generator_action.text(), "LRC 파일 생성기")
+            self.assertIn(self.window.automix_editor_action, self.window.tools_menu.actions())
+            self.assertEqual(self.window.automix_editor_action.text(), "AutoMix 편집기")
+            from dataclasses import replace
+            original_settings = self.window.project_settings
+            try:
+                for mode in ("none", "automix"):
+                    self.window.project_settings = replace(original_settings, transition_mode=mode)
+                    self.assertEqual(self.window.automix_editor_action.isEnabled(), mode == "automix")
+            finally:
+                self.window.project_settings = original_settings
+            # Every menu row shows an icon, except check-mark rows and the recent-files list.
+            for menu in self.window.menuBar().findChildren(QMenu):
+                if menu is self.window.recent_projects_menu or not menu.title():
+                    continue  # untitled: Qt's own overflow menu
+                for action in menu.actions():
+                    if not (action.isSeparator() or action.isCheckable()):
+                        self.assertFalse(action.icon().isNull(), f"{menu.title()} > {action.text()}")
             self.assertEqual(
                 set(self.window.source_insert_actions), set(SourceType)
             )

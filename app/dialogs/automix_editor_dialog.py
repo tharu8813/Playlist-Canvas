@@ -19,7 +19,7 @@ from PySide6.QtCore import QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton,
-    QScrollArea, QSlider, QSplitter, QToolButton, QVBoxLayout,
+    QScrollArea, QSizePolicy, QSlider, QSplitter, QToolButton, QVBoxLayout,
 )
 
 from app.automix.overrides import pair_key
@@ -37,7 +37,9 @@ from app.widgets.transition_editor import (
 from app.widgets.transition_inspector import INCOMING_COLOR, OUTGOING_COLOR, _clock, plan_junctions
 
 _SETTINGS_KEY = "automix_editor/advanced"
-_COPIED_FIELDS = ("style", "duration", "tempo_match", "vocal_handoff", "eq_bands")
+AUDITION_ACTIVITY = "automix_audition"
+_COPIED_FIELDS = ("style", "duration", "tempo_match", "vocal_handoff", "eq_bands",
+                  "echo_beats", "echo_feedback", "echo_low_cut", "tape_entry", "key_shift", "ramp_seconds")
 """What paste and presets carry to another transition: how it mixes, never where (cues belong to the songs)."""
 _PRESETS_KEY = "automix_editor/presets"
 
@@ -118,8 +120,8 @@ class AutoMixEditorDialog(QDialog):
             for name in ("analyses_updated", "structures_updated"):
                 signal = getattr(owner, name, None)
                 if signal is not None:
-                    # Queued behind MainWindow's own slot, which merges the new results first.
-                    signal.connect(lambda _results: QTimer.singleShot(0, self, self._analysis_arrived))
+                    # A bound slot, not a lambda: Qt drops it when this dialog is deleted.
+                    signal.connect(self._queue_analysis_arrived)
         playlist_changed = getattr(getattr(window, "playlist_service", None), "playlist_changed", None)
         if playlist_changed is not None:
             playlist_changed.connect(self._playlist_changed)
@@ -143,8 +145,9 @@ class AutoMixEditorDialog(QDialog):
         self.previous_button = tool("‹")
         self.next_button = tool("›")
         self.transition_combo = QComboBox()
-        self.transition_combo.setMinimumWidth(260)
-        self.transition_combo.setMaximumWidth(460)
+        self.transition_combo.setMinimumWidth(180)
+        self.transition_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.transition_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.simple_button = QPushButton()
         self.advanced_button = QPushButton()
         self.mode_group = QButtonGroup(self)
@@ -194,24 +197,32 @@ class AutoMixEditorDialog(QDialog):
         toolbar = QFrame()
         toolbar.setObjectName("automixEditorToolbar")
         bar = QHBoxLayout(toolbar)
-        bar.setContentsMargins(12, 8, 12, 8)
-        bar.setSpacing(6)
+        bar.setContentsMargins(20, 16, 20, 16)
+        bar.setSpacing(8)
+        self.editor_title = QLabel("AutoMix")
+        self.editor_title.setObjectName("automixEditorTitle")
+        bar.addWidget(self.editor_title)
+        bar.addSpacing(16)
         for widget in (self.previous_button, self.transition_combo, self.next_button):
             bar.addWidget(widget)
         bar.addSpacing(12)
         bar.addWidget(mode_box)
-        bar.addSpacing(12)
-        for widget in (self.undo_button, self.redo_button):
-            bar.addWidget(widget)
-        bar.addSpacing(12)
-        bar.addWidget(self.snap_button)
-        bar.addSpacing(12)
+        bar.addWidget(self.help_button)
+
+        self.tools_bar = QFrame()
+        self.tools_bar.setObjectName("automixToolsBar")
+        tools_row = QHBoxLayout(self.tools_bar)
+        tools_row.setContentsMargins(20, 8, 20, 8)
+        tools_row.setSpacing(6)
+        for widget in (self.undo_button, self.redo_button, self.copy_button, self.paste_button, self.presets_button):
+            tools_row.addWidget(widget)
+        tools_row.addStretch(1)
+        tools_row.addWidget(self.snap_button)
+        tools_row.addSpacing(12)
         for widget in (self.zoom_out_button, self.fit_button, self.zoom_in_button):
-            bar.addWidget(widget)
-        bar.addStretch(1)
-        for widget in (self.copy_button, self.paste_button, self.presets_button, self.properties_button,
-                       self.help_button):
-            bar.addWidget(widget)
+            tools_row.addWidget(widget)
+        tools_row.addSpacing(12)
+        tools_row.addWidget(self.properties_button)
 
         self.timeline = AutoMixTimeline()
         self.timeline.seek_requested.connect(self._seek)
@@ -237,7 +248,7 @@ class AutoMixEditorDialog(QDialog):
         self.properties_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.properties_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.properties_scroll.setWidget(self.properties)
-        self.properties_scroll.setMinimumWidth(270)
+        self.properties_scroll.setMinimumWidth(300)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.addWidget(self.timeline_scroll)
@@ -267,6 +278,7 @@ class AutoMixEditorDialog(QDialog):
         self.position_slider.sliderMoved.connect(lambda value: self._seek_local(value / 1000.0))
         self.state_label = QLabel()
         self.state_label.setObjectName("automixStateChip")
+        self.state_label.setWordWrap(True)
         self.retry_button = QPushButton()
         self.retry_button.clicked.connect(self.audition.retry)
         self.retry_button.hide()
@@ -277,23 +289,35 @@ class AutoMixEditorDialog(QDialog):
         self.volume_slider.setFixedWidth(100)
         self.volume_slider.valueChanged.connect(self._volume_changed)
         transport = QFrame()
-        transport.setObjectName("previewControlCard")
-        row = QHBoxLayout(transport)
-        row.setContentsMargins(12, 8, 12, 8)
+        transport.setObjectName("automixTransport")
+        transport_layout = QVBoxLayout(transport)
+        transport_layout.setContentsMargins(20, 12, 20, 14)
+        transport_layout.setSpacing(10)
+        progress = QHBoxLayout()
+        progress.addWidget(self.position_slider, 1)
+        progress.addWidget(self.time_label)
+        transport_layout.addLayout(progress)
+        row = QHBoxLayout()
         row.setSpacing(8)
-        for widget in (self.play_button, self.stop_button, self.loop_button, self.compare_button, self.time_label):
+        for widget in (self.play_button, self.stop_button, self.loop_button, self.compare_button):
             row.addWidget(widget)
-        row.addWidget(self.position_slider, 1)
-        row.addWidget(self.state_label)
-        row.addWidget(self.retry_button)
-        row.addSpacing(8)
+        row.addStretch(1)
         row.addWidget(self.volume_label)
         row.addWidget(self.volume_slider)
+        transport_layout.addLayout(row)
+        status = QHBoxLayout()
+        status.addWidget(self.state_label, 1)
+        status.addWidget(self.retry_button)
+        self.save_label = QLabel()
+        self.save_label.setObjectName("mutedLabel")
+        status.addWidget(self.save_label)
+        transport_layout.addLayout(status)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(toolbar)
+        layout.addWidget(self.tools_bar)
         layout.addWidget(self.splitter, 1)
         layout.addWidget(transport)
 
@@ -859,6 +883,10 @@ class AutoMixEditorDialog(QDialog):
 
     # -- outside changes -------------------------------------------------------------------
 
+    def _queue_analysis_arrived(self, _results=None) -> None:
+        # Queued behind MainWindow's own slot, which merges the new results first.
+        QTimer.singleShot(0, self, self._analysis_arrived)
+
     def _analysis_arrived(self) -> None:
         """New analysis re-plans in place: the selected transition and the view stay put."""
         if self._finished:
@@ -916,7 +944,7 @@ class AutoMixEditorDialog(QDialog):
     def _retranslate(self) -> None:
         korean = self.korean
         self.setWindowTitle(self._text("AutoMix 편집기", "AutoMix editor"))
-        self.simple_button.setText(self._text("단순", "Simple"))
+        self.simple_button.setText(self._text("기본 편집", "Basic"))
         self.advanced_button.setText(self._text("고급", "Advanced"))
         self.simple_button.setToolTip(self._text("스타일·길이·핵심 큐만 (Ctrl+1)", "Style, length and key cues (Ctrl+1)"))
         self.advanced_button.setToolTip(self._text("정밀 큐·템포·대역 레인까지 (Ctrl+2)",
@@ -924,7 +952,7 @@ class AutoMixEditorDialog(QDialog):
         self.previous_button.setToolTip(self._text("이전 전환 (Alt+←)", "Previous transition (Alt+Left)"))
         self.next_button.setToolTip(self._text("다음 전환 (Alt+→)", "Next transition (Alt+Right)"))
         self.transition_combo.setToolTip(self._text("편집할 전환 · ✎ 직접 설정한 전환", "Transition to edit · ✎ set by hand"))
-        self.snap_button.setText(self._text("⌖ 박자 스냅", "⌖ Snap"))
+        self.snap_button.setText(self._text("박자 스냅", "Snap"))
         self.snap_button.setToolTip(self._text("끌 때 마디·박자에 붙습니다. Shift를 누르면 잠시 반대로 (S)",
                                                "Drags click onto bars and beats; Shift inverts it while held (S)"))
         self.fit_button.setText(self._text("맞춤", "Fit"))
@@ -949,12 +977,18 @@ class AutoMixEditorDialog(QDialog):
         self.properties_button.setToolTip(self._text("속성 패널 보이기/숨기기", "Show or hide the properties panel"))
         self.help_button.setToolTip(self._text("단축키 (F1)", "Shortcuts (F1)"))
         self.stop_button.setToolTip(self._text("정지 · 구간 처음으로", "Stop · back to the window start"))
-        self.loop_button.setText(self._text("⟲ 구간 반복", "⟲ Loop"))
+        self.loop_button.setText(self._text("구간 반복", "Loop"))
         self.loop_button.setToolTip(self._text("전환 앞뒤 구간을 반복 재생 (L)", "Repeat the transition window (L)"))
         self.play_button.setToolTip(self._text("선택한 전환 구간 재생 / 일시정지 (Space)",
                                                "Play / pause the selected transition window (Space)"))
         self.retry_button.setText(self._text("다시 시도", "Retry"))
-        self.volume_label.setText("🔊")
+        self.volume_label.setText(self._text("음량", "Volume"))
+        self.save_label.setText(self._text("변경 사항은 프로젝트에 자동 반영", "Edits apply to the project automatically"))
+        self.previous_button.setAccessibleName(self._text("이전 전환", "Previous transition"))
+        self.next_button.setAccessibleName(self._text("다음 전환", "Next transition"))
+        self.help_button.setAccessibleName(self._text("단축키 도움말", "Keyboard shortcuts"))
+        self.volume_slider.setAccessibleName(self._text("미리듣기 음량", "Audition volume"))
+        self.position_slider.setAccessibleName(self._text("미리듣기 위치", "Audition position"))
         self.volume_slider.setToolTip(self._text("미리듣기 볼륨", "Audition volume"))
         self.position_slider.setToolTip(self._text("구간 안에서 이동", "Seek within the window"))
         self._set_play_text()

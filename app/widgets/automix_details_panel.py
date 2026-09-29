@@ -19,10 +19,13 @@ _STYLE_LABELS = {
     "bass_swap": ("베이스 스왑", "Bass swap"),
     "vocal_safe_eq": ("보컬 보호 EQ", "Vocal-safe EQ"),
     "filter_blend": ("필터 블렌드", "Filter blend"),
-    "short_fade": ("짧은 페이드", "Short fade"),
+    "short_fade": ("크로스페이드", "Crossfade"),
     "filter_sweep": ("필터 스윕", "Filter sweep"),
     "drop_in": ("여운 위로 시작", "Drop in over the tail"),
-    "legacy": ("기본 크로스페이드", "Plain crossfade"),
+    "echo_out": ("에코 아웃", "Echo out"),
+    "tape_stop": ("테이프 스톱", "Tape stop"),
+    "downbeat_cut": ("컷", "Cut"),
+    "legacy": ("크로스페이드", "Crossfade"),
     "eq": ("EQ 직접 설정", "Custom EQ"),
     "sequential": ("이어서 재생", "Back to back"),
     "gap": ("간격", "Gap"),
@@ -38,6 +41,8 @@ _DETAIL_FIELDS = (
     ("outgoing_rate", "나가는 곡 속도(전환 중)", "Outgoing rate (in overlap)"),
     ("tempo_ramp_seconds", "템포 맞춤 구간(초)", "Tempo ramp (s)"),
     ("tempo_delta_percent", "템포 차이 %", "Tempo delta %"),
+    ("key_shift_semitones", "키 맞춤(반음)", "Key shift (semitones)"),
+    ("skipped_seconds", "생략한 곡 끝(초)", "Skipped ending (s)"),
     ("outgoing_cue", "나가는 곡 큐(초)", "Outgoing cue (s)"),
     ("incoming_cue", "들어오는 곡 큐(초)", "Incoming cue (s)"),
     ("outgoing_vocal_outro_start", "나가는 곡 마지막 보컬 끝(초)", "Outgoing last vocal ends (s)"),
@@ -119,11 +124,11 @@ class AutoMixDetailsPanel(QFrame):
         header.setSpacing(6)
         header.addWidget(self.title_label)
         header.addStretch(1)
-        header.addWidget(self.open_window_button)
         layout.addLayout(header)
         layout.addWidget(self.status_label)
         layout.addWidget(self.progress_label)
         layout.addWidget(self.explanation_label)
+        layout.addWidget(self.open_window_button)
         self.retranslate()
 
     # -- state ---------------------------------------------------------------

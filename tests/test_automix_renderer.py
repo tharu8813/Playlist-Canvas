@@ -173,9 +173,10 @@ class BassSwapGraphTests(unittest.TestCase):
         self.assertIn("[c0low]afade=t=out:st=54.800000:d=2.000000:curve=qsin", graph)
         self.assertIn("[c1mid]afade=t=in:st=0.000000:d=8.000000:curve=qsin", graph)
         self.assertIn("[c1low]afade=t=in:st=2.800000:d=2.000000:curve=qsin", graph)
-        self.assertIn("[m1a]atrim=end=52.000000[m1pre]", graph)
-        self.assertIn("[m1b]atrim=start=52.000000:end=60.000000", graph)
-        self.assertIn("[m1c]atrim=start=60.000000", graph)
+        # The window cut by sample count (52 s and 60 s at 48 kHz).
+        self.assertIn("[m1a]atrim=end_sample=2496000[m1pre]", graph)
+        self.assertIn("[m1b]atrim=start_sample=2496000:end_sample=2880000", graph)
+        self.assertIn("[m1c]atrim=start_sample=2880000", graph)
 
     def test_fade_windows_scale_with_min_and_max_transition_lengths(self) -> None:
         for duration in (2.0, 20.0):
@@ -213,7 +214,7 @@ class BassSwapGraphTests(unittest.TestCase):
         self.assertIn("anullsrc=r=48000:cl=stereo:d=3.000000[lead]", graph)
         self.assertIn("[c0mid]afade=t=out:st=52.000000:d=8.000000", graph)  # clip-local
         self.assertIn("[leading][c1]acrossfade=d=8.000000:curve1=nofade", graph)
-        self.assertIn("[m1b]atrim=start=55.000000:end=63.000000", graph)  # global timeline
+        self.assertIn("[m1b]atrim=start_sample=2640000:end_sample=3024000", graph)  # global timeline, 55-63 s
 
     def test_chained_beat_matches_envelope_the_middle_clip_on_both_ends(self) -> None:
         clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 52.0, 60.0), _clip("c", "c", 106.0, 60.0)]
@@ -222,8 +223,8 @@ class BassSwapGraphTests(unittest.TestCase):
         self.assertIn("[c1mid]afade=t=in:st=0.000000:d=8.000000:curve=qsin,"
                       "afade=t=out:st=54.000000:d=6.000000:curve=qsin[c1mide]", graph)
         self.assertIn("[m1][c2]acrossfade=d=6.000000:curve1=nofade", graph)
-        self.assertIn("[m2a]atrim=end=106.000000[m2pre]", graph)
-        self.assertIn("[m2b]atrim=start=106.000000:end=112.000000", graph)
+        self.assertIn("[m2a]atrim=end_sample=5088000[m2pre]", graph)  # 106 s
+        self.assertIn("[m2b]atrim=start_sample=5088000:end_sample=5376000", graph)
         self.assertEqual(label, "m2")
 
     def test_beat_match_next_to_a_cut_only_processes_the_participating_clips(self) -> None:
@@ -268,16 +269,59 @@ class TransitionStyleGraphTests(unittest.TestCase):
         clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 57.0, 60.0)]
         graph, _label = build_filter_graph(clips, [_styled("a", "b", 57.0, 3.0, TransitionDsp.SHORT_FADE)])
         self.assertNotIn("acrossover", graph)
-        self.assertIn("[c0][c1]acrossfade=d=3.000000:curve1=qsin:curve2=qsin[m1sum]", graph)
-        self.assertIn("[m1b]atrim=start=57.000000:end=60.000000,asetpts=PTS-STARTPTS,alimiter=", graph)
+        self.assertIn("[c0][c1]acrossfade=d=3.000000:curve1=qsin:curve2=qsin,asetpts=N/SR/TB[m1sum]", graph)
+        self.assertIn("[m1b]atrim=start_sample=2736000:end_sample=2880000,asetpts=PTS-STARTPTS,"
+                      "asetnsamples=n=1024:p=0,apad=pad_len=4800,alimiter=", graph)
 
     def test_drop_in_fades_only_the_outgoing_side_behind_a_click_guard(self) -> None:
         clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 57.0, 60.0)]
         graph, _label = build_filter_graph(clips, [_styled("a", "b", 57.0, 3.0, TransitionDsp.DROP_IN)])
         self.assertNotIn("acrossover", graph)
         self.assertIn("[c1]afade=t=in:d=0.02[m1attack]", graph)
-        self.assertIn("[c0][m1attack]acrossfade=d=3.000000:curve1=qsin:curve2=nofade[m1sum]", graph)
+        self.assertIn("[c0][m1attack]acrossfade=d=3.000000:curve1=qsin:curve2=nofade,asetpts=N/SR/TB[m1sum]", graph)
         self.assertIn("alimiter=", graph)
+
+    def test_echo_out_echoes_the_windows_first_beat_under_a_full_level_incoming_track(self) -> None:
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 56.0, 60.0)]
+        transition = AudioRenderTransition("a", "b", 56.0, 4.0, TransitionType.EQUAL_POWER,
+                                           TransitionDsp.ECHO_OUT, beat_seconds=0.5)
+        graph, _label = build_filter_graph(clips, [transition])
+        # The first beat (the last hit) plays dry, then the dry track is gone within half a beat...
+        self.assertIn("[c0dry]afade=t=out:st=56.500000:d=0.250000:curve=qsin", graph)
+        self.assertIn("[c0wetsrc]afade=t=in:st=56.000000:d=0.01", graph)  # ...and that hit feeds the echo
+        self.assertIn("aecho=in_gain=0:out_gain=1:delays=500.000|1000.000|1500.000|2000.000", graph)
+        self.assertIn("highpass=f=200", graph)
+        self.assertIn("[c1]afade=t=in:d=0.02[m1attack]", graph)
+        self.assertIn("[c0][m1attack]acrossfade=d=4.000000:curve1=nofade:curve2=nofade,asetpts=N/SR/TB[m1sum]", graph)
+
+    def test_tape_stop_slows_the_window_with_the_stretcher_and_delays_the_entry(self) -> None:
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 58.0, 60.0)]
+        transition = _styled("a", "b", 58.0, 2.0, TransitionDsp.TAPE_STOP, TransitionType.EQUAL_POWER)
+        graph, _label = build_filter_graph(clips, [transition])
+        self.assertIn(f"[c0head]atrim=end_sample={58 * SAMPLE_RATE}", graph)
+        self.assertIn("rubberband@stop0=tempo=1:pitch=1", graph)
+        self.assertIn("rubberband@stop0 tempo", graph)
+        self.assertIn(f"atrim=end_sample={2 * SAMPLE_RATE}[c0t]", graph)
+        self.assertIn("[c1]afade=t=in:st=1.200000:d=0.02[m1attack]", graph)
+        # Without a command-driven stretcher it is a plain fade, same timing.
+        plain, _label = build_filter_graph(clips, [transition], ramp_filter=None)
+        self.assertNotIn("rubberband", plain)
+        self.assertIn("[c0body]afade=t=out:st=59.100000:d=0.900000:curve=qsin[c0]", plain)
+
+    def test_tape_stop_schedule_slows_monotonically_and_consumes_less_input(self) -> None:
+        from app.automix.renderer import TAPE_STOP_MIN_RATE, tape_stop_schedule
+
+        schedule = tape_stop_schedule(2.0)
+        rates = [rate for _second, rate in schedule]
+        self.assertEqual(rates, sorted(rates, reverse=True))
+        self.assertAlmostEqual(rates[-1], TAPE_STOP_MIN_RATE, places=6)
+        self.assertLess(schedule[-1][0], 2.0)  # a slowing platter plays less than the window's source
+
+    def test_downbeat_cut_is_a_millisecond_equal_power_splice(self) -> None:
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 59.95, 60.0)]
+        graph, _label = build_filter_graph(
+            clips, [_styled("a", "b", 59.95, 0.05, TransitionDsp.DOWNBEAT_CUT, TransitionType.EQUAL_POWER)])
+        self.assertIn("[c0][c1]acrossfade=d=0.050000:curve1=qsin:curve2=qsin,asetpts=N/SR/TB[m1sum]", graph)
 
     def test_planner_styles_apply_to_equal_power_transitions_too(self) -> None:
         graph = self._pair_graph(TransitionDsp.FILTER_BLEND, TransitionType.EQUAL_POWER)
@@ -301,7 +345,7 @@ class TransitionStyleGraphTests(unittest.TestCase):
         # c: filter-blend head; its SHORT_FADE tail adds no band fade.
         self.assertIn("[c2low]afade=t=in:st=2.760000:d=0.720000:curve=qsin[c2lowe]", graph)
         self.assertNotIn("[c3pre]", graph)  # d only touches SHORT_FADE: no crossover
-        self.assertIn("[m2][c3]acrossfade=d=3.000000:curve1=qsin:curve2=qsin[m3sum]", graph)
+        self.assertIn("[m2][c3]acrossfade=d=3.000000:curve1=qsin:curve2=qsin,asetpts=N/SR/TB[m3sum]", graph)
         self.assertEqual(graph.count("alimiter="), 3)
         self.assertEqual(label, "m3")
 
@@ -664,6 +708,33 @@ class RealBassSwapRenderTests(unittest.TestCase):
         steady = audio[2 * SAMPLE_RATE:10 * SAMPLE_RATE]
         ratio = np.sqrt(np.mean(steady[:, 0] ** 2) / np.mean(steady[:, 1] ** 2))
         self.assertAlmostEqual(float(ratio), 1.25, delta=0.02)
+
+    def test_echo_out_repeats_decay_beat_by_beat_after_the_dry_track_stops(self) -> None:
+        paths = {"a": self._source("a", _tones([(1000.0, 0.5)], 30.0)),
+                 "b": self._source("b", _tones([(3000.0, 0.5)], 12.0))}
+        clips = [_clip("a", "a", 0.0, 30.0), _clip("b", "b", 26.0, 10.0, gain=0.0)]
+        transition = AudioRenderTransition("a", "b", 26.0, 4.0, TransitionType.EQUAL_POWER,
+                                           TransitionDsp.ECHO_OUT, beat_seconds=0.5)
+        audio = self._render(clips, [transition], paths)
+        self._assert_exact_length(audio, 36.0)
+        levels = [_spectrum_level(audio[int(s * SAMPLE_RATE):int((s + 0.4) * SAMPLE_RATE), 0], 1000.0)
+                  for s in (25.0, 27.05, 27.55, 28.05)]  # dry, then repeats 2-4 of the 26.0 s hit
+        self.assertGreater(levels[1], 0.2 * levels[0])        # the echo is audible...
+        self.assertLess(levels[1], levels[0])                  # ...below the dry track...
+        self.assertLess(levels[2], 0.8 * levels[1])            # ...and dies away
+        self.assertLess(levels[3], 0.8 * levels[2])
+
+    def test_tape_stop_lowers_the_pitch_as_it_slows(self) -> None:
+        if "rubberband" not in ffmpeg_filter_names(str(self.executable)):
+            self.skipTest("FFmpeg has no rubberband")
+        paths = {"a": self._source("a", _tones([(440.0, 0.5)], 30.0)),
+                 "b": self._source("b", _tones([(3000.0, 0.5)], 12.0))}
+        clips = [_clip("a", "a", 0.0, 30.0), _clip("b", "b", 28.0, 10.0, gain=0.0)]
+        audio = self._render(clips, [_styled("a", "b", 28.0, 2.0, TransitionDsp.TAPE_STOP,
+                                             TransitionType.EQUAL_POWER)], paths)
+        self._assert_exact_length(audio, 38.0)
+        segment = audio[int(29.3 * SAMPLE_RATE):int(29.5 * SAMPLE_RATE), 0]
+        self.assertGreater(_spectrum_level(segment, 220.0), _spectrum_level(segment, 440.0))
 
     def test_failed_bass_swap_with_partial_output_retries_as_valid_qsin(self) -> None:
         clips, transitions, paths = self._pair()

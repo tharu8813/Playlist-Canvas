@@ -63,10 +63,13 @@ class SelectTransitionDspTests(unittest.TestCase):
     def test_reliable_beat_match_without_conflicts_is_bass_swap(self) -> None:
         self.assertIs(self.select(), TransitionDsp.BASS_SWAP)
 
-    def test_fixed_crossfade_and_cut_keep_the_legacy_mix(self) -> None:
-        for strategy in (TransitionStrategy.FIXED_CROSSFADE, TransitionStrategy.CUT):
-            with self.subTest(strategy=strategy):
-                self.assertIsNone(self.select(_candidate(strategy, duration=2.0)))
+    def test_short_fixed_crossfade_is_equal_power_and_cut_keeps_the_legacy_mix(self) -> None:
+        cases = ((TransitionStrategy.FIXED_CROSSFADE, 2.0, TransitionDsp.SHORT_FADE),
+                 (TransitionStrategy.FIXED_CROSSFADE, 5.0, None),
+                 (TransitionStrategy.CUT, 2.0, None))
+        for strategy, duration, expected in cases:
+            with self.subTest(strategy=strategy, duration=duration):
+                self.assertIs(self.select(_candidate(strategy, duration=duration)), expected)
 
     def test_a_window_mostly_past_the_decay_start_drops_the_next_track_in(self) -> None:
         # Window 100-108 s: its middle (104 s) against the outgoing decay start.
@@ -240,6 +243,8 @@ class DecisionReasonTests(unittest.TestCase):
             (dict(candidate=_candidate(TransitionStrategy.BEAT_ALIGNED_CROSSFADE), compatibility=_compatibility(0.9125), **_KNOWN_QUIET),
              "* filter_blend: kicks would drift 73ms"),
             (dict(), "* bass_swap: clean reliable beat match"),
+            (dict(candidate=_candidate(TransitionStrategy.FIXED_CROSSFADE, duration=3.0)),
+             "* short_fade: fixed_crossfade without a shared tempo, equal-power instead of linear"),
             (dict(candidate=_candidate(TransitionStrategy.FIXED_CROSSFADE)),
              "* legacy crossfade: fixed_crossfade has no reliable rhythm to style on"),
         ]

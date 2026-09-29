@@ -33,6 +33,18 @@ class TempoRamp:
     source_end: float
     end_rate: float
     steps: int = 32
+    end_pitch: float = 1.0
+    """Pitch ratio reached over the same span and held after it (AutoMix key
+    matching: at most a semitone). Needs a stretcher that takes pitch commands;
+    timing never depends on it."""
+
+    def pitch_at(self, source_seconds: float) -> float:
+        """The pitch ratio playing at ``source_seconds`` of the track."""
+        if source_seconds <= self.source_start or self.end_pitch == 1.0:
+            return 1.0
+        span = self.source_end - self.source_start
+        progress = 1.0 if span <= 0.0 else min(1.0, (source_seconds - self.source_start) / span)
+        return 1.0 + (self.end_pitch - 1.0) * progress
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +124,16 @@ class TransitionDsp(str, Enum):
     DROP_IN = "drop_in"
     """The outgoing track is already fading: the incoming one starts at full
     level while that tail fades out underneath it."""
+    ECHO_OUT = "echo_out"
+    """The outgoing track stops on the window's first downbeat and only a
+    beat-synced echo of its last beat rings on (lows cut), under the incoming
+    track at full level. Needs no shared tempo."""
+    TAPE_STOP = "tape_stop"
+    """The outgoing track slows to a stop, pitch falling with speed like a
+    turntable losing power; the incoming track enters late in the window."""
+    DOWNBEAT_CUT = "downbeat_cut"
+    """A hard cut from one downbeat to the next track's, with only a few
+    milliseconds of equal-power overlap so it does not click."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +165,14 @@ class AudioRenderTransition:
     """A band style's fade windows set by hand (low, mid, high; each
     ((outgoing start, end), (incoming start, end)) as 0..1 of the window),
     used instead of the style's BAND_ENVELOPES. ``None``: the style's own."""
+    beat_seconds: float | None = None
+    """ECHO_OUT: the echo delay, one outgoing beat on the timeline (``None``: 0.5 s)."""
+    echo_feedback: float | None = None
+    """ECHO_OUT: each repeat's level against the previous one (``None``: the renderer's default)."""
+    echo_low_cut: bool = True
+    """ECHO_OUT: thin the repeats below the low cut."""
+    tape_entry: float | None = None
+    """TAPE_STOP: window progress where the incoming track enters (``None``: the renderer's default)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,6 +407,7 @@ def validate_compiled_render_plan(plan: CompiledRenderPlan) -> None:
         ramp = clip.tempo_ramp
         if ramp is not None and not (
             isfinite(ramp.end_rate) and ramp.end_rate > 0.0 and ramp.steps >= 1
+            and isfinite(ramp.end_pitch) and ramp.end_pitch > 0.0
             and clip.source_in <= ramp.source_start <= ramp.source_end <= clip.source_out
         ):
             raise ValueError(f"Clip {clip.clip_id!r} has an invalid tempo ramp.")

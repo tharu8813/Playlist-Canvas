@@ -156,7 +156,7 @@ from app.utils.logging_setup import log_directory, report_unexpected_error
 from app.widgets.playlist_editor import PlaylistEditor
 from app.widgets.content_library_panel import ContentLibraryPanel
 from app.widgets.activity_progress import ActivityProgressWidget
-from app.ui.studio_icons import source_icon
+from app.ui.studio_icons import menu_icon, source_icon
 from app import __version__
 
 
@@ -272,6 +272,9 @@ class MainWindow(QMainWindow):
         playlist_editor = getattr(self, "playlist_editor", None)
         if playlist_editor is not None:
             playlist_editor.set_transitions(settings.transition_mode == "automix", settings.automix_overrides)
+        automix_editor_action = getattr(self, "automix_editor_action", None)
+        if automix_editor_action is not None:
+            automix_editor_action.setEnabled(settings.transition_mode == "automix")
 
     def __init__(self) -> None:
         super().__init__()
@@ -1377,6 +1380,11 @@ class MainWindow(QMainWindow):
         self.lrc_generator_action = QAction(self)
         self.lrc_generator_action.triggered.connect(self._show_lrc_generator)
         self.tools_menu.addAction(self.lrc_generator_action)
+        self.automix_editor_action = QAction(self)
+        self.automix_editor_action.triggered.connect(lambda: self.preview_controller.edit_transition())
+        settings = getattr(self, "_project_settings", None)
+        self.automix_editor_action.setEnabled(settings is not None and settings.transition_mode == "automix")
+        self.tools_menu.addAction(self.automix_editor_action)
         self.tools_menu.addSeparator()
         self.tools_menu.addAction(self.settings_action)
         self.tools_menu.addSeparator()
@@ -1401,6 +1409,29 @@ class MainWindow(QMainWindow):
         self.about_action.setMenuRole(QAction.MenuRole.AboutRole)
         self.about_action.triggered.connect(self._show_about)
         self.help_menu.addAction(self.about_action)
+        # Toolbar actions bring their own icons; every other row gets one here.
+        # Checkable rows (grid, panels, languages) keep their check mark instead.
+        menu_icons = {
+            self.save_as_action: "save_as", self.recent_projects_menu.menuAction(): "recent",
+            self.import_m3u_action: "import_playlist", self.export_m3u_action: "export_playlist",
+            self.exit_action: "exit", self.project_settings_action: "project_settings",
+            self.save_preset_action: "save_preset", self.upgrade_project_action: "upgrade",
+            self.cut_action: "cut", self.copy_action: "copy", self.paste_action: "paste",
+            self.duplicate_action: "duplicate", self.select_all_action: "select_all",
+            self.clear_selection_action: "clear_selection", self.reset_layout_action: "reset_layout",
+            self.show_playlist_action: "track_list", self.show_timeline_action: "timeline",
+            self.lrc_generator_action: "lyrics", self.automix_editor_action: "automix",
+            self.language_menu.menuAction(): "language", self.help_action: "help",
+            self.shortcuts_action: "shortcuts", self.check_updates_action: "check_updates",
+            self.about_action: "about",
+            **{self.insert_category_menus[category].menuAction(): name for category, name in (
+                ("basic", "add_basic"), ("playback", "now_playing"),
+                ("branding", "logo"), ("audio_effects", "audio_visualizer"),
+            )},
+            **{action: kind.value for kind, action in self.source_insert_actions.items()},
+        }
+        for action, name in menu_icons.items():
+            action.setIcon(menu_icon(name))
         self._sync_canvas_shortcut_actions(None, QApplication.focusWidget())
 
     def _rebuild_recent_projects_menu(self) -> None:
@@ -1433,6 +1464,7 @@ class MainWindow(QMainWindow):
         clear_action = menu.addAction(
             "최근 프로젝트 목록 지우기" if korean else "Clear recent projects"
         )
+        clear_action.setIcon(menu_icon("clear"))
         clear_action.triggered.connect(self._confirm_clear_recent_projects)
 
     def _confirm_clear_recent_projects(self) -> bool:
@@ -4746,6 +4778,11 @@ class MainWindow(QMainWindow):
         self.lrc_generator_action.setText(
             "LRC 파일 생성기" if self.translator.is_korean
             else "LRC File Generator"
+        )
+        self.automix_editor_action.setText("AutoMix 편집기" if korean else "AutoMix Editor")
+        self.automix_editor_action.setStatusTip(
+            "곡 사이 전환을 두 곡 타임라인에서 직접 편집합니다. (AutoMix 전환 모드에서 사용)" if korean
+            else "Edit the transitions between songs on a two-track timeline (AutoMix transition mode)."
         )
         self.file_menu.setTitle("파일" if self.translator.is_korean else "File")
         self.recent_projects_menu.setTitle(

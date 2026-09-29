@@ -14,6 +14,7 @@ from app.automix.planner import compile_automix
 from app.automix.renderer import AutoMixAudioPipeline, band_fade_windows
 from app.utils.subprocess_utils import hidden_process_kwargs
 from app.timeline.models import TransitionType
+from app.timeline.render_plan import TransitionDsp
 from tests.test_automix_planner import ENABLED, _analysis, _structure, _track
 
 
@@ -27,9 +28,12 @@ class TailProtectionTests(unittest.TestCase):
                 plan = compile_automix(tracks, analyses, ENABLED)
                 self.assertEqual(plan.audio.clips[1].playback_rate, 1.0)  # b plays at its own tempo
                 self.assertAlmostEqual(plan.audio.clips[0].tempo_ramp.end_rate, 124 / 120)
-                self.assertEqual(plan.audio.transitions[1].type, TransitionType.CROSSFADE)
+                # b's bar grid is enough to leave it on a phrase boundary (an echo
+                # needs no tempo from c), whether c's tempo is incompatible or unknown.
+                self.assertEqual(plan.audio.transitions[1].type, TransitionType.EQUAL_POWER)
+                self.assertIs(plan.audio.transitions[1].dsp, TransitionDsp.ECHO_OUT)
+                self.assertEqual(plan.audio.clips[0].source_out, 60)
                 for clip, transition in zip(plan.audio.clips, plan.audio.transitions):
-                    self.assertEqual(clip.source_out, 60)
                     self.assertAlmostEqual(clip.timeline_end, transition.timeline_start + transition.duration)
 
     def test_structure_hint_cannot_discard_an_unknown_or_known_vocal_ending(self):

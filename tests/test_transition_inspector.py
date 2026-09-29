@@ -63,6 +63,18 @@ class TransitionWindowTests(unittest.TestCase):
         (junction,) = plan_junctions(_crossfaded_plan())
         self.assertEqual((junction.start, junction.end, junction.handover), (52.0, 60.0, 56.0))
 
+    def test_detail_tabs_preserve_selection_and_do_not_control_playback(self) -> None:
+        panel, window = self._window(_crossfaded_plan(), [])
+        selected = window.junction
+        with patch.object(panel, "set_plan") as replan:
+            window.detail_tabs.setCurrentIndex(1)
+            window.details_button.setChecked(True)
+            self.assertFalse(window.details_box.isHidden())
+            window.detail_tabs.setCurrentIndex(0)
+        self.assertIs(window.junction, selected)
+        self.assertFalse(window._playing)
+        replan.assert_not_called()
+
     def test_follows_the_playhead_until_a_transition_is_picked_by_hand(self) -> None:
         tracks = [_track("a", 200), _track("b", 180), _track("c", 210)]
         analyses = {t.id: _analysis(t.id, 120, t.duration_seconds) for t in tracks}

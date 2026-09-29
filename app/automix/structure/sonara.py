@@ -49,6 +49,7 @@ import numpy as np
 
 from app.automix.structure.models import TrackSection, TrackStructureAnalysis
 from app.automix.structure.provider import StructureAnalysisCancelled
+from app.automix.structure.timbre import timbre_curves
 from app.models.playlist import PlaylistTrack
 
 LOGGER = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ class SonaraStructureProvider:
     """StructureAnalysisProvider backed by the optional ``sonara`` package."""
 
     provider_id = "sonara_structure"
-    version = "2"  # 2: analyzes FFmpeg-decoded PCM (sonara's own M4A decode doubled every time)
+    version = "3"  # 2: analyzes FFmpeg-decoded PCM (sonara's own M4A decode doubled every time); 3: timbre curves
     """This implementation's version -- see __init__, which folds in the
     installed sonara package version into the actual per-instance cache
     identity (self.version); each analyze() result additionally folds in
@@ -120,6 +121,7 @@ class SonaraStructureProvider:
         if progress is not None:
             progress(0.3, "Analyzing track structure")
         keyword_arguments: dict[str, object] = {"features": ["structure"]}
+        timbre: tuple[tuple[float, ...], ...] = ((), (), ())
         if self._ffmpeg_executable is not None:
             from app.automix.analysis.basic import SAMPLE_RATE, BasicAnalysisProvider
 
@@ -129,6 +131,7 @@ class SonaraStructureProvider:
             )
             result = sonara.analyze_signal(np.asarray(signal, dtype=np.float32), sr=sample_rate,
                                            **keyword_arguments)
+            timbre = timbre_curves(signal, sample_rate)
         else:
             if self._sample_rate is not None:
                 keyword_arguments["sr"] = self._sample_rate
@@ -172,6 +175,7 @@ class SonaraStructureProvider:
             sections=sections,
             energy_curve=energy_curve,
             energy_curve_hop_seconds=(float(hop_seconds) if hop_seconds is not None else None),
+            bass_curve=timbre[0], brightness_curve=timbre[1], percussive_curve=timbre[2],
             analyzer_id=self.provider_id,
             analyzer_version=analyzer_version,
         )

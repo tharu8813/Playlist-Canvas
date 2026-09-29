@@ -59,6 +59,10 @@ class TransitionDspDecision:
     """VOCAL_SAFE_EQ only: window progress of the mid-band handoff (see VocalMap.handoff)."""
 
 
+SWEEP_MIN_SECONDS = 8.0
+"""FILTER_SWEEP needs room: its highpass travels over most of the window."""
+
+
 def select_transition_dsp(
     candidate: TransitionCandidate,
     compatibility: TransitionCompatibility,
@@ -66,28 +70,35 @@ def select_transition_dsp(
     incoming: TrackAnalysis,
     outgoing_structure: TrackStructureAnalysis | None = None,
     incoming_structure: TrackStructureAnalysis | None = None,
+    *, previous_style: TransitionDsp | None = None,
 ) -> TransitionDspDecision:
     """Decide the DSP style for ``candidate``'s window. Rules, first match wins:
 
     0. the outgoing window's middle is past the track's decay start (any
        strategy) -> DROP_IN: on 20 real transitions this took the mean
        level dip from -13.9 to -8.9 dB and holes under -15 dB from 9 to 2.
-    1. FIXED_CROSSFADE/CUT (no usable rhythm analysis) -> ``None``: legacy tri.
+    1. FIXED_CROSSFADE (no shared tempo) -> SHORT_FADE under SHORT_FADE_MAX_SECONDS,
+       else, like CUT, ``None``: legacy tri.
     2. window shorter than SHORT_FADE_MAX_SECONDS -> SHORT_FADE.
     3. both tracks singing at the same time for at least 1/8 of the window
        (see VocalMap), or known clashing keys -> VOCAL_SAFE_EQ. Vocals that
        hand over without meeting (the outgoing line ends early, the incoming
        one starts late) are not a clash.
-    4. energy jump, or (not rate-matched) kick drift across the window -> FILTER_BLEND.
+    4. energy jump -> FILTER_SWEEP when it rises into a window of at least
+       SWEEP_MIN_SECONDS (a highpass build-up into the bigger track), else
+       FILTER_BLEND; (not rate-matched) kick drift across the window -> FILTER_BLEND.
     5. BEAT_MATCH -> BASS_SWAP; BEAT_ALIGNED_CROSSFADE -> ``None`` (legacy qsin).
     Then: vocal activity unknown on either side -> VOCAL_SAFE_EQ (rules 3-5).
+    Playlist flow: a filter style the previous junction (``previous_style``)
+    already used gives way to the other filter style.
     """
     strategy = candidate.strategy
     duration = candidate.duration_seconds
     facts = [f"+ {strategy.value} ({'rate-matched' if strategy is TransitionStrategy.BEAT_MATCH else 'own tempo'})"]
     vocals = vocal_map(candidate, outgoing, incoming)
     keys = _keys_clash(outgoing, incoming)
-    energy, energy_source = _energy_jump(candidate, outgoing, incoming, outgoing_structure, incoming_structure)
+    rise, energy_source = _energy_jump(candidate, outgoing, incoming, outgoing_structure, incoming_structure)
+    energy = abs(rise) if rise is not None else None
     drift = 0.0
     if strategy is TransitionStrategy.BEAT_ALIGNED_CROSSFADE:
         drift = duration * compatibility.tempo_shift_percent / 100.0
@@ -97,7 +108,7 @@ def select_transition_dsp(
     metrics = (
         ("vocal_overlap", vocals.overlap_ratio if vocals is not None else None),
         ("vocal_handoff", handoff), ("key_clash", keys),
-        ("energy_delta", energy), ("energy_source", energy_source or None),
+        ("energy_delta", energy), ("energy_rise", rise), ("energy_source", energy_source or None),
         ("kick_drift_ms", drift * 1000.0 if strategy is TransitionStrategy.BEAT_ALIGNED_CROSSFADE else None),
         ("outgoing_decayed", decayed),
     )
@@ -106,6 +117,12 @@ def select_transition_dsp(
         # leaves a hole; start it at full level and let the tail fade under it.
         return TransitionDspDecision(TransitionDsp.DROP_IN, (
             f"* drop_in: outgoing already fading (from {outgoing.decay_start_seconds:.1f}s)", *facts,
+        ), metrics)
+    if strategy is TransitionStrategy.FIXED_CROSSFADE and duration < SHORT_FADE_MAX_SECONDS:
+        # No beat grid to style on, but the legacy linear (tri) fade dips -3 dB mid-window:
+        # on 10 real fallback fades it ran 1.8 dB under equal power; SHORT_FADE is qsin.
+        return TransitionDspDecision(TransitionDsp.SHORT_FADE, (
+            f"* short_fade: {strategy.value} without a shared tempo, equal-power instead of linear",
         ), metrics)
     if strategy not in (TransitionStrategy.BEAT_MATCH, TransitionStrategy.BEAT_ALIGNED_CROSSFADE):
         return TransitionDspDecision(
@@ -129,13 +146,19 @@ def select_transition_dsp(
     elif conflict or keys:
         dsp, rule = TransitionDsp.VOCAL_SAFE_EQ, "vocals overlap" if conflict else "keys clash"
     elif energy is not None and energy >= ENERGY_JUMP_THRESHOLD:
-        dsp, rule = TransitionDsp.FILTER_BLEND, f"{energy_source} energy delta {energy:.2f} (>= {ENERGY_JUMP_THRESHOLD})"
+        if rise is not None and rise > 0.0 and duration >= SWEEP_MIN_SECONDS:
+            dsp, rule = TransitionDsp.FILTER_SWEEP, f"{energy_source} energy rises {energy:.2f}: sweep up into it"
+        else:
+            dsp, rule = TransitionDsp.FILTER_BLEND, f"{energy_source} energy delta {energy:.2f} (>= {ENERGY_JUMP_THRESHOLD})"
     elif drift > MAX_BEAT_DRIFT_SECONDS:
         dsp, rule = TransitionDsp.FILTER_BLEND, f"kicks would drift {drift * 1000:.0f}ms"
     elif strategy is TransitionStrategy.BEAT_MATCH:
         dsp, rule = TransitionDsp.BASS_SWAP, "clean reliable beat match"
     else:
         dsp, rule = None, "aligned crossfade with no conflicts: legacy equal-power"
+    swap = {TransitionDsp.FILTER_SWEEP: TransitionDsp.FILTER_BLEND, TransitionDsp.FILTER_BLEND: TransitionDsp.FILTER_SWEEP}
+    if dsp in swap and dsp is previous_style and (dsp is TransitionDsp.FILTER_SWEEP or duration >= SWEEP_MIN_SECONDS):
+        dsp, rule = swap[dsp], f"{rule}; previous junction used {previous_style.value}"
     if vocals is None and dsp is not TransitionDsp.SHORT_FADE:
         # The light analyzer never measures vocals, so this is the normal case.
         # A full-window mid crossfade lets two singers overlap for the whole
@@ -249,7 +272,7 @@ def _energy_jump(
         local_out = outgoing_structure.energy_at(candidate.outgoing_source_time)
         local_in = incoming_structure.energy_at(candidate.incoming_source_time)
         if local_out is not None and local_in is not None:
-            return abs(local_out - local_in), "local"
+            return local_in - local_out, "local"
     if outgoing.energy is not None and incoming.energy is not None:
-        return abs(outgoing.energy - incoming.energy), "global"
+        return incoming.energy - outgoing.energy, "global"
     return None, ""

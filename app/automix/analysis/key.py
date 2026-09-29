@@ -76,6 +76,30 @@ def key_to_camelot(key: str) -> str | None:
     return table.get(root) if table is not None else None
 
 
+def shift_key(key: str, semitones: int) -> str | None:
+    """``key`` transposed by ``semitones`` (same mode), or None if unparseable."""
+    try:
+        root, mode = key.rsplit(" ", 1)
+        index = PITCH_CLASSES.index(root)
+    except ValueError:
+        return None
+    return f"{PITCH_CLASSES[(index + semitones) % 12]} {mode}"
+
+
+def harmonic_shift(outgoing_key: str, incoming_key: str, max_semitones: int = 1) -> int | None:
+    """The smallest pitch shift (semitones, +up first) that makes ``outgoing_key``
+    Camelot-compatible with ``incoming_key``; None when they already are or no
+    shift within ``max_semitones`` helps."""
+    if camelot_compatible(outgoing_key, incoming_key):
+        return None
+    for size in range(1, max_semitones + 1):
+        for semitones in (size, -size):
+            shifted = shift_key(outgoing_key, semitones)
+            if shifted is not None and camelot_compatible(shifted, incoming_key):
+                return semitones
+    return None
+
+
 def camelot_compatible(key_a: str, key_b: str) -> bool:
     """True if two keys mix cleanly on the Camelot wheel.
 

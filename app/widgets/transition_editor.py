@@ -10,19 +10,21 @@ auditions the one window it changed.
 from __future__ import annotations
 
 import bisect
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+    QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QSizePolicy, QSlider, QToolButton, QVBoxLayout, QWidget,
 )
 
 from app.automix.models import TrackAnalysis
 from app.automix.overrides import (
-    EQ_BANDS, MANUAL_STYLES, MAX_DURATION_SECONDS, MIN_EQ_WINDOW, STYLE_AUTO, STYLE_CUT, STYLE_EQ,
-    BandWindows, TransitionOverride, Window, pair_key,
+    ECHO_BEAT_CHOICES, EQ_BANDS, MANUAL_STYLES, MAX_DURATION_SECONDS, MAX_RAMP_SECONDS, MIN_EQ_WINDOW,
+    STYLE_ALIASES, STYLE_AUTO,
+    STYLE_CUT, STYLE_EQ, BandWindows, TransitionOverride, Window, pair_key,
 )
 from app.automix.renderer import BAND_ENVELOPES
 from app.automix.structure.models import TrackStructureAnalysis
@@ -45,12 +47,22 @@ STYLE_CHOICES = {
                      "A DJ-style highpass sweep out of the outgoing song."),
     "filter_blend": ("필터 블렌드", "Filter blend", "들어오는 곡이 고음부터 스며드는 3대역 블렌드입니다.",
                      "A 3-band blend; the incoming song arrives highs-first."),
-    "short_fade": ("짧은 페이드", "Short fade", "대역 분리 없이 전체 음량을 교차합니다.",
-                   "A full-band equal-power fade."),
+    "short_fade": ("크로스페이드", "Crossfade", "대역 분리 없이 두 곡의 전체 음량을 부드럽게 교차합니다.",
+                   "A full-band equal-power crossfade."),
     "drop_in": ("드롭인", "Drop in", "들어오는 곡을 처음부터 제 음량으로 시작하고 앞 곡은 아래로 사라집니다.",
                 "The incoming song starts at full level; the outgoing one fades under it."),
-    "legacy": ("크로스페이드", "Crossfade", "가장 단순한 전체 대역 크로스페이드입니다.",
-               "The plainest full-band crossfade."),
+    "echo_out": ("에코 아웃", "Echo out", "나가는 곡이 큐에서 멈추고 마지막 박자의 에코만 박자에 맞춰 잦아듭니다. "
+                 "템포가 달라도 자연스럽습니다.",
+                 "The outgoing song stops at the cue and only a beat-synced echo of its last beat rings out; "
+                 "works across any tempo."),
+    "tape_stop": ("테이프 스톱", "Tape stop", "턴테이블 전원이 꺼지듯 나가는 곡이 느려지며 음이 내려가다 멈춥니다.",
+                  "The outgoing song slows and drops in pitch to a halt, like a turntable losing power."),
+    "downbeat_cut": ("컷", "Cut", "겹치지 않고 큐 지점에서 바로 다음 곡으로 넘어갑니다. 딸깍 소리가 나지 않게 "
+                     "아주 짧게 이어 붙입니다. 큐를 박자에 두면 박에서 박으로 넘어갑니다.",
+                     "No overlap: jump to the next song at the cue, spliced just long enough not to click. "
+                     "Put the cues on beats for a beat-to-beat cut."),
+    "legacy": ("크로스페이드", "Crossfade", "대역 분리 없이 두 곡의 전체 음량을 교차합니다.",
+               "A full-band crossfade."),
     "cut": ("컷", "Cut", "겹치지 않고 큐 지점에서 바로 다음 곡으로 넘어갑니다.",
             "No overlap: jump to the next song at the cue."),
     "eq": ("EQ 직접", "Custom EQ", "저음·중음·고음을 각각 언제 넘길지 아래 그래프에서 직접 정합니다.",
@@ -81,7 +93,9 @@ def override_from_junction(junction: Junction) -> TransitionOverride:
                                               junction.outgoing.source_at(junction.start))), 6),
             incoming_cue=round(max(0.0, float(junction.incoming.source_in)), 6),
             duration=min(MAX_DURATION_SECONDS, float(transition.duration)),
-            style=STYLE_AUTO,
+            # A phrase exit's move is not what "auto" re-picks for a hand-set window: keep it.
+            style=(transition.dsp.value if details.get("strategy") == "phrase_exit" and transition.dsp is not None
+                   else STYLE_AUTO),
             tempo_match=isinstance(rate, (int, float)) and abs(float(rate) - 1.0) > 1e-9,
         )
     # No overlap now (an automatic cut or back-to-back junction): keep that exact
@@ -342,8 +356,36 @@ def edited_override(
 
 # -- side panel -------------------------------------------------------------------------
 
-_BASIC_STYLES = (STYLE_AUTO, "legacy", "vocal_safe_eq", STYLE_CUT)
+STYLE_GROUPS = (
+    # (Korean heading, English heading, styles) -- what the editor offers, by kind of move.
+    ("페이드", "Fades", ("short_fade", "drop_in")),
+    ("EQ 믹스 · 박자가 맞는 곡", "EQ mixes · beat-matched songs",
+     ("bass_swap", "vocal_safe_eq", "filter_blend", "filter_sweep", STYLE_EQ)),
+    ("효과 · 템포가 달라도 됨", "Effects · any tempo", ("echo_out", "tape_stop", "downbeat_cut")),
+)
+_BASIC_STYLES = ("short_fade", "vocal_safe_eq", "echo_out", "downbeat_cut")
+"""Simple mode's choices besides automatic: one of each kind."""
 LENGTH_PRESETS = (4.0, 8.0, 16.0)
+_CUT_STYLES = (STYLE_CUT, "downbeat_cut")
+"""Styles without an overlap to size."""
+KEY_SHIFT_CHOICES = (None, 0, -2, -1, 1, 2)
+
+
+def shown_style(style: str) -> str:
+    """The editor button that stands for saved ``style`` (see STYLE_ALIASES)."""
+    return STYLE_ALIASES.get(style, style)
+
+
+def effect_length(style: str, outgoing: TrackAnalysis | None) -> float | None:
+    """The window an effect's move naturally takes, as the automatic phrase exit sizes it (None: not an effect)."""
+    from app.automix.exits import ECHO_BARS, ECHO_MAX_SECONDS, TAPE_STOP_SECONDS
+
+    bar = (outgoing.meter_numerator or 4) * 60.0 / outgoing.bpm if outgoing is not None and outgoing.bpm else 2.0
+    if style == "echo_out":
+        return round(min(ECHO_BARS * bar, ECHO_MAX_SECONDS), 3)
+    if style == "tape_stop":
+        return round(min(max(bar, TAPE_STOP_SECONDS[0]), TAPE_STOP_SECONDS[1]), 3)
+    return None
 
 
 class TransitionPropertiesPanel(QWidget):
@@ -394,16 +436,22 @@ class TransitionPropertiesPanel(QWidget):
         self.style_group = QButtonGroup(self)
         self.style_buttons: dict[str, QToolButton] = {}
         self.style_grid = QGridLayout()
-        self.style_grid.setSpacing(6)
-        for style in MANUAL_STYLES:
+        self.style_grid.setHorizontalSpacing(6)
+        self.style_grid.setVerticalSpacing(6)
+        for style in (STYLE_AUTO, *(style for *_names, styles in STYLE_GROUPS for style in styles)):
             button = QToolButton()
             button.setObjectName("transitionStyleCard")
             button.setCheckable(True)
-            button.setMinimumHeight(34)
+            button.setMinimumHeight(30)
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            button.clicked.connect(lambda _checked=False, style=style: self._emit({"style": style}))
+            button.clicked.connect(lambda _checked=False, style=style: self._choose_style(style))
             self.style_group.addButton(button)
             self.style_buttons[style] = button
+        self.group_labels = []
+        for _group in STYLE_GROUPS:
+            label = QLabel()
+            label.setObjectName("styleGroupLabel")
+            self.group_labels.append(label)
         self.style_description = QLabel()
         self.style_description.setObjectName("mutedLabel")
         self.style_description.setWordWrap(True)
@@ -478,6 +526,50 @@ class TransitionPropertiesPanel(QWidget):
         self.band_hint.setObjectName("mutedLabel")
         self.band_hint.setWordWrap(True)
 
+        # -- style details: only the chosen style's own settings are shown --
+        self.detail_title = self._title()
+        self.echo_beats_label = QLabel()
+        self.echo_beat_buttons: dict[float, QToolButton] = {}
+        echo_beats_row = QHBoxLayout()
+        echo_beats_row.setSpacing(6)
+        for beats in ECHO_BEAT_CHOICES:
+            button = QToolButton()
+            button.setObjectName("eqPresetButton")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, beats=beats: self._emit({"echo_beats": beats}))
+            self.echo_beat_buttons[beats] = button
+            echo_beats_row.addWidget(button)
+        echo_beats_row.addStretch(1)
+        self.echo_tail_label = QLabel()
+        self.echo_feedback_slider = QSlider(Qt.Orientation.Horizontal)
+        self.echo_feedback_slider.setRange(20, 80)
+        self.echo_feedback_slider.valueChanged.connect(self._echo_feedback_moved)
+        self.echo_feedback_slider.sliderReleased.connect(self.flush)
+        self.echo_feedback_value = QLabel()
+        self.echo_feedback_value.setMinimumWidth(64)
+        self.echo_feedback_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        echo_tail_row = QHBoxLayout()
+        echo_tail_row.addWidget(self.echo_feedback_slider, 1)
+        echo_tail_row.addWidget(self.echo_feedback_value)
+        self.echo_low_cut_check = QCheckBox()
+        self.echo_low_cut_check.toggled.connect(lambda checked: self._emit({"echo_low_cut": checked}))
+
+        self.tape_entry_label = QLabel()
+        self.tape_entry_slider = QSlider(Qt.Orientation.Horizontal)
+        self.tape_entry_slider.setRange(20, 95)
+        self.tape_entry_slider.valueChanged.connect(self._tape_entry_moved)
+        self.tape_entry_slider.sliderReleased.connect(self.flush)
+        self.tape_entry_value = QLabel()
+        self.tape_entry_value.setMinimumWidth(40)
+        self.tape_entry_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        tape_row = QHBoxLayout()
+        tape_row.addWidget(self.tape_entry_slider, 1)
+        tape_row.addWidget(self.tape_entry_value)
+
+        self.key_label = QLabel()
+        self.key_combo = QComboBox()
+        self.key_combo.currentIndexChanged.connect(self._key_chosen)
+
         self.facts_title = self._title()
         self.facts = QGridLayout()
         self.facts.setHorizontalSpacing(12)
@@ -497,23 +589,31 @@ class TransitionPropertiesPanel(QWidget):
         mode_row.addWidget(self.mode_chip)
         mode_row.addStretch(1)
         mode_row.addWidget(self.reset_button)
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.key_label)
+        key_row.addWidget(self.key_combo, 1)
         self.cue_box = group(self.cue_title, cues)
-        self.tempo_box = group(self.tempo_title, self.tempo_check, self.tempo_info)
+        self.tempo_box = group(self.tempo_title, self.tempo_check, key_row, self.tempo_info)
         self.handoff_box = group(self.handoff_label, handoff_row)
         self.band_box = group(self.band_title, presets, self.link_check, self.band_hint)
+        self.echo_box = group(self.echo_beats_label, echo_beats_row, self.echo_tail_label, echo_tail_row,
+                              self.echo_low_cut_check)
+        self.tape_box = group(self.tape_entry_label, tape_row)
         self.length_box = group(self.length_title, length_row, length_value)
+        # One "details" section: whichever of these belongs to the chosen style.
+        self.detail_box = group(self.detail_title, self.echo_box, self.tape_box, self.handoff_box, self.band_box)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(14)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(22)
         layout.addWidget(group(self.pair_label, self.songs_label, mode_row))
         layout.addWidget(group(self.style_title, self.style_grid, self.style_description))
+        layout.addWidget(self.detail_box)
         layout.addWidget(self.length_box)
         layout.addWidget(self.cue_box)
         layout.addWidget(self.tempo_box)
-        layout.addWidget(self.handoff_box)
-        layout.addWidget(self.band_box)
-        layout.addWidget(group(self.facts_title, self.facts))
+        self.facts_box = group(self.facts_title, self.facts)
+        layout.addWidget(self.facts_box)
         layout.addStretch(1)
         self._layout_styles()
         self.retranslate(True)
@@ -574,9 +674,16 @@ class TransitionPropertiesPanel(QWidget):
             self.length_spin.setValue(max(MIN_EDIT_SECONDS, override.duration))
             self.tempo_check.setChecked(override.tempo_match)
             self.handoff_slider.setValue(round((override.vocal_handoff or 0.525) * 100))
+            self.echo_feedback_slider.setValue(round(override.echo_feedback * 100))
+            self.echo_low_cut_check.setChecked(override.echo_low_cut)
+            for beats, button in self.echo_beat_buttons.items():
+                button.setChecked(abs(override.echo_beats - beats) < 1e-9)
+            self.tape_entry_slider.setValue(round(override.tape_entry * 100))
+            self.key_combo.setCurrentIndex(KEY_SHIFT_CHOICES.index(override.key_shift)
+                                           if override.key_shift in KEY_SHIFT_CHOICES else 0)
             self.style_group.setExclusive(False)
             for style, button in self.style_buttons.items():
-                button.setChecked(manual and style == override.style)
+                button.setChecked(manual and style == shown_style(override.style))
             self.style_group.setExclusive(True)
         finally:
             self._syncing = False
@@ -606,34 +713,89 @@ class TransitionPropertiesPanel(QWidget):
         self.flush()
         self.changed.emit(changes)
 
+    def _choose_style(self, style: str) -> None:
+        """Pick ``style``; an effect whose move has its own length gets it (echo: two
+        bars, stop: one) instead of a long blend's window."""
+        changes: dict[str, object] = {"style": style}
+        natural = effect_length(style, self._analyses[0])
+        if natural is not None and self._override is not None and self._override.duration > natural * 1.5:
+            changes["duration"] = natural
+        self._emit(changes)
+
     def _handoff_moved(self, value: int) -> None:
         self.handoff_value.setText(f"{value}%")
         self._queue("vocal_handoff", value / 100.0)
 
+    def _echo_feedback_moved(self, value: int) -> None:
+        self._show_echo_feedback(value)
+        self._queue("echo_feedback", value / 100.0)
+
+    def _show_echo_feedback(self, value: int) -> None:
+        # How much quieter each repeat is: the number a DJ reads off an echo unit.
+        self.echo_feedback_value.setText(f"{20 * math.log10(value / 100.0):.1f} dB")
+
+    def _tape_entry_moved(self, value: int) -> None:
+        self.tape_entry_value.setText(f"{value}%")
+        self._queue("tape_entry", value / 100.0)
+
+    def _key_chosen(self, index: int) -> None:
+        if 0 <= index < len(KEY_SHIFT_CHOICES):
+            self._emit({"key_shift": KEY_SHIFT_CHOICES[index]})
+
     def _layout_styles(self) -> None:
-        shown = MANUAL_STYLES if self.advanced else _BASIC_STYLES
-        for button in self.style_buttons.values():
-            self.style_grid.removeWidget(button)
-            button.hide()
-        for position, style in enumerate(shown):
-            button = self.style_buttons[style]
-            self.style_grid.addWidget(button, position // 2, position % 2)
-            button.show()
+        """Automatic on its own row, then the styles: grouped by kind in advanced
+        mode, one of each kind in simple mode."""
+        for widget in (*self.style_buttons.values(), *self.group_labels):
+            self.style_grid.removeWidget(widget)
+            widget.hide()
+        columns = 3 if self.advanced else 2
+        self.style_grid.addWidget(self.style_buttons[STYLE_AUTO], 0, 0, 1, columns)
+        self.style_buttons[STYLE_AUTO].show()
+        row = 1
+        groups = STYLE_GROUPS if self.advanced else ((None, None, _BASIC_STYLES),)
+        for index, (_korean, _english, styles) in enumerate(groups):
+            if self.advanced:
+                label = self.group_labels[index]
+                self.style_grid.addWidget(label, row, 0, 1, columns)
+                label.show()
+                row += 1
+            for position, style in enumerate(styles):
+                button = self.style_buttons[style]
+                self.style_grid.addWidget(button, row + position // columns, position % columns)
+                button.show()
+            row += (len(styles) + columns - 1) // columns
+        for column in range(3):
+            self.style_grid.setColumnStretch(column, 1 if column < columns else 0)
 
     def _refresh(self) -> None:
         override, korean = self._override, self.korean
-        cut = override is not None and override.style == STYLE_CUT
+        style = shown_style(override.style) if override is not None and self._manual else None
+        cut = style in _CUT_STYLES
         for seconds, button in self.length_presets.items():
             button.setChecked(not cut and override is not None and abs(override.duration - seconds) < 0.01)
         self.length_box.setEnabled(not cut)
         self.cue_box.setVisible(self.advanced)
         self.tempo_box.setVisible(self.advanced)
+        self.facts_box.setVisible(self.advanced)
         both_bpms = all(analysis is not None and analysis.bpm for analysis in self._analyses)
         self.tempo_check.setEnabled(not cut and both_bpms)
-        self.handoff_box.setVisible(self.advanced and override is not None and override.style == "vocal_safe_eq")
-        self.band_box.setVisible(self.advanced and (self._band_style or (override is not None
-                                                                          and override.style == STYLE_EQ)))
+        self.key_combo.setEnabled(not cut)
+        # Effects are what the user came to shape: their settings show in both modes.
+        self.echo_box.setVisible(style == "echo_out")
+        self.tape_box.setVisible(style == "tape_stop")
+        self.handoff_box.setVisible(self.advanced and style == "vocal_safe_eq")
+        # A band style playing now (automatic too) can be reshaped from its presets.
+        self.band_box.setVisible(self.advanced and (style == STYLE_EQ or self._band_style))
+        details = [box for box in (self.echo_box, self.tape_box, self.handoff_box, self.band_box)
+                   if not box.isHidden()]
+        self.detail_box.setVisible(bool(details))
+        name = (STYLE_CHOICES[style][0 if korean else 1] if style in STYLE_CHOICES and style != STYLE_AUTO
+                else self._auto_style)
+        self.detail_title.setText((f"{name} 세부 설정" if korean else f"{name} settings") if name
+                                  else ("세부 설정" if korean else "Settings"))
         self.handoff_value.setText(f"{self.handoff_slider.value()}%")
+        self.tape_entry_value.setText(f"{self.tape_entry_slider.value()}%")
+        self._show_echo_feedback(self.echo_feedback_slider.value())
         self.reset_button.setEnabled(self._manual)
         self.mode_chip.setProperty("manual", self._manual)
         self.mode_chip.style().unpolish(self.mode_chip)
@@ -681,11 +843,42 @@ class TransitionPropertiesPanel(QWidget):
         self.reset_button.setText("자동으로 되돌리기" if korean else "Back to automatic")
         self.reset_button.setToolTip("이 전환을 분석이 정하는 자동 전환으로 되돌립니다 (Ctrl+Backspace)" if korean
                                      else "Let analysis decide this transition again (Ctrl+Backspace)")
-        self.style_title.setText("스타일" if korean else "Style")
+        self.style_title.setText("전환 스타일" if korean else "Transition style")
         for style, button in self.style_buttons.items():
             names = STYLE_CHOICES[style]
             button.setText(names[0] if korean else names[1])
             button.setToolTip(names[2] if korean else names[3])
+        for label, (korean_name, english_name, _styles) in zip(self.group_labels, STYLE_GROUPS):
+            label.setText(korean_name if korean else english_name)
+        self.echo_beats_label.setText("에코 간격" if korean else "Echo delay")
+        for beats, button in self.echo_beat_buttons.items():
+            button.setText({0.5: ("½박", "½ beat"), 1.0: ("1박", "1 beat"), 2.0: ("2박", "2 beats")}[beats][
+                0 if korean else 1])
+        self.echo_tail_label.setText("여운 길이 (반복마다 줄어드는 양)" if korean
+                                     else "Tail length (how much each repeat drops)")
+        self.echo_feedback_slider.setToolTip("오른쪽일수록 에코가 오래 남습니다." if korean
+                                             else "Further right, the echo rings on longer.")
+        self.echo_low_cut_check.setText("에코의 저음 걷어내기 (다음 곡 킥과 겹치지 않게)" if korean
+                                        else "Cut the echo's lows (keeps it off the next kick)")
+        self.tape_entry_label.setText("다음 곡이 들어오는 지점 (멈춤 구간 대비)" if korean
+                                      else "Where the next song comes in (share of the stop)")
+        self.key_label.setText("키 맞춤" if korean else "Key match")
+        self.key_combo.setToolTip(
+            "나가는 곡의 끝부분만 반음 단위로 옮겨 다음 곡의 키와 어울리게 합니다. 템포 램프 구간 동안 서서히 바뀝니다."
+            if korean else
+            "Glides the outgoing song's tail by semitones to suit the next song's key, over the tempo ramp.")
+        syncing, self._syncing = self._syncing, True
+        try:
+            index = max(0, self.key_combo.currentIndex())
+            self.key_combo.clear()
+            for shift in KEY_SHIFT_CHOICES:
+                self.key_combo.addItem(
+                    ("자동 (분석이 확실할 때)" if korean else "Automatic (when the keys are clear)") if shift is None
+                    else ("끄기" if korean else "Off") if shift == 0
+                    else (f"{shift:+d} 반음" if korean else f"{shift:+d} semitone{'s' if abs(shift) > 1 else ''}"))
+            self.key_combo.setCurrentIndex(index)
+        finally:
+            self._syncing = syncing
         self.length_title.setText("겹침 길이" if korean else "Overlap length")
         for seconds, button in self.length_presets.items():
             name = {4.0: ("짧게", "Short"), 8.0: ("보통", "Medium"), 16.0: ("길게", "Long")}[seconds]

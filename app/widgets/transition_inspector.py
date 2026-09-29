@@ -21,13 +21,15 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QMenu,
     QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSplitter, QStyle, QStyledItemDelegate,
-    QStyleOptionSlider, QStyleOptionViewItem, QToolButton, QToolTip, QVBoxLayout, QWidget,
+    QStyleOptionSlider, QStyleOptionViewItem, QTabWidget, QToolButton, QToolTip, QVBoxLayout, QWidget,
 )
 
 from app.automix.diagnostics import rows_to_json
 from app.automix.renderer import (
-    BAND_ENVELOPES, DROP_IN_ATTACK_SECONDS, HIGH_CROSSOVER_HZ, LOW_CROSSOVER_HZ,
-    SWEEP_SHAPES, _CURVE_BY_TRANSITION_TYPE, _band_envelope, band_windows_of, transition_dsp_style,
+    BAND_ENVELOPES, DROP_IN_ATTACK_SECONDS, ECHO_FEEDBACK, ECHO_FIRST_LEVEL,
+    HIGH_CROSSOVER_HZ, LOW_CROSSOVER_HZ, SWEEP_SHAPES, TAPE_STOP_FADE,
+    _CURVE_BY_TRANSITION_TYPE, _band_envelope, band_windows_of, echo_beat, tape_entry, tape_stop_schedule,
+    transition_dsp_style,
 )
 from app.timeline.render_plan import (
     AudioRenderClip, AudioRenderTransition, CompiledRenderPlan, TransitionDsp, visual_segments,
@@ -49,6 +51,16 @@ _STYLE_DESCRIPTIONS = {
                      "A DJ-style sweep: a highpass lifts the outgoing lows away while the incoming track fills in from the highs."),
     "drop_in": ("나가는 곡의 여운이 이미 잦아드는 중이라, 들어오는 곡을 처음부터 제 음량으로 시작합니다.",
                 "The outgoing tail is already fading, so the incoming track starts at full level over it."),
+    "echo_out": ("나가는 곡이 프레이즈 첫 박에서 멈추고, 마지막 박자의 에코(저음 제거)가 박마다 잦아드는 사이 "
+                 "들어오는 곡이 제 음량으로 시작합니다. 템포가 맞지 않아도 됩니다.",
+                 "The outgoing track stops on a phrase downbeat; an echo of its last beat (lows cut) dies away "
+                 "beat by beat while the incoming track starts at full level. Needs no shared tempo."),
+    "tape_stop": ("나가는 곡이 턴테이블처럼 느려지며 음이 내려가다 멈추고, 들어오는 곡이 창의 뒷부분에서 시작합니다.",
+                  "The outgoing track slows and falls in pitch to a halt, like a turntable; the incoming track "
+                  "enters late in the window."),
+    "downbeat_cut": ("나가는 곡의 다운비트에서 들어오는 곡의 다운비트로 바로 넘어갑니다. 딸깍 소리만 막을 만큼 짧게 겹칩니다.",
+                     "Cuts from the outgoing track's downbeat straight to the incoming one's, overlapping only "
+                     "long enough not to click."),
     "eq": ("저음·중음·고음을 각각 언제 넘길지 직접 정한 전환입니다.",
            "Hand-set band timing: when the lows, mids and highs each change hands."),
     "legacy": ("두 곡의 음량을 전체 대역에서 교차하는 기본 크로스페이드입니다.",
@@ -123,7 +135,37 @@ def mix_lanes(transition: AudioRenderTransition) -> list[MixLane]:
     if style is TransitionDsp.DROP_IN:
         attack = min(1.0, DROP_IN_ATTACK_SECONDS / max(transition.duration, 1e-6))
         return [MixLane("level", "음량", "Level", _fade(whole, False), _fade((0.0, attack), True))]
-    curve = "qsin" if style is TransitionDsp.SHORT_FADE else _CURVE_BY_TRANSITION_TYPE.get(transition.type, "tri")
+    duration = max(transition.duration, 1e-6)
+    if style is TransitionDsp.ECHO_OUT:
+        beat = echo_beat(transition)
+        feedback = ECHO_FEEDBACK if transition.echo_feedback is None else transition.echo_feedback
+        attack = min(1.0, DROP_IN_ATTACK_SECONDS / duration)
+
+        def echo(progress: float) -> float:
+            repeats = progress * duration / beat  # the k-th repeat sounds from k beats in
+            return 0.0 if repeats < 1.0 else ECHO_FIRST_LEVEL * feedback ** (int(repeats) - 1)
+
+        return [
+            MixLane("level", "음량", "Level",
+                    _fade((min(1.0, beat / duration), min(1.0, 1.5 * beat / duration)), False),
+                    _fade((0.0, attack), True)),
+            MixLane("echo", *(("에코\n(저음 제거)", "Echo\n(lows cut)") if transition.echo_low_cut else ("에코", "Echo")),
+                    echo, lambda _progress: 0.0),
+        ]
+    if style is TransitionDsp.TAPE_STOP:
+        schedule = tape_stop_schedule(duration)
+
+        def speed(progress: float) -> float:
+            return schedule[min(len(schedule) - 1, int(progress * len(schedule)))][1]
+
+        entry = tape_entry(transition)
+        return [
+            MixLane("level", "음량", "Level", _fade(TAPE_STOP_FADE, False),
+                    _fade((entry, min(1.0, entry + DROP_IN_ATTACK_SECONDS / duration)), True)),
+            MixLane("speed", "속도·음높이", "Speed & pitch", speed, lambda _progress: 0.0),
+        ]
+    curve = ("qsin" if style in (TransitionDsp.SHORT_FADE, TransitionDsp.DOWNBEAT_CUT)
+             else _CURVE_BY_TRANSITION_TYPE.get(transition.type, "tri"))
     return [MixLane("level", "음량", "Level", _fade(whole, False, curve), _fade(whole, True, curve))]
 
 
@@ -685,10 +727,12 @@ class TransitionInspectorWindow(QDialog):
     def __init__(self, panel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.panel = panel
+        self.setObjectName("automixInspector")
         self.setWindowFlag(Qt.WindowType.Window, True)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
         self.setModal(False)
-        self.resize(1120, 760)
+        self.resize(1240, 840)
+        self.setMinimumSize(820, 600)
         self.junctions: list[Junction] = []
         self._selected = -1
         self._plan = None
@@ -697,9 +741,10 @@ class TransitionInspectorWindow(QDialog):
 
         # Header: what this is and how far the mix is -- nothing else competes here.
         self.title_label = QLabel()
-        self.title_label.setObjectName("dialogTitle")
+        self.title_label.setObjectName("automixInspectorTitle")
         self.status_label = QLabel()
-        self.status_label.setObjectName("previewStatusChip")
+        self.status_label.setObjectName("mutedLabel")
+        self.status_label.setWordWrap(True)
         self.export_button = QToolButton()
         self.export_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         export_menu = QMenu(self.export_button)
@@ -712,7 +757,6 @@ class TransitionInspectorWindow(QDialog):
         header = QHBoxLayout()
         header.setSpacing(10)
         header.addWidget(self.title_label)
-        header.addWidget(self.status_label)
         header.addStretch(1)
         header.addWidget(self.export_button)
 
@@ -748,13 +792,13 @@ class TransitionInspectorWindow(QDialog):
         list_header = QHBoxLayout()
         list_header.addWidget(self.list_title)
         list_header.addStretch(1)
-        list_header.addWidget(self.follow_check)
         list_pane = QWidget()
         list_pane.setMinimumWidth(240)
         list_layout = QVBoxLayout(list_pane)
         list_layout.setContentsMargins(0, 0, 6, 0)
         list_layout.setSpacing(6)
         list_layout.addLayout(list_header)
+        list_layout.addWidget(self.follow_check)
         list_layout.addWidget(self.list, 1)
 
         # Right: what happens (plain words, key facts), then how (graph), then numbers.
@@ -764,24 +808,27 @@ class TransitionInspectorWindow(QDialog):
         heading_font.setBold(True)
         self.heading_label.setFont(heading_font)
         self.heading_label.setWordWrap(True)
+        self.heading_label.setTextFormat(Qt.TextFormat.PlainText)
         self.description_label = QLabel()
         self.description_label.setWordWrap(True)
         self.description_label.setTextFormat(Qt.TextFormat.RichText)
         self.fact_labels = [QLabel() for _ in range(4)]
         for label in self.fact_labels:
-            label.setObjectName("previewStatusChip")
+            label.setObjectName("automixInspectorFact")
+            label.setWordWrap(True)
         self.listen_button = QPushButton()
         self.listen_button.setObjectName("primaryButton")
         self.listen_button.clicked.connect(lambda: self._seek_to_selected(play=True))
         self.jump_button = QPushButton()
         self.jump_button.clicked.connect(lambda: self._seek_to_selected(play=False))
-        facts = QHBoxLayout()
-        facts.setSpacing(6)
-        for label in self.fact_labels:
-            facts.addWidget(label)
-        facts.addStretch(1)
-        facts.addWidget(self.jump_button)
-        facts.addWidget(self.listen_button)
+        facts = QGridLayout()
+        facts.setSpacing(8)
+        for index, label in enumerate(self.fact_labels):
+            facts.addWidget(label, 0, index)
+        actions = QHBoxLayout()
+        actions.addWidget(self.listen_button)
+        actions.addWidget(self.jump_button)
+        actions.addStretch(1)
         self.diagram = TransitionDiagram()
         self.diagram.seek_requested.connect(self._request_seek)
         self.legend_label = QLabel()
@@ -817,26 +864,42 @@ class TransitionInspectorWindow(QDialog):
             details_layout.addWidget(widget)
         self.details_box.hide()
 
+        self.detail_tabs = QTabWidget()
+        self.detail_tabs.setObjectName("automixDetailTabs")
+        flow_page = QWidget()
+        flow_layout = QVBoxLayout(flow_page)
+        flow_layout.setContentsMargins(0, 14, 0, 0)
+        flow_layout.setSpacing(12)
+        flow_layout.addWidget(self.diagram)
+        flow_layout.addWidget(self.legend_label)
+        flow_layout.addStretch(1)
+        analysis_page = QWidget()
+        analysis_layout = QVBoxLayout(analysis_page)
+        analysis_layout.setContentsMargins(0, 14, 0, 0)
+        analysis_layout.setSpacing(16)
+        analysis_layout.addWidget(self.metrics_title)
+        analysis_layout.addLayout(self.metrics_grid)
+        analysis_layout.addWidget(self.details_button)
+        analysis_layout.addWidget(self.details_box)
+        analysis_layout.addStretch(1)
+        self.detail_tabs.addTab(flow_page, "")
+        self.detail_tabs.addTab(analysis_page, "")
+
         detail = QWidget()
         detail_layout = QVBoxLayout(detail)
-        detail_layout.setContentsMargins(10, 0, 8, 8)
-        detail_layout.setSpacing(10)
+        detail_layout.setContentsMargins(20, 12, 20, 12)
+        detail_layout.setSpacing(12)
         detail_layout.addWidget(self.heading_label)
         detail_layout.addWidget(self.description_label)
         detail_layout.addLayout(facts)
-        detail_layout.addWidget(self.diagram)
-        detail_layout.addWidget(self.legend_label)
-        detail_layout.addSpacing(4)
-        detail_layout.addWidget(self.metrics_title)
-        detail_layout.addLayout(self.metrics_grid)
-        detail_layout.addSpacing(4)
-        detail_layout.addWidget(self.details_button)
-        detail_layout.addWidget(self.details_box)
+        detail_layout.addLayout(actions)
+        detail_layout.addWidget(self.detail_tabs)
         detail_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(detail)
+        self.detail_scroll = scroll
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(list_pane)
@@ -849,6 +912,7 @@ class TransitionInspectorWindow(QDialog):
         layout.setContentsMargins(18, 14, 18, 14)
         layout.setSpacing(8)
         layout.addLayout(header)
+        layout.addWidget(self.status_label)
         layout.addSpacing(4)
         layout.addLayout(overview_header)
         layout.addWidget(self.overview)
@@ -869,7 +933,7 @@ class TransitionInspectorWindow(QDialog):
         self._playhead = 0.0
         self._syncing = False
         bar = QFrame()
-        bar.setObjectName("previewControlCard")
+        bar.setObjectName("automixInspectorTransport")
         self.transport_play_button = QPushButton()
         self.transport_play_button.setObjectName("previewPlayButton")
         self.transport_play_button.setCheckable(True)
@@ -1163,6 +1227,7 @@ class TransitionInspectorWindow(QDialog):
         manual = self._is_manual(self._selected)
         self.diagram.set_junction(junction)
         has_junction = junction is not None and 0 <= self._selected < len(rows)
+        self.detail_tabs.setVisible(has_junction)
         for widget in (self.listen_button, self.jump_button, self.loop_check, self.details_button, self.diagram):
             widget.setEnabled(has_junction)
         for widget in (self.diagram, self.legend_label, self.details_button, *self.fact_labels,
@@ -1324,16 +1389,20 @@ class TransitionInspectorWindow(QDialog):
                           f"{row.get('outgoing_analyzer') or '–'} / {row.get('incoming_analyzer') or '–'}",
                           "나가는 곡 / 들어오는 곡" if korean else "outgoing / incoming"))
         self.metrics_title.setVisible(bool(cards))
-        columns = 3
+        columns = 2
         for position, (title, value, detail) in enumerate(cards):
             card = QFrame()
-            card.setObjectName("card")
+            card.setObjectName("automixMetric")
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(12, 10, 12, 10)
             card_layout.setSpacing(2)
             title_label = QLabel(title)
+            title_label.setWordWrap(True)
+            title_label.setTextFormat(Qt.TextFormat.PlainText)
             title_label.setObjectName("mutedLabel")
             value_label = QLabel(value)
+            value_label.setWordWrap(True)
+            value_label.setTextFormat(Qt.TextFormat.PlainText)
             value_font = QFont(value_label.font())
             value_font.setPointSizeF(value_font.pointSizeF() + 2)
             value_font.setBold(True)
@@ -1350,15 +1419,17 @@ class TransitionInspectorWindow(QDialog):
 
     def _retranslate(self, korean: bool) -> None:
         self.setWindowTitle("AutoMix 전환 자세히 보기" if korean else "AutoMix transition details")
-        self.title_label.setText("AutoMix 전환 자세히 보기" if korean else "AutoMix transition details")
+        self.title_label.setText("AutoMix · 전환 살펴보기" if korean else "AutoMix · Transition details")
+        self.detail_tabs.setTabText(0, "전환 흐름" if korean else "Transition flow")
+        self.detail_tabs.setTabText(1, "분석 정보" if korean else "Analysis")
         self.status_label.setText(self.panel.status_label.text())
         self.status_label.setToolTip(self.panel.status_label.toolTip())
-        self.follow_check.setText("자동 선택" if korean else "Auto-select")
+        self.follow_check.setText("재생 중인 전환 따라가기" if korean else "Follow playback")
         self.follow_check.setToolTip(
             "재생 중이거나 곧 나올 전환을 자동으로 선택합니다. 직접 고르면 꺼집니다." if korean
             else "Selects the transition playing now or coming up next. Picking one yourself turns it off."
         )
-        self.export_button.setText("복사 ▾" if korean else "Copy ▾")
+        self.export_button.setText("정보 복사" if korean else "Copy details")
         self.export_button.setToolTip("전환 정보를 클립보드로 복사합니다." if korean
                                       else "Copy the transition information to the clipboard.")
         self.copy_text_action.setText("모든 전환을 텍스트로 복사" if korean else "Copy all transitions as text")
@@ -1394,7 +1465,10 @@ class TransitionInspectorWindow(QDialog):
         self.forward_button.setToolTip("5초 앞으로 (→)" if korean else "Forward 5 s (→)")
         self.transport_play_button.setToolTip("재생 / 일시정지 (Space)" if korean else "Play / Pause (Space)")
         self._set_play_text()
-        self.loop_check.setText("🔁 선택한 전환 반복" if korean else "🔁 Loop selected transition")
+        self.loop_check.setText("전환 반복" if korean else "Loop transition")
+        self.volume_label.setText("음량" if korean else "Volume")
+        self.position_slider.setAccessibleName("재생 위치" if korean else "Playback position")
+        self.volume_slider.setAccessibleName("음량" if korean else "Volume")
         self.loop_check.setToolTip(
             "선택한 전환의 4초 전부터 끝난 뒤 2초까지를 반복 재생합니다 (L)" if korean
             else "Repeats from 4 s before the selected transition to 2 s after it (L)")

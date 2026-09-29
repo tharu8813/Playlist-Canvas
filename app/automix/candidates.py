@@ -149,6 +149,8 @@ class TransitionStrategy(str, Enum):
     BEAT_ALIGNED_CROSSFADE = "beat_aligned_crossfade"
     FIXED_CROSSFADE = "fixed_crossfade"
     CUT = "cut"
+    PHRASE_EXIT = "phrase_exit"
+    """No shared tempo: leave the outgoing track on a phrase boundary (app/automix/exits.py)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,11 +253,19 @@ def generate_candidates(
             outgoing, incoming, settings, outgoing_playback_rate=outgoing_playback_rate,
             reasons=("- BPM is unknown for one or both tracks",),
         )
-    if not compatibility.compatible:
+    bridge = compatibility.bridgeable and all(
+        a.bpm_confidence >= RELIABLE_BPM_CONFIDENCE and len(a.beats) >= 4 and a.beat_alignment_quality() == "reliable"
+        for a in (outgoing, incoming))
+    if not compatibility.compatible and not bridge:
         return _fallback_candidates(
             outgoing, incoming, settings, outgoing_playback_rate=outgoing_playback_rate,
             reasons=compatibility.reasons,
         )
+    if bridge:
+        # Two reliable grids a little too far apart: match them anyway, over a longer ramp.
+        settings = replace(settings, max_tempo_change_percent=settings.max_bridge_tempo_percent)
+        compatibility = replace(compatibility, reasons=compatibility.reasons + (
+            f"+ tempo bridge: the outgoing track eases {compatibility.tempo_shift_percent:.1f}% over a long ramp",))
 
     outgoing_quality = outgoing.beat_alignment_quality()
     incoming_quality = incoming.beat_alignment_quality()

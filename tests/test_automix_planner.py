@@ -223,10 +223,11 @@ class CompileAutomixThreeTrackTests(unittest.TestCase):
         plan = compile_automix(tracks, analyses, ENABLED)
         clip_a, clip_b, clip_c = plan.audio.clips
         self.assertEqual(len(plan.audio.transitions), 2)
-        # a->b is tempo-incompatible: it degrades to a small fixed
-        # crossfade, never a beat-matched one.
+        # a->b is tempo-incompatible: never beat-matched; with a bar grid it
+        # leaves a on a phrase boundary with a short echo instead.
         self.assertNotEqual(plan.audio.transitions[0].type, TransitionType.BEAT_MATCH)
-        self.assertLessEqual(plan.audio.transitions[0].duration, ENABLED.fallback_crossfade_seconds)
+        self.assertIs(plan.audio.transitions[0].dsp, TransitionDsp.ECHO_OUT)
+        self.assertLessEqual(plan.audio.transitions[0].duration, 6.0)
         # b->c is fully compatible and still gets a real (larger) overlap.
         self.assertEqual(plan.audio.transitions[1].type, TransitionType.BEAT_MATCH)
         self.assertLess(clip_c.timeline_start, clip_b.timeline_end)
@@ -525,12 +526,12 @@ class TransitionDspSelectionTests(unittest.TestCase):
         self.assertLessEqual(transition.duration, 2 * 2.0 + 1e-6)  # two 2 s bars at 120 BPM
         self.assertIn(transition.dsp, (TransitionDsp.VOCAL_SAFE_EQ, TransitionDsp.SHORT_FADE))
 
-    def test_fixed_crossfade_fallback_keeps_the_legacy_mix(self) -> None:
+    def test_fixed_crossfade_fallback_mixes_at_equal_power(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0)]
         analyses = {"a": _analysis("a", None, 60.0), "b": _analysis("b", None, 60.0)}
         (transition,) = compile_automix(tracks, analyses, ENABLED).audio.transitions
         self.assertIs(transition.type, TransitionType.CROSSFADE)
-        self.assertIsNone(transition.dsp)
+        self.assertIs(transition.dsp, TransitionDsp.SHORT_FADE)
 
     def test_same_inputs_always_plan_the_same_styles(self) -> None:
         tracks = [_track("a", 60.0), _track("b", 60.0), _track("c", 60.0)]

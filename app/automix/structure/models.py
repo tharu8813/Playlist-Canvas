@@ -82,6 +82,12 @@ class TrackStructureAnalysis:
     energy_curve: tuple[float, ...] = ()
     energy_curve_hop_seconds: float | None = None
 
+    bass_curve: tuple[float, ...] = ()
+    brightness_curve: tuple[float, ...] = ()
+    percussive_curve: tuple[float, ...] = ()
+    """Section timbre, 0..1 per ``timbre.TIMBRE_HOP_SECONDS`` (see
+    app/automix/structure/timbre.py); empty when not measured."""
+
     analyzer_id: str = ""
     analyzer_version: str = ""
 
@@ -116,6 +122,9 @@ class TrackStructureAnalysis:
         for value in self.energy_curve:
             if not _is_finite_number(value) or value < 0.0:
                 raise ValueError("TrackStructureAnalysis.energy_curve values must be finite and non-negative.")
+        for curve in (self.bass_curve, self.brightness_curve, self.percussive_curve):
+            if not all(_is_finite_number(value) and 0.0 <= value <= 1.0 for value in curve):
+                raise ValueError("TrackStructureAnalysis timbre curves must hold values in 0..1.")
         if not isinstance(self.analyzer_id, str) or not isinstance(self.analyzer_version, str):
             raise ValueError("TrackStructureAnalysis analyzer_id/analyzer_version must be strings.")
 
@@ -156,6 +165,9 @@ class TrackStructureAnalysis:
             ],
             "energy_curve": list(self.energy_curve),
             "energy_curve_hop_seconds": self.energy_curve_hop_seconds,
+            "bass_curve": list(self.bass_curve),
+            "brightness_curve": list(self.brightness_curve),
+            "percussive_curve": list(self.percussive_curve),
             "analyzer_id": self.analyzer_id,
             "analyzer_version": self.analyzer_version,
         }
@@ -183,6 +195,9 @@ class TrackStructureAnalysis:
             ),
             energy_curve=tuple(fields.get("energy_curve", ())),
             energy_curve_hop_seconds=fields.get("energy_curve_hop_seconds"),
+            bass_curve=tuple(fields.get("bass_curve", ())),
+            brightness_curve=tuple(fields.get("brightness_curve", ())),
+            percussive_curve=tuple(fields.get("percussive_curve", ())),
             analyzer_id=fields.get("analyzer_id", ""),
             analyzer_version=fields.get("analyzer_version", ""),
         )

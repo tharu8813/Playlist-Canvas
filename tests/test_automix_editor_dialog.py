@@ -91,8 +91,10 @@ class AutoMixEditorTests(unittest.TestCase):
     def test_modes_show_the_same_edit_and_switching_changes_nothing(self):
         host, editor = self._editor()
         self.assertTrue(editor.properties.cue_box.isHidden())
+        self.assertTrue(editor.properties.facts_box.isHidden())
         editor._set_advanced(True)
         self.assertFalse(editor.properties.cue_box.isHidden())
+        self.assertFalse(editor.properties.facts_box.isHidden())
         self.assertTrue(editor.timeline.advanced)
         editor.properties.style_buttons["vocal_safe_eq"].click()
         editor.properties.handoff_slider.setValue(65)
@@ -172,14 +174,15 @@ class AutoMixEditorTests(unittest.TestCase):
 
     def test_copy_paste_carries_how_it_mixes_not_where(self):
         host, editor = self._editor()
-        editor.properties.style_buttons["cut"].click()
+        editor.properties.style_buttons["echo_out"].click()
+        editor.properties._emit({"echo_feedback": 0.7, "echo_beats": 0.5})
         editor._copy()
         editor._user_select(1)
         cues = editor._base()
         editor._paste()
         pasted = host._set_automix_override.call_args.args
         self.assertEqual(pasted[0], pair_key("b", "c"))
-        self.assertEqual(pasted[1].style, "cut")
+        self.assertEqual((pasted[1].style, pasted[1].echo_feedback, pasted[1].echo_beats), ("echo_out", 0.7, 0.5))
         self.assertEqual((pasted[1].outgoing_cue, pasted[1].incoming_cue), (cues.outgoing_cue, cues.incoming_cue))
 
     def test_reset_goes_back_to_automatic_and_band_drags_become_custom_eq(self):
