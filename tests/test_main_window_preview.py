@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
@@ -18,7 +19,7 @@ from PySide6.QtCore import QRect, QRectF, QSize, Qt, QUrl
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtMultimedia import QMediaPlayer
-from PySide6.QtWidgets import QDialog, QFrame, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QMessageBox, QWidget
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.canvas.source_item import SourceItem
@@ -1306,6 +1307,47 @@ class MainWindowPreviewTests(MainWindowTestCase):
         self.assertFalse(self.window._automix_analysis_timer.isActive())  # no restart mid-preview
         self.window._finish_inline_preview()
         self.assertTrue(self.window._automix_analysis_timer.isActive())  # background resumes
+
+    def _loading_popups(self) -> list:
+        return [widget for widget in QApplication.topLevelWidgets()
+                if widget.objectName() == "previewLoadingDialog" and widget.isVisible()]
+
+    def _pump(self, seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            QApplication.processEvents()
+            time.sleep(0.01)
+
+    def test_a_loading_popup_covers_preview_setup_and_automix_saved_analysis(self) -> None:
+        tracks = [PlaylistTrack("a.wav", "A", duration_seconds=100.0), PlaylistTrack("b.wav", "B", duration_seconds=90.0)]
+        self.window.playlist_service.replace(tracks)
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="automix")
+
+        def fake_start(controller, *_args, **_options):
+            controller.initial_loading = True  # saved analyses still landing
+
+        with TemporaryDirectory(prefix="playlist-fake-ffmpeg-") as directory:
+            fake_ffmpeg = Path(directory) / "ffmpeg.exe"
+            fake_ffmpeg.touch()
+            self.window.settings_service.save(replace(self.window.settings_service.current, ffmpeg_path=str(fake_ffmpeg)))
+            with patch.object(ProgressiveAutoMixController, "start", fake_start):
+                self.window.preview_controller.show_export_preview(tracks)
+            self.addCleanup(self.window._finish_inline_preview)
+            (popup,) = self._loading_popups()
+            self._pump(0.3)
+            self.assertTrue(popup.isVisible())  # Preview is up, the saved analyses are not
+            self.window._inline_preview._blended_audio_controller.initial_load_done.emit()
+            self._pump(0.3)
+            self.assertEqual(self._loading_popups(), [])
+
+    def test_the_loading_popup_closes_by_itself_without_a_mix(self) -> None:
+        tracks = [PlaylistTrack("a.wav", "A", duration_seconds=100.0)]
+        self.window.playlist_service.replace(tracks)
+        self.window.project_settings = replace(self.window.project_settings, transition_mode="none")
+        self.window.preview_controller.show_export_preview(tracks)
+        self.addCleanup(self.window._finish_inline_preview)
+        self._pump(0.3)
+        self.assertEqual(self._loading_popups(), [])
 
     def test_preview_hands_the_automatic_automix_settings_to_the_mix(self) -> None:
         from app.automix.settings import AUTOMIX_SETTINGS

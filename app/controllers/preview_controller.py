@@ -25,6 +25,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMessageBox, QWidget
 
 from app.dialogs.export_preview_dialog import ExportPreviewDialog
+from app.dialogs.preview_loading_dialog import PreviewLoadingDialog
 from app.renderer.ffmpeg_renderer import FFmpegNotFoundError, FFmpegRenderer
 
 if TYPE_CHECKING:
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
 
 PREVIEW_TAB_INDEX = 2
 PREVIEW_MIX_ACTIVITY = "preview_mix"
+INITIAL_LOAD_LIMIT_MS = 4000
+"""The loading popup never waits longer than this for AutoMix's saved analyses."""
 
 
 class PreviewController:
@@ -97,13 +100,8 @@ class PreviewController:
             window._bottom_tab_change_guard = False
         QSettings().setValue("workspace/bottom_tab", selected)
 
-    def show_export_preview(self, tracks: list) -> None:
-        """Show a track-aware playback preview in the main Canvas workspace."""
+    def _show_export_preview(self, tracks: list) -> None:
         window = self.window
-        if window._inline_preview is not None:
-            window.canvas_stack.setCurrentWidget(window._inline_preview)
-            window._inline_preview.setFocus(Qt.FocusReason.OtherFocusReason)
-            return
         executable = None
         try:
             executable = FFmpegRenderer(
@@ -113,6 +111,26 @@ class PreviewController:
             pass
         transition_mode = window.project_settings.transition_mode
         crossfade_seconds = window.project_settings.crossfade_seconds
+        # Per-track volume/EQ only exists in a rendered mix, even without transitions.
+        needs_mix = (
+            (transition_mode != "none" or any(track.audio_filter for track in tracks))
+            and executable is not None and bool(tracks)
+        )
+        korean = window.translator.is_korean
+        steps = [
+            ("오디오 믹스 준비 시작", "Starting the audio mix"),
+            ("미리보기 화면 만들기", "Building the preview screen"),
+            ("재생 화면 배치", "Laying out the player"),
+        ]
+        if needs_mix and transition_mode == "automix":
+            steps.append(("저장된 곡 분석 불러오기", "Loading saved track analysis"))
+        if not needs_mix:
+            steps.pop(0)
+        loading = PreviewLoadingDialog(
+            [korean_text if korean else english for korean_text, english in steps], korean, window,
+        )
+        self._loading = loading
+        loading.start()
         from app.automix.settings import automix_settings_for
 
         automix_settings = automix_settings_for(window.project_settings)
@@ -125,12 +143,13 @@ class PreviewController:
         preloaded_blended_audio = None
         blended_audio_controller = None
         blended_audio_temp_dir = None
-        if transition_mode != "none" and executable is not None and tracks:
+        if needs_mix:
             preloaded_blended_audio, blended_audio_controller, blended_audio_temp_dir = (
                 self._prepare_blended_preview_audio(
                     tracks, executable, transition_mode, crossfade_seconds, automix_settings,
                 )
             )
+            loading.advance(loading.current + 1)
         preview = ExportPreviewDialog(
             window.canvas.scene_model, tracks, window.translator,
             window._export_visualizers(tracks), executable, window, source_store=window.store,
@@ -144,6 +163,7 @@ class PreviewController:
             automix_settings=automix_settings,
         )
         controls_page = preview.build_embedded_controls_page()
+        loading.advance(loading.current + 1)
         window._inline_preview = preview
         window._inline_preview_controls = controls_page
         preview.finished.connect(window._finish_inline_preview)
@@ -171,6 +191,35 @@ class PreviewController:
         self._track_background_mix_progress(preview)
         preview.show()
         preview.setFocus(Qt.FocusReason.OtherFocusReason)
+        preview.finished.connect(loading.finish)
+        if getattr(blended_audio_controller, "initial_loading", False):
+            # Saved analyses land (and are planned) in a quick burst right after
+            # start: keep the popup until then. Real analysis runs for minutes;
+            # the status-bar activity shows that, so the popup closes when it starts.
+            loading.advance(loading.current + 1)
+            blended_audio_controller.initial_load_done.connect(loading.finish_soon)
+            QTimer.singleShot(INITIAL_LOAD_LIMIT_MS, loading, loading.finish)
+        else:
+            loading.finish_soon()
+
+    def show_export_preview(self, tracks: list) -> None:
+        """Show a track-aware playback preview in the main Canvas workspace.
+
+        A modal popup lists what is loading meanwhile; it closes once Preview
+        is up (AutoMix: once its saved analyses are loaded, too).
+        """
+        window = self.window
+        if window._inline_preview is not None:
+            window.canvas_stack.setCurrentWidget(window._inline_preview)
+            window._inline_preview.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        self._loading = None
+        try:
+            self._show_export_preview(tracks)
+        except BaseException:
+            if self._loading is not None:
+                self._loading.finish()
+            raise
 
     def _prepare_blended_preview_audio(
         self, tracks: list, executable, transition_mode: str, crossfade_seconds: float,

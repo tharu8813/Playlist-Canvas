@@ -312,6 +312,8 @@ class ProgressiveAutoMixController(QObject):
     """Partial mix: (path, provisional plan, covered-until seconds, linear gain)."""
     level_ready = Signal(float)
     """Linear gain per-track audio should play at so it matches the mix's loudness."""
+    initial_load_done = Signal()
+    """Once per run: every cached analysis has landed (what is left is real analysis, or nothing)."""
 
     def __init__(self, renderer: FFmpegRenderer, parent: QObject | None = None, *, korean: bool = True) -> None:
         super().__init__(parent)
@@ -349,6 +351,8 @@ class ProgressiveAutoMixController(QObject):
         """(label, progress or None when not measurable, detail) per stage, for the status-bar popup."""
         self.fallback_message: str | None = None
         """Set when the final mix is not AutoMix after all (it fell back to back-to-back audio)."""
+        self.initial_loading = False
+        """True from start() until initial_load_done."""
         self.progress.connect(lambda *args: setattr(self, "last_progress", args))
 
     # -- public API (PreviewAudioController-compatible) ----------------------
@@ -387,6 +391,7 @@ class ProgressiveAutoMixController(QObject):
         self._final_fraction = 0.0
         self._overall = 0.0
         self._done = False
+        self.initial_loading = True
         self._ticker.start()
         self._publish(force=True)
         worker = _AnalysisWorker(
@@ -443,6 +448,7 @@ class ProgressiveAutoMixController(QObject):
             self._cached.add(track_id)
         else:
             self._running[track_id] = step
+            self._settle_initial_load()  # a real analysis: minutes, not a load
             self._publish()
 
     def _on_rhythm(self, generation: int, track_id: str, analysis) -> None:
@@ -450,6 +456,13 @@ class ProgressiveAutoMixController(QObject):
             self._running.pop(track_id, None)
             self._state.record_rhythm(track_id, analysis)
             self._on_analysis_progress()
+            if self._state.rhythm_count() >= len(self._tracks):
+                self._settle_initial_load()
+
+    def _settle_initial_load(self) -> None:
+        if self.initial_loading:
+            self.initial_loading = False
+            self.initial_load_done.emit()
 
     def _on_structure(self, generation: int, track_id: str, structure) -> None:
         if generation == self._generation:
@@ -481,6 +494,7 @@ class ProgressiveAutoMixController(QObject):
             return
         # Missing results (failed/cancelled tracks) must not stall the final mix.
         self._running.clear()
+        self._settle_initial_load()
         self._scheduler.analysis_complete = True
         self._evaluate()
 
