@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.services.project_media_service import MissingMedia
 from app.utils.i18n import Translator
 
@@ -28,6 +29,7 @@ class MissingMediaDialog(QDialog):
     def __init__(self, media: list[MissingMedia], translator: Translator,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("other", "projects"), translator)
         self.media = media
         self.translator = translator
         self.setMinimumSize(760, 360)

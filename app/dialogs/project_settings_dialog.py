@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QRadioButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.models.project import (
     MAX_CROSSFADE_SECONDS,
     MIN_CROSSFADE_SECONDS,
@@ -32,6 +33,7 @@ class ProjectSettingsDialog(QDialog):
         canvas_size: tuple[int, int] = (1280, 720),
     ) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("other", "project_settings"), translator)
         self.setObjectName("projectSettingsDialog")
         self.translator = translator
         self.selected_settings = replace(settings)

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QSlider, QStyle, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.utils.time_format import format_clock
 
@@ -40,6 +41,7 @@ class ContentPreviewDialog(QDialog):
 
     def __init__(self, path: str, media_type: str, korean: bool, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "project_content"))
         self.path = Path(path)
         self.media_type = media_type
         self.korean = korean

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.models.source import Source
 from app.models.source_components import VideoComponent
 from app.models.source_registry import source_registry
@@ -18,6 +19,7 @@ class VideoSourceDialog(QDialog):
 
     def __init__(self, source: Source, korean: bool, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "video_source"))
         video = source_registry.component_for(source)
         if not isinstance(video, VideoComponent):
             raise ValueError("Video settings require a video source.")

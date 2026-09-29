@@ -326,7 +326,11 @@ class PreviewController:
             ),
         )
 
+        settled = False  # ready or failed: a late (coalesced) update must not revive the task
+
         def on_progress(_stage: str, fraction: float, message: str) -> None:
+            if settled:
+                return
             # The live state ("Analyzing 3 / 12 ...", "AutoMix ready through track 4")
             # is the detail line of the status-bar popup; the title stays the task's name.
             # AutoMix also lists its stages (analysis, preview mix, final mix) with their own progress.
@@ -336,6 +340,8 @@ class PreviewController:
             )
 
         def on_ready(*_args: object) -> None:
+            nonlocal settled
+            settled = True
             window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)
             window.statusBar().showMessage(
                 getattr(controller, "fallback_message", None) or (
@@ -345,6 +351,8 @@ class PreviewController:
             )
 
         def on_failed(*_args: object) -> None:
+            nonlocal settled
+            settled = True
             window.activity_progress.finish(PREVIEW_MIX_ACTIVITY)
             window.statusBar().showMessage(
                 "미리보기 믹스를 준비하지 못해 개별 곡 오디오로 계속 재생합니다." if korean else

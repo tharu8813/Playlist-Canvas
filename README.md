@@ -10,7 +10,7 @@
   <p>음악, 가사, 비주얼 요소를 하나의 캔버스에서 편집해 플레이리스트 영상을 만드는 Windows 데스크톱 편집기</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-1.2.0.10-1685D1" alt="Version 1.2.0.10">
+    <img src="https://img.shields.io/badge/version-1.3.0.0-1685D1" alt="Version 1.3.0.0">
     <img src="https://img.shields.io/badge/platform-Windows%2064--bit-0078D4" alt="Windows 64-bit">
     <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python 3.12">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
@@ -51,10 +51,11 @@ Playlist Canvas는 정적인 이미지와 음악을 합치는 수준을 넘어, 
 - H.264/H.265 및 지원되는 GPU 인코더를 이용한 MP4 내보내기
 - FFmpeg 자동 다운로드, SHA-256 검증, 설치 및 즉시 적용
 - GitHub Releases 기반 자동 업데이트 확인, 릴리즈 노트 표시와 검증된 Setup 실행
+- 오프라인 사용 설명서: 창마다 나뉜 탭, 태그·전체 검색, 번호가 표시된 스크린샷, 어느 창에서든 **F1**로 그 창의 도움말 열기
 
 ## 사용자 설치
 
-1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.2.0.10-setup.exe`를 받습니다.
+1. GitHub의 **Releases** 페이지에서 최신 `Playlist Canvas-1.3.0.0-setup.exe`를 받습니다.
 2. Setup 파일을 실행하고 설치 언어를 선택합니다.
 3. 설치 위치와 바탕 화면 바로가기 생성 여부를 선택한 뒤 **설치**를 누릅니다.
 4. 설치가 완료되면 **Playlist Canvas 실행**을 선택하거나 시작 메뉴의 바로가기를 실행합니다. 설치 후에는 파일 탐색기의 `.pvsproj` 프로젝트를 더블클릭해 프로그램과 프로젝트를 바로 열 수도 있습니다.
@@ -187,6 +188,18 @@ python scripts/run_tests.py
 각각 별도 프로세스에서 실행됩니다. Windows GitHub Actions에서도 같은 컴파일,
 회귀 테스트, PyInstaller 빌드와 패키지 스모크 테스트를 실행합니다.
 
+## 사용 설명서 스크린샷 갱신
+
+도움말(`app/dialogs/help_content.py`)의 스크린샷은 샘플 프로젝트로 각 창을 열어 자동으로
+촬영합니다. 화면이 바뀌었다면 FFmpeg가 PATH에 있는 상태에서 다시 생성하세요. 번호 표시는 본문의
+①②③ 목록과 맞춰져 있습니다.
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+python tools/capture_help_images.py            # 한국어·영어 모두
+python tools/capture_help_images.py --lang ko  # 한 언어만
+```
+
 ## Windows 배포본 빌드
 
 먼저 PyInstaller로 설치 프로그램에 포함할 애플리케이션 폴더를 생성합니다.
@@ -201,7 +214,7 @@ python -m PyInstaller --noconfirm --clean playlist_canvas.spec
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 ```
 
-완성된 `output-setup\Playlist Canvas-1.2.0.10-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
+완성된 `output-setup\Playlist Canvas-1.3.0.0-setup.exe`를 GitHub Release에 첨부합니다. 자세한 배포 절차는 [PACKAGING.md](PACKAGING.md)를 참고하세요.
 
 ## 프로젝트 구조
 
@@ -209,6 +222,7 @@ python -m PyInstaller --noconfirm --clean playlist_canvas.spec
 playlist_project/
 ├─ app/                    # 편집기 UI, 모델, 서비스와 렌더러
 ├─ app/resources/          # 앱·프로젝트 파일 아이콘과 기본 언어팩
+├─ app/resources/help/     # 사용 설명서 스크린샷 (tools/capture_help_images.py로 다시 생성)
 ├─ docs/images/            # README 이미지
 ├─ tests/                  # 회귀 및 배포 계약 테스트
 ├─ tools/                  # 개발 보조 도구

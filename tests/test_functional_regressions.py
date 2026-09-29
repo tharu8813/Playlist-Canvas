@@ -2707,6 +2707,10 @@ class FunctionalRegressionTests(unittest.TestCase):
         assert dialog._shortcuts_dialog is not None
         self.assertGreaterEqual(dialog._shortcuts_dialog.table.rowCount(), 6)
         self.assertIn("F1", dialog._shortcuts_dialog.table.item(4, 0).text())
+        self.assertEqual(dialog.shortcuts_shortcut.key().toString(), "Shift+F1")
+        with patch("app.dialogs.help_dialog.HelpDialog") as help_dialog:
+            dialog.help_shortcut.activated.emit()
+        self.assertEqual(help_dialog.call_args.kwargs, {"tab": "lyrics_editor", "topic": "lrc_timing"})
         dialog.close()
 
     def test_ffprobe_is_used_as_duration_fallback(self) -> None:

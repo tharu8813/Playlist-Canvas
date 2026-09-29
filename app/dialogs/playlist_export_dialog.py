@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.services.playlist_export_service import TimestampFormat
 from app.utils.i18n import Translator
 
@@ -28,6 +29,7 @@ class PlaylistExportDialog(QDialog):
     def __init__(self, default_directory: Path, translator: Translator,
                  parent: object | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "playlist"), translator)
         self.translator = translator
         self.setMinimumWidth(460)
         self.directory_edit = QLineEdit(str(default_directory))

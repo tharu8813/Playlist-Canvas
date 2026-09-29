@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.utils.time_format import format_clock
 
 
@@ -28,6 +29,7 @@ class FFmpegInstallProgressDialog(QDialog):
 
     def __init__(self, korean: bool, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("other", "ffmpeg"))
         self._korean = korean
         self._started_at = monotonic()
         self._cancelling = False

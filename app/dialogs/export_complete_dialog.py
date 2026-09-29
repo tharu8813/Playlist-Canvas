@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.utils.i18n import Translator
 from app.services.export_validation_service import ExportValidationResult
 
@@ -33,6 +34,7 @@ class ExportCompleteDialog(QDialog):
         validation: ExportValidationResult | None = None,
     ) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("other", "export_process"))
         self.output_path = Path(output_path).expanduser().resolve()
         self.translator = translator
         self.export_again_requested = False

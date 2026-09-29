@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.services.recent_projects_service import RecentProjectsService
 from app.services.project_service import ProjectError, ProjectService, ProjectSummary
 from app.utils.i18n import Translator
@@ -77,6 +78,7 @@ class StartupDialog(QDialog):
     def __init__(self, translator: Translator, recent: RecentProjectsService,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "start"), translator)
         self.translator = translator
         self.recent = recent
         self.action = ""

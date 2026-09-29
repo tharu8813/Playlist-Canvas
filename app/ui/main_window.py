@@ -3376,8 +3376,29 @@ class MainWindow(QMainWindow):
         ShortcutsDialog(self.translator, self).exec()
 
     def _show_help(self) -> None:
-        """Open the searchable offline user guide."""
-        HelpDialog(self.translator, self).exec()
+        """Open the offline user guide on the tab (and topic) for what is in use."""
+        tab, topic = self._help_context()
+        HelpDialog(self.translator, self, tab=tab, topic=topic).exec()
+
+    def _help_context(self) -> tuple[str, str | None]:
+        """Preview while it plays; otherwise Canvas, on the focused panel's topic."""
+        if self._inline_preview is not None:
+            return "preview", "full_preview"
+        focus = QApplication.focusWidget()
+        panels = (
+            (getattr(self, "playlist_editor", None), "playlist"),
+            (getattr(self, "timeline_panel", None), "timeline"),
+            (getattr(self, "layer_panel", None), "layers"),
+            (getattr(self, "content_library_panel", None), "project_content"),
+            (getattr(self, "source_sidebar", None), "sources"),
+            (getattr(self, "inspector", None), "properties"),
+            (getattr(self, "canvas", None), "canvas_editing"),
+        )
+        for panel, topic in panels:
+            if isinstance(panel, QWidget) and focus is not None and (
+                    focus is panel or panel.isAncestorOf(focus)):
+                return "canvas", topic
+        return "canvas", "workspace"
 
     def _show_about(self) -> None:
         """Open program identity, runtime details, and support diagnostics."""

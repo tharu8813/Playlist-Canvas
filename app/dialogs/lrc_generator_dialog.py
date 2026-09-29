@@ -39,12 +39,17 @@ from PySide6.QtWidgets import (
 
 from app.models.project import ProjectContent
 from app.models.playlist import PlaylistTrack
+from app.dialogs.help_dialog import install_help_shortcut
 from app.dialogs.lrc_shortcuts_dialog import LrcShortcutsDialog
 from app.services.lyrics_service import LyricsError, LyricsService
 from app.services.lrc_draft_service import LrcDraft, LrcDraftError, LrcDraftService
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.services.playlist_service import PlaylistService
 from app.utils.i18n import Translator
+
+
+_STEP_HELP_TOPICS = {0: "lrc_audio", 1: "lrc_input", 2: "lrc_timing", 3: "lrc_review"}
+"""F1 opens the lyrics editor's help on the topic of the step being shown."""
 
 
 class LrcGeneratorDialog(QDialog):
@@ -494,8 +499,12 @@ class LrcGeneratorDialog(QDialog):
         self.redo_shortcut.activated.connect(self._redo_record)
         self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self.save_shortcut.activated.connect(self._save_lrc)
-        self.help_shortcut = QShortcut(QKeySequence("F1"), self)
-        self.help_shortcut.activated.connect(self._open_shortcuts)
+        self.help_shortcut = install_help_shortcut(
+            self, lambda dialog: ("lyrics_editor", _STEP_HELP_TOPICS.get(dialog.pages.currentIndex())),
+            translator,
+        )
+        self.shortcuts_shortcut = QShortcut(QKeySequence("Shift+F1"), self)
+        self.shortcuts_shortcut.activated.connect(self._open_shortcuts)
         self.play_pause_shortcut = QShortcut(QKeySequence("Ctrl+Space"), self)
         self.play_pause_shortcut.activated.connect(self._toggle_playback)
         self.seek_back_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)

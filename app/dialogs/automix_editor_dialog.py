@@ -25,7 +25,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton,
+    QApplication, QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSplitter, QToolButton, QVBoxLayout,
 )
 
@@ -36,6 +36,7 @@ from app.automix.settings import automix_settings_for
 from app.controllers.transition_audition_controller import (
     FAILED, READY, RENDERING, UNAVAILABLE, WAITING, TransitionAuditionController,
 )
+from app.dialogs.help_dialog import install_help_shortcut, open_help
 from app.ui.studio_icons import menu_icon
 from app.widgets.activity_progress import activity_for
 from app.widgets.automix_timeline import AutoMixTimeline
@@ -263,7 +264,8 @@ class AutoMixEditorDialog(QDialog):
         self.fit_button.clicked.connect(self._fit)
         self.lanes_button.toggled.connect(self._lanes_toggled)
         self.properties_button.toggled.connect(self._toggle_properties)
-        self.help_button.clicked.connect(self._show_shortcuts)
+        self.help_button.clicked.connect(self._show_help)
+        install_help_shortcut(self, lambda editor: editor._help_context(), getattr(self.host, "translator", None))
 
         toolbar = QFrame()
         toolbar.setObjectName("automixEditorToolbar")
@@ -445,7 +447,7 @@ class AutoMixEditorDialog(QDialog):
             ("Ctrl+-", lambda: self.timeline.zoom(1.25)),
             ("Ctrl+0", self._fit),
             ("Home", lambda: self._seek_local(0.0)),
-            ("F1", self._show_shortcuts),
+            ("Shift+F1", self._show_shortcuts),
         ):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
@@ -1378,7 +1380,7 @@ class AutoMixEditorDialog(QDialog):
                                                  "Recommend again (keeping kept values)\tCtrl+Backspace"))
         self.reset_all_action.setText(self._text("전환 전체 초기화 (고정 해제 포함)", "Reset the whole transition (unkeeps too)"))
         self.layout_action.setText(self._text("작업 공간 기본 배치로", "Default workspace layout"))
-        self.shortcuts_action.setText(self._text("단축키\tF1", "Shortcuts\tF1"))
+        self.shortcuts_action.setText(self._text("단축키\tShift+F1", "Shortcuts\tShift+F1"))
         self.compare_label.setText(self._text("A/B 비교", "A/B"))
         self.mine_button.setText(self._text("내 편집", "My edit"))
         self.compare_button.setText(self._text("자동 결과", "Automatic"))
@@ -1389,7 +1391,7 @@ class AutoMixEditorDialog(QDialog):
             "B: hear what analysis would do, from the same spot; any edit switches back to yours (B)"))
         self.properties_button.setText(self._text("속성", "Properties"))
         self.properties_button.setToolTip(self._text("속성 패널 보이기/숨기기", "Show or hide the properties panel"))
-        self.help_button.setToolTip(self._text("단축키 (F1)", "Shortcuts (F1)"))
+        self.help_button.setToolTip(self._text("도움말 (F1) · 단축키는 Shift+F1", "Help (F1) · shortcuts: Shift+F1"))
         self.stop_button.setToolTip(self._text("정지 · 구간 처음으로", "Stop · back to the window start"))
         self.loop_button.setText(self._text("반복", "Loop"))
         self.loop_button.setToolTip(self._text("전환 앞뒤 구간을 반복 재생 (L)", "Repeat the transition window (L)"))
@@ -1401,7 +1403,7 @@ class AutoMixEditorDialog(QDialog):
                                            "Edits save to the project at once; Preview and Export use the same settings"))
         self.previous_button.setAccessibleName(self._text("이전 전환", "Previous transition"))
         self.next_button.setAccessibleName(self._text("다음 전환", "Next transition"))
-        self.help_button.setAccessibleName(self._text("단축키 도움말", "Keyboard shortcuts"))
+        self.help_button.setAccessibleName(self._text("AutoMix 편집기 도움말", "AutoMix editor help"))
         self.volume_slider.setAccessibleName(self._text("미리듣기 음량", "Audition volume"))
         self.position_slider.setAccessibleName(self._text("미리듣기 위치", "Audition position"))
         self.volume_slider.setToolTip(self._text("미리듣기 볼륨", "Audition volume"))
@@ -1412,6 +1414,20 @@ class AutoMixEditorDialog(QDialog):
         self._refresh_actions()
         self._set_audition_text()
         self._set_playhead(self._playhead)
+
+    def _help_context(self) -> tuple[str, str]:
+        """F1: the editor's help, on the topic of the part that has focus."""
+        focus = QApplication.focusWidget()
+        for widget, topic in ((self.properties_scroll, "automix_properties"),
+                              (self.timeline_scroll, "automix_timeline"),
+                              (self.play_button.parentWidget(), "automix_listen")):
+            if focus is not None and (focus is widget or widget.isAncestorOf(focus)):
+                return "automix_editor", topic
+        return "automix_editor", "automix_editor"
+
+    def _show_help(self) -> None:
+        tab, topic = self._help_context()
+        open_help(self, getattr(self.host, "translator", None), tab, topic)
 
     def _show_shortcuts(self) -> None:
         rows = (
@@ -1430,6 +1446,7 @@ class AutoMixEditorDialog(QDialog):
             ("Ctrl+C / Ctrl+V", "전환 설정 복사 / 붙여넣기 (큐 제외)", "Copy / paste settings (no cues)"),
             ("Ctrl+Shift+V", "큐 위치까지 붙여넣기", "Paste including cues"),
             ("Ctrl+Backspace", "자동으로 되돌리기 · 고정값이 있으면 다시 추천", "Back to automatic · recommend again if values are kept"),
+            ("F1 · Shift+F1", "도움말 · 이 단축키 요약", "Help · this shortcut summary"),
         )
         text = "<table cellspacing='6'>" + "".join(
             f"<tr><td><b>{html.escape(keys)}</b></td><td>{html.escape(korean if self.korean else english)}</td></tr>"

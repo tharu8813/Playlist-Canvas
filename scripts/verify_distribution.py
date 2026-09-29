@@ -10,6 +10,8 @@ REQUIRED_FILES = (
     Path("app/resources/ko.json"),
     Path("app/resources/en.json"),
     Path("app/resources/language-pack-template.json"),
+    Path("app/resources/help/ko/canvas_workspace.png"),
+    Path("app/resources/help/en/canvas_workspace.png"),
     Path("app/ui/studio.qss"),
     Path("assets/icons/check.svg"),
     Path("LICENSE.txt"),

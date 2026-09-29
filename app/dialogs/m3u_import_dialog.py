@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dialogs.help_dialog import install_help_shortcut
 from app.preview.album_art import track_cover_thumbnail
 from app.preview.text_template import format_timestamp
 from app.services.playlist_service import AudioImportCandidate
@@ -39,6 +40,7 @@ class M3uImportDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        install_help_shortcut(self, ("canvas", "playlist"), translator)
         self.candidates = candidates
         self.playlist_path = playlist_path
         self.skipped = skipped
