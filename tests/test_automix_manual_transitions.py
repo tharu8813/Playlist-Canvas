@@ -110,6 +110,41 @@ class ManualPlanTests(unittest.TestCase):
         self.assertEqual(transition.type, TransitionType.EQUAL_POWER)
         self.assertIsNone(transition.dsp)
 
+    def test_a_hand_set_tempo_match_applies_however_far_apart_the_tempos_are(self) -> None:
+        tracks = _tracks()
+        analyses = _analyses(tracks, (120.0, 150.0, 120.0))  # 25% apart: beyond the automatic bridge
+        automatic = compile_automix(tracks, analyses, ENABLED)
+        self.assertIsNone(automatic.audio.clips[0].tempo_ramp)
+        override = TransitionOverride(150.0, 0.0, 10.0, "legacy", tempo_match=True)
+        plan = compile_automix(tracks, analyses, _manual(ENABLED, **{"a>b": override}))
+        self.assertAlmostEqual(plan.audio.clips[0].tempo_ramp.end_rate, 1.25)
+        validate_compiled_render_plan(plan)
+
+    def test_a_hand_set_window_may_run_into_the_quiet_tail_up_to_the_files_end(self) -> None:
+        from dataclasses import replace as replaced
+
+        tracks = _tracks()
+        analyses = _analyses(tracks)
+        analyses["a"] = replaced(analyses["a"], audible_end_seconds=190.0)  # "a" (200 s) fades out from 190 s
+        override = TransitionOverride(180.0, 0.0, 18.0, "legacy", tempo_match=False)
+        plan = compile_automix(tracks, analyses, _manual(ENABLED, **{"a>b": override}))
+        self.assertAlmostEqual(plan.audio.transitions[0].duration, 18.0)
+        longer = compile_automix(tracks, analyses, _manual(ENABLED, **{"a>b": replaced(override, duration=30.0)}))
+        self.assertAlmostEqual(longer.audio.transitions[0].duration, 20.0)  # the file itself ends at 200 s
+        validate_compiled_render_plan(longer)
+
+    def test_an_echo_out_rings_on_past_the_end_of_the_outgoing_file(self) -> None:
+        tracks = _tracks()
+        override = TransitionOverride(196.0, 0.0, 12.0, "echo_out", tempo_match=False, echo_feedback=0.95)
+        plan = compile_automix(tracks, _analyses(tracks), _manual(ENABLED, **{"a>b": override}))
+        transition = plan.audio.transitions[0]
+        self.assertAlmostEqual(transition.duration, 12.0)  # "a" has only 4 s left after 196 s
+        self.assertAlmostEqual(plan.audio.clips[0].source_out, 208.0)  # the renderer pads the rest
+        self.assertEqual(transition.echo_feedback, 0.95)
+        validate_compiled_render_plan(plan)
+        with self.assertRaises(ValueError):
+            TransitionOverride(196.0, echo_feedback=0.99)
+
     def test_out_of_range_values_are_clamped_to_what_the_songs_have(self) -> None:
         tracks = _tracks()
         override = TransitionOverride(195.0, 0.0, 30.0, "short_fade", tempo_match=False)

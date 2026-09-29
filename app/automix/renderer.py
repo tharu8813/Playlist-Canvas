@@ -158,7 +158,10 @@ ECHO_FEEDBACK = 0.55
 """Each echo repeat's level against the previous one (-5.2 dB per beat)."""
 ECHO_FIRST_LEVEL = 0.9
 """The first repeat's level. With the low cut, 0.55 there left it 17 dB under the dry track."""
-ECHO_MAX_REPEATS = 16
+ECHO_MAX_REPEATS = 64
+"""Enough repeats for a long, slowly decaying tail (a whole window at a half-beat delay)."""
+ECHO_SILENT_LEVEL = 1e-4
+"""-80 dB: a repeat this quiet is left out."""
 ECHO_LOW_CUT_HZ = 200.0
 """Echoes are thinned below this so their bass never muddies the incoming kick."""
 ECHO_DEFAULT_BEAT_SECONDS = 0.5
@@ -274,14 +277,17 @@ def graph_parts(
         sweep_in, sweep_out = sweep_side(index - 1), sweep_side(index)
         rest_bands, rest_sweep = resting_dsp.get(clip.clip_id, (False, False))
         exit_transition = exit_side(index)
+        following = transition_by_pair.get((clip.clip_id, clips[index + 1].clip_id)) if index + 1 < len(clips) else None
+        # Even rendered without DSP (the legacy retry), an echo's window may run past the file.
+        pin = following is not None and following.dsp is TransitionDsp.ECHO_OUT
         # The exit effect (if any) runs last, on what the band/sweep stages made.
         body = labels[index] if exit_transition is None else f"{labels[index]}body"
         if (incoming is None and outgoing is None and sweep_in is None and sweep_out is None
                 and not rest_bands and not rest_sweep):
-            filters.append(_clip_filter_chain(index, clip, body, ramp_filter=ramp_filter, source=source))
+            filters.append(_clip_filter_chain(index, clip, body, ramp_filter=ramp_filter, source=source, pin=pin))
         else:
             current = f"{labels[index]}pre"
-            filters.append(_clip_filter_chain(index, clip, current, ramp_filter=ramp_filter, source=source))
+            filters.append(_clip_filter_chain(index, clip, current, ramp_filter=ramp_filter, source=source, pin=pin))
             if sweep_in is not None or sweep_out is not None or rest_sweep:
                 swept = f"{labels[index]}swept"
                 filters.append(_sweep_filter(index, current, swept, clip.duration, sweep_in, sweep_out))
@@ -331,13 +337,15 @@ def graph_parts(
 
 
 def _clip_filter_chain(index: int, clip: AudioRenderClip, label: str, *, ramp_filter: str | None = "rubberband",
-                       source: str | None = None) -> str:
+                       source: str | None = None, pin: bool = False) -> str:
     """One clip, trimmed/stretched/gained to exactly its planned placement.
 
     A TempoRamp renders with ``ramp_filter`` (a time-stretcher taking timed
     ``tempo`` commands); ``None`` renders its rate steps as separate,
     sample-pinned segments instead (same timing, a stretcher restart per step).
     ``source``: the stream label to read (default input ``index``'s audio).
+    ``pin``: hold the clip to its planned length even without a ramp (an echo
+    out may reach past the file's end; silence stands in there).
     """
     source = source or f"{index}:a"
     if clip.tempo_ramp is not None and ramp_filter is None:
@@ -353,7 +361,7 @@ def _clip_filter_chain(index: int, clip: AudioRenderClip, label: str, *, ramp_fi
     if abs(clip.gain - 1.0) > 1e-9:
         parts.append(f"volume={clip.gain:.6f}")
     parts.append(f"aformat=sample_rates={SAMPLE_RATE}:channel_layouts=stereo")
-    if clip.tempo_ramp is not None:
+    if clip.tempo_ramp is not None or pin:
         # Overlaps align on the clip's END (acrossfade), so pin its length to
         # the plan: the stretcher may leave it a frame short or long.
         samples = round(clip.duration * SAMPLE_RATE)
@@ -566,7 +574,9 @@ def echo_taps(duration: float, beat: float, feedback: float | None = None) -> li
     """(delay seconds, level) of each ECHO_OUT repeat that starts inside the window."""
     feedback = ECHO_FEEDBACK if feedback is None else feedback
     count = max(1, min(ECHO_MAX_REPEATS, int(duration / beat + 1e-9)))
-    return [(beat * k, ECHO_FIRST_LEVEL * feedback ** (k - 1)) for k in range(1, count + 1)]
+    taps = [(beat * k, ECHO_FIRST_LEVEL * feedback ** (k - 1)) for k in range(1, count + 1)]
+    # Repeats past -80 dB are inaudible (and aecho rejects a decay that rounds to 0).
+    return [tap for index, tap in enumerate(taps) if index == 0 or tap[1] >= ECHO_SILENT_LEVEL]
 
 
 def echo_beat(transition: AudioRenderTransition) -> float:
@@ -621,7 +631,7 @@ def _exit_filters(
             f"[{wet}src]afade=t=in:st={feed_start:.6f}:d=0.01,"
             f"afade=t=out:st={feed_end - 0.03:.6f}:d=0.03,"
             f"aecho=in_gain=0:out_gain=1:delays={'|'.join(f'{d * 1000:.3f}' for d, _ in taps)}"
-            f":decays={'|'.join(f'{level:.4f}' for _, level in taps)},"
+            f":decays={'|'.join(f'{level:.6f}' for _, level in taps)},"
             f"{low_cut}"
             f"afade=t=out:st={clip_duration - tail:.6f}:d={tail:.6f}[{wet}]",
             f"[{dry}f][{wet}]amix=inputs=2:normalize=0:duration=first[{output}]",

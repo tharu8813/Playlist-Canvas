@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
 
 from app.automix.models import TrackAnalysis
 from app.automix.overrides import (
-    ECHO_BEAT_CHOICES, EQ_BANDS, MANUAL_STYLES, MAX_DURATION_SECONDS, MAX_RAMP_SECONDS, MIN_EQ_WINDOW,
+    ECHO_BEAT_CHOICES, EQ_BANDS, MANUAL_STYLES, MAX_DURATION_SECONDS, MAX_ECHO_FEEDBACK, MAX_RAMP_SECONDS,
+    MIN_EQ_WINDOW,
     STYLE_ALIASES, STYLE_AUTO,
     STYLE_CUT, STYLE_EQ, BandWindows, TransitionOverride, Window, pair_key,
 )
@@ -272,6 +273,7 @@ def drag_override(
     floor = head.timeline_at(ramp_floor(junctions, index))
     length = drawn.end - drawn.start
     limit = ""
+    advice = ""
     guide: float | None = None
     changes: dict[str, float] = {}
     if kind in ("move", "start"):
@@ -296,13 +298,18 @@ def drag_override(
             snapped = snap_length(new_length, incoming_analysis, tolerance)
             guide = drawn.start + snapped if abs(snapped - new_length) > 1e-9 else None
             new_length = snapped
-        longest = min(MAX_DURATION_SECONDS, head.timeline_end - drawn.start, incoming_length - base.incoming_cue)
+        # An echo rings on past the outgoing song's end: only the incoming song and 60 s bound it.
+        outgoing_room = math.inf if base.style == "echo_out" else head.timeline_end - drawn.start
+        longest = min(MAX_DURATION_SECONDS, outgoing_room, incoming_length - base.incoming_cue)
         if new_length > longest:
             which = (0 if longest >= MAX_DURATION_SECONDS - 1e-6
-                     else 1 if longest >= head.timeline_end - drawn.start - 1e-6 else 2)
+                     else 1 if longest >= outgoing_room - 1e-6 else 2)
             new_length, guide = longest, None
             limit = (("최대 60초", "나가는 곡 끝", "들어오는 곡 끝") if korean
                      else ("60 s max", "outgoing song ends", "incoming song ends"))[which]
+            if which == 1:  # A has nothing left after this: a longer mix has to start earlier
+                advice = (" · 더 길게는 시작 핸들을 앞으로 끄세요" if korean
+                          else " · drag the start handle earlier for a longer mix")
         if new_length < MIN_EDIT_SECONDS:
             new_length, limit, guide = MIN_EDIT_SECONDS, ("최소 길이" if korean else "shortest"), None
         changes["duration"] = new_length
@@ -354,7 +361,7 @@ def drag_override(
     if "duration" in changes:
         changes["duration"] = min(MAX_DURATION_SECONDS, max(MIN_EDIT_SECONDS, changes["duration"]))
     if limit:
-        hint += f"  ▸ {limit}에서 멈춤" if korean else f"  ▸ stops at {limit}"
+        hint += (f"  ▸ {limit}에서 멈춤" if korean else f"  ▸ stops at {limit}") + advice
     elif guide is not None:
         hint += "  ◆ 박자" if korean else "  ◆ on the beat"
     try:
@@ -570,7 +577,7 @@ class TransitionPropertiesPanel(QWidget):
         echo_beats_row.addStretch(1)
         self.echo_tail_label = QLabel()
         self.echo_feedback_slider = QSlider(Qt.Orientation.Horizontal)
-        self.echo_feedback_slider.setRange(20, 80)
+        self.echo_feedback_slider.setRange(20, round(MAX_ECHO_FEEDBACK * 100))
         self.echo_feedback_slider.valueChanged.connect(self._echo_feedback_moved)
         self.echo_feedback_slider.sliderReleased.connect(self.flush)
         self.echo_feedback_value = QLabel()
@@ -802,6 +809,9 @@ class TransitionPropertiesPanel(QWidget):
         for seconds, button in self.length_presets.items():
             button.setChecked(not cut and override is not None and abs(override.duration - seconds) < 0.01)
         self.length_box.setEnabled(not cut)
+        # For an echo the window is how long its repeats ring (past the song's end if need be).
+        self.length_title.setText(("에코가 울리는 시간" if korean else "Echo ring time") if style == "echo_out"
+                                  else ("겹침 길이" if korean else "Overlap length"))
         self.cue_box.setVisible(self.advanced)
         self.tempo_box.setVisible(self.advanced)
         self.facts_box.setVisible(self.advanced)
@@ -882,10 +892,13 @@ class TransitionPropertiesPanel(QWidget):
         for beats, button in self.echo_beat_buttons.items():
             button.setText({0.5: ("½박", "½ beat"), 1.0: ("1박", "1 beat"), 2.0: ("2박", "2 beats")}[beats][
                 0 if korean else 1])
-        self.echo_tail_label.setText("여운 길이 (반복마다 줄어드는 양)" if korean
-                                     else "Tail length (how much each repeat drops)")
-        self.echo_feedback_slider.setToolTip("오른쪽일수록 에코가 오래 남습니다." if korean
-                                             else "Further right, the echo rings on longer.")
+        self.echo_tail_label.setText("여운 감쇠 (반복마다 줄어드는 양)" if korean
+                                     else "Tail decay (how much each repeat drops)")
+        self.echo_feedback_slider.setToolTip(
+            "오른쪽일수록 에코가 천천히 줄어 오래 남습니다. 울리는 시간은 위의 '에코가 울리는 시간'으로 정합니다."
+            if korean else
+            "Further right, each repeat drops less and the echo rings on longer. "
+            "How long it rings is the 'Echo ring time' above.")
         self.echo_low_cut_check.setText("에코의 저음 걷어내기 (다음 곡 킥과 겹치지 않게)" if korean
                                         else "Cut the echo's lows (keeps it off the next kick)")
         self.tape_entry_label.setText("다음 곡이 들어오는 지점 (멈춤 구간 대비)" if korean

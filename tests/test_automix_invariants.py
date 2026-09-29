@@ -15,6 +15,7 @@ from app.automix.overrides import (
     TransitionOverride, pair_key, parse_overrides, serialize_overrides,
 )
 from app.automix.planner import compile_automix
+from app.timeline.render_plan import TransitionDsp
 from tests.test_automix_planner import ENABLED, _analysis, _track
 
 CASES = 300
@@ -76,9 +77,13 @@ class PlannerInvariantTests(unittest.TestCase):
         durations = {track.id: track.duration_seconds for track in enabled}
         for previous, clip in zip(clips, clips[1:]):
             self.assertGreaterEqual(clip.timeline_start, previous.timeline_start - EPSILON, seed)
+        # An echo out may ring on past its file's end (the renderer pads that clip with silence).
+        echoes = {transition.clip_a for transition in plan.audio.transitions
+                  if transition.dsp is TransitionDsp.ECHO_OUT}
         for clip in clips:
             self.assertGreaterEqual(clip.source_in, -EPSILON, seed)
-            self.assertLessEqual(clip.source_out, durations[clip.track_id] + EPSILON, seed)
+            if clip.clip_id not in echoes:
+                self.assertLessEqual(clip.source_out, durations[clip.track_id] + EPSILON, seed)
         index = {clip.clip_id: position for position, clip in enumerate(clips)}
         for transition in plan.audio.transitions:
             a, b = index[transition.clip_a], index[transition.clip_b]

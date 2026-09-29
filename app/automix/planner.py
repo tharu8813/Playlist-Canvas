@@ -50,7 +50,9 @@ from app.automix.analysis.key import harmonic_shift, shift_key
 from app.automix.compatibility import evaluate_compatibility
 from app.automix.exits import CUT_SECONDS, plan_phrase_exit
 from app.automix.models import TrackAnalysis
-from app.automix.overrides import STYLE_AUTO, STYLE_CUT, STYLE_EQ, STYLE_LEGACY, TransitionOverride
+from app.automix.overrides import (
+    MAX_DURATION_SECONDS, STYLE_AUTO, STYLE_CUT, STYLE_EQ, STYLE_LEGACY, TransitionOverride,
+)
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
 from app.automix.transition_style import describe_transition, select_transition_dsp
@@ -422,13 +424,13 @@ def _plan_manual(
 
     The user's cues, length and style are kept as far as the two tracks
     allow: the cue never goes before the previous transition has finished
-    (nor the clip's start), the window is shortened to what both tracks
-    still have, and tempo matching needs both BPMs within the tempo budget.
+    (nor the clip's start), the window is shortened to what both files still
+    have -- their real ends, not the analysed end of their sound: a hand-set
+    window may take in a quiet tail -- and tempo matching needs both BPMs.
     Analysis is optional; without it "auto" style is a plain crossfade.
     """
-    outgoing_end = _audible_end(outgoing_analysis, settings, previous_clip)
-    incoming_end = (min(track.duration_seconds, audible_end(incoming_analysis))
-                    if incoming_analysis is not None else track.duration_seconds)
+    outgoing_end = max(previous_clip.source_in, previous_clip.source_out)
+    incoming_end = track.duration_seconds
     cue = min(max(float(override.outgoing_cue), ramp_floor, previous_clip.source_in), outgoing_end)
     incoming_cue = min(max(0.0, float(override.incoming_cue)), max(0.0, incoming_end - MIN_MANUAL_OVERLAP_SECONDS))
 
@@ -445,15 +447,18 @@ def _plan_manual(
                   and outgoing_analysis.bpm is not None and incoming_analysis.bpm is not None)
     rate = 1.0
     if override.tempo_match and bpms_known:
-        matched = _nearest_octave_rate(incoming_analysis.bpm / outgoing_analysis.bpm, settings)
-        if abs(matched - 1.0) * 100.0 <= settings.max_bridge_tempo_percent:
-            rate = matched
-    duration = min(float(override.duration), (outgoing_end - cue) / rate, incoming_end - incoming_cue)
+        # Asked for by hand: always matched, however far apart (automatic mixes keep their limits).
+        rate = _nearest_octave_rate(incoming_analysis.bpm / outgoing_analysis.bpm, settings)
+    # An echo out takes only the window's first beat from the song; its repeats may
+    # ring on past the file's end (the renderer pads the clip with silence).
+    echo = override.style == TransitionDsp.ECHO_OUT.value
+    outgoing_room = MAX_DURATION_SECONDS if echo else (outgoing_end - cue) / rate
+    duration = min(float(override.duration), outgoing_room, incoming_end - incoming_cue)
     if override.style == TransitionDsp.DOWNBEAT_CUT.value:
         duration = min(duration, CUT_SECONDS)  # a cut: the window only keeps it from clicking
     if duration < MIN_MANUAL_OVERLAP_SECONDS:
         return cut()
-    outgoing_out = min(outgoing_end, cue + duration * rate)
+    outgoing_out = cue + duration * rate if echo else min(outgoing_end, cue + duration * rate)
 
     outgoing_clip = replace(previous_clip, source_out=outgoing_out)
     ramp_seconds = 0.0

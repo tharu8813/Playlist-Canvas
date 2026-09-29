@@ -37,6 +37,8 @@ Both still load and plan exactly as saved."""
 ECHO_BEAT_CHOICES = (0.5, 1.0, 2.0)
 MAX_DURATION_SECONDS = 60.0
 MAX_RAMP_SECONDS = 120.0
+MAX_ECHO_FEEDBACK = 0.95
+"""Each echo repeat at most 0.4 dB under the one before: a tail that rings for many bars."""
 MAX_OVERRIDES = 20_000
 EQ_BANDS = ("low", "mid", "high")
 """The renderer's crossover bands, in the order ``TransitionOverride.eq_bands`` stores them."""
@@ -115,8 +117,8 @@ class TransitionOverride:
             object.__setattr__(self, "eq_bands", _band_windows(self.eq_bands))
         if not _number(self.echo_beats) or self.echo_beats not in ECHO_BEAT_CHOICES:
             raise ValueError("Manual transition echo_beats must be one of 0.5, 1, 2 beats.")
-        if not _number(self.echo_feedback) or not 0.2 <= self.echo_feedback <= 0.8:
-            raise ValueError("Manual transition echo_feedback must be between 0.2 and 0.8.")
+        if not _number(self.echo_feedback) or not 0.2 <= self.echo_feedback <= MAX_ECHO_FEEDBACK:
+            raise ValueError("Manual transition echo_feedback must be between 0.2 and 0.95.")
         if not isinstance(self.echo_low_cut, bool):
             raise ValueError("Manual transition echo_low_cut must be a boolean.")
         if not _number(self.tape_entry) or not 0.2 <= self.tape_entry <= 0.95:

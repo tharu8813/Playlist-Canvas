@@ -479,7 +479,7 @@ class AutoMixEditorDialog(QDialog):
                 tempo += self._text(" (타임라인의 '템포 변경 시작' 핸들로 시작점 조정)",
                                     " (drag 'Tempo change starts' on the timeline to move where it begins)")
             elif (override or self._base()).tempo_match:
-                tempo += " · " + self._tempo_match_skipped(analyses[0].bpm, analyses[1].bpm)
+                tempo += self._text(" · 템포가 이미 같아 바꿀 필요가 없음", " · tempos already match")
         length = junction.end - junction.start
         facts = [
             (self._text("믹스 시작", "Mix starts"), _clock(junction.start, precise=True)),
@@ -497,18 +497,6 @@ class AutoMixEditorDialog(QDialog):
             songs_html=songs, analyses=analyses, durations=durations,
             band_style=style in BAND_ENVELOPES, auto_style=self._style_name(junction), tempo_text=tempo, facts=facts,
         )
-
-    def _tempo_match_skipped(self, outgoing_bpm: float, incoming_bpm: float) -> str:
-        """Why "match tempo" is on but nothing changes."""
-        from app.automix.candidates import _nearest_octave_rate
-
-        rate = _nearest_octave_rate(incoming_bpm / outgoing_bpm, self._settings)
-        percent = abs(rate - 1.0) * 100.0
-        if percent < 0.05:
-            return self._text("템포가 이미 같아 바꿀 필요가 없음", "tempos already match")
-        limit = self._settings.max_bridge_tempo_percent
-        return self._text(f"템포 차이 {percent:.1f}%가 맞춤 한도 {limit:g}%를 넘어 원래 템포 유지",
-                          f"a {percent:.1f}% tempo gap exceeds the {limit:g}% match limit; tempos stay")
 
     def _style_name(self, junction) -> str:
         transition = junction.transition

@@ -224,7 +224,7 @@ class EffectSettingsTests(unittest.TestCase):
         old = TransitionOverride.from_dict({"outgoing_cue": 1.0, "style": "echo_out"})
         self.assertEqual((old.echo_beats, old.echo_feedback, old.echo_low_cut, old.tape_entry, old.key_shift),
                          (1.0, 0.55, True, 0.6, None))
-        for bad in (dict(echo_beats=3.0), dict(echo_feedback=0.95), dict(tape_entry=0.1), dict(key_shift=5)):
+        for bad in (dict(echo_beats=3.0), dict(echo_feedback=0.99), dict(tape_entry=0.1), dict(key_shift=5)):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 TransitionOverride(outgoing_cue=1.0, **bad)
 
@@ -234,7 +234,7 @@ class EffectSettingsTests(unittest.TestCase):
         self.assertAlmostEqual(transition.beat_seconds, 0.3)  # half a 100 BPM beat
         graph, _label = build_filter_graph(plan.audio.clips, plan.audio.transitions)
         self.assertIn("delays=300.000|600.000", graph)
-        self.assertIn("decays=0.9000|0.6300|0.4410", graph)
+        self.assertIn("decays=0.900000|0.630000|0.441000", graph)
         self.assertNotIn("highpass=f=200", graph)
 
     def test_tape_entry_moves_where_the_next_song_comes_in(self) -> None:
