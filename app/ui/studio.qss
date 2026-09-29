@@ -183,6 +183,16 @@ QTreeWidget::item:selected, QListWidget::item:selected, QTableWidget::item:selec
 #projectContentList, #sourceCardsScroll, #helpBrowser { background: @field; }
 #projectContentFilter, #sourceSearch, #helpSearch { min-height: 30px; }
 #playlistList[dropActive="true"] { border: 1px solid @accent; border-radius: 4px; }
+#playlistList::item { border: 0; border-radius: 5px; }
+#playlistList::item:hover { background: @alternate; }
+#playlistList::item:selected { background: #304B44; }
+#trackNumber { color: @muted; font-size: 11px; min-width: 18px; }
+#trackRowCover { background: @alternate; color: @muted; border-radius: 5px; font-size: 15px; }
+#trackDuration { color: @text; font-size: 11px; min-width: 38px; qproperty-alignment: 'AlignRight | AlignVCenter'; }
+#trackBadge { color: @muted; border: 1px solid @border; border-radius: 8px; padding: 1px 7px; font-size: 10px; }
+QPushButton#playlistToolButton { background: transparent; border-color: transparent; color: @muted; padding: 6px 9px; }
+QPushButton#playlistToolButton:hover { background: @hover; border-color: @border; color: @text; }
+QPushButton#playlistToolButton:disabled { background: transparent; border-color: transparent; color: @disabled_text; }
 #trackRow { background: @panel; border: 0; border-bottom: 1px solid @border; border-radius: 0; }
 #trackRow:hover { background: @alternate; }
 #trackRow[trackDisabled="true"] { background: @panel; border: 1px dashed @border; }
@@ -318,8 +328,10 @@ QSlider::handle:horizontal:focus { border-color: @accent; }
 #playlistPreview #previewStage, #embeddedCanvasPreview #previewStage { border: 0; border-radius: 0; }
 #previewTrackPanel { border-left: 1px solid @border; }
 #previewTrackListTitle { font-size: 13px; font-weight: 600; }
-#previewTrackList::item { padding: 8px 6px; border-bottom: 1px solid @border; }
-#previewTrackList::item:selected { background: #304B44; border-left: 2px solid @accent; }
+/* Preview track rows are painted by PreviewTrackDelegate. */
+QPushButton#previewTransportButton { background: transparent; border-color: transparent; color: @muted; min-width: 22px; padding: 6px 10px; }
+QPushButton#previewTransportButton:hover { background: @hover; border-color: @border; color: @text; }
+#previewPlayButton { min-width: 96px; }
 #playlistPreview #previewInfoCard, #embeddedNowPlaying { border-bottom: 1px solid @border; }
 #playlistPreview QPushButton:focus, #embeddedCanvasPreview QPushButton:focus { border: 1px solid @accent; }
 #previewTrackPanel, #previewInfoCard, #previewControlCard, #previewPerformanceBar { background: @panel; border: 0; border-radius: 0; }

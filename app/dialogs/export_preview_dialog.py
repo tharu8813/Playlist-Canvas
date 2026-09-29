@@ -16,8 +16,10 @@ from weakref import WeakSet
 
 import numpy as np
 
-from PySide6.QtCore import QElapsedTimer, QRect, QRectF, QSize, QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QResizeEvent, QShortcut
+from PySide6.QtCore import QElapsedTimer, QPointF, QRect, QRectF, QSize, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import (
+    QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QResizeEvent, QShortcut,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QStackedLayout,
     QStyle,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -82,11 +85,6 @@ VIDEO_PROXY_ACTIVITY = "preview_video_proxy"
 AUDIO_ANALYSIS_ACTIVITY = "preview_audio_analysis"
 _BLENDED_AUDIO_TRACK_INDEX = -2
 """Sentinel for `_active_track_index` when playing the pre-rendered AutoMix/crossfade mix."""
-_TRANSITION_TYPE_LABELS = {
-    TransitionType.CROSSFADE: "Crossfade",
-    TransitionType.BEAT_MATCH: "Beat Match",
-    TransitionType.AUTOMIX: "AutoMix",
-}
 
 
 def _transition_display_regions(
@@ -173,7 +171,7 @@ class PlaylistTimeline(QSlider):
         self.schedule = schedule
         self._transition_regions = _transition_display_regions(transitions)
         self._dragging = False
-        self.setMinimumHeight(42)
+        self.setMinimumHeight(46)
 
     def set_schedule(
         self, schedule: tuple[tuple[int, PlaylistTrack, float, float], ...],
@@ -185,48 +183,62 @@ class PlaylistTimeline(QSlider):
         self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
-        super().paintEvent(event)
+        """One block per track (the playing one outlined, the part heard filled),
+        transitions in amber across the joins, and the playhead on top."""
         total = max(0.01, self.maximum() / TIMELINE_SCALE)
         current_seconds = self.value() / TIMELINE_SCALE
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        palette = self.palette()
+        accent = palette.highlight().color()
         usable_width = max(1, self.width() - 18)
-        windows = self.schedule
 
-        def x_at(seconds: float) -> int:
-            return 9 + round(seconds / total * usable_width)
+        def x_at(seconds: float) -> float:
+            return 9 + seconds / total * usable_width
 
-        band_y = self.height() - 8
-        for start, end, transition_type in self._transition_regions:
-            x0, x1 = x_at(start), x_at(end)
-            if x1 <= x0:
-                continue
-            band_rect = QRect(x0, band_y, x1 - x0, 6)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(255, 191, 92, 170))
-            painter.drawRoundedRect(band_rect, 3, 3)
-            if x1 - x0 >= 34:
-                painter.setPen(QColor("#4A330A"))
-                painter.drawText(
-                    band_rect, Qt.AlignmentFlag.AlignCenter,
-                    _TRANSITION_TYPE_LABELS.get(transition_type, "MIX"),
-                )
-        for index, (_schedule_index, _track, start, end) in enumerate(windows, start=1):
-            x = x_at(start)
+        top, height = 8.0, max(16.0, self.height() - 18.0)
+        played_x = x_at(current_seconds)
+        for index, (_schedule_index, track, start, end) in enumerate(self.schedule, start=1):
             active = start <= current_seconds < end or (
-                index == len(windows) and current_seconds >= start
+                index == len(self.schedule) and current_seconds >= start
             )
-            painter.setPen(QPen(QColor("#7BA8D1"), 1.2))
-            painter.drawLine(x, 3, x, self.height() - 10)
-            label_x = max(1, min(self.width() - 25, x + 3))
-            if active:
+            block = QRectF(x_at(start) + 1, top, max(2.0, x_at(end) - x_at(start) - 2), height)
+            painter.setPen(QPen(accent, 1.2) if active else Qt.PenStyle.NoPen)
+            painter.setBrush(palette.alternateBase())
+            painter.drawRoundedRect(block, 4, 4)
+            if played_x > block.left():
+                heard = QColor(accent)
+                heard.setAlpha(70 if active else 38)
+                painter.save()
+                painter.setClipRect(QRectF(block.left(), top, played_x - block.left(), height))
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor("#79C7B4"))
-                painter.drawRoundedRect(QRect(label_x, 1, 24, 18), 8, 8)
-                painter.setPen(QColor("#FFFFFF"))
-            else:
-                painter.setPen(QColor("#9BAFC2"))
-            painter.drawText(QRect(label_x, 1, 24, 18), Qt.AlignmentFlag.AlignCenter, str(index))
+                painter.setBrush(heard)
+                painter.drawRoundedRect(block, 4, 4)
+                painter.restore()
+            if block.width() >= 28:
+                label = f"{index:02d}  {track.title or Path(track.file_path).stem}"
+                painter.setPen(palette.text().color() if active else palette.placeholderText().color())
+                text_rect = block.adjusted(7, 0, -5, 0)
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                                 painter.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight,
+                                                                  int(text_rect.width())))
+        amber = QColor("#F5C66B")
+        for start, end, _transition_type in self._transition_regions:
+            x0, x1 = x_at(start), x_at(end)
+            if x1 - x0 < 1:
+                continue
+            painter.setPen(Qt.PenStyle.NoPen)
+            amber.setAlpha(46)
+            painter.setBrush(amber)
+            painter.drawRect(QRectF(x0, top, x1 - x0, height))
+            amber.setAlpha(220)
+            painter.setBrush(amber)
+            painter.drawRoundedRect(QRectF(x0, top + height + 3, x1 - x0, 3), 1.5, 1.5)
+        painter.setPen(QPen(palette.text().color(), 1.6))
+        painter.drawLine(QPointF(played_x, top - 5), QPointF(played_x, top + height + 4))
+        painter.setPen(QPen(palette.window().color(), 1.5))
+        painter.setBrush(palette.text().color())
+        painter.drawEllipse(QPointF(played_x, top - 3), 4.5, 4.5)
         painter.end()
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
@@ -256,6 +268,74 @@ class PlaylistTimeline(QSlider):
     def _set_value_from_position(self, x_position: float) -> None:
         ratio = max(0.0, min(1.0, (x_position - 9) / max(1, self.width() - 18)))
         self.setValue(round(self.minimum() + ratio * (self.maximum() - self.minimum())))
+
+
+def _track_details(track: PlaylistTrack, separator: str) -> str:
+    """Artist and album, else the file name: the "Unknown ..." placeholders are stored defaults, not information."""
+    return separator.join(
+        value for value, placeholder in ((track.artist, "Unknown Artist"), (track.album, "Unknown Album"))
+        if value and value != placeholder
+    ) or Path(track.file_path).name
+
+
+TRACK_ROW_ROLE = Qt.ItemDataRole.UserRole + 2
+"""(detail, duration) text of a Preview track-list row; its title is the item text."""
+
+
+class PreviewTrackDelegate(QStyledItemDelegate):
+    """A Preview track row: cover or number tile, title over details, duration on the right."""
+
+    def paint(self, painter: QPainter, option, index) -> None:  # type: ignore[override]
+        palette = option.palette
+        accent = palette.highlight().color()
+        rect = QRectF(option.rect).adjusted(0, 1, -2, -1)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if selected or hovered:
+            fill = QColor(accent) if selected else palette.alternateBase().color()
+            if selected:
+                fill.setAlpha(46)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect, 5, 5)
+        if selected:
+            painter.setBrush(accent)
+            painter.drawRoundedRect(QRectF(rect.left(), rect.top() + 8, 3, rect.height() - 16), 1.5, 1.5)
+        tile = QRectF(rect.left() + 10, rect.center().y() - 18, 36, 36)
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        number = f"{index.row() + 1:02d}"
+        if isinstance(icon, QIcon) and not icon.isNull():
+            icon.paint(painter, tile.toRect())
+        else:
+            painter.setBrush(QColor("#304B44") if selected else palette.alternateBase())
+            painter.drawRoundedRect(tile, 5, 5)
+            painter.setPen(accent if selected else palette.placeholderText().color())
+            painter.drawText(tile, Qt.AlignmentFlag.AlignCenter, number)
+        detail, duration = index.data(TRACK_ROW_ROLE) or ("", "")
+        metrics = painter.fontMetrics()
+        duration_width = metrics.horizontalAdvance(duration) + 4
+        text_left = tile.right() + 10
+        title_rect = QRectF(text_left, rect.top() + 8, rect.right() - text_left - duration_width - 10, 18)
+        bold = QFont(option.font)
+        bold.setBold(True)
+        painter.setFont(bold)
+        painter.setPen(palette.text().color())
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(bold).elidedText(index.data(Qt.ItemDataRole.DisplayRole) or "",
+                                                       Qt.TextElideMode.ElideRight, int(title_rect.width())))
+        painter.setFont(option.font)
+        painter.setPen(palette.placeholderText().color())
+        painter.drawText(QRectF(rect.right() - duration_width - 8, title_rect.top(), duration_width, 18),
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, duration)
+        detail_rect = QRectF(text_left, title_rect.bottom() + 1, rect.right() - text_left - 8, 16)
+        painter.drawText(detail_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         metrics.elidedText(detail, Qt.TextElideMode.ElideRight, int(detail_rect.width())))
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:  # type: ignore[override]
+        return QSize(0, 54)
 
 
 class AudioAnalysisWorker(QThread):
@@ -801,8 +881,8 @@ class ExportPreviewDialog(QDialog):
         self.track_list = QListWidget()
         self.track_list.setObjectName("previewTrackList")
         self.track_list.setUniformItemSizes(True)
-        self.track_list.setIconSize(QSize(38, 38))
-        self.track_list.setSpacing(2)
+        self.track_list.setItemDelegate(PreviewTrackDelegate(self.track_list))
+        self.track_list.setMouseTracking(True)
         self.track_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
         )
@@ -1131,18 +1211,12 @@ class ExportPreviewDialog(QDialog):
             title = track.title or Path(track.file_path).stem or (
                 "제목 없음" if korean else "Untitled track"
             )
-            detail = " · ".join(
-                value for value in (track.artist, track.album) if value
-            ) or Path(track.file_path).name
-            item = QListWidgetItem(
-                f"{index + 1:02d}  {title}\n     {detail} · {format_timestamp(track.duration_seconds)}"
-            )
+            detail = _track_details(track, " · ")
+            item = QListWidgetItem(title)
+            item.setData(TRACK_ROW_ROLE, (detail, format_timestamp(track.duration_seconds)))
             cover = track_cover_thumbnail(track.file_path, track.cover_path)
             if not cover.isNull():
                 item.setIcon(QIcon(cover))
-            else:
-                item.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
-            item.setSizeHint(QSize(0, 54))
             item.setData(Qt.ItemDataRole.UserRole, index)
             item.setData(
                 Qt.ItemDataRole.UserRole + 1,
@@ -1508,10 +1582,7 @@ class ExportPreviewDialog(QDialog):
         if self.track_title_label.text() != track_title:
             self.track_title_label.setText(track_title)
             self.track_title_label.setToolTip(track_title)
-        metadata = " / ".join(
-            value for value in (track.artist, track.album) if value
-        )
-        metadata_text = metadata or Path(track.file_path).name
+        metadata_text = _track_details(track, " / ")
         if self.track_meta_label.text() != metadata_text:
             self.track_meta_label.setText(metadata_text)
             self.track_meta_label.setToolTip(str(Path(track.file_path)))
@@ -3817,10 +3888,10 @@ class ExportPreviewDialog(QDialog):
             ("GPU 레이어" if korean else "GPU layers")
             if self.gpu_preview_enabled else ("CPU 모드" if korean else "CPU mode")
         )
-        self.previous_button.setText("|◀")
+        self.previous_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward))
         self.rewind_button.setText("−5s")
         self.forward_button.setText("+5s")
-        self.next_button.setText("▶|")
+        self.next_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward))
         self.previous_button.setToolTip("이전 곡 (Shift+←)" if korean else "Previous track (Shift+←)")
         self.next_button.setToolTip("다음 곡 (Shift+→)" if korean else "Next track (Shift+→)")
         self.rewind_button.setToolTip("5초 뒤로 (←)" if korean else "Back 5 seconds (←)")

@@ -31,6 +31,7 @@ from app.preview.album_art import track_cover_thumbnail
 from app.services.project_content_service import LYRICS_EXTENSIONS
 from app.services.m3u_playlist import PLAYLIST_FILE_EXTENSIONS
 from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
+from app.ui.design_system import COLORS
 from app.utils.i18n import Translator
 
 # Dropping an M3U8 playlist adds its songs (MainWindow shows them for review first).
@@ -390,28 +391,28 @@ class TrackRow(QWidget):
         subtitle = " · ".join(escape(value) for value in known) or Path(track.file_path).name
         if not track.enabled:
             title = f'<span style="text-decoration:line-through">{title}</span>'
-        metadata = QLabel(f"<b>{title}</b><br><span>{subtitle}</span>")
+        metadata = QLabel(f"<b>{title}</b><br><span style=\"color:{COLORS['muted']}\">{subtitle}</span>")
         metadata.setObjectName("trackMetadata")
         metadata.setTextFormat(Qt.TextFormat.RichText)
         duration = QLabel(track.duration_label)
-        duration.setObjectName("mutedLabel")
+        duration.setObjectName("trackDuration")
         layout.addWidget(number_label)
         layout.addWidget(cover_label)
         layout.addWidget(metadata, 1)
         if not track.enabled:
             excluded = QLabel("제외됨" if korean else "Excluded")
-            excluded.setObjectName("mutedLabel")
+            excluded.setObjectName("trackBadge")
             layout.addWidget(excluded)
         if track.lyrics or track.lyrics_path:
             offset = track.lyrics_timing_offset_seconds
             lyric_badge = QLabel(
                 f"가사 {offset:+.2f}s" if korean else f"Lyrics {offset:+.2f}s"
             )
-            lyric_badge.setObjectName("mutedLabel")
+            lyric_badge.setObjectName("trackBadge")
             layout.addWidget(lyric_badge)
         if analysis is not None and analysis.bpm is not None:
             bpm_badge = QLabel(f"{round(analysis.bpm)} BPM")
-            bpm_badge.setObjectName("mutedLabel")
+            bpm_badge.setObjectName("trackBadge")
             bpm_badge.setToolTip(
                 f"AutoMix 분석: {round(analysis.bpm)} BPM"
                 + (f" · {analysis.key}" if analysis.key else "")
@@ -501,6 +502,10 @@ class PlaylistEditor(QFrame):
         self.duplicate_button = QPushButton()
         self.details_button = QPushButton()
         self.remove_button = QPushButton()
+        # Selection actions stay quiet until hovered: disabled, they must not read as a row of grey blocks.
+        for button in (self.up_button, self.down_button, self.duplicate_button,
+                       self.details_button, self.remove_button):
+            button.setObjectName("playlistToolButton")
         header.addWidget(self.title)
         header.addWidget(self.summary)
         header.addStretch()

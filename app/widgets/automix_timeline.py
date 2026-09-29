@@ -709,6 +709,7 @@ class AutoMixTimeline(QWidget):
             head.closeSubpath()
             painter.fillPath(head, PLAYHEAD_COLOR)
         painter.restore()
+        self._paint_selected_label(painter, lanes)
         self._paint_selection_name(painter)
         if self.drag_hint and (self.dragging or self._press is not None):
             self._paint_hint(painter, left, right)
@@ -741,13 +742,30 @@ class AutoMixTimeline(QWidget):
         return None
 
     def _paint_selection(self, painter: QPainter, lanes) -> None:
+        """The selected target tinted and outlined in the accent (the outline alone hid under the song borders)."""
         rect = self._selection_rect(lanes)
         if rect is None:
             return
         accent = QColor(self.palette().highlight().color())
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(accent, 2.0, Qt.PenStyle.DashLine if self.draft else Qt.PenStyle.SolidLine))
+        fill = QColor(accent)
+        fill.setAlpha(36)
+        painter.setBrush(fill)
+        painter.setPen(QPen(accent, 2.5, Qt.PenStyle.DashLine if self.draft else Qt.PenStyle.SolidLine))
         painter.drawRoundedRect(rect, 3, 3)
+
+    def _paint_selected_label(self, painter: QPainter, lanes) -> None:
+        """The selected row's label marked with an accent bar, so the row reads as selected even off-screen."""
+        if (self.selection if self.advanced else "transition") == "transition":
+            return  # spans both tracks: the tinted overlap says it
+        rect = self._selection_rect(lanes)
+        if rect is None:
+            return
+        accent = QColor(self.palette().highlight().color())
+        row = QRectF(0, rect.top() + 1, self.LABEL - 4, rect.height() - 2)
+        fill = QColor(accent)
+        fill.setAlpha(40)
+        painter.fillRect(row, fill)
+        painter.fillRect(QRectF(0, row.top(), 4, row.height()), accent)
 
     def _paint_selection_name(self, painter: QPainter) -> None:
         """What is selected, named, in the corner above the track labels (never over the audio)."""
