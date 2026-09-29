@@ -48,8 +48,32 @@ _PART_TIPS = {
              "Tempo change starts · drag to set where A starts easing onto B's tempo (←/→ one beat, Shift: free)"),
 }
 PARTS = ("start", "end", "move", "incoming", "ramp")
+MARKER_TOP = 17.0
+"""Marker labels start below the bar numbers along a lane's top edge."""
+MARKER_ROW = 15.0
+MARKER_ROWS = 3
 RAMP_GRIP = 24.0
 """The tempo-change handle's grip: this band at the bottom of track A."""
+
+
+def stack_labels(spans: list[tuple[float, float]], gap: float = 6.0) -> list[int]:
+    """Row per ``(x, width)`` label, sorted by x: each takes the first row it does not run into.
+
+    Past MARKER_ROWS rows a label shares the row that frees up first.
+    """
+    ends: list[float] = []
+    rows = []
+    for x, width in spans:
+        row = next((index for index, end in enumerate(ends) if x - gap > end), None)
+        if row is None:
+            if len(ends) < MARKER_ROWS:
+                ends.append(-math.inf)
+                row = len(ends) - 1
+            else:
+                row = min(range(len(ends)), key=ends.__getitem__)
+        ends[row] = x + width
+        rows.append(row)
+    return rows
 
 
 def _premultiplied(color: QColor) -> np.uint32:
@@ -809,20 +833,22 @@ class AutoMixTimeline(QWidget):
     def _paint_markers(self, painter: QPainter, lane: int, clip: AudioRenderClip, color: QColor, top: float) -> None:
         junction = self.junction
         side = "out" if lane == 0 else "in"
-        for seconds, marker_side, korean, english in junction.markers:
-            if marker_side != side:
-                continue
-            x = self.x_of(seconds)
+        metrics = painter.fontMetrics()
+        labels = sorted((self.x_of(seconds), korean if self.korean else english)
+                        for seconds, marker_side, korean, english in junction.markers if marker_side == side)
+        widths = [metrics.horizontalAdvance(text) for _x, text in labels]
+        rows = stack_labels([(x, 7 + width) for (x, _text), width in zip(labels, widths)])
+        for (x, text), width, row in zip(labels, widths, rows):
+            y = top + MARKER_TOP + row * MARKER_ROW  # below the bar numbers
             painter.setPen(QPen(color.lighter(140), 1, Qt.PenStyle.DotLine))
-            painter.drawLine(QPointF(x, top + 16), QPointF(x, top + self.track_height))
-            diamond = QPainterPath(QPointF(x, top + 3))
-            for point in ((x + 5, top + 8), (x, top + 13), (x - 5, top + 8)):
+            painter.drawLine(QPointF(x, y + 12), QPointF(x, top + self.track_height))
+            diamond = QPainterPath(QPointF(x, y + 1))
+            for point in ((x + 5, y + 6), (x, y + 11), (x - 5, y + 6)):
                 diamond.lineTo(*point)
             diamond.closeSubpath()
             painter.fillPath(diamond, color.lighter(140))
             painter.setPen(color.lighter(150))
-            painter.drawText(QRectF(x + 7, top + 1, 150, 14), Qt.AlignmentFlag.AlignLeft,
-                             korean if self.korean else english)
+            painter.drawText(QRectF(x + 7, y - 1, width + 4, 14), Qt.AlignmentFlag.AlignLeft, text)
         # The cue flag: where A's mix starts / where B starts playing.
         x = self.x_of(junction.start if lane == 0 else clip.timeline_start)
         label = ("A 큐" if self.korean else "A cue") if lane == 0 else ("B 시작" if self.korean else "B start")

@@ -378,3 +378,13 @@ class TempoRampStartTests(unittest.TestCase):
         grip_y = timeline._lane_top(0) + timeline.track_height - RAMP_GRIP / 2
         self.assertEqual(timeline.hit(x, grip_y), ("ramp",))
         timeline.grab()  # paints the ramp band and its handle without error
+
+class MarkerLabelTests(unittest.TestCase):
+    def test_close_labels_stack_instead_of_overlapping(self) -> None:
+        from app.widgets.automix_timeline import MARKER_ROWS, stack_labels
+
+        self.assertEqual(stack_labels([(100.0, 80.0), (300.0, 80.0)]), [0, 0])  # apart: one row
+        self.assertEqual(stack_labels([(100.0, 80.0), (120.0, 80.0), (400.0, 50.0)]), [0, 1, 0])
+        crowded = stack_labels([(float(x), 200.0) for x in range(0, 50, 10)])
+        self.assertEqual(crowded[:MARKER_ROWS], list(range(MARKER_ROWS)))
+        self.assertTrue(all(0 <= row < MARKER_ROWS for row in crowded))
