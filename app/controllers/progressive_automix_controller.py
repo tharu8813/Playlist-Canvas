@@ -595,6 +595,7 @@ class ProgressiveAutoMixController(QObject):
         self._scheduler.render_finished()
         self._done = True
         self._ticker.stop()
+        self._publish_timer.stop()  # the forced publish below is the last word
         audio = getattr(plan, "audio", None)
         if audio is not None and len(audio.clips) > 1 and not audio.transitions:
             # The export pipeline fell back to back-to-back audio (a failed
@@ -611,6 +612,7 @@ class ProgressiveAutoMixController(QObject):
         if generation != self._generation:
             return
         self._ticker.stop()
+        self._publish_timer.stop()
         self.audio_failed.emit(message)
 
     # -- progress (always from real state) -----------------------------------

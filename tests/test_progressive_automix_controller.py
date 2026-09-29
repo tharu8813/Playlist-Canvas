@@ -177,6 +177,23 @@ class ProgressiveControllerTests(unittest.TestCase):
         self.assertEqual(fractions[-1], 1.0)
         self.assertEqual(self.messages[-1], "AutoMix ready")
 
+    def test_nothing_is_published_after_the_final_mix_is_ready(self) -> None:
+        # A coalesced update still pending when the mix landed used to arrive
+        # after audio_ready, reviving Preview's finished status-bar task.
+        from app.timeline.compiler import compile_playlist
+
+        self.analyze(*(t.id for t in self.tracks))
+        final_controller = self.finals[0][0]
+        final_controller.progress.emit("Combining audio", 0.5, "Normalizing loudness 1.0s / 600.0s · 1%")
+        final_controller.progress.emit("Combining audio", 0.6, "Normalizing loudness 2.0s / 600.0s · 2%")
+        self.assertTrue(self.controller._publish_timer.isActive())  # the second one was coalesced
+        after_ready: list[str] = []
+        self.controller.audio_ready.connect(
+            lambda *_args: self.controller.progress.connect(lambda *update: after_ready.append(update)))
+        final_controller.audio_ready.emit("final.flac", compile_playlist(self.tracks))
+        self.settle()
+        self.assertEqual(after_ready, [])
+
     def test_a_final_mix_without_transitions_is_not_reported_as_automix(self) -> None:
         from app.timeline.compiler import compile_playlist
 

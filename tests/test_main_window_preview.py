@@ -2071,6 +2071,11 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 set_position.assert_not_called()  # deferred until seekable, per the hot-swap fix
                 self.assertAlmostEqual(preview._playhead_seconds, 85.0, places=2)
                 self.assertNotIn("preview_mix", activity.active_keys)
+                # A coalesced progress update that lands after the mix is ready
+                # must not bring the finished task back (it came back titled
+                # with its raw key, "preview_mix", stuck at 100 %).
+                preview._blended_audio_controller.progress.emit("AutoMix", 1.0, "AutoMix ready")
+                self.assertNotIn("preview_mix", activity.active_keys)
             finally:
                 self.window._finish_inline_preview()
 
