@@ -19,10 +19,17 @@ _TIMED_LABELS = {
     "Combining mix": ("믹싱 중", "Mixing"),
     "Measuring loudness": ("최종 믹스 음량 측정 중", "Measuring the mix loudness"),
     "Normalizing loudness and saving audio": ("음량 보정 및 오디오 저장 중", "Normalizing loudness and saving audio"),
+    "Saving audio": ("오디오 저장 중", "Saving audio"),
 }
+_TRACKS = ("곡 완료", " tracks done")
+_PARTS = ("구간 완료", " parts done")
 _COUNTED_LABELS = {
-    "Analyzing beats and vocals": ("리듬·보컬 분석 중", "Analyzing beats and vocals"),
-    "Analyzing track structure": ("곡 구조 분석 중", "Analyzing song structure"),
+    "Analyzing beats and vocals": ("리듬·보컬 분석 중", "Analyzing beats and vocals", _TRACKS),
+    "Analyzing track structure": ("곡 구조 분석 중", "Analyzing song structure", _TRACKS),
+    "Rendering clips": ("곡별 믹싱 중", "Mixing each track", _TRACKS),
+    "Combining mix": ("구간 합치는 중", "Joining the mix", _PARTS),
+    "Measuring loudness": ("최종 믹스 음량 측정 중", "Measuring the mix loudness", _PARTS),
+    "Normalizing loudness": ("음량 보정 중", "Normalizing loudness", _PARTS),
 }
 _FIXED = {
     "Analyzing tracks for AutoMix": ("AutoMix 분석 준비 중", "Preparing AutoMix analysis"),
@@ -50,8 +57,7 @@ def audio_progress_text(message: str, korean: bool) -> str | None:
     if match := _COUNTED.match(message):
         label = _COUNTED_LABELS.get(match["label"])
         if label is not None:
-            unit = "곡 완료" if korean else " tracks done"
-            return f"{label[pick]} · {match['done']}/{match['total']}{unit}"
+            return f"{label[pick]} · {match['done']}/{match['total']}{label[2][pick]}"
     if message.startswith("Preparing ") and message.endswith(" clip(s)"):
         return "믹싱 준비 중" if korean else "Preparing the mix"
     return None

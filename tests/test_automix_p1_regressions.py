@@ -138,9 +138,11 @@ class MixTimingTests(unittest.TestCase):
             ):
                 renderer.prepare_playlist_audio(tracks, directory, RenderSettings(), 'crossfade')
 
-        self.assertEqual(len(inner_commands), 1)
-        self.assertNotIn('aac', inner_commands[0])
-        self.assertIn('pcm_f32le', inner_commands[0])
+        # Each clip, then the fold: all of them lossless.
+        self.assertEqual(len(inner_commands), 3)
+        for command in inner_commands:
+            self.assertNotIn('aac', command)
+            self.assertIn('pcm_f32le', command)
         aac_encodes = [command for command in outer_commands if 'aac' in command]
         self.assertEqual(len(aac_encodes), 1)
 

@@ -1295,11 +1295,21 @@ class FFmpegRenderer:
 
         total_duration = resolved_plan.duration_seconds
         blended_segments = None
+        flac = audio_codec == "flac"
+        audio_path = output_directory / ("playlist_audio.flac" if flac else "playlist_audio.m4a")
+        codec_args = (["-c:a", "flac", "-compression_level", "0"] if flac else
+                      ["-c:a", "aac", "-b:a", settings.audio_bitrate, "-movflags", "+faststart"])
         if transition_mode == "automix":
-            blended_segments = self._render_automix_audio_segments(
+            parts = self._render_automix_audio_segments(
                 active_tracks, output_directory, total_duration, progress_callback, cancel_event, accept_plan,
                 automix_settings,
             )
+            if parts is not None:
+                # Mixed in parts on every core: measure, normalize and encode them the same way.
+                self._finish_automix_parts(parts, audio_path, codec_args, progress_callback, cancel_event)
+                if plan_callback is not None:
+                    plan_callback(resolved_plan)
+                return audio_path
         elif transition_mode == "crossfade":
             blended_segments = self._render_fixed_crossfade_audio_segments(
                 active_tracks, output_directory, total_duration, crossfade_seconds,
@@ -1317,8 +1327,6 @@ class FFmpegRenderer:
         total_duration = resolved_plan.duration_seconds
         concat_path = output_directory / "playlist.ffconcat"
         self._write_concat_file(concat_path, segments, segment_durations)
-        flac = audio_codec == "flac"
-        audio_path = output_directory / ("playlist_audio.flac" if flac else "playlist_audio.m4a")
         self._report(
             progress_callback, "Combining audio", 0.53,
             f"Measuring loudness 0.0s / {total_duration:.1f}s · 0%",
@@ -1340,8 +1348,6 @@ class FFmpegRenderer:
             )
 
         combining_input_args = ["-f", "concat", "-safe", "0", "-i", str(concat_path)]
-        codec_args = (["-c:a", "flac", "-compression_level", "0"] if flac else
-                      ["-c:a", "aac", "-b:a", settings.audio_bitrate, "-movflags", "+faststart"])
         combining_output_args = [
             *codec_args, "-ar", "48000", "-ac", "2",
             "-progress", "pipe:1", "-nostats",
@@ -1533,7 +1539,7 @@ class FFmpegRenderer:
         try:
             from app.automix.analysis.registry import create_analysis_provider
             from app.automix.planner import compile_automix
-            from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
+            from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError, render_workers
             from app.automix.settings import AutoMixTransitionSettings
             from app.automix.workflow import AutoMixWorkflow
             from app.automix.structure.service import StructureAnalysisService
@@ -1593,10 +1599,14 @@ class FFmpegRenderer:
             if not plan.audio.clips:
                 return None
             self._report(progress_callback, "Preparing audio", 0.2, "Rendering AutoMix transitions")
-            prepared = AutoMixAudioPipeline(self.executable).render(
+            from app.automix.parallel_mix import render_parts
+
+            parts = render_parts(
+                AutoMixAudioPipeline(self.executable),
                 plan.audio,
                 {track.id: track.file_path for track in active_tracks},
                 temporary,
+                workers=render_workers(),
                 cancel_event=cancel_event,
                 progress=lambda _stage, fraction, message: self._report(
                     progress_callback, "Preparing audio", 0.2 + fraction * 0.3, message,
@@ -1610,7 +1620,31 @@ class FFmpegRenderer:
             return None
         if plan_callback is not None:
             plan_callback(plan)
-        return [prepared.path], [plan.duration_seconds]
+        return parts
+
+    def _finish_automix_parts(
+        self, parts: list, audio_path: Path, codec_args: list[str],
+        progress_callback: Callable[[str, float, str], None] | None, cancel_event: threading.Event,
+    ) -> None:
+        """Loudness-normalize and encode AutoMix mix parts into ``audio_path`` (see app.automix.parallel_mix)."""
+        from app.automix.parallel_mix import finish_parts
+        from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderCancelled, AutoMixRenderError, render_workers
+
+        try:
+            finish_parts(
+                AutoMixAudioPipeline(self.executable), parts, audio_path,
+                [*codec_args, "-ar", "48000", "-ac", "2"],
+                workers=render_workers(), cancel_event=cancel_event,
+                progress=lambda fraction, message: self._report(
+                    progress_callback, "Combining audio", 0.53 + fraction * 0.11, message),
+            )
+        except AutoMixRenderCancelled as error:
+            raise RenderCancelledError("Rendering was cancelled.") from error
+        except AutoMixRenderError as error:
+            raise RenderError(f"Could not finish the AutoMix audio: {error}") from error
+        if cancel_event.is_set():
+            raise RenderCancelledError("Rendering was cancelled.")
+        self._report(progress_callback, "Combining audio", 0.64, "AutoMix audio ready")
 
     def _render_fixed_crossfade_audio_segments(
         self, active_tracks: list[PlaylistTrack], temporary: Path, sequential_duration: float,
@@ -1623,7 +1657,7 @@ class FFmpegRenderer:
         if cancel_event.is_set():
             raise RenderCancelledError("Rendering was cancelled.")
         try:
-            from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
+            from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError, render_workers
             from app.timeline.models import TransitionType
             from app.timeline.render_plan import AudioRenderClip, AudioRenderPlan, AudioRenderTransition
         except ImportError as error:
@@ -1673,6 +1707,8 @@ class FFmpegRenderer:
                 progress=lambda _stage, fraction, message: self._report(
                     progress_callback, "Preparing audio", 0.1 + fraction * 0.4, message,
                 ),
+                track_filters={track.id: track.audio_filter for track in active_tracks},
+                workers=render_workers(),
             )
         except AutoMixRenderError as error:
             if cancel_event.is_set():
@@ -1702,6 +1738,7 @@ class FFmpegRenderer:
         def normalize(index: int, track: PlaylistTrack) -> tuple[int, Path]:
             output = directory / f"track_{index:04d}.nut"
             duration = f"{track.duration_seconds:.6f}"
+            pad = f"apad=whole_dur={duration}"
 
             def normalization_progress(line: str) -> None:
                 seconds = self._parse_progress_seconds(line)
@@ -1729,8 +1766,10 @@ class FFmpegRenderer:
                 # audio decode gets one FFmpeg worker instead of oversubscribing
                 # every CPU core. PCM output and ordering remain unchanged.
                 "-threads", "1", "-i", track.file_path, "-vn", "-map", "0:a:0",
-                "-af", f"apad=whole_dur={duration}", "-t", duration,
-                "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "nut",
+                "-af", f"{track.audio_filter},{pad}" if track.audio_filter else pad, "-t", duration,
+                # Float: a track's volume/EQ boost may pass full scale, which
+                # loudness normalization brings back down only if nothing clipped.
+                "-c:a", "pcm_f32le", "-ar", "48000", "-ac", "2", "-f", "nut",
                 "-progress", "pipe:1", "-nostats", "-y", str(output),
             ], progress_parser=normalization_progress, cancel_event=cancel_event)
             return index, output
@@ -1819,7 +1858,7 @@ class FFmpegRenderer:
 
                 self._run([
                     "-f", "lavfi", "-t", f"{gap:.6f}", "-i", "anullsrc=r=48000:cl=stereo",
-                    "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "nut",
+                    "-c:a", "pcm_f32le", "-ar", "48000", "-ac", "2", "-f", "nut",
                     "-progress", "pipe:1", "-nostats", "-y", str(silence),
                 ], progress_parser=silence_progress, cancel_event=cancel_event)
                 combined.append(silence)

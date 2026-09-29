@@ -650,7 +650,7 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertEqual(durations, [0.4, 2.75])
         self.assertIn("apad=whole_dur=2.750000", commands[0])
         self.assertIn("2.750000", commands[0])
-        self.assertIn("pcm_s16le", commands[0])
+        self.assertIn("pcm_f32le", commands[0])
         self.assertIn("duration 0.400000", manifest_text)
         self.assertIn("duration 2.750000", manifest_text)
 

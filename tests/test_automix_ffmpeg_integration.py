@@ -265,19 +265,19 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             sequential_duration = renderer._timeline_duration(tracks)
             self.assertEqual(sequential_duration, 40.0)
 
-            segments = renderer._render_automix_audio_segments(
+            parts = renderer._render_automix_audio_segments(
                 tracks, directory, sequential_duration, None, __import__("threading").Event(),
             )
-            self.assertIsNotNone(segments)
-            segment_paths, segment_durations = segments
-            self.assertAlmostEqual(sum(segment_durations), 37.0, delta=0.05)
-            for path in segment_paths:
-                self.assertTrue(path.is_file())
-                # The intermediate AutoMix mix must be lossless PCM, not a
-                # second lossy AAC encode -- the final combine step already
-                # encodes to AAC exactly once, after loudness normalization.
-                # Float, so blending/stretching over full scale is not clipped.
-                self.assertEqual(_audio_codec(executable, path), "pcm_f32le")
+            self.assertIsNotNone(parts)
+            self.assertAlmostEqual(sum(part.count for part in parts) / 48000, 37.0, delta=0.05)
+            for part in parts:
+                # The intermediate AutoMix mix must be lossless, not a second
+                # lossy AAC encode -- the final combine step already encodes to
+                # AAC exactly once, after loudness normalization. Raw float32,
+                # so blending/stretching over full scale is not clipped.
+                self.assertTrue(part.path.is_file())
+                self.assertEqual(part.path.suffix, ".f32")
+                self.assertGreaterEqual(part.path.stat().st_size, (part.first + part.count) * 8)
 
     def test_full_render_with_automix_enabled_uses_mix_duration(self) -> None:
         executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())

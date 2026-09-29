@@ -60,6 +60,8 @@ PREVIEW_ANALYSIS_WORKERS = 2
 """Tracks analysed side by side while Preview plays: each worker's Python steps
 contend with playback for the GIL. Measured on 11 tracks: 2 workers finish the
 mix as fast as 4 (the final render dominates) with fewer late frames."""
+LEVEL_WORKERS = 4
+"""Loudness scans at once while Preview opens (each is one FFmpeg decode)."""
 PUBLISH_INTERVAL_SECONDS = 0.25
 """At most this often a burst of analysis steps redraws the status line."""
 ANALYSIS_WEIGHT = 0.45
@@ -146,12 +148,18 @@ def playlist_gain(executable: Path, tracks: list[PlaylistTrack], cancel_event: t
     level than the final mix whenever the first tracks were louder or quieter
     than the rest.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     enabled = [track for track in tracks if track.enabled]
-    levels = {}
-    for track in enabled:
-        if cancel_event.is_set():
-            return None
-        levels[track.id] = track_level(executable, track.file_path, cancel_event)
+    # One decode per file, several at once (30 tracks: 5.4 s one by one).
+    with ThreadPoolExecutor(max_workers=LEVEL_WORKERS, thread_name_prefix="preview-levels",
+                            initializer=lower_thread_if_background) as pool:
+        measured = list(pool.map(lambda track: track_level(executable, track.file_path, cancel_event), enabled))
+    if cancel_event.is_set():
+        return None
+    # ponytail: the track's own volume shifts its level; its EQ is not measured.
+    levels = {track.id: (loudness + track.volume_db, peak + track.volume_db)
+              for track, (loudness, peak) in zip(enabled, measured)}
     return preview_gain(levels, {track.id: track.duration_seconds for track in enabled})
 
 
@@ -266,7 +274,7 @@ class _PartialRenderWorker(QThread):
             self._render()
 
     def _render(self) -> None:
-        from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError
+        from app.automix.renderer import AutoMixAudioPipeline, AutoMixRenderError, render_workers
 
         try:
             gain = self._gain
@@ -279,6 +287,8 @@ class _PartialRenderWorker(QThread):
                 render, {track.id: track.file_path for track in self._tracks}, self._directory,
                 cancel_event=self._cancel_event, container="flac",
                 progress=lambda _stage, _fraction, message: self.progress.emit(self._generation, message),
+                track_filters={track.id: track.audio_filter for track in self._tracks},
+                workers=render_workers(),
             )
         except AutoMixRenderError as error:
             if not self._cancel_event.is_set():
