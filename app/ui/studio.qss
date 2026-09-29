@@ -163,6 +163,13 @@ QRadioButton::indicator { width: 14px; height: 14px; }
 
 QGroupBox { color: @text; font-weight: 600; border: 0; border-top: 1px solid @border; border-radius: 0; margin-top: 18px; padding: 14px 4px 4px; }
 QGroupBox::title { subcontrol-origin: margin; left: 0; padding: 0 8px 0 0; color: @muted; }
+#appSettingsDialog QGroupBox, #projectSettingsDialog QGroupBox { margin-top: 24px; padding: 18px 8px 12px; }
+#appSettingsDialog QGroupBox::title, #projectSettingsDialog QGroupBox::title { color: @text; font-size: 13px; font-weight: 600; }
+#appSettingsDialog QLineEdit, #projectSettingsDialog QLineEdit,
+#appSettingsDialog QComboBox, #projectSettingsDialog QComboBox { min-height: 28px; }
+#appSettingsDialog #settingsTabs QTabBar::tab, #projectSettingsDialog #settingsTabs QTabBar::tab { padding: 10px 18px; }
+#appSettingsDialog QPushButton:focus, #projectSettingsDialog QPushButton:focus { border: 1px solid @accent; }
+#projectSettingsDialog #thumbnailPreview { background: @window; border: 1px solid @border; border-radius: 4px; }
 
 /* --- Lists, trees & tables -------------------------------------- */
 QScrollArea, QListWidget, QTreeWidget, QTableWidget { background: @panel; color: @text; border: 0; }
@@ -194,6 +201,21 @@ QToolButton#eqPresetButton:hover { background: @hover; border-color: #F5C66B; }
 /* --- AutoMix editor ------------------------------------------ */
 #automixEditorToolbar { background: @panel; border: 0; border-bottom: 1px solid @border; }
 #automixEditorToolbar QToolButton { padding: 5px 9px; }
+#automixEditorTitle { font-size: 20px; font-weight: 600; color: @text; }
+#automixToolsBar { background: @window; border-bottom: 1px solid @border; }
+#automixToolsBar QToolButton { background: transparent; border-color: transparent; padding: 5px 8px; }
+#automixToolsBar QToolButton:hover { background: @hover; }
+#automixToolsBar QToolButton:checked { background: @alternate; color: @accent; border-color: @border; }
+#automixTransport { background: @panel; border-top: 1px solid @border; }
+#automixEditor QToolButton:focus, #automixEditor QPushButton:focus { border: 1px solid @accent; }
+#automixEditor QComboBox { min-height: 30px; }
+#automixEditor #transitionStyleCard { background: transparent; border-color: @border; border-radius: 4px; padding: 5px 8px; }
+#automixEditor #transitionStyleCard:checked { background: #304B44; color: @accent; border-color: @accent; }
+#automixEditor #styleGroupLabel { color: @muted; font-size: 11px; font-weight: 600; padding: 6px 0 0 0; }
+#automixEditor #eqPresetButton { border-radius: 4px; }
+#automixEditor #eqPresetButton:checked { background: #304B44; color: @accent; border-color: @accent; }
+#automixEditor #automixModeChip { border: 0; padding: 2px 0; }
+#automixEditor #automixModeChip[manual="true"] { background: transparent; color: @accent; }
 #automixTimelineArea, #automixTimelineArea > QWidget > QWidget { background: @window; }
 #automixPropertiesArea, #automixProperties { background: @panel; border: 0; border-left: 1px solid @border; }
 #automixModeChip { color: @muted; background: transparent; border: 1px solid @border; border-radius: 9px; padding: 2px 9px; font-size: 11px; }
@@ -204,6 +226,15 @@ QToolButton#eqPresetButton:hover { background: @hover; border-color: #F5C66B; }
 #automixStateChip[state="failed"], #automixStateChip[state="unavailable"] { color: #F29C9C; font-weight: 600; }
 
 /* --- Scroll bars & splitters ---------------------------------- */
+#automixInspectorTitle { font-size: 20px; font-weight: 600; }
+#automixInspectorFact { background: @alternate; color: @text; padding: 8px 12px; border-radius: 4px; }
+#automixDetailTabs::pane { border: 0; border-top: 1px solid @border; }
+#automixDetailTabs QTabBar::tab { background: transparent; color: @muted; padding: 10px 18px; border: 0; border-bottom: 2px solid transparent; }
+#automixDetailTabs QTabBar::tab:selected { color: @accent; border-bottom: 2px solid @accent; }
+#automixDetailTabs QTabBar::tab:hover { background: @hover; }
+#automixMetric { background: transparent; border: 0; border-bottom: 1px solid @border; }
+#automixInspectorTransport { background: @panel; border: 0; border-top: 1px solid @border; }
+#automixInspector QPushButton:focus, #automixInspector QToolButton:focus { border: 1px solid @accent; }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 3px; }
 QScrollBar::handle:vertical { background: @border; min-height: 28px; border-radius: 5px; }
 QScrollBar::handle:vertical:hover { background: @muted; }
@@ -266,9 +297,17 @@ QSlider::handle:horizontal:focus { border-color: @accent; }
 
 /* --- Preview stage -------------------------------------- */
 #previewStage { border: 1px solid @border; border-radius: 4px; background: #121416; }
+#playlistPreview #previewStage, #embeddedCanvasPreview #previewStage { border: 0; border-radius: 0; }
+#previewTrackPanel { border-left: 1px solid @border; }
+#previewTrackListTitle { font-size: 13px; font-weight: 600; }
+#previewTrackList::item { padding: 8px 6px; border-bottom: 1px solid @border; }
+#previewTrackList::item:selected { background: #304B44; border-left: 2px solid @accent; }
+#playlistPreview #previewInfoCard, #embeddedNowPlaying { border-bottom: 1px solid @border; }
+#playlistPreview QPushButton:focus, #embeddedCanvasPreview QPushButton:focus { border: 1px solid @accent; }
 #previewTrackPanel, #previewInfoCard, #previewControlCard, #previewPerformanceBar { background: @panel; border: 0; border-radius: 0; }
 #previewPerformanceMetric, #previewStatusChip { background: transparent; color: @muted; border: 0; padding: 4px 8px; }
 #previewTrackTitle { font-size: 16px; font-weight: 600; }
+#embeddedPreviewTitle { font-size: 16px; font-weight: 600; padding: 6px 0; }
 #previewTrackBadge { background: #304B44; color: @accent; border-radius: 4px; }
 #previewPlayButton, #embeddedPreviewPlayButton { background: @accent; color: @window; border: 0; font-weight: 600; }
 #previewPlayButton:checked, #embeddedPreviewPlayButton:checked { background: #304B44; color: @text; }

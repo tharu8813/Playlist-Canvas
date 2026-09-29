@@ -440,6 +440,7 @@ class ExportPreviewDialog(QDialog):
                  automix_settings=None) -> None:
         super().__init__(parent)
         self.embedded = embedded
+        self.setObjectName("playlistPreview")
         self.preferred_backend = (
             preferred_backend if preferred_backend in {"gpu_layers", "cpu"}
             else "gpu_layers"
@@ -675,8 +676,15 @@ class ExportPreviewDialog(QDialog):
         self.frame_rate_label.setObjectName("previewStatusChip")
         self.frame_rate_label.setMinimumWidth(170)
         self.frame_rate_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.tracks_toggle = QPushButton()
+        self.tracks_toggle.setCheckable(True)
+        self.tracks_toggle.setChecked(True)
+        self.performance_toggle = QPushButton()
+        self.performance_toggle.setCheckable(True)
         self.performance_bar = QFrame()
         self.performance_bar.setObjectName("previewPerformanceBar")
+        self.performance_bar.hide()
+        self.performance_toggle.toggled.connect(self.performance_bar.setVisible)
         self.performance_title_label = QLabel()
         self.performance_title_label.setObjectName("previewPerformanceTitle")
         self.performance_scale_label = QLabel()
@@ -755,11 +763,13 @@ class ExportPreviewDialog(QDialog):
         self.track_time_label.setObjectName("previewTimeLabel")
         self.track_title_label = QLabel("-")
         self.track_title_label.setObjectName("previewTrackTitle")
+        self.track_title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.track_title_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         self.track_meta_label = QLabel("-")
         self.track_meta_label.setObjectName("mutedLabel")
+        self.track_meta_label.setTextFormat(Qt.TextFormat.PlainText)
         self.track_meta_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
@@ -768,11 +778,12 @@ class ExportPreviewDialog(QDialog):
         self.track_badge_label = QLabel("01")
         self.track_badge_label.setObjectName("previewTrackBadge")
         self.track_badge_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.track_badge_label.setFixedSize(48, 48)
+        self.track_badge_label.setFixedSize(36, 36)
         self.timeline_title_label = QLabel()
         self.timeline_title_label.setObjectName("panelTitle")
         self.track_list_panel = QFrame()
         self.track_list_panel.setObjectName("previewTrackPanel")
+        self.tracks_toggle.toggled.connect(self.track_list_panel.setVisible)
         self.track_list_panel.setMinimumWidth(210)
         self.track_list_panel.setMaximumWidth(300)
         self.track_list_panel.setSizePolicy(
@@ -826,45 +837,48 @@ class ExportPreviewDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
+        layout.setSpacing(6)
         header = QHBoxLayout()
         header_text = QVBoxLayout()
         header_text.setSpacing(2)
         header_text.addWidget(self.dialog_title_label)
         header_text.addWidget(self.hint_label)
         header.addLayout(header_text, 1)
+        header.addWidget(self.tracks_toggle)
+        header.addWidget(self.performance_toggle)
+        header.addWidget(self.button_box)
         layout.addLayout(header)
 
-        performance_layout = QHBoxLayout(self.performance_bar)
-        performance_layout.setContentsMargins(10, 6, 10, 6)
-        performance_layout.setSpacing(8)
-        performance_layout.addWidget(self.performance_title_label)
-        performance_layout.addWidget(self.preview_mode_label)
-        performance_layout.addWidget(self.frame_rate_label)
-        performance_layout.addWidget(self.performance_scale_label)
-        performance_layout.addWidget(self.performance_gpu_label)
-        performance_layout.addWidget(self.performance_video_label)
-        performance_layout.addWidget(self.performance_latency_label)
-        performance_layout.addStretch(1)
+        performance_layout = QGridLayout(self.performance_bar)
+        performance_layout.setContentsMargins(12, 8, 12, 8)
+        performance_layout.setSpacing(6)
+        performance_layout.addWidget(self.performance_title_label, 0, 0)
+        for index, metric in enumerate((self.preview_mode_label, self.frame_rate_label,
+                                       self.performance_scale_label, self.performance_gpu_label,
+                                       self.performance_video_label, self.performance_latency_label)):
+            metric.setWordWrap(True)
+            performance_layout.addWidget(metric, 1 + index // 2, index % 2)
+        performance_layout.setColumnStretch(0, 1)
+        performance_layout.setColumnStretch(1, 1)
         layout.addWidget(self.performance_bar)
         layout.addWidget(self.error_banner)
 
         self.preview_stage = QFrame()
         self.preview_stage.setObjectName("previewStage")
         stage_layout = QVBoxLayout(self.preview_stage)
-        stage_layout.setContentsMargins(8, 8, 8, 8)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
         stage_content_layout = QHBoxLayout()
         stage_content_layout.setContentsMargins(0, 0, 0, 0)
         stage_content_layout.setSpacing(8)
-        stage_content_layout.addWidget(self.track_list_panel)
         stage_content_layout.addWidget(self.preview_stack_host, 1)
+        stage_content_layout.addWidget(self.track_list_panel)
         stage_layout.addLayout(stage_content_layout, 1)
         layout.addWidget(self.preview_stage, 1)
 
         self.now_playing_card = QFrame()
         self.now_playing_card.setObjectName("previewInfoCard")
         now_layout = QHBoxLayout(self.now_playing_card)
-        now_layout.setContentsMargins(14, 10, 14, 10)
+        now_layout.setContentsMargins(14, 8, 14, 8)
         now_layout.setSpacing(12)
         now_layout.addWidget(self.track_badge_label)
         track_text = QVBoxLayout()
@@ -879,7 +893,7 @@ class ExportPreviewDialog(QDialog):
         self.timeline_card = QFrame()
         self.timeline_card.setObjectName("previewControlCard")
         timeline_layout = QVBoxLayout(self.timeline_card)
-        timeline_layout.setContentsMargins(14, 10, 14, 8)
+        timeline_layout.setContentsMargins(14, 6, 14, 4)
         timeline_header = QHBoxLayout()
         timeline_header.addWidget(self.timeline_title_label)
         timeline_header.addStretch()
@@ -900,12 +914,11 @@ class ExportPreviewDialog(QDialog):
         controls.addWidget(self.forward_button, 0, 3)
         controls.addWidget(self.next_button, 0, 4)
         controls.setColumnStretch(5, 1)
-        controls.addWidget(self.volume_label, 1, 0)
-        controls.addWidget(self.volume_slider, 1, 1, 1, 3)
-        controls.addWidget(self.volume_value_label, 1, 4)
-        controls.addWidget(self.shortcut_hint_label, 1, 6, 1, 3)
+        controls.addWidget(self.volume_label, 0, 6)
+        controls.addWidget(self.volume_slider, 0, 7)
+        controls.addWidget(self.volume_value_label, 0, 8)
+        self.shortcut_hint_label.hide()
         layout.addWidget(self.transport_card)
-        layout.addWidget(self.button_box)
 
         self.timeline.valueChanged.connect(self._on_seeked)
         self.play_button.toggled.connect(self._toggle_playback)
@@ -3717,6 +3730,10 @@ class ExportPreviewDialog(QDialog):
             "Review the complete timeline with actual audio and export-equivalent composition."
         )
         self.performance_title_label.setText("성능" if korean else "Performance")
+        self.tracks_toggle.setText("곡 목록" if korean else "Track list")
+        self.tracks_toggle.setToolTip("곡 목록 펼치기 / 접기" if korean else "Show or hide the track list")
+        self.performance_toggle.setText("성능 정보" if korean else "Performance")
+        self.performance_toggle.setToolTip("미리보기 렌더링 상태 보기" if korean else "Show preview rendering status")
         self.track_list_title_label.setText("트랙" if korean else "Tracks")
         self._populate_track_list()
         if getattr(self, "automix_details", None) is not None:
@@ -3731,6 +3748,11 @@ class ExportPreviewDialog(QDialog):
             if korean else
             "Space Play/Pause  ·  ←/→ Seek 5s  ·  Shift+←/→ Change track  ·  ↑/↓ Volume"
         )
+        self.transport_card.setToolTip(self.shortcut_hint_label.text())
+        self.timeline.setAccessibleName("재생 위치" if korean else "Playback position")
+        self.volume_slider.setAccessibleName("음량" if korean else "Volume")
+        self.previous_button.setAccessibleName("이전 곡" if korean else "Previous track")
+        self.next_button.setAccessibleName("다음 곡" if korean else "Next track")
         if self.preview_close_button is not None:
             self.preview_close_button.setText(
                 ("편집으로 돌아가기" if korean else "Back to editing")

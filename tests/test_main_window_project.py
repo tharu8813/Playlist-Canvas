@@ -981,9 +981,10 @@ class MainWindowProjectTests(MainWindowTestCase):
         try:
             self.assertLessEqual(dialog.height(), 640)
             content = dialog.scroll_area.widget()
-            self.assertGreater(content.sizeHint().height(), dialog.height())  # the settings scroll
-            for group in (dialog.identity_group, dialog.transition_group, dialog.thumbnail_group):
+            self.assertEqual(dialog.tabs.count(), 4)
+            for group in (dialog.identity_group, dialog.thumbnail_group):
                 self.assertTrue(content.isAncestorOf(group))
+            self.assertTrue(dialog.tabs.widget(2).widget().isAncestorOf(dialog.transition_group))
             self.assertFalse(content.isAncestorOf(dialog.buttons))  # Save/Cancel never scroll away
             # A preset-sized canvas is shown as that preset, not as "Custom".
             self.assertEqual(dialog.canvas_preset_combo.currentText(), "9:16")

@@ -159,6 +159,10 @@ class PreviewController:
             track_panel.setStyleSheet(controls_page.styleSheet())
             window.preview_track_inspector_layout.addWidget(track_panel)
         window.inspector_stack.setCurrentWidget(window.preview_track_inspector)
+        tracks_toggle = getattr(preview, "tracks_toggle", None)
+        if tracks_toggle is not None:
+            tracks_toggle.toggled.connect(window.inspector_stack.setVisible)
+            window.inspector_stack.setVisible(tracks_toggle.isChecked())
         window.statusBar().showMessage(
             "캔버스에서 전체 미리보기를 재생합니다 · 편집 기능이 잠겼습니다."
             if window.translator.is_korean else

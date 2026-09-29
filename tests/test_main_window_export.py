@@ -565,7 +565,7 @@ class MainWindowExportTests(MainWindowTestCase):
             for page in (dialog.general_page, dialog.export_page, dialog.ffmpeg_page):
                 self.assertIsInstance(page, QScrollArea)
             self.assertTrue(dialog.general_page.widget().isAncestorOf(dialog.app_group))
-            self.assertTrue(dialog.export_page.widget().isAncestorOf(dialog.notification_group))
+            self.assertTrue(dialog.notifications_page.widget().isAncestorOf(dialog.notification_group))
             self.assertTrue(dialog.ffmpeg_page.widget().isAncestorOf(dialog.ffmpeg_group))
             self.assertFalse(dialog.general_page.isAncestorOf(dialog.button_box))
         finally:

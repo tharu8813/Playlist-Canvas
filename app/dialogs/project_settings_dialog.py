@@ -11,7 +11,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QMessageBox, QRadioButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QMessageBox, QRadioButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from app.models.project import (
@@ -32,25 +32,37 @@ class ProjectSettingsDialog(QDialog):
         canvas_size: tuple[int, int] = (1280, 720),
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("projectSettingsDialog")
         self.translator = translator
         self.selected_settings = replace(settings)
         self.canvas_thumbnail = canvas_thumbnail
         self.original_canvas_size = canvas_size
         self.setMinimumSize(620, 420)
-        self.resize(700, 620)  # fits small laptop screens; the settings scroll, the buttons stay
+        self.resize(820, 620)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 16)
-        outer.setSpacing(10)
+        outer.setContentsMargins(20, 18, 20, 16)
+        outer.setSpacing(12)
+        self.dialog_title_label = QLabel()
+        self.dialog_title_label.setObjectName("dialogTitle")
+        self.subtitle_label = QLabel()
+        self.subtitle_label.setObjectName("mutedLabel")
+        self.subtitle_label.setWordWrap(True)
+        outer.addWidget(self.dialog_title_label)
+        outer.addWidget(self.subtitle_label)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("settingsTabs")
+        self.tabs.setDocumentMode(True)
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         self.scroll_area.setWidget(body)
-        outer.addWidget(self.scroll_area, 1)
+        self.tabs.addTab(self.scroll_area, "")
+        outer.addWidget(self.tabs, 1)
         root = QVBoxLayout(body)
-        root.setContentsMargins(20, 18, 20, 4)
-        root.setSpacing(14)
+        root.setContentsMargins(14, 16, 14, 14)
+        root.setSpacing(24)
 
         identity_group = QGroupBox()
         self.identity_group = identity_group
@@ -190,13 +202,37 @@ class ProjectSettingsDialog(QDialog):
         (self.custom_radio if settings.thumbnail_mode == "custom" else self.canvas_radio).setChecked(True)
         root.addWidget(self.thumbnail_group)
         root.addStretch(1)
+        for group in (self.canvas_group, self.transition_group, self.content_group):
+            root.removeWidget(group)
+            page = QScrollArea()
+            page.setWidgetResizable(True)
+            page.setFrameShape(QFrame.Shape.NoFrame)
+            page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            content = QWidget()
+            page_layout = QVBoxLayout(content)
+            page_layout.setContentsMargins(14, 16, 14, 14)
+            page_layout.addWidget(group)
+            page_layout.addStretch(1)
+            page.setWidget(content)
+            self.tabs.addTab(page, "")
+        for settings_form in (form, canvas_form):
+            settings_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            settings_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            settings_form.setHorizontalSpacing(24)
+            settings_form.setVerticalSpacing(14)
+        for label, field in ((self.title_label, self.title_edit), (self.author_label, self.author_edit),
+                             (self.description_label, self.description_edit),
+                             (self.canvas_preset_label, self.canvas_preset_combo),
+                             (self.canvas_width_label, self.canvas_width_spin),
+                             (self.canvas_height_label, self.canvas_height_spin)):
+            label.setBuddy(field)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
         self.buttons.accepted.connect(self._accept)
         self.buttons.rejected.connect(self.reject)
-        self.buttons.setContentsMargins(20, 0, 20, 0)
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setObjectName("primaryButton")
         outer.addWidget(self.buttons)
         self.choose_thumbnail_button.clicked.connect(self._choose_thumbnail)
         self.canvas_radio.toggled.connect(self._refresh_thumbnail)
@@ -250,6 +286,12 @@ class ProjectSettingsDialog(QDialog):
     def retranslate(self) -> None:
         korean = self.translator.is_korean
         self.setWindowTitle("프로젝트 설정" if korean else "Project settings")
+        self.dialog_title_label.setText("프로젝트 설정" if korean else "Project settings")
+        self.subtitle_label.setText("현재 프로젝트의 화면, 곡 전환, 저장 방식을 설정합니다." if korean
+                                    else "Configure the canvas, transitions and file storage for this project.")
+        for index, names in enumerate((("프로젝트 정보", "Project"), ("캔버스", "Canvas"),
+                                        ("곡 전환", "Transitions"), ("파일 관리", "Files"))):
+            self.tabs.setTabText(index, names[0 if korean else 1])
         self.identity_group.setTitle("프로젝트 정보" if korean else "Project information")
         self.title_label.setText("이름" if korean else "Name")
         self.author_label.setText("작성자" if korean else "Author")
@@ -263,8 +305,8 @@ class ProjectSettingsDialog(QDialog):
             "사용자 지정" if korean else "Custom",
         )
         self.scale_content_radio.setText(
-            "기존 요소를 새 화면 비율에 맞춰 재배치 및 크기 조정 (권장)"
-            if korean else "Reposition and scale existing sources for the new ratio (Recommended)"
+            "요소 위치와 크기도 함께 조정 (권장)"
+            if korean else "Reposition and scale sources (recommended)"
         )
         self.keep_content_radio.setText(
             "캔버스만 변경하고 요소 위치와 크기 유지"

@@ -72,9 +72,10 @@ class SettingsDialog(QDialog):
                  translator: Translator, parent: object | None = None, *,
                  active_preview_backend: str | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("appSettingsDialog")
         self.translator = translator
         self.setMinimumSize(720, 520)
-        self.resize(720, 560)
+        self.resize(820, 600)
         self._ffmpeg_installing = False
         self._ffmpeg_catalog_loading = False
         self._ffmpeg_catalog_loaded = False
@@ -471,12 +472,16 @@ class SettingsDialog(QDialog):
         self.tabs.setDocumentMode(True)
         # Each tab scrolls on its own: the General tab alone needed ~900 px, so the
         # dialog opened taller than a laptop screen.
-        self.general_page = self._scroll_page(app_group, content_group)
-        self.export_page = self._scroll_page(output_group, render_group, notification_group)
+        self.general_page = self._scroll_page(app_group)
+        self.export_page = self._scroll_page(output_group, render_group)
         self.ffmpeg_page = self._scroll_page(self.ffmpeg_about_card, self.ffmpeg_status_card, ffmpeg_group)
+        self.content_page = self._scroll_page(content_group)
+        self.notifications_page = self._scroll_page(notification_group)
         self.tabs.addTab(self.general_page, "")
         self.tabs.addTab(self.export_page, "")
         self.tabs.addTab(self.ffmpeg_page, "")
+        self.tabs.addTab(self.content_page, "")
+        self.tabs.addTab(self.notifications_page, "")
         self.tabs.currentChanged.connect(self._settings_tab_changed)
 
         layout = QVBoxLayout(self)
@@ -485,7 +490,14 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.title_label)
         layout.addWidget(self.subtitle_label)
         layout.addWidget(self.tabs, 1)
+        self.button_box.button(QDialogButtonBox.StandardButton.Save).setObjectName("primaryButton")
         layout.addWidget(self.button_box)
+        for form in (app_form, content_form, render_form, output_form, ffmpeg_form, notification_form):
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            form.setHorizontalSpacing(24)
+            form.setVerticalSpacing(14)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.ffmpeg_group = ffmpeg_group
         self.output_group = output_group
         self.render_group = render_group
@@ -510,6 +522,7 @@ class SettingsDialog(QDialog):
         body = QWidget()
         layout = QVBoxLayout(body)
         layout.setContentsMargins(14, 16, 14, 14)
+        layout.setSpacing(24)
         for widget in widgets:
             layout.addWidget(widget)
         layout.addStretch()
@@ -976,6 +989,8 @@ class SettingsDialog(QDialog):
         self.tabs.setTabText(0, "일반" if korean else "General")
         self.tabs.setTabText(1, "내보내기" if korean else "Export")
         self.tabs.setTabText(2, "FFmpeg")
+        self.tabs.setTabText(3, "콘텐츠" if korean else "Content")
+        self.tabs.setTabText(4, "알림" if korean else "Notifications")
         self.ffmpeg_about_title.setText(
             "FFmpeg이란?" if korean else "What is FFmpeg?"
         )
