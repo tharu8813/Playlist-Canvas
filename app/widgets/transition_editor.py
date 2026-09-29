@@ -308,6 +308,34 @@ def drag_override(
         changes["duration"] = new_length
         bars = bars_text(new_length, incoming_analysis, korean)
         hint = f"{'겹침' if korean else 'Overlap'} {new_length:.2f}s" + (f" · {bars}" if bars else "")
+    elif kind == "ramp":  # where the outgoing song starts easing onto the new tempo
+        ramp = drawn.outgoing.tempo_ramp
+        if ramp is None:
+            return None, "", None
+        # Before its ramp the clip plays at its own rate: the new start is placed on that mapping.
+        plain = replace(head, tempo_ramp=None)
+        cue = ramp.source_end
+        earliest = max(ramp_floor(junctions, index), drawn.outgoing.source_in, cue - MAX_RAMP_SECONDS)
+        source = plain.source_at(plain.timeline_at(ramp.source_start) + delta)
+        if snapping:
+            reach = tolerance * plain.playback_rate
+            snapped = cue if abs(cue - source) <= reach else magnet(source, outgoing_analysis, reach)
+            guide = plain.timeline_at(snapped) if abs(snapped - source) > 1e-9 else None
+            source = snapped
+        if source > cue:
+            source, limit, guide = cue, ("믹스 시작" if korean else "the mix start"), None
+        if source < earliest:
+            source, guide = earliest, None
+            limit = (("최대 2분" if korean else "2 min max") if earliest == cue - MAX_RAMP_SECONDS
+                     else ("앞 전환 끝" if korean else "previous transition"))
+        changes["ramp_seconds"] = round(cue - source, 6)
+        span = changes["ramp_seconds"]
+        bars = bars_text(span, outgoing_analysis, korean)
+        hint = ((f"템포 변경 시작 {_clock(plain.timeline_at(source), precise=True)} · "
+                 + (f"{bars} 동안" if bars else f"{span:.1f}초 동안") if span > 1e-6 else "템포 즉시 변경")
+                if korean else
+                (f"Tempo change starts {_clock(plain.timeline_at(source), precise=True)} · over "
+                 + (bars or f"{span:.1f} s") if span > 1e-6 else "Tempo changes at once"))
     else:  # "incoming": slide the incoming song under its window (skip or keep its intro)
         cue = base.incoming_cue - delta
         if snapping:

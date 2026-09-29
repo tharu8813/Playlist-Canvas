@@ -24,6 +24,8 @@ class AutoMixEditorTests(unittest.TestCase):
 
     def setUp(self):
         QSettings().setValue("automix_editor/advanced", False)
+        QSettings().remove("automix_editor/geometry")
+        self.addCleanup(QSettings().remove, "automix_editor/geometry")
 
     def _host(self, overrides=None):
         host = QWidget()
@@ -61,6 +63,36 @@ class AutoMixEditorTests(unittest.TestCase):
         self.assertFalse(editor.play_button.isEnabled())
         controller.edit_transition()  # the playlist's "AutoMix editor" button: first transition
         self.assertEqual([e._index for e in host.findChildren(AutoMixEditorDialog)][-1], 0)
+
+    def test_it_can_be_maximized_and_reopens_the_way_it_was_left(self):
+        if not QApplication.organizationName():  # QSettings stores nothing without one
+            QApplication.setOrganizationName("Playlist Canvas Tests")
+            self.addCleanup(QApplication.setOrganizationName, "")
+        _host, editor = self._editor()
+        self.assertTrue(editor.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint)
+        editor.show()
+        editor.resize(780, 600)  # fits the 800 px offscreen test screen
+        editor.close()
+        _host, again = self._editor()
+        again.show()
+        self.assertEqual((again.width(), again.height()), (780, 600))
+
+    def test_analysis_arriving_after_the_editor_is_deleted_is_ignored(self):
+        from PySide6.QtCore import QObject, Signal
+        from shiboken6 import delete
+
+        class Controller(QObject):
+            analyses_updated = Signal(object)
+
+        host = self._host()
+        host.automix_analysis_controller = Controller()
+        _host, editor = self._editor(host)
+        editor._finished = True  # skip the cleanup close() on a deleted object
+        delete(editor)
+        with patch("sys.excepthook") as hook:
+            host.automix_analysis_controller.analyses_updated.emit({})
+            QApplication.processEvents()
+        hook.assert_not_called()
 
     def test_an_edit_is_stored_replanned_and_undone_in_one_step(self):
         host, editor = self._editor()

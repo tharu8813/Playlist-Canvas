@@ -43,6 +43,8 @@ _COPIED_FIELDS = ("style", "duration", "tempo_match", "vocal_handoff", "eq_bands
                   "echo_beats", "echo_feedback", "echo_low_cut", "tape_entry", "key_shift", "ramp_seconds")
 """What paste and presets carry to another transition: how it mixes, never where (cues belong to the songs)."""
 _PRESETS_KEY = "automix_editor/presets"
+_GEOMETRY_KEY = "automix_editor/geometry"
+"""Size, position and maximized state, kept from one opening to the next."""
 
 
 class _OverrideCommand(QUndoCommand):
@@ -83,6 +85,8 @@ class AutoMixEditorDialog(QDialog):
         self.setObjectName("automixEditor")
         self.setWindowFlag(Qt.WindowType.Window, True)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        # A long timeline wants the whole screen: maximize (and minimize) like a main window.
+        self.setWindowFlag(Qt.WindowType.WindowMinMaxButtonsHint, True)
         self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setMinimumSize(760, 520)
@@ -127,6 +131,9 @@ class AutoMixEditorDialog(QDialog):
         if playlist_changed is not None:
             playlist_changed.connect(self._playlist_changed)
         self._set_advanced(bool(QSettings().value(_SETTINGS_KEY, False, bool)), save=False)
+        geometry = QSettings().value(_GEOMETRY_KEY)
+        if geometry:
+            self.restoreGeometry(geometry)
         self._replan()
         start = next((index for index, junction in enumerate(self._junctions)
                       if (junction.outgoing.track_id, junction.incoming.track_id) == pair), 0)
@@ -464,8 +471,15 @@ class AutoMixEditorDialog(QDialog):
             tempo = f"A {analyses[0].bpm:.1f} · B {analyses[1].bpm:.1f} BPM"
             if isinstance(rate, (int, float)) and abs(rate - 1.0) > 1e-9:
                 ramp = float(details.get("tempo_ramp_seconds") or 0.0)
-                tempo += self._text(f" · A를 {analyses[0].bpm * rate:.1f} BPM으로 {ramp:.1f}초 램프",
-                                    f" · A ramps to {analyses[0].bpm * rate:.1f} BPM over {ramp:.1f} s")
+                tempo += (self._text(f" · A를 {analyses[0].bpm * rate:.1f} BPM으로 {ramp:.1f}초 동안 변경",
+                                     f" · A eases to {analyses[0].bpm * rate:.1f} BPM over {ramp:.1f} s")
+                          if ramp > 1e-6 else
+                          self._text(f" · A를 {analyses[0].bpm * rate:.1f} BPM으로 바로 변경",
+                                     f" · A jumps to {analyses[0].bpm * rate:.1f} BPM"))
+                tempo += self._text(" (타임라인의 '템포 변경 시작' 핸들로 시작점 조정)",
+                                    " (drag 'Tempo change starts' on the timeline to move where it begins)")
+            elif (override or self._base()).tempo_match:
+                tempo += " · " + self._tempo_match_skipped(analyses[0].bpm, analyses[1].bpm)
         length = junction.end - junction.start
         facts = [
             (self._text("믹스 시작", "Mix starts"), _clock(junction.start, precise=True)),
@@ -483,6 +497,18 @@ class AutoMixEditorDialog(QDialog):
             songs_html=songs, analyses=analyses, durations=durations,
             band_style=style in BAND_ENVELOPES, auto_style=self._style_name(junction), tempo_text=tempo, facts=facts,
         )
+
+    def _tempo_match_skipped(self, outgoing_bpm: float, incoming_bpm: float) -> str:
+        """Why "match tempo" is on but nothing changes."""
+        from app.automix.candidates import _nearest_octave_rate
+
+        rate = _nearest_octave_rate(incoming_bpm / outgoing_bpm, self._settings)
+        percent = abs(rate - 1.0) * 100.0
+        if percent < 0.05:
+            return self._text("템포가 이미 같아 바꿀 필요가 없음", "tempos already match")
+        limit = self._settings.max_bridge_tempo_percent
+        return self._text(f"템포 차이 {percent:.1f}%가 맞춤 한도 {limit:g}%를 넘어 원래 템포 유지",
+                          f"a {percent:.1f}% tempo gap exceeds the {limit:g}% match limit; tempos stay")
 
     def _style_name(self, junction) -> str:
         transition = junction.transition
@@ -1048,6 +1074,7 @@ class AutoMixEditorDialog(QDialog):
             return
         self.properties.flush()
         self._finished = True
+        QSettings().setValue(_GEOMETRY_KEY, self.saveGeometry())
         if self._player is not None:
             self._player.stop()
             self._player.setSource(QUrl())

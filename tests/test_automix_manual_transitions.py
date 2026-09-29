@@ -319,3 +319,62 @@ class TimelineBandDragTests(unittest.TestCase):
         beat = 0.5 / length  # 120 BPM
         self.assertAlmostEqual(snapped[0][0][0] / beat, round(snapped[0][0][0] / beat), places=6)
         timeline._band_drag = None
+
+class TempoRampStartTests(unittest.TestCase):
+    """Where the outgoing song starts easing onto the new tempo: saved, planned, dragged and shown."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
+    def _plan(self, override):
+        tracks = _tracks()
+        analyses = _analyses(tracks, (120.0, 125.0, 120.0))
+        return tracks, analyses, compile_automix(tracks, analyses, _manual(ENABLED, **{"a>b": override}))
+
+    def test_the_ramp_length_is_saved_and_planned(self) -> None:
+        override = TransitionOverride(150.0, 0.0, 10.0, "legacy", tempo_match=True, ramp_seconds=12.0)
+        self.assertEqual(parse_overrides({"a>b": override.to_dict()})["a>b"], override)
+        with self.assertRaises(ValueError):
+            TransitionOverride(150.0, ramp_seconds=-1.0)
+        ramp = self._plan(override)[2].audio.clips[0].tempo_ramp
+        self.assertAlmostEqual((ramp.source_start, ramp.source_end), (138.0, 150.0))
+        at_once = self._plan(TransitionOverride(150.0, 0.0, 10.0, "legacy", True, ramp_seconds=0.0))[2]
+        self.assertEqual(at_once.audio.clips[0].tempo_ramp.source_start, 150.0)
+        automatic = self._plan(TransitionOverride(150.0, 0.0, 10.0, "legacy", True))[2]
+        self.assertAlmostEqual(automatic.audio.clips[0].tempo_ramp.source_start, 150.0 - 8 * 2.0)  # 8 bars
+
+    def test_dragging_the_ramp_start_sets_its_length_within_what_the_song_allows(self) -> None:
+        from app.widgets.transition_editor import drag_override
+
+        base = TransitionOverride(150.0, 0.0, 10.0, "legacy", tempo_match=True)
+        tracks, analyses, plan = self._plan(base)
+        junctions = plan_junctions(plan)
+        context = EditContext({t.id: t for t in tracks}, analyses)
+        drag = lambda delta, snapping=False: drag_override(  # noqa: E731
+            junctions, 0, junctions[0], base, "ramp", delta, context,
+            snapping=snapping, tolerance=0.3, korean=True)
+        later, hint, _guide = drag(6.0)  # 16 s ramp starting 6 s later: 10 s
+        self.assertAlmostEqual(later.ramp_seconds, 10.0, places=4)
+        self.assertIn("템포 변경 시작", hint)
+        self.assertEqual(drag(60.0)[0].ramp_seconds, 0.0)  # past the mix start: at once
+        self.assertLessEqual(drag(-1000.0)[0].ramp_seconds, 150.0)  # never before the song starts
+        snapped = drag(6.1, snapping=True)[0]
+        self.assertAlmostEqual(snapped.ramp_seconds / 2.0, round(snapped.ramp_seconds / 2.0), places=4)  # a bar
+
+    def test_the_view_shows_where_the_tempo_starts_to_change_and_its_handle_is_grabbable(self) -> None:
+        from app.widgets.automix_timeline import RAMP_GRIP, AutoMixTimeline
+
+        tracks, analyses, plan = self._plan(TransitionOverride(150.0, 0.0, 10.0, "legacy", True, ramp_seconds=40.0))
+        junction = plan_junctions(plan)[0]
+        timeline = AutoMixTimeline()
+        self.addCleanup(timeline.deleteLater)
+        timeline.resize(1200, 500)
+        timeline.analyses = (analyses["a"], analyses["b"])
+        timeline.set_junction(junction, refit=True)
+        ramp_start = junction.outgoing.timeline_at(junction.outgoing.tempo_ramp.source_start)
+        self.assertLess(timeline.view()[0], ramp_start)
+        x = timeline.x_of(ramp_start)
+        grip_y = timeline._lane_top(0) + timeline.track_height - RAMP_GRIP / 2
+        self.assertEqual(timeline.hit(x, grip_y), ("ramp",))
+        timeline.grab()  # paints the ramp band and its handle without error

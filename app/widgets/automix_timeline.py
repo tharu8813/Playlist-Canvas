@@ -17,8 +17,9 @@ import math
 import numpy as np
 from PySide6.QtCore import QLineF, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QFontMetrics, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen,
-    QWheelEvent,
+    QBrush, QColor, QFont, QFontMetrics, QImage, QKeyEvent, QLinearGradient, QMouseEvent, QPainter, QPainterPath,
+    QPen,
+    QPixmap, QWheelEvent,
 )
 from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
@@ -35,15 +36,27 @@ from app.widgets.transition_inspector import (
 HANDLE_COLOR = QColor("#FBBF24")
 SNAP_COLOR = QColor("#FDE68A")
 _BAND_LABELS = {"high": ("고음", "Highs"), "mid": ("중음", "Mids"), "low": ("저음", "Lows"),
-                "level": ("음량", "Level"), "sweep": ("하이패스", "Highpass")}
+                "level": ("음량", "Level"), "sweep": ("하이패스", "Highpass"),
+                "echo": ("에코", "Echo"), "speed": ("속도·음높이", "Speed & pitch")}
 _PART_TIPS = {
     "start": ("믹스 시작 · 끌어서 위치와 길이 조정 (←/→ 한 박자, Shift: 자유)",
               "Mix start · drag to move it and change the length (←/→ one beat, Shift: free)"),
     "end": ("믹스 끝 · 끌어서 겹침 길이 조정", "Mix end · drag to change the overlap length"),
     "move": ("겹침 구간 · 끌어서 길이는 그대로 옮기기", "Overlap · drag to move it, keeping its length"),
     "incoming": ("B 곡 · 끌어서 들어오는 곡의 시작 지점 조정", "Track B · drag to change where it starts"),
+    "ramp": ("템포 변경 시작 · 끌어서 A가 B의 템포로 바뀌기 시작하는 지점 조정 (←/→ 한 박자, Shift: 자유)",
+             "Tempo change starts · drag to set where A starts easing onto B's tempo (←/→ one beat, Shift: free)"),
 }
-PARTS = ("start", "end", "move", "incoming")
+PARTS = ("start", "end", "move", "incoming", "ramp")
+RAMP_GRIP = 24.0
+"""The tempo-change handle's grip: this band at the bottom of track A."""
+
+
+def _premultiplied(color: QColor) -> np.uint32:
+    """``color`` as one ARGB32_Premultiplied pixel."""
+    alpha = color.alpha()
+    return np.uint32((alpha << 24) | (color.red() * alpha // 255 << 16)
+                     | (color.green() * alpha // 255 << 8) | color.blue() * alpha // 255)
 
 
 def _mapping(clip: AudioRenderClip) -> tuple[np.ndarray, np.ndarray]:
@@ -113,9 +126,10 @@ class AutoMixTimeline(QWidget):
         self._pan: tuple[float, tuple[float, float]] | None = None
         self._view: tuple[float, float] = (0.0, 1.0)
         self._frozen: tuple[float, float] | None = None
+        self._static_cache: tuple[tuple, tuple, QPixmap] | None = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(360)
         self._update_height()
 
     # -- state -------------------------------------------------------------------
@@ -176,6 +190,9 @@ class AutoMixTimeline(QWidget):
         length = junction.end - junction.start
         pad = max(6.0, length * 0.75)
         start, end = junction.start - pad, junction.end + pad
+        ramp = self._ramp_span()
+        if ramp is not None:  # where the tempo starts to change is part of the transition
+            start = min(start, ramp[0] - max(2.0, (ramp[1] - ramp[0]) * 0.1))
         if self.audition is not None:
             start, end = min(start, self.audition[0] - 1.0), max(end, self.audition[1] + 1.0)
         self._set_view(start, end)
@@ -232,6 +249,15 @@ class AutoMixTimeline(QWidget):
     def _tracks_bottom(self) -> float:
         return self._lane_top(1) + self.track_height
 
+    def _ramp_span(self) -> tuple[float, float] | None:
+        """Timeline (start, end) of the outgoing track's tempo change, or None without one."""
+        junction = self.junction
+        ramp = junction.outgoing.tempo_ramp if junction is not None else None
+        if ramp is None:
+            return None
+        clip = junction.outgoing
+        return clip.timeline_at(ramp.source_start), clip.timeline_at(ramp.source_end)
+
     def _band_bar(self, lane_index: int, band: str, side: str) -> QRectF | None:
         junction = self.junction
         if self._bands is None or junction is None or junction.end <= junction.start:
@@ -264,6 +290,12 @@ class AutoMixTimeline(QWidget):
         if not top <= y <= bottom:
             return None
         start, end = self.x_of(junction.start), self.x_of(junction.end)
+        ramp = self._ramp_span()
+        lane_bottom = self._lane_top(0) + self.track_height
+        if ramp is not None and self._lane_top(0) <= y <= lane_bottom and abs(x - self.x_of(ramp[0])) <= self.GRAB:
+            # Beside the mix start handle, its grip at the bottom of track A decides.
+            if abs(x - self.x_of(ramp[0])) < abs(x - start) or y >= lane_bottom - RAMP_GRIP:
+                return ("ramp",)
         if junction.end > junction.start:
             if abs(x - start) <= self.GRAB and (abs(x - start) <= abs(x - end)):
                 return ("start",)
@@ -321,7 +353,7 @@ class AutoMixTimeline(QWidget):
             if (position - origin).manhattanLength() < QApplication.startDragDistance():
                 return
             self._drag = (part, self.seconds_at(origin.x()))
-            self.setCursor(Qt.CursorShape.SizeHorCursor if part in ("start", "end")
+            self.setCursor(Qt.CursorShape.SizeHorCursor if part in ("start", "end", "ramp")
                            else Qt.CursorShape.ClosedHandCursor)
             self.drag_started.emit(part)
         if self._drag is not None:
@@ -363,7 +395,7 @@ class AutoMixTimeline(QWidget):
             self._hover = hover
             if hit is None:
                 self.unsetCursor()
-            elif hit[0] in ("start", "end") or (hit[0] == "band" and hit[3] != "move"):
+            elif hit[0] in ("start", "end", "ramp") or (hit[0] == "band" and hit[3] != "move"):
                 self.setCursor(Qt.CursorShape.SizeHorCursor)
             else:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -451,18 +483,54 @@ class AutoMixTimeline(QWidget):
 
     # -- painting ----------------------------------------------------------------------
 
-    def paintEvent(self, _event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        palette = self.palette()
-        painter.fillRect(self.rect(), palette.window())
+    def _static_state(self) -> tuple[tuple, tuple]:
+        """What the static layer shows: (objects compared by identity, values compared by equality)."""
+        junction = self.junction
+        ids = (junction.outgoing.track_id, junction.incoming.track_id) if junction is not None else ()
+        band_hot = (self._band_drag[:2] if self._band_drag is not None
+                    else self._hover if self._hover is not None and self._hover.startswith("band") else None)
+        objects = (junction, *self.analyses, *(self.peaks.get(track_id) for track_id in ids))
+        values = (self.width(), self.height(), self.devicePixelRatioF(), self.view(), self.draft, self.advanced,
+                  self._bands, band_hot, self.korean, self.audition, self.loop,
+                  tuple(track_id in self.peaks for track_id in ids),
+                  tuple(self.titles.get(track_id) for track_id in ids),
+                  self.palette().cacheKey(), self.font().key())
+        return objects, values
+
+    def _static_layer(self) -> QPixmap:
+        """Everything but the handles, guides and playhead, drawn again only when it changes.
+
+        The playhead moves many times a second during an audition and hovering
+        restyles a handle; neither redraws the waveforms, grids and lanes.
+        """
+        objects, values = self._static_state()
+        cached = self._static_cache
+        if (cached is not None and cached[1] == values and len(cached[0]) == len(objects)
+                and all(a is b for a, b in zip(cached[0], objects))):
+            return cached[2]
+        ratio = self.devicePixelRatioF()
+        pixmap = QPixmap(max(1, round(self.width() * ratio)), max(1, round(self.height() * ratio)))
+        pixmap.setDevicePixelRatio(ratio)
+        painter = QPainter(pixmap)
+        self._paint_static(painter)
+        painter.end()
+        self._static_cache = (objects, values, pixmap)
+        return pixmap
+
+    def _small_font(self) -> QFont:
         small = QFont(self.font())
         small.setPointSizeF(max(7.5, small.pointSizeF() - 0.5))
-        painter.setFont(small)
+        return small
+
+    def _paint_static(self, painter: QPainter) -> None:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        palette = self.palette()
+        painter.fillRect(QRectF(0, 0, self.width(), self.height()), palette.window())
+        painter.setFont(self._small_font())
         junction = self.junction
         if junction is None:
             painter.setPen(palette.placeholderText().color())
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+            painter.drawText(QRectF(0, 0, self.width(), self.height()), Qt.AlignmentFlag.AlignCenter,
                              "편집할 전환이 없습니다 · 재생할 곡을 2개 이상 추가하세요" if self.korean
                              else "No transition to edit · add at least two playable tracks")
             return
@@ -478,13 +546,29 @@ class AutoMixTimeline(QWidget):
             self._paint_track(painter, lane, clip, analysis, color, letter, left, right)
         if self.advanced:
             self._paint_bands(painter, lanes, left, right)
-        painter.save()
-        painter.setClipRect(QRectF(left, 0, right - left, self.height()))
         if junction.end > junction.start:  # the overlap, tinted over every lane
+            painter.save()
+            painter.setClipRect(QRectF(left, 0, right - left, self.height()))
             band = QColor(palette.highlight().color())
             band.setAlpha(22)
             painter.fillRect(QRectF(self.x_of(junction.start), self.RULER,
                                     self.x_of(junction.end) - self.x_of(junction.start), bottom - self.RULER), band)
+            painter.restore()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._static_layer())
+        junction = self.junction
+        if junction is None:
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(self._small_font())
+        palette = self.palette()
+        left, right = self._plot()
+        lanes = self.lanes()
+        bottom = (self._lane_top(2 + len(lanes)) - self.GAP) if lanes else self._tracks_bottom()
+        painter.save()
+        painter.setClipRect(QRectF(left, 0, right - left, self.height()))
         self._paint_handles(painter, bottom)
         if self.snap_guide is not None:
             x = self.x_of(self.snap_guide)
@@ -563,19 +647,48 @@ class AutoMixTimeline(QWidget):
         self._paint_grid(painter, clip, analysis, color, top)
         self._paint_waveform(painter, clip, color, top, left, right)
         if lane == 0 and clip.tempo_ramp is not None:
-            r0, r1 = clip.timeline_at(clip.tempo_ramp.source_start), clip.timeline_at(clip.tempo_ramp.source_end)
-            hatch = QBrush(color.lighter(120), Qt.BrushStyle.BDiagPattern)
-            painter.fillRect(QRectF(self.x_of(r0), top + self.track_height - 14, self.x_of(r1) - self.x_of(r0), 10), hatch)
-            bpm = analysis.bpm * clip.tempo_ramp.end_rate if analysis is not None and analysis.bpm else None
-            painter.setPen(color.lighter(130))
-            label_x = min(max(self.x_of(r0), left) + 4, max(left + 4, self.x_of(r1) - 200))
-            painter.drawText(QRectF(label_x, top + self.track_height - 30, 220, 14), Qt.AlignmentFlag.AlignLeft,
-                             ("템포 램프" if self.korean else "Tempo ramp") + (f" → {bpm:.1f} BPM" if bpm else ""))
+            self._paint_ramp(painter, clip, analysis, color, top, left)
         painter.setPen(QPen(color, 1.2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(active, 3, 3)
         self._paint_markers(painter, lane, clip, color, top)
         painter.restore()
+
+    def _paint_ramp(self, painter: QPainter, clip: AudioRenderClip, analysis: TrackAnalysis | None,
+                    color: QColor, top: float, left: float) -> None:
+        """Track A's tempo change: a band that brightens toward the new tempo, and what it changes to."""
+        ramp = clip.tempo_ramp
+        r0, r1 = clip.timeline_at(ramp.source_start), clip.timeline_at(ramp.source_end)
+        x0, x1 = self.x_of(r0), self.x_of(r1)
+        lane_bottom = top + self.track_height
+        if x1 - x0 >= 1.0:
+            glow = QLinearGradient(x0, 0, x1, 0)
+            tint = QColor(color.lighter(125))
+            tint.setAlpha(8)
+            glow.setColorAt(0.0, tint)
+            tint.setAlpha(46)
+            glow.setColorAt(1.0, tint)
+            painter.fillRect(QRectF(x0, top + 1, x1 - x0, self.track_height - 2), QBrush(glow))
+            hatch = QBrush(color.lighter(120), Qt.BrushStyle.BDiagPattern)
+            painter.fillRect(QRectF(x0, lane_bottom - 12, x1 - x0, 10), hatch)
+        base = analysis.bpm * clip.playback_rate if analysis is not None and analysis.bpm else None
+        target = analysis.bpm * ramp.end_rate if analysis is not None and analysis.bpm else None
+        if abs(ramp.end_rate - clip.playback_rate) < 1e-9:
+            text = "키 맞춤" if self.korean else "Key glide"
+        elif target is None:
+            text = "템포 변경" if self.korean else "Tempo change"
+        else:
+            text = f"{base:.1f} → {target:.1f} BPM"
+        if x1 - x0 < 1.0:
+            text = ("즉시 · " if self.korean else "at once · ") + text
+        bars = ""
+        if analysis is not None and analysis.bpm and x1 - x0 >= 1.0:
+            bar = (analysis.meter_numerator or 4) * 60.0 / analysis.bpm
+            bars = f" · {(ramp.source_end - ramp.source_start) / bar:.1f}" + ("마디" if self.korean else " bars")
+        painter.setPen(color.lighter(135))
+        label = ("템포 변경 " if self.korean else "Tempo ") + text + bars
+        painter.drawText(QRectF(max(x0, left) + 6, lane_bottom - RAMP_GRIP - 16, 320, 14),
+                         Qt.AlignmentFlag.AlignLeft, label)
 
     def _paint_track_label(self, painter: QPainter, lane: int, clip: AudioRenderClip,
                            analysis: TrackAnalysis | None, color: QColor, letter: str) -> None:
@@ -674,20 +787,24 @@ class AutoMixTimeline(QWidget):
         mins = np.minimum.reduceat(peaks[:limit, 0], np.minimum(starts, limit - 1))
         maxs = np.maximum.reduceat(peaks[:limit, 1], np.minimum(starts, limit - 1))
         active_left, active_right = self.x_of(clip.timeline_start), self.x_of(clip.timeline_end)
-        solid, ghost = [], []
-        for column in np.nonzero(valid)[0]:
-            x = float(edges_x[column]) + 0.5
-            y0 = middle - float(maxs[column]) * amplitude
-            y1 = middle - float(mins[column]) * amplitude
-            (solid if active_left <= x <= active_right else ghost).append(QLineF(x, y0, x, max(y1, y0 + 1)))
         faint = QColor(self.palette().placeholderText().color())
         faint.setAlpha(70)
-        painter.setPen(QPen(faint, 1))
-        painter.drawLines(ghost)
         wave = QColor(color)
         wave.setAlpha(215)
-        painter.setPen(QPen(wave, 1))
-        painter.drawLines(solid)
+        # One pixel column per peak bar, filled in numpy: building a QLineF per column
+        # cost several ms a lane, and a maximized window has thousands of columns.
+        band_top = math.floor(top)
+        height = max(1, math.ceil(top + self.track_height) - band_top)
+        y0 = middle - maxs * amplitude - band_top
+        y1 = np.maximum(middle - mins * amplitude - band_top, y0 + 1.0)
+        rows = np.arange(height, dtype=np.float64)[:, None] + 0.5
+        covered = (rows >= np.floor(y0)) & (rows <= np.ceil(y1)) & valid
+        centers = edges_x[:-1] + 0.5
+        solid = (centers >= active_left) & (centers <= active_right)
+        pixels = np.where(solid, _premultiplied(wave), _premultiplied(faint)).astype(np.uint32)
+        image_data = np.ascontiguousarray(np.where(covered, pixels, np.uint32(0)))
+        image = QImage(image_data.data, columns, height, columns * 4, QImage.Format.Format_ARGB32_Premultiplied)
+        painter.drawImage(QPointF(left, band_top), image)
 
     def _paint_markers(self, painter: QPainter, lane: int, clip: AudioRenderClip, color: QColor, top: float) -> None:
         junction = self.junction
@@ -744,6 +861,28 @@ class AutoMixTimeline(QWidget):
             painter.setPen(QPen(QColor("#111314"), 1))
             for offset in (-2.5, 0.0, 2.5):
                 painter.drawLine(QPointF(x + offset, grip.top() + 4), QPointF(x + offset, grip.bottom() - 4))
+            if state == "selected" and self.hasFocus():
+                painter.setPen(QPen(self.palette().text().color(), 1.2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(grip.adjusted(-3, -3, 3, 3), 4, 4)
+        ramp = self._ramp_span()
+        if ramp is not None:  # where A starts easing onto the new tempo: a dashed line with a grip
+            x = self.x_of(ramp[0])
+            lane_bottom = self._lane_top(0) + self.track_height
+            state = self._part_state("ramp")
+            color = OUTGOING_COLOR.lighter(150 if state != "idle" else 125)
+            painter.setPen(QPen(color, 2.0 if state != "idle" else 1.3, Qt.PenStyle.DashLine))
+            painter.drawLine(QPointF(x, self._lane_top(0) + 1), QPointF(x, lane_bottom - 1))
+            grip = QRectF(x - 8, lane_bottom - RAMP_GRIP + 2, 16, RAMP_GRIP - 6)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(grip, 3, 3)
+            painter.setPen(QPen(QColor("#111314"), 1.3))
+            middle = grip.center().y()
+            painter.drawLine(QPointF(x - 4, middle), QPointF(x + 4, middle))  # a double arrow: drag sideways
+            for side in (-1, 1):
+                painter.drawLine(QPointF(x + 4 * side, middle), QPointF(x + 1.5 * side, middle - 2.5))
+                painter.drawLine(QPointF(x + 4 * side, middle), QPointF(x + 1.5 * side, middle + 2.5))
             if state == "selected" and self.hasFocus():
                 painter.setPen(QPen(self.palette().text().color(), 1.2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
