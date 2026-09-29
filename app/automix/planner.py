@@ -42,11 +42,12 @@ from app.automix.candidates import (
     audible_end,
     audible_start,
     generate_candidates,
+    key_shift as _key_shift,
     select_best_candidate,
     vocal_intro_end,
     vocal_outro_start,
 )
-from app.automix.analysis.key import harmonic_shift, shift_key
+from app.automix.analysis.key import shift_key
 from app.automix.compatibility import evaluate_compatibility
 from app.automix.exits import CUT_SECONDS, plan_phrase_exit
 from app.automix.models import TrackAnalysis
@@ -225,17 +226,6 @@ BRIDGE_RAMP_BARS = 16
 two phrases, so no single bar moves more than a direct match's ramp would."""
 KEY_GLIDE_SECONDS = 8.0
 """A hand-set key shift on a track without a tempo glides over this long before the cue."""
-KEY_SHIFT_MIN_CONFIDENCE = 0.7
-"""Both key estimates must be at least this sure before a tail is re-pitched:
-a shift chosen from a wrong key makes the clash worse, not better."""
-
-
-def _key_shift(outgoing: TrackAnalysis, incoming: TrackAnalysis) -> int | None:
-    """Semitones to glide the outgoing tail by so the two keys mix (None: leave it)."""
-    if (outgoing.key is None or incoming.key is None
-            or min(outgoing.key_confidence, incoming.key_confidence) < KEY_SHIFT_MIN_CONFIDENCE):
-        return None
-    return harmonic_shift(outgoing.key, incoming.key, max_semitones=1)
 
 
 def _audible_start(analysis: TrackAnalysis | None, settings: AutoMixTransitionSettings) -> float:
@@ -278,13 +268,17 @@ def _plan_overlap(
     fallback = adjacent(_audible_end(outgoing_analysis, settings, previous_clip),
                         _audible_start(incoming_analysis, settings))
     override = settings.override_for(previous_track.id, track.id) if settings.enabled else None
-    if override is not None:
+
+    def manual(recommendation: tuple[tuple[str, object], ...] = ()):
         return _plan_manual(
             previous_clip, previous_track, track, override, outgoing_analysis, incoming_analysis,
-            structures, settings, ramp_floor, fallback, log_diagnostics,
+            structures, settings, ramp_floor, fallback, log_diagnostics, recommendation,
         )
+
+    if override is not None and not override.recommend:
+        return manual()
     if outgoing_analysis is None or incoming_analysis is None or not settings.enabled:
-        return fallback
+        return fallback if override is None else manual((("recommendation", "no_analysis"),))
 
     compatibility = evaluate_compatibility(outgoing_analysis, incoming_analysis, settings)
     candidates = generate_candidates(
@@ -293,6 +287,9 @@ def _plan_overlap(
         outgoing_structure=structures.get(previous_track.id),
         incoming_structure=structures.get(track.id),
     )
+    unlocked = select_best_candidate(candidates)
+    if override is not None:  # a recommendation that keeps the user's locked values
+        candidates = _honour_locks(candidates, override, outgoing_analysis, incoming_analysis)
     best = select_best_candidate(candidates)
     phrase_exit = None
     if best is None or best.strategy in (TransitionStrategy.FIXED_CROSSFADE, TransitionStrategy.CUT):
@@ -302,8 +299,19 @@ def _plan_overlap(
             structures.get(previous_track.id), structures.get(track.id),
             outgoing_rate=previous_clip.playback_rate, earliest=ramp_floor, previous_style=previous_style,
         )
+        if phrase_exit is not None and override is not None:
+            unlocked = unlocked or phrase_exit.candidate
+            held = _honour_locks([phrase_exit.candidate], override, outgoing_analysis, incoming_analysis)
+            phrase_exit = replace(phrase_exit, candidate=held[0]) if held else None
         if phrase_exit is not None:
             best = phrase_exit.candidate
+    if override is not None and (best is None or best.duration_seconds <= 0.0):
+        # Nothing analysis would pick keeps the locked values: play the stored ones, and say so.
+        nearest = (() if unlocked is None else
+                   (("nearest_outgoing_cue", unlocked.outgoing_source_time),
+                    ("nearest_incoming_cue", unlocked.incoming_source_time),
+                    ("nearest_duration", unlocked.duration_seconds)))
+        return manual((("recommendation", "no_fit"), *nearest))
     if best is None or best.duration_seconds <= 0.0:
         return fallback
     if best.strategy is TransitionStrategy.CUT:
@@ -336,7 +344,7 @@ def _plan_overlap(
     # Anchor timestamps are in the original media, not the playlist clock.
     timeline_start = outgoing_clip.timeline_at(cue)
     if timeline_start <= previous_clip.timeline_start:
-        return fallback
+        return fallback if override is None else manual((("recommendation", "no_fit"),))
 
     # duration_seconds is authoritative (Commit C.1): the candidate already
     # sized it as the outgoing tail from the cue at the overlap rate, which
@@ -387,6 +395,7 @@ def _plan_overlap(
         ("incoming_key", incoming_analysis.key),
         ("key_shift_semitones", key_shift),
         *decision.metrics,
+        *((("recommendation", "locked"), ("locked", override.locked)) if override is not None else ()),
     )
     transition = AudioRenderTransition(
         clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
@@ -405,6 +414,57 @@ def _plan_overlap(
 MIN_MANUAL_OVERLAP_SECONDS = 0.05
 """A manual window shorter than this (or one squeezed to it by the tracks'
 ends) is played as a cut: an overlap FFmpeg cannot fade is not a mix."""
+LOCK_REACH_BARS = 1.0
+"""A recommendation may hold a locked cue when its own cue is at most this far from it."""
+LOCK_DISTANCE_WEIGHT = 0.1
+"""Score lost per ``LOCK_REACH_BARS`` a candidate had to move: the nearest good one wins."""
+
+
+def _honour_locks(
+    candidates: Sequence[TransitionCandidate], override: TransitionOverride,
+    outgoing: TrackAnalysis, incoming: TrackAnalysis,
+) -> list[TransitionCandidate]:
+    """``candidates`` moved onto ``override``'s locked values; one that cannot keep them is dropped.
+
+    A locked cue takes a candidate whose own cue is within a bar of it, and the
+    other (unlocked) cue moves by the same time so the two songs' beats stay
+    as aligned as the candidate had them; an unlocked length then ends where
+    the songs do. A locked length takes any candidate both songs have room
+    for. A cut has no window to hold anything.
+    """
+    locked = set(override.locked)
+    reach = (LOCK_REACH_BARS * (outgoing.meter_numerator or 4) * 60.0 / outgoing.bpm) if outgoing.bpm else 0.25
+    held = []
+    for candidate in candidates:
+        rate = candidate.outgoing_rate
+        if candidate.strategy is TransitionStrategy.CUT or candidate.duration_seconds <= 0.0 or rate <= 0.0:
+            continue
+        out_shift = override.outgoing_cue - candidate.outgoing_source_time if "outgoing_cue" in locked else None
+        in_shift = override.incoming_cue - candidate.incoming_source_time if "incoming_cue" in locked else None
+        if any(abs(shift) > reach for shift in (out_shift, in_shift) if shift is not None):
+            continue
+        if out_shift is None:
+            out_shift = (in_shift or 0.0) * rate
+        if in_shift is None:
+            in_shift = out_shift / rate
+        cue = candidate.outgoing_source_time + out_shift
+        incoming_cue = candidate.incoming_source_time + in_shift
+        duration = override.duration if "duration" in locked else min(
+            candidate.duration_seconds, (outgoing.duration_seconds - cue) / rate,
+            incoming.duration_seconds - incoming_cue)
+        outgoing_out = cue + duration * rate
+        if (cue < 0.0 or incoming_cue < 0.0 or duration < MIN_MANUAL_OVERLAP_SECONDS
+                or outgoing_out > outgoing.duration_seconds + _GAP_EPSILON
+                or incoming_cue + duration > incoming.duration_seconds + _GAP_EPSILON):
+            continue
+        bar = (incoming.meter_numerator or 4) * 60.0 / incoming.bpm if incoming.bpm else None
+        held.append(replace(
+            candidate, outgoing_source_time=cue, outgoing_source_out=outgoing_out,
+            incoming_source_time=incoming_cue, duration_seconds=duration,
+            bars=round(duration / bar) if bar else candidate.bars,
+            score=candidate.score - LOCK_DISTANCE_WEIGHT * max(abs(out_shift), abs(in_shift) * rate) / reach,
+        ))
+    return held
 
 
 def _plan_manual(
@@ -419,8 +479,12 @@ def _plan_manual(
     ramp_floor: float,
     fallback: tuple[AudioRenderClip, float, float, AudioRenderTransition | None],
     log_diagnostics: bool = True,
+    recommendation: tuple[tuple[str, object], ...] = (),
 ) -> tuple[AudioRenderClip, float, float, AudioRenderTransition | None]:
     """``_plan_overlap`` for a junction the user set by hand.
+
+    ``recommendation``: extra details when a recommendation could not keep the
+    locked values and the stored ones play instead (see ``_plan_overlap``).
 
     The user's cues, length and style are kept as far as the two tracks
     allow: the cue never goes before the previous transition has finished
@@ -560,6 +624,7 @@ def _plan_manual(
         ("incoming_key", incoming_analysis.key if incoming_analysis is not None else None),
         ("key_shift_semitones", key_shift or None),
         *metrics,
+        *recommendation,
     )
     style_name = STYLE_EQ if band_windows is not None else dsp.value if dsp is not None else "legacy"
     transition = AudioRenderTransition(

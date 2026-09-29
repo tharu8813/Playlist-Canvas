@@ -311,6 +311,13 @@ class TransitionChip(QPushButton):
             return
         from app.widgets.transition_editor import style_label
 
+        if override.get("recommend"):  # still automatic, around values the user kept
+            self.setText("⟷ 자동 · 고정값 유지" if korean else "⟷ Auto · values kept")
+            self.setToolTip("AutoMix가 정하되 편집기에서 고정한 값은 그대로 둡니다. 클릭하면 편집하고, "
+                            "우클릭하면 고정까지 풀고 자동으로 되돌립니다." if korean else
+                            "AutoMix decides, keeping the values you kept in the editor. Click to edit; "
+                            "right-click to go fully automatic.")
+            return
         style = style_label(str(override.get("style", "auto")), korean)
         if override.get("style") == "cut":
             summary = style

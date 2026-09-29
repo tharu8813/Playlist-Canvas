@@ -44,6 +44,10 @@ EQ_BANDS = ("low", "mid", "high")
 """The renderer's crossover bands, in the order ``TransitionOverride.eq_bands`` stores them."""
 MIN_EQ_WINDOW = 0.02
 """Shortest band fade, as a fraction of the overlap (a zero-length afade is not a fade)."""
+LOCKABLE_FIELDS = ("outgoing_cue", "incoming_cue", "duration")
+"""What "keep this value" holds through a new automatic recommendation."""
+SONG_FIELDS = ("outgoing_cue", "incoming_cue")
+"""Where in each song the window sits: meaningful only for this pair of songs."""
 
 Window = tuple[float, float]
 BandWindows = tuple[tuple[Window, Window], ...]
@@ -82,6 +86,10 @@ class TransitionOverride:
     ``ramp_seconds``: with a tempo match (or key glide), how long -- in outgoing
     source seconds before the cue -- the outgoing track takes to reach the new
     tempo (0: at once; ``None``: automatic, 8 bars or 16 for a tempo bridge).
+    ``locked``: fields (LOCKABLE_FIELDS) the user asked to keep.
+    ``recommend``: the planner recommends everything not ``locked`` as for an
+    automatic junction, keeping the locked values; the stored values are what
+    plays when no recommendation can keep them (the plan says why).
     """
 
     outgoing_cue: float
@@ -97,6 +105,8 @@ class TransitionOverride:
     tape_entry: float = 0.6
     key_shift: int | None = None
     ramp_seconds: float | None = None
+    locked: tuple[str, ...] = ()
+    recommend: bool = False
 
     def __post_init__(self) -> None:
         if not _number(self.outgoing_cue) or self.outgoing_cue < 0.0:
@@ -131,6 +141,12 @@ class TransitionOverride:
             not _number(self.ramp_seconds) or not 0.0 <= self.ramp_seconds <= MAX_RAMP_SECONDS
         ):
             raise ValueError("Manual transition ramp_seconds must be between 0 and 120 seconds.")
+        if isinstance(self.locked, str) or not isinstance(self.locked, (tuple, list)) or not set(
+                self.locked) <= set(LOCKABLE_FIELDS):
+            raise ValueError("Manual transition locked must list outgoing_cue, incoming_cue or duration.")
+        object.__setattr__(self, "locked", tuple(name for name in LOCKABLE_FIELDS if name in self.locked))
+        if not isinstance(self.recommend, bool):
+            raise ValueError("Manual transition recommend must be a boolean.")
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -152,6 +168,10 @@ class TransitionOverride:
                 band: {"out": list(out_window), "in": list(in_window)}
                 for band, (out_window, in_window) in zip(EQ_BANDS, self.eq_bands)
             }
+        if self.locked:
+            data["locked"] = list(self.locked)
+        if self.recommend:
+            data["recommend"] = True
         return data
 
     @classmethod
@@ -172,6 +192,8 @@ class TransitionOverride:
             tape_entry=data.get("tape_entry", 0.6),
             key_shift=data.get("key_shift"),
             ramp_seconds=data.get("ramp_seconds"),
+            locked=data.get("locked", ()),
+            recommend=data.get("recommend", False),
         )
 
 

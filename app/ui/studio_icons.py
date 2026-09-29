@@ -34,6 +34,14 @@ def pin_icon() -> QIcon:
     return icon
 
 
+def lock_icon() -> QIcon:
+    """A checkable lock: open when off, closed in the accent colour when on."""
+    icon = QIcon(_pixmap('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>'))
+    icon.addPixmap(_pixmap('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+                           _PIN_ACCENT), QIcon.Mode.Normal, QIcon.State.On)
+    return icon
+
+
 _SOURCE_SHAPES = {
     "text": '<path d="M5 5h14 M12 5v14 M9 19h6"/>',
     "shape": '<rect x="3" y="10" width="10" height="10" rx="1"/><circle cx="16" cy="8" r="5"/>',
@@ -89,6 +97,11 @@ _MENU_SHAPES = {
     "check_updates": '<path d="M20 12a8 8 0 1 1-2.3-5.7 M20 4v5h-5"/>',
     "about": '<circle cx="12" cy="12" r="9"/><path d="M12 11v6 M12 7v1"/>',
     "clear": '<path d="M3 6h18 M9 6V3h6v3 M6 6l1 15h10l1-15"/>',
+    "undo": '<path d="M9 14 4 9l5-5 M4 9h11a5 5 0 0 1 0 10h-3"/>',
+    "redo": '<path d="m15 14 5-5-5-5 M20 9H9a5 5 0 0 0 0 10h3"/>',
+    "zoom_in": '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-5-5 M8 10.5h5 M10.5 8v5"/>',
+    "zoom_out": '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-5-5 M8 10.5h5"/>',
+    "more": '<path d="M5 12h.5 M12 12h.5 M19 12h.5"/>',
 }
 
 

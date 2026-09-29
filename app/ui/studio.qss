@@ -227,6 +227,21 @@ QToolButton#eqPresetButton:hover { background: @hover; border-color: #F5C66B; }
 #automixStateChip[state="ready"] { color: @accent; }
 #automixStateChip[state="waiting"], #automixStateChip[state="rendering"] { color: #F5C66B; }
 #automixStateChip[state="failed"], #automixStateChip[state="unavailable"] { color: #F29C9C; font-weight: 600; }
+#automixStateChip[state="stale"] { color: #F5C66B; font-weight: 600; }
+#automixEditor #selectionTitle { font-size: 15px; font-weight: 600; color: @text; }
+#automixEditor #changedMark { color: @accent; font-size: 11px; }
+#automixEditor QToolButton#lockButton { background: transparent; border: 1px solid @border; border-radius: 4px; padding: 2px 8px; color: @muted; }
+#automixEditor QToolButton#lockButton:hover { color: @text; border-color: @muted; }
+#automixEditor QToolButton#lockButton:checked { background: #304B44; color: @accent; border-color: @accent; }
+#automixEditor QToolButton#itemResetButton { background: transparent; border: 1px solid transparent; color: @muted; padding: 2px 6px; }
+#automixEditor QToolButton#itemResetButton:hover { color: @text; border-color: @border; }
+#automixEditor #automixNote { color: #F5C66B; background: #332D20; border-radius: 4px; padding: 6px 8px; }
+#automixEditor #automixSummary { color: @muted; border-left: 2px solid @accent; padding: 2px 0 2px 8px; }
+#automixEditor #automixMessage { color: @muted; }
+#automixEditor QToolButton#compareButton { border-radius: 0; padding: 5px 12px; }
+#automixEditor QToolButton#compareButton:checked { background: @accent; color: @window; border-color: @accent; font-weight: 600; }
+#automixEditor QToolButton#compareButton:disabled, #automixEditor QToolButton:disabled { color: @disabled_text; }
+#automixEditor QComboBox#snapCombo { min-width: 76px; }
 
 /* --- Scroll bars & splitters ---------------------------------- */
 #automixInspectorTitle { font-size: 20px; font-weight: 600; }

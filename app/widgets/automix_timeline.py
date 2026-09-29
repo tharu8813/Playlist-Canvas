@@ -33,21 +33,31 @@ from app.widgets.transition_inspector import (
     INCOMING_COLOR, OUTGOING_COLOR, PLAYHEAD_COLOR, Junction, _clock, _nice_step, mix_lanes,
 )
 
-HANDLE_COLOR = QColor("#FBBF24")
-SNAP_COLOR = QColor("#FDE68A")
+HANDLE_COLOR = QColor("#C9D0CE")
+"""Handles are neutral: orange and blue belong to the songs, the accent to the selection."""
+SNAP_COLOR = QColor("#E6E8E7")
+LOCK_COLOR = QColor("#A3AAA9")
 _BAND_LABELS = {"high": ("고음", "Highs"), "mid": ("중음", "Mids"), "low": ("저음", "Lows"),
                 "level": ("음량", "Level"), "sweep": ("하이패스", "Highpass"),
                 "echo": ("에코", "Echo"), "speed": ("속도·음높이", "Speed & pitch")}
+_KEYS = ("←/→ 한 박자 · Shift+←/→ 0.01초 · Esc 끌기 취소", "←/→ one beat · Shift+←/→ 0.01 s · Esc cancels a drag")
 _PART_TIPS = {
-    "start": ("믹스 시작 · 끌어서 위치와 길이 조정 (←/→ 한 박자, Shift: 자유)",
-              "Mix start · drag to move it and change the length (←/→ one beat, Shift: free)"),
+    "start": ("믹스 시작 · 끌어서 위치와 길이를 함께 조정", "Mix start · drag to move it and change the length"),
     "end": ("믹스 끝 · 끌어서 겹침 길이 조정", "Mix end · drag to change the overlap length"),
-    "move": ("겹침 구간 · 끌어서 길이는 그대로 옮기기", "Overlap · drag to move it, keeping its length"),
+    "move": ("전환 구간 · 끌어서 길이는 그대로 옮기기", "Transition · drag to move it, keeping its length"),
+    "outgoing": ("A 곡 · 끌면 A의 큐가 바뀌며 전환이 함께 움직입니다",
+                 "Track A · drag to change A's cue; the transition moves with it"),
     "incoming": ("B 곡 · 끌어서 들어오는 곡의 시작 지점 조정", "Track B · drag to change where it starts"),
-    "ramp": ("템포 변경 시작 · 끌어서 A가 B의 템포로 바뀌기 시작하는 지점 조정 (←/→ 한 박자, Shift: 자유)",
-             "Tempo change starts · drag to set where A starts easing onto B's tempo (←/→ one beat, Shift: free)"),
+    "ramp": ("템포 변경 시작 · 끌어서 A가 B의 템포로 바뀌기 시작하는 지점 조정",
+             "Tempo change starts · drag to set where A starts easing onto B's tempo"),
 }
-PARTS = ("start", "end", "move", "incoming", "ramp")
+PARTS = ("move", "start", "end", "outgoing", "incoming", "ramp")
+SIMPLE_PARTS = ("move", "start", "end")
+"""Simple mode edits where the transition sits and how long it is; the rest is advanced."""
+PART_SELECTION = {"move": "transition", "start": "transition", "end": "transition", "outgoing": "outgoing",
+                  "incoming": "incoming", "ramp": "tempo"}
+PART_FIELDS = {"move": ("outgoing_cue",), "start": ("outgoing_cue", "duration"), "end": ("duration",),
+               "outgoing": ("outgoing_cue",), "incoming": ("incoming_cue",), "ramp": ()}
 MARKER_TOP = 17.0
 """Marker labels start below the bar numbers along a lane's top edge."""
 MARKER_ROW = 15.0
@@ -107,19 +117,23 @@ class AutoMixTimeline(QWidget):
     seek_requested = Signal(float)
     drag_started = Signal(str)
     drag_moved = Signal(str, float, bool)
-    """(part, timeline seconds from where the drag began, free: Shift held)."""
+    """(part, timeline seconds from where the drag began, invert: Shift held -- snapping flips while held)."""
     drag_finished = Signal()
+    drag_cancelled = Signal()
+    """Esc during a drag: nothing changes, the view goes back to the committed plan."""
     bands_changed = Signal(object)
     nudge_requested = Signal(str, int, bool)
     """(part, direction -1/+1, fine: Shift held)."""
+    selection_changed = Signal(str)
+    """What the side panel should show (transition_editor.SELECTIONS)."""
 
     RULER = 34.0
     TRACK = 96.0
     BAND = 48.0
     GAP = 6.0
-    LABEL = 156.0
+    LABEL = 168.0
     RIGHT = 12.0
-    GRAB = 9.0
+    GRAB = 10.0
     BAR = 7.0
     MIN_SPAN = 1.5
 
@@ -141,6 +155,13 @@ class AutoMixTimeline(QWidget):
         self.drag_hint = ""
         self.snap_guide: float | None = None
         self.selected_part: str | None = None
+        self.selection = "transition"
+        self.snap_unit = "beat"
+        """"off", "beat" or "bar" (transition_editor.SNAP_UNITS): what band bars click onto."""
+        self.locked: tuple[str, ...] = ()
+        self.show_lanes = True
+        self.audition_stale = False
+        """The audio heard is an older edit than the one drawn."""
         self._hover: str | None = None
         self._press: tuple[str, QPointF] | None = None
         self._drag: tuple[str, float] | None = None
@@ -172,12 +193,40 @@ class AutoMixTimeline(QWidget):
 
     def set_advanced(self, advanced: bool) -> None:
         self.advanced = advanced
+        if not advanced and self.selected_part not in (None, *SIMPLE_PARTS):
+            self.selected_part = None
+        # Simple mode shows the transition selected; the advanced selection is kept for coming back.
         self._update_height()
         self.update()
 
+    def set_show_lanes(self, shown: bool) -> None:
+        self.show_lanes = shown
+        if not shown and self.selection.startswith("band:"):
+            self._select("transition")
+        self._update_height()
+        self.update()
+
+    def set_selection(self, selection: str) -> None:
+        """Select without telling anyone (the editor restoring its own state)."""
+        self.selection = selection
+        self.update()
+
+    def _select(self, selection: str) -> None:
+        if selection != self.selection:
+            self.selection = selection
+            self.selection_changed.emit(selection)
+        self.update()
+
+    def parts(self) -> tuple[str, ...]:
+        """The handles this mode offers (also the ↑/↓ keyboard order)."""
+        if not self.advanced:
+            return SIMPLE_PARTS
+        bands = tuple(f"band:{lane.key}" for lane in self.lanes() if self.editable_bands() and lane.key in EQ_BANDS)
+        return (*PARTS[:-1], *(("ramp",) if self._ramp_span() is not None else ()), *bands)
+
     def lanes(self):
         """The band lanes shown in advanced mode (``mix_lanes`` of the transition)."""
-        if not self.advanced or self.junction is None or self.junction.transition is None:
+        if not self.advanced or not self.show_lanes or self.junction is None or self.junction.transition is None:
             return []
         return mix_lanes(self.junction.transition)
 
@@ -186,8 +235,9 @@ class AutoMixTimeline(QWidget):
         return transition is not None and transition_dsp_style(transition) in BAND_ENVELOPES
 
     def _update_height(self) -> None:
-        lanes = len(self.lanes()) if self.advanced else 0
-        if self.advanced and lanes == 0:
+        shown = self.advanced and self.show_lanes
+        lanes = len(self.lanes()) if shown else 0
+        if shown and lanes == 0:
             lanes = 1  # the "no overlap" note
         height = self.RULER + 2 * (self.TRACK + self.GAP) + lanes * (self.BAND + self.GAP) + 10
         self.setMinimumHeight(int(height))
@@ -294,12 +344,16 @@ class AutoMixTimeline(QWidget):
         return QRectF(left, top, max(3.0, right - left), self.BAR)
 
     def hit(self, x: float, y: float) -> tuple[str, ...] | None:
-        """What is under (x, y): ("start"|"end"|"move"|"incoming",) or ("band", band, side, kind)."""
+        """What is under (x, y): (part,) for a PARTS handle, ("band", band, side, kind) for a band
+        bar, ("lane", band) for the rest of a band lane; None for empty space (a click there seeks)."""
         junction = self.junction
         if junction is None or x < self.LABEL:
             return None
-        if self.editable_bands():
-            for lane_index, lane in enumerate(self.lanes(), start=2):
+        for lane_index, lane in enumerate(self.lanes(), start=2):
+            top = self._lane_top(lane_index)
+            if not top <= y <= top + self.BAND:
+                continue
+            if self.editable_bands():
                 for side in ("out", "in"):
                     rect = self._band_bar(lane_index, lane.key, side)
                     if rect is None or not rect.top() - 4 <= y <= rect.bottom() + 4:
@@ -310,11 +364,12 @@ class AutoMixTimeline(QWidget):
                         return ("band", lane.key, side, "end")
                     if rect.left() < x < rect.right():
                         return ("band", lane.key, side, "move")
-        top, bottom = self.RULER - 14, self._tracks_bottom()
+            return ("lane", lane.key) if lane.key in EQ_BANDS else None
+        top, bottom = self.RULER - 16, self._tracks_bottom()
         if not top <= y <= bottom:
             return None
         start, end = self.x_of(junction.start), self.x_of(junction.end)
-        ramp = self._ramp_span()
+        ramp = self._ramp_span() if self.advanced else None
         lane_bottom = self._lane_top(0) + self.track_height
         if ramp is not None and self._lane_top(0) <= y <= lane_bottom and abs(x - self.x_of(ramp[0])) <= self.GRAB:
             # Beside the mix start handle, its grip at the bottom of track A decides.
@@ -327,13 +382,17 @@ class AutoMixTimeline(QWidget):
                 return ("end",)
         elif abs(x - start) <= self.GRAB and y < self._lane_top(1):
             return ("move",)
+        if y < self.RULER:
+            return None  # the ruler seeks
         incoming_top = self._lane_top(1)
-        if incoming_top <= y <= bottom:
+        if incoming_top <= y <= bottom and self.advanced:
             clip = junction.incoming
             if self.x_of(clip.timeline_start) - 2 <= x <= self.x_of(clip.timeline_end) + 2:
                 return ("incoming",)
         if start <= x <= end and y < incoming_top:
             return ("move",)
+        if self.advanced and y < incoming_top and self.x_of(junction.outgoing.timeline_start) <= x <= start:
+            return ("outgoing",)
         return None
 
     # -- mouse -----------------------------------------------------------------------
@@ -348,12 +407,16 @@ class AutoMixTimeline(QWidget):
             return
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         hit = self.hit(position.x(), position.y())
-        if hit is not None and hit[0] == "band":
-            self._band_drag = (hit[1], hit[2], hit[3], position.x(), self._bands)
-            self._frozen = self._view
+        if hit is not None and hit[0] in ("band", "lane"):
+            self.selected_part = f"band:{hit[1]}"
+            self._select(f"band:{hit[1]}")
+            if hit[0] == "band":
+                self._band_drag = (hit[1], hit[2], hit[3], position.x(), self._bands)
+                self._frozen = self._view
             return
         if hit is not None:
             self.selected_part = hit[0]
+            self._select(PART_SELECTION[hit[0]])
             self._press = (hit[0], position)
             self._frozen = self._view
             self.update()
@@ -412,20 +475,50 @@ class AutoMixTimeline(QWidget):
         elif press is not None:
             self.update()  # a click on a handle only selects it
 
+    def cancel_drag(self) -> bool:
+        """Drop a drag in flight (Esc): nothing is committed. False if there was none."""
+        if self._drag is None and self._band_drag is None and self._press is None:
+            return False
+        dragging = self._drag is not None or self._band_drag is not None
+        if self._band_drag is not None:
+            self._bands = self._band_drag[4]
+        self._drag = self._band_drag = self._press = None
+        self._frozen = None
+        self.drag_hint = ""
+        self.snap_guide = None
+        self.unsetCursor()
+        if dragging:
+            self.drag_cancelled.emit()
+        self.update()
+        return dragging
+
     def _hover_at(self, position: QPointF, global_position) -> None:
         hit = self.hit(position.x(), position.y())
         hover = None if hit is None else ":".join(hit)
+        locked = hit is not None and any(name in self.locked for name in PART_FIELDS.get(hit[0], ()))
         if hover != self._hover:
             self._hover = hover
-            if hit is None:
+            if hit is None or hit[0] == "lane":
                 self.unsetCursor()
+            elif locked:
+                self.setCursor(Qt.CursorShape.ForbiddenCursor)
             elif hit[0] in ("start", "end", "ramp") or (hit[0] == "band" and hit[3] != "move"):
                 self.setCursor(Qt.CursorShape.SizeHorCursor)
             else:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             self.update()
+        keys = _KEYS[0 if self.korean else 1]
         if hit is not None and hit[0] in _PART_TIPS:
-            QToolTip.showText(global_position, _PART_TIPS[hit[0]][0 if self.korean else 1], self)
+            tip = _PART_TIPS[hit[0]][0 if self.korean else 1]
+            if locked:
+                tip += (" · 고정됨: 속성 패널에서 고정을 풀면 움직일 수 있습니다" if self.korean
+                        else " · kept: unlock it in the properties panel to move it")
+            QToolTip.showText(global_position, f"{tip}\n{keys}", self)
+        elif hit is not None and hit[0] == "lane":
+            korean, english = _BAND_LABELS[hit[1]]
+            QToolTip.showText(global_position, (f"{korean} 대역 · 클릭해서 선택하면 속성 패널에서 수치로 조절합니다"
+                                                if self.korean else
+                                                f"{english} band · click to select it and set it in the panel"), self)
         elif hit is not None:
             korean, english = _BAND_LABELS[hit[1]]
             QToolTip.showText(global_position, (
@@ -461,6 +554,8 @@ class AutoMixTimeline(QWidget):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
         fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if key == Qt.Key.Key_Escape and self.cancel_drag():
+            return
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right) and not event.modifiers() & (
                 Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier):
             direction = -1 if key == Qt.Key.Key_Left else 1
@@ -469,30 +564,34 @@ class AutoMixTimeline(QWidget):
             else:
                 self.pan(0.1 * direction)
         elif key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
-            order = [None, *PARTS]
+            order = [None, *self.parts()]
             index = order.index(self.selected_part) if self.selected_part in order else 0
             self.selected_part = order[(index + (1 if key == Qt.Key.Key_Down else -1)) % len(order)]
-            self.update()
+            part = self.selected_part
+            self._select("transition" if part is None else part if part.startswith("band:") else PART_SELECTION[part])
         elif key == Qt.Key.Key_Escape and self.selected_part is not None:
             self.selected_part = None
             self.update()
         else:
             super().keyPressEvent(event)
 
-    def _dragged_bands(self, x: float, free: bool) -> BandWindows:
+    def _dragged_bands(self, x: float, invert: bool) -> BandWindows:
+        """The band windows under a bar drag to ``x``; snapping follows ``snap_unit``, flipped while Shift is held."""
         band, side, kind, press_x, base = self._band_drag
         junction = self.junction
         length = max(1e-6, junction.end - junction.start)
         delta = (self.seconds_at(x) - self.seconds_at(press_x)) / length
         out_window, in_window = base[EQ_BANDS.index(band)]
         own = out_window if side == "out" else in_window
-        if not free:  # the moving edge clicks onto a beat, or the window's start, middle or end
+        if (self.snap_unit != "off") != invert:  # the edge clicks onto a beat/bar, or the window's start, middle, end
             anchor = own[1] if kind == "end" else own[0]
             reach = 8.0 * self.seconds_per_pixel() / length
             points = [0.0, 0.5, 1.0]
             incoming = self.analyses[1]
             if incoming is not None and incoming.bpm:
                 beat = 60.0 / incoming.bpm / length
+                if self.snap_unit == "bar":
+                    beat *= incoming.meter_numerator or 4
                 points.append(round((anchor + delta) / beat) * beat)
             nearest = min(points, key=lambda point: abs(point - anchor - delta))
             if abs(nearest - anchor - delta) <= reach:
@@ -515,6 +614,7 @@ class AutoMixTimeline(QWidget):
                     else self._hover if self._hover is not None and self._hover.startswith("band") else None)
         objects = (junction, *self.analyses, *(self.peaks.get(track_id) for track_id in ids))
         values = (self.width(), self.height(), self.devicePixelRatioF(), self.view(), self.draft, self.advanced,
+                  self.show_lanes, self.audition_stale,
                   self._bands, band_hot, self.korean, self.audition, self.loop,
                   tuple(track_id in self.peaks for track_id in ids),
                   tuple(self.titles.get(track_id) for track_id in ids),
@@ -593,6 +693,7 @@ class AutoMixTimeline(QWidget):
         bottom = (self._lane_top(2 + len(lanes)) - self.GAP) if lanes else self._tracks_bottom()
         painter.save()
         painter.setClipRect(QRectF(left, 0, right - left, self.height()))
+        self._paint_selection(painter, lanes)
         self._paint_handles(painter, bottom)
         if self.snap_guide is not None:
             x = self.x_of(self.snap_guide)
@@ -608,35 +709,108 @@ class AutoMixTimeline(QWidget):
             head.closeSubpath()
             painter.fillPath(head, PLAYHEAD_COLOR)
         painter.restore()
-        if self.drag_hint and self.dragging:
-            metrics = painter.fontMetrics()
-            width = metrics.horizontalAdvance(self.drag_hint) + 18
-            box = QRectF(max(left, right - width), 2, width, 22)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(12, 14, 16, 225))
-            painter.drawRoundedRect(box, 5, 5)
-            painter.setPen(SNAP_COLOR)
-            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, self.drag_hint)
+        self._paint_selection_name(painter)
+        if self.drag_hint and (self.dragging or self._press is not None):
+            self._paint_hint(painter, left, right)
         if self.hasFocus():
-            painter.setPen(QPen(palette.highlight().color(), 1))
+            painter.setPen(QPen(palette.highlight().color(), 1, Qt.PenStyle.DotLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1))
+
+    def _selection_rect(self, lanes) -> QRectF | None:
+        """The selected target's outline, in widget coordinates."""
+        junction = self.junction
+        selection = self.selection if self.advanced else "transition"
+        if selection == "transition":
+            x0, x1 = self.x_of(junction.start), self.x_of(junction.end)
+            return QRectF(x0 - 3, self.RULER + 1, max(6.0, x1 - x0 + 6), self._tracks_bottom() - self.RULER)
+        if selection in ("outgoing", "incoming"):
+            clip, lane = (junction.outgoing, 0) if selection == "outgoing" else (junction.incoming, 1)
+            x0, x1 = self.x_of(clip.timeline_start), self.x_of(clip.timeline_end)
+            return QRectF(x0, self._lane_top(lane) - 1, x1 - x0, self.track_height + 2)
+        if selection == "tempo":
+            ramp = self._ramp_span()
+            if ramp is None:
+                return None
+            x0, x1 = self.x_of(ramp[0]), self.x_of(ramp[1])
+            return QRectF(x0 - 3, self._lane_top(0) - 1, max(6.0, x1 - x0 + 6), self.track_height + 2)
+        for lane_index, lane in enumerate(lanes, start=2):
+            if selection == f"band:{lane.key}":
+                return QRectF(self.LABEL, self._lane_top(lane_index) - 1,
+                              self._plot()[1] - self.LABEL, self.BAND + 2)
+        return None
+
+    def _paint_selection(self, painter: QPainter, lanes) -> None:
+        rect = self._selection_rect(lanes)
+        if rect is None:
+            return
+        accent = QColor(self.palette().highlight().color())
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(accent, 2.0, Qt.PenStyle.DashLine if self.draft else Qt.PenStyle.SolidLine))
+        painter.drawRoundedRect(rect, 3, 3)
+
+    def _paint_selection_name(self, painter: QPainter) -> None:
+        """What is selected, named, in the corner above the track labels (never over the audio)."""
+        from app.widgets.transition_editor import selection_name
+
+        palette = self.palette()
+        box = QRectF(0, 0, self.LABEL - 4, self.RULER)
+        painter.fillRect(box, palette.alternateBase())
+        selection = self.selection if self.advanced else "transition"
+        painter.setPen(palette.placeholderText().color())
+        painter.drawText(box.adjusted(10, 2, -4, -box.height() / 2), Qt.AlignmentFlag.AlignBottom,
+                         "선택" if self.korean else "Selected")
+        bold = QFont(painter.font())
+        bold.setBold(True)
+        painter.setFont(bold)
+        painter.setPen(palette.highlight().color())
+        name = QFontMetrics(bold).elidedText(selection_name(selection, self.korean), Qt.TextElideMode.ElideRight,
+                                             int(box.width() - 14))
+        painter.drawText(box.adjusted(10, box.height() / 2, -4, -2), Qt.AlignmentFlag.AlignTop, name)
+        painter.setFont(self._small_font())
+
+    def _paint_hint(self, painter: QPainter, left: float, right: float) -> None:
+        """The value under a drag (and how far it moved), next to the handle being dragged."""
+        metrics = painter.fontMetrics()
+        width = metrics.horizontalAdvance(self.drag_hint) + 18
+        anchor = self.x_of(self.snap_guide) if self.snap_guide is not None else self._drag_x()
+        x = min(max(left, anchor + 10), right - width) if anchor is not None else right - width
+        box = QRectF(max(left, x), 2, width, 22)
+        painter.setPen(QPen(self.palette().highlight().color(), 1))
+        painter.setBrush(QColor(12, 14, 16, 235))
+        painter.drawRoundedRect(box, 5, 5)
+        painter.setPen(SNAP_COLOR)
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, self.drag_hint)
+
+    def _drag_x(self) -> float | None:
+        junction = self.junction
+        part = self._drag[0] if self._drag is not None else None
+        if part in ("move", "start", "outgoing"):
+            return self.x_of(junction.start)
+        if part == "end":
+            return self.x_of(junction.end)
+        if part == "incoming":
+            return self.x_of(junction.incoming.timeline_start)
+        if part == "ramp" and self._ramp_span() is not None:
+            return self.x_of(self._ramp_span()[0])
+        return None
 
     def _paint_ruler(self, painter: QPainter, left: float, right: float) -> None:
         palette = self.palette()
         muted = palette.placeholderText().color()
         painter.fillRect(QRectF(left, 0, right - left, self.RULER), palette.base())
         start, end = self.view()
-        if self.audition is not None:
+        if self.audition is not None:  # the window heard: solid when current, dashed while an older edit plays
             a, b = self.audition
             x0, x1 = max(left, self.x_of(a)), min(right, self.x_of(b))
             if x1 > x0:
-                color = QColor(palette.highlight().color())
-                color.setAlpha(170 if self.loop else 80)
-                painter.fillRect(QRectF(x0, self.RULER - 5, x1 - x0, 4), color)
-        painter.setPen(muted)
-        painter.drawText(QRectF(8, 0, self.LABEL - 16, self.RULER), Qt.AlignmentFlag.AlignVCenter,
-                         "믹스 시간" if self.korean else "Mix time")
+                color = QColor(palette.highlight().color() if not self.audition_stale else QColor("#F5C66B"))
+                color.setAlpha(170 if self.loop else 90)
+                if self.audition_stale:
+                    painter.setPen(QPen(color, 3, Qt.PenStyle.DashLine))
+                    painter.drawLine(QPointF(x0, self.RULER - 3), QPointF(x1, self.RULER - 3))
+                else:
+                    painter.fillRect(QRectF(x0, self.RULER - 5, x1 - x0, 4), color)
         step = _nice_step(end - start, right - left)
         tick = math.ceil(start / step) * step
         painter.save()
@@ -709,10 +883,11 @@ class AutoMixTimeline(QWidget):
         if analysis is not None and analysis.bpm and x1 - x0 >= 1.0:
             bar = (analysis.meter_numerator or 4) * 60.0 / analysis.bpm
             bars = f" · {(ramp.source_end - ramp.source_start) / bar:.1f}" + ("마디" if self.korean else " bars")
-        painter.setPen(color.lighter(135))
         label = ("템포 변경 " if self.korean else "Tempo ") + text + bars
-        painter.drawText(QRectF(max(x0, left) + 6, lane_bottom - RAMP_GRIP - 16, 320, 14),
-                         Qt.AlignmentFlag.AlignLeft, label)
+        box = QRectF(max(x0, left) + 6, lane_bottom - RAMP_GRIP - 18, painter.fontMetrics().horizontalAdvance(label) + 10, 16)
+        painter.fillRect(box, QColor(17, 19, 20, 200))  # legible over the waveform
+        painter.setPen(color.lighter(135))
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, label)
 
     def _paint_track_label(self, painter: QPainter, lane: int, clip: AudioRenderClip,
                            analysis: TrackAnalysis | None, color: QColor, letter: str) -> None:
@@ -733,17 +908,22 @@ class AutoMixTimeline(QWidget):
                                               Qt.TextElideMode.ElideRight, width)
         painter.drawText(QRectF(38, top + 10, width, 22), Qt.AlignmentFlag.AlignVCenter, title)
         painter.setFont(QFont(self.font()))
-        painter.setPen(palette.placeholderText().color())
+        painter.setPen(color.lighter(115))
         role = ("나가는 곡" if lane == 0 else "들어오는 곡") if self.korean else ("Outgoing" if lane == 0 else "Incoming")
-        facts = [role]
+        painter.drawText(QRectF(12, top + 36, self.LABEL - 22, 18), Qt.AlignmentFlag.AlignVCenter, role)
+        painter.setPen(palette.placeholderText().color())
+        facts = []
         if analysis is not None and analysis.bpm:
             facts.append(f"{analysis.bpm:.1f} BPM")
         if analysis is not None and analysis.key:
             facts.append(analysis.key)
-        painter.drawText(QRectF(12, top + 38, self.LABEL - 22, 18), Qt.AlignmentFlag.AlignVCenter, " · ".join(facts))
         if analysis is None:
-            painter.drawText(QRectF(12, top + 56, self.LABEL - 22, 18), Qt.AlignmentFlag.AlignVCenter,
-                             "박자 분석 없음" if self.korean else "No beat analysis")
+            facts.append("박자 분석 없음" if self.korean else "No beat analysis")
+        elif analysis.beat_alignment_quality() != "reliable":
+            facts.append("박자 불확실" if self.korean else "beats uncertain")
+        text = QFontMetrics(painter.font()).elidedText(" · ".join(facts), Qt.TextElideMode.ElideRight,
+                                                       int(self.LABEL - 22))
+        painter.drawText(QRectF(12, top + 54, self.LABEL - 22, 18), Qt.AlignmentFlag.AlignVCenter, text)
 
     def _paint_grid(self, painter: QPainter, clip: AudioRenderClip, analysis: TrackAnalysis | None,
                     color: QColor, top: float) -> None:
@@ -862,14 +1042,33 @@ class AutoMixTimeline(QWidget):
         painter.setPen(QColor("#111314"))
         painter.drawText(flag, Qt.AlignmentFlag.AlignCenter, text)
 
+    def _handle_color(self, state: str, locked: bool) -> QColor:
+        """Idle handles are neutral, hovered ones brighter, selected or dragged ones the accent; kept ones dim."""
+        if locked:
+            return LOCK_COLOR
+        if state in ("drag", "selected"):
+            return QColor(self.palette().highlight().color())
+        return QColor("#FFFFFF") if state == "hover" else HANDLE_COLOR
+
+    def _paint_lock(self, painter: QPainter, x: float, y: float) -> None:
+        """A small padlock (a kept value), its body centred on (x, y)."""
+        painter.save()
+        painter.setPen(QPen(QColor("#111314"), 1.0))
+        painter.setBrush(LOCK_COLOR)
+        painter.drawRoundedRect(QRectF(x - 4.5, y - 2, 9, 7), 1.5, 1.5)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(LOCK_COLOR, 1.6))
+        painter.drawArc(QRectF(x - 3, y - 7, 6, 8), 0, 180 * 16)
+        painter.restore()
+
     def _paint_handles(self, painter: QPainter, bottom: float) -> None:
         junction = self.junction
         tracks_bottom = self._tracks_bottom()
-        outline = QColor(HANDLE_COLOR)
-        outline.setAlpha(210)
         if junction.end > junction.start:
             x0, x1 = self.x_of(junction.start), self.x_of(junction.end)
-            painter.setPen(QPen(outline, 1.3, Qt.PenStyle.DashLine if self.draft else Qt.PenStyle.SolidLine))
+            outline = QColor(HANDLE_COLOR)
+            outline.setAlpha(120)
+            painter.setPen(QPen(outline, 1.0, Qt.PenStyle.DashLine if self.draft else Qt.PenStyle.SolidLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(QRectF(x0, self.RULER + 2, x1 - x0, tracks_bottom - self.RULER - 2))
             parts = (("start", x0), ("end", x1))
@@ -877,28 +1076,38 @@ class AutoMixTimeline(QWidget):
             parts = (("move", self.x_of(junction.start)),)
         for part, x in parts:
             state = self._part_state(part)
-            color = HANDLE_COLOR.lighter(125) if state in ("hover", "drag", "selected") else HANDLE_COLOR
-            width = 4.0 if state == "idle" else 6.0
+            locked = any(name in self.locked for name in PART_FIELDS[part])
+            color = self._handle_color(state, locked)
+            width = 3.0 if state == "idle" else 5.0
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
             painter.drawRect(QRectF(x - width / 2, self.RULER, width, tracks_bottom - self.RULER))
-            grip = QRectF(x - 7, self.RULER - 15, 14, 15)
+            grip = QRectF(x - 8, self.RULER - 16, 16, 16)
             painter.drawRoundedRect(grip, 3, 3)
-            painter.setPen(QPen(QColor("#111314"), 1))
-            for offset in (-2.5, 0.0, 2.5):
-                painter.drawLine(QPointF(x + offset, grip.top() + 4), QPointF(x + offset, grip.bottom() - 4))
+            if locked:
+                self._paint_lock(painter, x, grip.center().y() + 1)
+            else:
+                painter.setPen(QPen(QColor("#111314"), 1))
+                for offset in (-2.5, 0.0, 2.5):
+                    painter.drawLine(QPointF(x + offset, grip.top() + 4), QPointF(x + offset, grip.bottom() - 4))
             if state == "selected" and self.hasFocus():
                 painter.setPen(QPen(self.palette().text().color(), 1.2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRoundedRect(grip.adjusted(-3, -3, 3, 3), 4, 4)
+        if "incoming_cue" in self.locked:
+            self._paint_lock(painter, self.x_of(junction.incoming.timeline_start) + 10, self._lane_top(1) + 12)
         ramp = self._ramp_span()
-        if ramp is not None:  # where A starts easing onto the new tempo: a dashed line with a grip
+        if ramp is not None:  # where A starts easing onto the new tempo: a dashed line (with a grip in advanced)
             x = self.x_of(ramp[0])
             lane_bottom = self._lane_top(0) + self.track_height
             state = self._part_state("ramp")
-            color = OUTGOING_COLOR.lighter(150 if state != "idle" else 125)
+            color = (OUTGOING_COLOR.lighter(125) if state == "idle"
+                     else self._handle_color(state, False))
             painter.setPen(QPen(color, 2.0 if state != "idle" else 1.3, Qt.PenStyle.DashLine))
             painter.drawLine(QPointF(x, self._lane_top(0) + 1), QPointF(x, lane_bottom - 1))
+            if not self.advanced:
+                ramp = None
+        if ramp is not None:
             grip = QRectF(x - 8, lane_bottom - RAMP_GRIP + 2, 16, RAMP_GRIP - 6)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
@@ -913,14 +1122,16 @@ class AutoMixTimeline(QWidget):
                 painter.setPen(QPen(self.palette().text().color(), 1.2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRoundedRect(grip.adjusted(-3, -3, 3, 3), 4, 4)
-        for part, lane in (("move", 0), ("incoming", 1)):
+        for part, lane in (("move", 0), ("outgoing", 0), ("incoming", 1)):  # what a drag here would move
             state = self._part_state(part)
-            if state == "idle" or (part == "move" and junction.end <= junction.start):
+            if state not in ("hover", "drag") or (part == "move" and junction.end <= junction.start):
                 continue
-            clip = junction.incoming
+            clip = junction.incoming if part == "incoming" else junction.outgoing
             x0, x1 = ((self.x_of(junction.start), self.x_of(junction.end)) if part == "move"
                       else (self.x_of(clip.timeline_start), self.x_of(clip.timeline_end)))
-            painter.setPen(QPen(HANDLE_COLOR.lighter(120), 2.0 if state == "drag" else 1.4))
+            locked = any(name in self.locked for name in PART_FIELDS[part])
+            painter.setPen(QPen(self._handle_color(state, locked), 2.0 if state == "drag" else 1.2,
+                                Qt.PenStyle.DotLine if state == "hover" else Qt.PenStyle.SolidLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(QRectF(x0, self._lane_top(lane) + 1, x1 - x0, self.track_height - 2))
 

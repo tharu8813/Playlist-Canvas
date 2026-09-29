@@ -411,8 +411,59 @@ class TempoRampStartTests(unittest.TestCase):
         self.assertLess(timeline.view()[0], ramp_start)
         x = timeline.x_of(ramp_start)
         grip_y = timeline._lane_top(0) + timeline.track_height - RAMP_GRIP / 2
+        self.assertIsNone(timeline.hit(x, grip_y))  # simple mode shows the ramp but offers no handle
+        timeline.set_advanced(True)
         self.assertEqual(timeline.hit(x, grip_y), ("ramp",))
         timeline.grab()  # paints the ramp band and its handle without error
+
+class KeptValueTests(unittest.TestCase):
+    """"Keep this value": saved with the junction, and held by the planner's own recommendation."""
+
+    def _plan(self, override):
+        tracks = _tracks()
+        plan = compile_automix(tracks, _analyses(tracks), _manual(ENABLED, **{"a>b": override}))
+        return plan.audio.transitions[0]
+
+    def test_kept_values_and_the_recommend_mode_are_saved_and_loaded(self) -> None:
+        kept = TransitionOverride(150.0, 1.0, 12.0, locked=["duration", "outgoing_cue"], recommend=True)
+        self.assertEqual(kept.locked, ("outgoing_cue", "duration"))  # normalized order
+        self.assertEqual(parse_overrides({"a>b": kept.to_dict()})["a>b"], kept)
+        document = ProjectDocument(settings=ProjectSettings(automix_overrides={"a>b": kept.to_dict()}))
+        restored = automix_settings_for(ProjectDocument.from_dict(document.to_dict()).settings)
+        self.assertEqual(restored.override_for("a", "b"), kept)
+        self.assertNotIn("locked", TransitionOverride(150.0).to_dict())  # old files stay as they were
+        with self.assertRaises(ValueError):
+            TransitionOverride(150.0, locked=("style",))
+
+    def test_a_new_recommendation_keeps_a_kept_length(self) -> None:
+        automatic = compile_automix(_tracks(), _analyses(_tracks()), ENABLED).audio.transitions[0]
+        transition = self._plan(TransitionOverride(10.0, 0.0, 12.0, style="echo_out",
+                                                   locked=("duration",), recommend=True))
+        details = dict(transition.details)
+        self.assertEqual((details["mode"], details["recommendation"]), ("auto", "locked"))
+        self.assertAlmostEqual(transition.duration, 12.0, places=6)
+        self.assertNotEqual(transition.dsp, TransitionDsp.ECHO_OUT)  # unkept values follow analysis
+        self.assertNotAlmostEqual(automatic.duration, 12.0)
+
+    def test_a_kept_cue_no_recommendation_can_hold_plays_as_saved_and_says_why(self) -> None:
+        transition = self._plan(TransitionOverride(50.0, 0.0, 12.0, style="short_fade",
+                                                   locked=("outgoing_cue",), recommend=True))
+        details = dict(transition.details)
+        self.assertEqual((details["mode"], details["recommendation"]), ("manual", "no_fit"))
+        self.assertAlmostEqual(details["outgoing_cue"], 50.0)  # nothing was quietly moved
+        self.assertEqual(transition.dsp, TransitionDsp.SHORT_FADE)
+        self.assertGreater(details["nearest_outgoing_cue"], 100.0)  # what analysis would pick instead
+
+    def test_a_kept_cue_near_a_recommendation_moves_the_other_cue_with_it(self) -> None:
+        automatic = dict(compile_automix(_tracks(), _analyses(_tracks()), ENABLED).audio.transitions[0].details)
+        cue = automatic["outgoing_cue"] + 1.0  # half a bar after what analysis picked (120 BPM)
+        transition = self._plan(TransitionOverride(cue, 0.0, 8.0, locked=("outgoing_cue",), recommend=True))
+        details = dict(transition.details)
+        self.assertEqual(details["recommendation"], "locked")
+        self.assertAlmostEqual(details["outgoing_cue"], cue, places=6)
+        self.assertAlmostEqual(details["incoming_cue"], automatic["incoming_cue"] + 1.0, places=6)  # beats aligned
+        self.assertLessEqual(details["outgoing_cut"], 200.0 + 1e-6)  # the window ends with the song
+
 
 class MarkerLabelTests(unittest.TestCase):
     def test_close_labels_stack_instead_of_overlapping(self) -> None:
