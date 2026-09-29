@@ -25,6 +25,7 @@ class ProjectContentService(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._items: list[ProjectContent] = []
+        self._listed: set[str] = set()  # raw paths known to be in the library
 
     @property
     def items(self) -> list[ProjectContent]:
@@ -32,19 +33,27 @@ class ProjectContentService(QObject):
 
     def replace(self, items: Iterable[ProjectContent]) -> None:
         self._items = list(items)
+        self._listed.clear()
         self._deduplicate()
         self.changed.emit()
 
     def add_paths(self, paths: Iterable[str | Path]) -> int:
-        existing = {self._key(item.path) for item in self._items}
+        existing: set[str] | None = None
         added = 0
         for raw_path in paths:
+            # Every source edit re-synchronizes: skip paths already in the library
+            # without touching the disk again.
+            if str(raw_path) in self._listed:
+                continue
+            if existing is None:
+                existing = {self._key(item.path) for item in self._items}
             path = Path(raw_path).expanduser()
             media_type = self.classify(path)
             if not path.is_file() or media_type is None:
                 continue
             resolved = str(path.resolve())
             key = self._key(resolved)
+            self._listed.add(str(raw_path))
             if key in existing:
                 continue
             self._items.append(ProjectContent(resolved, media_type, path.stem))
@@ -58,6 +67,7 @@ class ProjectContentService(QObject):
         remaining = [item for item in self._items if item.id != content_id]
         if len(remaining) != len(self._items):
             self._items = remaining
+            self._listed.clear()
             self.changed.emit()
 
     def synchronize(self, document: ProjectDocument) -> None:

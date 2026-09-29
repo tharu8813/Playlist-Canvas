@@ -6,14 +6,18 @@ from base64 import b64decode
 from collections import Counter
 from functools import lru_cache
 from math import sin
+import os
 from pathlib import Path
+from stat import S_ISREG
 
 from mutagen import File as MutagenFile
 from mutagen import MutagenError
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
 from PySide6.QtGui import (
     QBrush, QColor, QImage, QImageReader, QPainter, QPixmap, QRadialGradient,
 )
+
+from app.video.frame_filter import apply_color_filters
 
 
 def extract_embedded_cover(audio_path: str | Path) -> QPixmap:
@@ -46,6 +50,80 @@ def extract_track_cover(
         except OSError:
             pass
     return extract_embedded_cover(audio_path)
+
+
+# Lists show covers at up to 46 px; twice that stays sharp on a 2x display.
+THUMBNAIL_EDGE = 96
+
+
+def track_cover_thumbnail(
+    audio_path: str | Path, cover_path: str | Path = "", edge: int = THUMBNAIL_EDGE,
+) -> QPixmap:
+    """A small cover for lists, decoded straight at ``edge`` px (never at full size).
+
+    Covering ``edge`` x ``edge``; a null pixmap when there is no artwork.
+    """
+    image = prewarm_cover_thumbnail(audio_path, cover_path, edge)
+    return QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+
+
+def prewarm_cover_thumbnail(
+    audio_path: str | Path, cover_path: str | Path = "", edge: int = THUMBNAIL_EDGE,
+) -> QImage:
+    """The cached thumbnail as a QImage; safe off the GUI thread (no QPixmap)."""
+    source = _cover_source(audio_path, cover_path)
+    return QImage() if source is None else _cached_thumbnail(*source, max(1, int(edge)))
+
+
+def _cover_source(
+    audio_path: str | Path, cover_path: str | Path = "",
+) -> tuple[str, bool, int, int] | None:
+    """``(path, is image file, mtime_ns, size)`` of the artwork a track shows.
+
+    One stat per file (lists call this for every row): the path is only made
+    absolute, not resolved -- the stat already tells a changed file apart.
+    """
+    for path, direct_image in ((cover_path, True), (audio_path, False)):
+        if not path:
+            continue
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        if S_ISREG(stat.st_mode):
+            return os.path.abspath(path), direct_image, stat.st_mtime_ns, stat.st_size
+    return None
+
+
+def _read_scaled(reader: QImageReader, edge: int) -> QImage:
+    size = reader.size()
+    if size.isValid():
+        # JPEG decodes at 1/2, 1/4, 1/8 scale: far faster than decoding and shrinking.
+        reader.setScaledSize(size.scaled(
+            QSize(edge, edge), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        ))
+    image = reader.read()
+    return image if not image.isNull() else QImage()
+
+
+@lru_cache(maxsize=512)
+def _cached_thumbnail(
+    source_path: str, direct_image: bool, _modified_ns: int, _file_size: int, edge: int,
+) -> QImage:
+    if direct_image:
+        return _read_scaled(QImageReader(source_path), edge)
+    try:
+        audio = MutagenFile(source_path)
+    except (MutagenError, OSError):
+        return QImage()
+    for data in _cover_candidates(audio) if audio is not None else ():
+        buffer = QBuffer()
+        buffer.setData(QByteArray(data))
+        buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        image = _read_scaled(QImageReader(buffer), edge)
+        if not image.isNull():
+            return image
+    return QImage()
 
 
 def extract_track_personal_color(
@@ -199,11 +277,15 @@ def create_ambient_background(cover: QPixmap, width: int, height: int,
 def create_cached_ambient_background(audio_path: str | Path, width: int, height: int,
                                      blur_radius: float = 24.0,
                                      cover_path: str | Path = "",
-                                     phase: float = 0.0) -> QPixmap:
+                                     phase: float = 0.0, *,
+                                     brightness: float = 0.0,
+                                     contrast: float = 0.0) -> QPixmap:
     """Return the ambient backdrop for one instant, reusing cached work.
 
     Palette extraction is cached per artwork; the drifting field is cached per
     quantised ``phase`` step so paused playback and repeated frames are free.
+    ``brightness``/``contrast`` (the source's image filters) are applied to the
+    small field before the upscale: the same look for a fraction of the pixels.
     """
     audio = Path(audio_path)
     override = Path(cover_path) if cover_path else None
@@ -237,7 +319,7 @@ def create_cached_ambient_background(audio_path: str | Path, width: int, height:
     phase_step = round(max(0.0, float(phase)) * AMBIENT_FLOW_HZ)
     scaled = _cached_ambient_scaled(
         palette, small_w, small_h, round(max(0.0, blur_radius) * 10),
-        phase_step, width, height,
+        phase_step, width, height, float(brightness), float(contrast),
     )
     return QPixmap.fromImage(scaled) if not scaled.isNull() else QPixmap()
 
@@ -246,6 +328,7 @@ def create_cached_ambient_background(audio_path: str | Path, width: int, height:
 def _cached_ambient_scaled(
     palette: _Palette, small_width: int, small_height: int,
     blur_radius_tenths: int, phase_step: int, width: int, height: int,
+    brightness: float = 0.0, contrast: float = 0.0,
 ) -> QImage:
     """Cache the full-size ambient frame.
 
@@ -259,6 +342,8 @@ def _cached_ambient_scaled(
     )
     if field.isNull():
         return QImage()
+    if brightness or contrast:
+        field = apply_color_filters(field, brightness=brightness, contrast=contrast)
     return field.scaled(
         width, height, Qt.AspectRatioMode.IgnoreAspectRatio,
         Qt.TransformationMode.SmoothTransformation,

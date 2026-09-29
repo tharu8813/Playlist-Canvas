@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.preview.album_art import extract_track_cover
+from app.preview.album_art import track_cover_thumbnail
 from app.preview.text_template import format_timestamp
 from app.services.playlist_service import AudioImportCandidate
 from app.utils.i18n import Translator
@@ -90,7 +90,7 @@ class M3uImportDialog(QDialog):
         fallback = QIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
         for row, candidate in enumerate(self.candidates):
             track = candidate.track
-            cover = extract_track_cover(track.file_path, track.cover_path)
+            cover = track_cover_thumbnail(track.file_path, track.cover_path)
             art = QTableWidgetItem()
             art.setIcon(
                 QIcon(cover.scaled(

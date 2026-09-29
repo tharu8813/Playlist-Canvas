@@ -125,17 +125,19 @@ def _filtered_track_pixmap(
     key: tuple,
     *,
     include_blur: bool = True,
+    prefiltered: bool = False,
 ) -> QPixmap:
     """Apply the source's brightness/contrast/blur to a track pixmap, memoised.
 
     ``base`` may be a callable so an expensive source pixmap (a re-scaled
-    ambient background, a decoded cover) is only built on a cache miss.
+    ambient background, a decoded cover) is only built on a cache miss;
+    ``prefiltered``: it already carries the filters, only memoise it.
     """
     cached = _FILTERED_TRACK_PIXMAP_CACHE.get(key)
     if cached is not None:
         return cached
     source_pixmap = base() if callable(base) else base
-    result = graphics_item._apply_image_filters(
+    result = source_pixmap if prefiltered else graphics_item._apply_image_filters(
         source_pixmap, include_blur=include_blur,
     )
     if len(_FILTERED_TRACK_PIXMAP_CACHE) > 96:
@@ -995,10 +997,11 @@ class CanvasSnapshot:
                             track.file_path, max(1, round(source.width)),
                             max(1, round(source.height)), max(18.0, source.blur),
                             track.cover_path, phase=global_seconds,
+                            brightness=source.brightness, contrast=source.contrast,
                         ),
                         ("ambient", round(source.width), round(source.height),
                          flow_step, *filter_key),
-                        include_blur=False,
+                        prefiltered=True,
                     )
                 else:
                     graphics_item._pixmap = _filtered_track_pixmap(
@@ -1027,13 +1030,14 @@ class CanvasSnapshot:
                                 max(1, round(source.height)),
                                 max(18.0, source.blur),
                                 previous_track.cover_path, phase=global_seconds,
+                                brightness=source.brightness, contrast=source.contrast,
                             ),
                             ("ambient-prev", round(source.width),
                              round(source.height),
                              round(global_seconds * AMBIENT_FLOW_HZ),
                              previous_track.file_path,
                              previous_track.cover_path, *filters),
-                            include_blur=False,
+                            prefiltered=True,
                         )
                     else:
                         previous_background = _filtered_track_pixmap(

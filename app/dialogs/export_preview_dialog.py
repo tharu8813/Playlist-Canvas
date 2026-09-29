@@ -67,7 +67,7 @@ from app.timeline.render_plan import (
 from app.preview.frame_state import (
     MixJunction, resolve_mix_phase, segment_junction,
 )
-from app.preview.album_art import extract_track_cover
+from app.preview.album_art import track_cover_thumbnail
 from app.video.timeline import resolve_video_position, source_video_paths
 from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
 from app.video.decoder_backpressure import VideoDecoderBackpressure
@@ -1137,7 +1137,7 @@ class ExportPreviewDialog(QDialog):
             item = QListWidgetItem(
                 f"{index + 1:02d}  {title}\n     {detail} · {format_timestamp(track.duration_seconds)}"
             )
-            cover = extract_track_cover(track.file_path, track.cover_path)
+            cover = track_cover_thumbnail(track.file_path, track.cover_path)
             if not cover.isNull():
                 item.setIcon(QIcon(cover))
             else:

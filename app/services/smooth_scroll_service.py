@@ -58,9 +58,11 @@ class SmoothScrollService(QObject):
         return self._duration_ms
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if not self._enabled or event.type() != QEvent.Type.Wheel:
-            return super().eventFilter(watched, event)
-        if not isinstance(event, QWheelEvent) or not isinstance(watched, QWidget):
+        # Every event of the whole application passes here: reject the non-wheel
+        # ones with one cheap type check (no event.type() enum, no base call).
+        if not isinstance(event, QWheelEvent) or not self._enabled:
+            return False
+        if event.type() != QEvent.Type.Wheel or not isinstance(watched, QWidget):
             return super().eventFilter(watched, event)
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             # Keep Canvas Ctrl+wheel zoom and widget-specific Ctrl gestures native.

@@ -80,6 +80,7 @@ class TimelinePanel(QFrame):
         self.translator = translator
         self._refreshing = False
         self._refresh_pending = False
+        self._shown: tuple | None = None
         self.setMinimumHeight(250)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 14)
@@ -198,13 +199,25 @@ class TimelinePanel(QFrame):
         """Rebuild timeline rows from the playlist and source stores."""
         if self._refreshing:
             return
+        timeline_tracks = self.playlist.timeline_tracks()
+        source_list = self.sources.sources()
+        # Moving or restyling a source changes nothing shown here: keep every editor.
+        shown = (
+            self.translator.is_korean,
+            tuple((track.id, track.title, track.artist, track.duration_label, start, end,
+                   self.playlist.minimum_start_time(track.id)) for track, start, end in timeline_tracks),
+            tuple((source.id, source.name, source.timeline_start, source.timeline_duration)
+                  for source in source_list),
+        )
+        if shown == self._shown:
+            return
+        self._shown = shown
         selected_track_id = self._selected_track_id()
         selected_source_id = self._selected_source_id()
         track_scroll = self.track_table.verticalScrollBar().value()
         source_scroll = self.source_table.verticalScrollBar().value()
         self._refreshing = True
         try:
-            timeline_tracks = self.playlist.timeline_tracks()
             self.track_table.setRowCount(len(timeline_tracks))
             for row, (track, start, end) in enumerate(timeline_tracks):
                 number = QTableWidgetItem(str(row + 1))
@@ -230,7 +243,6 @@ class TimelinePanel(QFrame):
                 self.track_table.setItem(row, 3, duration)
                 self.track_table.setItem(row, 4, end_item)
 
-            source_list = self.sources.sources()
             self.source_table.setRowCount(len(source_list))
             for row, source in enumerate(source_list):
                 source_item = QTableWidgetItem(source.name)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -48,6 +49,19 @@ def fit_beat_grid(beats: Sequence[float], start: float = -np.inf, end: float = n
 
     None when there are fewer than MINIMUM_FIT_BEATS beats to fit at all.
     """
+    if isinstance(beats, tuple):
+        # The planner asks for the same track window once per candidate and per
+        # (partial) plan: fit each one once.
+        return _cached_fit(beats, float(start), float(end))
+    return _fit(beats, start, end)
+
+
+@lru_cache(maxsize=2048)
+def _cached_fit(beats: tuple[float, ...], start: float, end: float) -> BeatGrid | None:
+    return _fit(beats, start, end)
+
+
+def _fit(beats: Sequence[float], start: float, end: float) -> BeatGrid | None:
     everything = np.asarray(beats, dtype=float)
     times = everything[(everything >= start) & (everything <= end)]
     if len(times) < MINIMUM_FIT_BEATS:
@@ -85,4 +99,6 @@ if __name__ == "__main__":
     grid = fit_beat_grid(quantized)
     assert grid is not None and abs(grid.bpm - 128.0) < 0.01, grid
     assert abs(grid.snap(truth[100]) - truth[100]) < 0.005
+    assert fit_beat_grid(tuple(quantized), 10.0, 70.0) is fit_beat_grid(tuple(quantized), 10.0, 70.0)
+    assert fit_beat_grid(tuple(quantized), 10.0, 70.0) == fit_beat_grid(list(quantized), 10.0, 70.0)
     print("beatgrid ok", grid.bpm)

@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 from app.automix.models import TrackAnalysis
 from app.automix.overrides import pair_key
 from app.models.playlist import PlaylistTrack
-from app.preview.album_art import extract_track_cover
+from app.preview.album_art import track_cover_thumbnail
 from app.services.project_content_service import LYRICS_EXTENSIONS
 from app.services.m3u_playlist import PLAYLIST_FILE_EXTENSIONS
 from app.services.playlist_service import AUDIO_EXTENSIONS, PlaylistService
@@ -365,7 +365,7 @@ class TrackRow(QWidget):
         cover_label.setObjectName("trackRowCover")
         cover_label.setFixedSize(34, 34)
         cover_label.setScaledContents(True)
-        cover_pixmap = extract_track_cover(track.file_path, track.cover_path)
+        cover_pixmap = track_cover_thumbnail(track.file_path, track.cover_path)
         if not cover_pixmap.isNull():
             cover_label.setPixmap(cover_pixmap.scaled(
                 34, 34, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -464,6 +464,8 @@ class PlaylistEditor(QFrame):
         self._analyses: dict[str, TrackAnalysis] = {}
         self._automix = False
         self._overrides: dict[str, dict] = {}
+        self._row_ids: list[str] = []
+        self._row_signatures: list[tuple] = []
         self.translator = translator
         self._ignore_order_signal = False
         self._pending_order_ids: list[str] = []
@@ -607,6 +609,18 @@ class PlaylistEditor(QFrame):
         chip.reset_requested.connect(lambda: self.transition_reset_requested.emit(key))
         return chip
 
+    def _row_signature(self, number: int, track: PlaylistTrack, previous: PlaylistTrack | None) -> tuple:
+        """Everything a TrackRow shows: equal signatures draw the same row."""
+        analysis = self._analyses.get(track.id)
+        chip = self._automix and previous is not None and track.enabled and track.start_time_seconds is None
+        key = pair_key(previous.id, track.id) if chip else ""
+        return (
+            number, track.title, track.artist, track.album, track.file_path, track.cover_path,
+            track.enabled, bool(track.lyrics or track.lyrics_path), track.lyrics_timing_offset_seconds,
+            track.duration_label, analysis.bpm if analysis else None, analysis.key if analysis else None,
+            self.translator.is_korean, key, self._overrides.get(key) if key else None,
+        )
+
     def refresh(self) -> None:
         """Rebuild rows from service order and update inclusion summary."""
         selected_ids = set(self._selected_ids())
@@ -621,7 +635,6 @@ class PlaylistEditor(QFrame):
             # the list. Clear references to soon-to-be-deleted TrackRow widgets
             # before QListWidget.clear() rebuilds the presentation.
             self.list_widget._clear_drop_feedback()
-            self.list_widget.clear()
             all_tracks = self.service.tracks
             query = self.search_edit.text().strip().casefold()
             tracks = [
@@ -641,22 +654,39 @@ class PlaylistEditor(QFrame):
                     if last_enabled is not None:
                         previous_enabled[track.id] = last_enabled
                     last_enabled = track
-            for track in tracks:
-                number = track_numbers[track.id]
-                item = QListWidgetItem()
-                item.setData(Qt.ItemDataRole.UserRole, track.id)
+            signatures = [
+                self._row_signature(track_numbers[track.id], track, previous_enabled.get(track.id))
+                for track in tracks
+            ]
+            # Same rows in the same order (a toggle, an analysis landing, a lyric
+            # edit): rebuild only the rows that look different, keep the rest.
+            listed = [self.list_widget.item(row).data(Qt.ItemDataRole.UserRole)
+                      for row in range(self.list_widget.count())]  # a drag may have moved them
+            in_place = [track.id for track in tracks] == self._row_ids == listed
+            if not in_place:
+                self.list_widget.clear()
+            for index, track in enumerate(tracks):
+                if in_place and signatures[index] == self._row_signatures[index]:
+                    continue
                 row = TrackRow(
-                    number, track, self.translator.is_korean,
+                    track_numbers[track.id], track, self.translator.is_korean,
                     analysis=self._analyses.get(track.id),
                     transition=self._transition_chip(previous_enabled.get(track.id), track),
                 )
+                if in_place:
+                    item = self.list_widget.item(index)
+                else:
+                    item = QListWidgetItem()
+                    item.setData(Qt.ItemDataRole.UserRole, track.id)
+                    self.list_widget.addItem(item)
+                    if track.id in selected_ids:
+                        item.setSelected(True)
+                    if track.id == current_id:
+                        self.list_widget.setCurrentItem(item)
                 item.setSizeHint(row.sizeHint())
-                self.list_widget.addItem(item)
                 self.list_widget.setItemWidget(item, row)
-                if track.id in selected_ids:
-                    item.setSelected(True)
-                if track.id == current_id:
-                    self.list_widget.setCurrentItem(item)
+            self._row_ids = [track.id for track in tracks]
+            self._row_signatures = signatures
             self.list_widget.setVisible(bool(tracks))
             self.empty_state.setVisible(not tracks)
             self.empty_add_button.setVisible(not query)  # "no search results" needs no add button

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.playlist import PlaylistTrack
-from app.preview.album_art import extract_track_cover
+from app.preview.album_art import track_cover_thumbnail
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.utils.i18n import Translator
 from app.utils.time_format import format_clock
@@ -139,7 +139,7 @@ class _TrackRow(QWidget):
         cover_label = QLabel()
         cover_label.setFixedSize(_COVER_PX, _COVER_PX)
         cover_label.setScaledContents(True)
-        pixmap = extract_track_cover(track.file_path, track.cover_path)
+        pixmap = track_cover_thumbnail(track.file_path, track.cover_path)
         if not pixmap.isNull():
             cover_label.setPixmap(pixmap.scaled(
                 _COVER_PX, _COVER_PX, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
