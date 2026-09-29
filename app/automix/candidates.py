@@ -21,9 +21,9 @@ unavailable"):
     Tempo shift vs. the allowed budget               0.25     -
     Requested bar length actually used                0.15     +
     Cue proximity to the ideal anchor (beat/downbeat) 0.10     +
-    Compatible key (Camelot wheel), if both known     0.06     + (bonus only, never a penalty -- section 3)
+    Compatible key (Camelot wheel), if both known     0.06     + (never a blocker; a clash only shortens the overlap, below)
     Similar energy level, if both known               0.04     +
-    Neither side sings in the overlap (outro over     0.08     + (only where both are *measured*;
+    Neither side sings in the overlap (outro over     0.12     + (only where both are *measured*;
       intro)                                                   two voices are rejected, not scored)
 
 Commit C adds five more, same discipline -- additive, and each independently
@@ -34,6 +34,14 @@ that had none of it:
     Local energy continuity at the actual cue points        0.05  + (more precise than the global scalar above)
     Incoming trim beyond INCOMING_TRIM_SOFT_LIMIT_SECONDS   0.08  -
     Outgoing tail beyond MAXIMUM_OUTGOING_TAIL_TRIM_SECONDS 0.05  -
+
+The pair-level factors above (confidence, tempo, key, global energy) are the
+same for every candidate of a pair, so they never change which one wins.
+Three candidate-level factors do, each a no-op without its data:
+
+    Outgoing cue on an 8-bar phrase start (measured bar grid)  0.06  +
+    Keys clash (and no re-pitch fixes it): per overlap length  0.30  - x severity x key confidence
+    Local energy jump >= ENERGY_FLOW_THRESHOLD: per length     0.10  + on a rise (build-up), - on a drop
 """
 
 from __future__ import annotations
@@ -41,10 +49,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from app.automix.analysis.key import camelot_compatible
+from app.automix.analysis.key import camelot_compatible, harmonic_shift, key_clash_severity
 from app.automix.beatgrid import fit_beat_grid
 from app.automix.compatibility import TransitionCompatibility
 from app.automix.models import RELIABLE_BPM_CONFIDENCE, TrackAnalysis
+from app.automix.phrases import PHRASE_BARS, phrase_starts
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
 
@@ -72,7 +81,7 @@ a downbeat within one frame of the last word counts as "right after" it."""
 MID_PHRASE_SECONDS = 0.5
 """An incoming cue this far into a sung span enters the line mid-phrase."""
 
-WEIGHT_INSTRUMENTAL_OVERLAP = 0.08
+WEIGHT_INSTRUMENTAL_OVERLAP = 0.12
 """Bonus when both sides are measured not to sing anywhere in the overlap: the
 outgoing outro under the incoming intro, the most natural blend there is. It
 favours the bar length that ends before the incoming singer instead of one that
@@ -127,6 +136,25 @@ start more than this many seconds before the track's own natural end is
 treated with rising skepticism -- a plausible outro is usually tens of
 seconds, not minutes; an anchor this far from the end more likely reflects
 a structure-analysis error than a deliberately long instrumental outro."""
+
+WEIGHT_PHRASE_ALIGNMENT = 0.06
+"""A blend that starts on an 8-bar phrase boundary sounds intended; one on bar
+3 of a phrase sounds like a mistake. Outweighs the preferred-length bonus
+(0.15 x 0.3), so a phrase-aligned 6-bar blend beats a mid-phrase 8-bar one, but
+not WEIGHT_INSTRUMENTAL_OVERLAP: keeping the incoming singer out comes first."""
+WEIGHT_KEY_CLASH = 0.3
+"""Per full-length (max_transition_seconds) overlap of two clashing keys: the
+shorter the harmonies share the room, the less the clash is heard. A sure, far
+clash (severity 1.0) outweighs phrase alignment and prefers 4 bars; a near miss
+(0.5) still lets a phrase-aligned blend win."""
+KEY_SHIFT_MIN_CONFIDENCE = 0.7
+"""Both key estimates must be at least this sure before a tail is re-pitched:
+a shift chosen from a wrong key makes the clash worse, not better."""
+WEIGHT_ENERGY_FLOW = 0.10
+ENERGY_FLOW_THRESHOLD = 0.3
+"""A local energy jump this large (transition_style.ENERGY_JUMP_THRESHOLD) sets
+the blend's length: a rise wants a long build-up into the bigger track, a drop a
+short blend so the loud tail does not bury the quiet intro."""
 
 _DURATION_EPSILON_SECONDS = 1e-6
 """Floating-point tolerance for the exact-duration invariant (Commit C.1):
@@ -317,6 +345,26 @@ def generate_candidates(
             if (candidate := _beat_based_candidate(
                 outgoing, incoming, compatibility, bars, strategy, settings,
                 outgoing_naive_override=outgoing_anchor, incoming_naive_override=incoming_anchor,
+                outgoing_playback_rate=outgoing_playback_rate,
+                outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
+            )) is not None
+        )
+
+    # Every phrase start near the end, at the bar count that reaches it: the
+    # bar-length candidates only land a whole 4/8/16 bars before the end,
+    # which is mid-phrase whenever the song does not end on a phrase boundary.
+    # Phrases are 8 bars apart, so one always starts 4..12 bars before the end.
+    outgoing_bar = (outgoing.meter_numerator or DEFAULT_METER_NUMERATOR) * 60.0 / outgoing.bpm
+    longest = min(max(bar_lengths), settings.preferred_bars + PHRASE_BARS // 2)
+    for start in phrase_starts(outgoing, outgoing_structure):
+        distance = round((audible_end(outgoing) - start) / outgoing_bar)
+        candidates.extend(
+            candidate
+            for bars in (distance, distance - 1)  # the cue lands within [bars, bars + 1] bars of the end
+            if min(bar_lengths) <= bars <= longest
+            and (candidate := _beat_based_candidate(
+                outgoing, incoming, compatibility, bars, strategy, settings,
+                outgoing_naive_override=start,
                 outgoing_playback_rate=outgoing_playback_rate,
                 outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
             )) is not None
@@ -525,6 +573,7 @@ def _beat_based_candidate(
         outgoing_source_time, incoming_source_time, duration_seconds,
         outgoing_source_span=outgoing_source_span, incoming_source_span=incoming_source_span,
         outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
+        outgoing_rate=outgoing_rate,
     )
     if strategy is TransitionStrategy.BEAT_MATCH:
         alignment = "downbeat" if all(_has_reliable_downbeats(a) for a in (outgoing, incoming)) else "beat (bar phase uncertain)"
@@ -598,6 +647,7 @@ def _score_beat_candidate(
     incoming_source_span: float | None = None,
     outgoing_structure: TrackStructureAnalysis | None = None,
     incoming_structure: TrackStructureAnalysis | None = None,
+    outgoing_rate: float = 1.0,
 ) -> tuple[float, tuple[str, ...]]:
     reasons: list[str] = list(compatibility.reasons)
     score = 0.0
@@ -680,6 +730,22 @@ def _score_beat_candidate(
                 reasons.append("+ similar local energy at the cue points")
             else:
                 reasons.append("- local energy jumps across the transition")
+            rise = incoming_local_energy - outgoing_local_energy
+            if abs(rise) >= ENERGY_FLOW_THRESHOLD:
+                reach = min(1.0, duration_seconds / settings.max_transition_seconds)
+                score += WEIGHT_ENERGY_FLOW * (reach if rise > 0.0 else -reach)
+                reasons.append(f"+ energy rises {rise:.2f}: a long build-up into the next track" if rise > 0.0
+                               else f"- energy drops {-rise:.2f}: a short blend keeps the loud tail off the intro")
+
+    if outgoing.bpm and any(abs(outgoing_source_time - start) <= 30.0 / outgoing.bpm  # half a beat
+                            for start in phrase_starts(outgoing, outgoing_structure)):
+        score += WEIGHT_PHRASE_ALIGNMENT
+        reasons.append("+ blend starts on an 8-bar phrase boundary")
+
+    clash = _heard_key_clash(outgoing, incoming, strategy, outgoing_rate)
+    if clash:
+        score -= WEIGHT_KEY_CLASH * clash * min(1.0, duration_seconds / settings.max_transition_seconds)
+        reasons.append(f"- keys clash ({outgoing.key} -> {incoming.key}): a shorter overlap is preferred")
 
     if incoming_source_time > INCOMING_TRIM_SOFT_LIMIT_SECONDS:
         # Deliberately uncapped (unlike the other components above): a
@@ -708,6 +774,30 @@ def _score_beat_candidate(
     # candidates that only differ by a bonus tie instead of the bonus
     # actually breaking the tie in ranking.
     return max(0.0, score), tuple(reasons)
+
+
+def key_shift(outgoing: TrackAnalysis, incoming: TrackAnalysis) -> int | None:
+    """Semitones to glide the outgoing tail by so the two keys mix (None: leave it)."""
+    if (outgoing.key is None or incoming.key is None
+            or min(outgoing.key_confidence, incoming.key_confidence) < KEY_SHIFT_MIN_CONFIDENCE):
+        return None
+    return harmonic_shift(outgoing.key, incoming.key, max_semitones=1)
+
+
+def _heard_key_clash(
+    outgoing: TrackAnalysis, incoming: TrackAnalysis, strategy: TransitionStrategy, outgoing_rate: float,
+) -> float:
+    """How hard the keys clash as the overlap will sound (0.0: no clash, or unknown).
+
+    A rate-matched tail the planner re-pitches into a compatible key does not
+    clash; otherwise the wheel distance counts as far as both keys are trusted."""
+    if outgoing.key is None or incoming.key is None:
+        return 0.0
+    if (strategy is TransitionStrategy.BEAT_MATCH and abs(outgoing_rate - 1.0) > 1e-9
+            and key_shift(outgoing, incoming) is not None):
+        return 0.0
+    severity = key_clash_severity(outgoing.key, incoming.key) or 0.0
+    return severity * min(outgoing.key_confidence, incoming.key_confidence)
 
 
 def audible_end(analysis: TrackAnalysis) -> float:

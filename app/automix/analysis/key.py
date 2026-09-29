@@ -119,3 +119,19 @@ def camelot_compatible(key_a: str, key_b: str) -> bool:
     if letter_a == letter_b:
         return abs(number_a - number_b) % 12 in (1, 11)
     return False
+
+
+def key_clash_severity(key_a: str, key_b: str) -> float | None:
+    """How hard two keys clash when their harmonies overlap: 0.0 compatible,
+    0.5 a near miss (two steps round the wheel, or one step and the other
+    mode -- the "energy boost" moves DJs use in short blends), 1.0 anything
+    further; None if either key is unparseable."""
+    code_a, code_b = key_to_camelot(key_a), key_to_camelot(key_b)
+    if code_a is None or code_b is None:
+        return None
+    if camelot_compatible(key_a, key_b):
+        return 0.0
+    steps = abs(int(code_a[:-1]) - int(code_b[:-1])) % 12
+    steps = min(steps, 12 - steps)
+    near = steps == 2 if code_a[-1] == code_b[-1] else steps == 1
+    return 0.5 if near else 1.0

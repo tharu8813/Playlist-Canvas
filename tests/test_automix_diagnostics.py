@@ -15,8 +15,8 @@ from tests.test_automix_planner import ENABLED, _analysis, _track
 
 class TransitionRowsTests(unittest.TestCase):
     def setUp(self) -> None:
-        tracks = [_track("a", 90.0), _track("b", 90.0), _track("c", 90.0, start=400.0)]
-        analyses = {track.id: _analysis(track.id, 120.0, 90.0) for track in tracks}
+        tracks = [_track("a", 96.0), _track("b", 96.0), _track("c", 96.0, start=400.0)]
+        analyses = {track.id: _analysis(track.id, 120.0, 96.0) for track in tracks}
         self.plan = compile_automix(tracks, analyses, ENABLED)
         self.rows = transition_rows(self.plan, {"a": "Song A", "b": "Song B"})
 
@@ -32,8 +32,8 @@ class TransitionRowsTests(unittest.TestCase):
         self.assertEqual((gap["to"], gap["type"], gap["duration"]), ("c", "gap", 0.0))
 
     def test_details_are_deterministic_and_carried_by_the_plan(self) -> None:
-        again = compile_automix([_track("a", 90.0), _track("b", 90.0), _track("c", 90.0, start=400.0)],
-                                {i: _analysis(i, 120.0, 90.0) for i in "abc"}, ENABLED)
+        again = compile_automix([_track("a", 96.0), _track("b", 96.0), _track("c", 96.0, start=400.0)],
+                                {i: _analysis(i, 120.0, 96.0) for i in "abc"}, ENABLED)
         self.assertEqual(again, self.plan)
         self.assertIn(("bars", 8), self.plan.audio.transitions[0].details)
 

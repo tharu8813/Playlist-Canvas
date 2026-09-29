@@ -68,11 +68,11 @@ class AutoMixWorkflowTests(unittest.TestCase):
             analyses = workflow.analyze(tracks).analyses
             self.assertEqual(len(provider.calls), 2)
 
-            plan_8_bars = workflow.plan(tracks, analyses, AutoMixTransitionSettings(enabled=True, preferred_bars=8))
-            plan_4_bars = workflow.plan(tracks, analyses, AutoMixTransitionSettings(enabled=True, preferred_bars=4))
+            plan_long = workflow.plan(tracks, analyses, AutoMixTransitionSettings(enabled=True))
+            plan_short = workflow.plan(tracks, analyses, AutoMixTransitionSettings(enabled=True, max_transition_seconds=10.0))
             # Neither re-plan touched the analyzer.
             self.assertEqual(len(provider.calls), 2)
-            self.assertNotEqual(plan_8_bars, plan_4_bars)
+            self.assertNotEqual(plan_long, plan_short)
 
     def test_cancellation_before_start_returns_cleanly(self) -> None:
         with TemporaryDirectory(prefix="automix-workflow-") as directory:

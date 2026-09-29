@@ -383,7 +383,7 @@ class TransitionGeometryTests(unittest.TestCase):
         # The reported bug: this landed near 30s (200 - 170) instead of
         # the ~16s an 8-bar/120 BPM candidate actually scores.
         self.assertLess(transition.duration, 20.0)
-        self.assertGreater(transition.duration, 10.0)
+        self.assertGreater(transition.duration, 7.5)  # the last phrase start is 4 bars (8 s) from the end
         clip_a, _clip_b = plan.audio.clips
         # Finalize candidate geometry without discarding audible source audio.
         self.assertEqual(clip_a.source_out, 200.0)
@@ -475,10 +475,10 @@ class LightAnalysisPolicyTests(unittest.TestCase):
     """What AutoMix does with only the light analyzer: bar phase and vocals unmeasured."""
 
     def test_unknown_bar_phase_halves_the_preset_length(self) -> None:
-        tracks = [_track("a", 60.0), _track("b", 60.0)]
+        tracks = [_track("a", 64.0), _track("b", 64.0)]  # ends on a phrase boundary: 8 bars back starts one
         for meter_confidence, bars in ((0.8, 8), (0.3, 4)):
             with self.subTest(meter_confidence=meter_confidence):
-                analyses = {i: _analysis(i, 120.0, 60.0, meter_confidence=meter_confidence) for i in "ab"}
+                analyses = {i: _analysis(i, 120.0, 64.0, meter_confidence=meter_confidence) for i in "ab"}
                 (transition,) = compile_automix(tracks, analyses, ENABLED).audio.transitions
                 self.assertIn(("bars", bars), transition.details)
                 self.assertAlmostEqual(transition.duration, bars * 2.0, delta=0.5)  # 2 s per bar at 120 BPM

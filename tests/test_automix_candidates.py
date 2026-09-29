@@ -118,7 +118,7 @@ class GenerateCandidatesTests(unittest.TestCase):
         incoming = _analysis("b", 120.0, duration=600.0)
         settings = AutoMixTransitionSettings(max_transition_seconds=60.0)
         candidates = self._generate(outgoing, incoming, settings)
-        self.assertEqual({c.bars for c in candidates}, set(BAR_LENGTHS))
+        self.assertLessEqual(set(BAR_LENGTHS), {c.bars for c in candidates})  # plus phrase-aligned lengths
 
     def test_scores_are_deterministic_across_repeated_calls(self) -> None:
         outgoing = _analysis("a", 128.0, duration=200.0)
@@ -129,7 +129,8 @@ class GenerateCandidatesTests(unittest.TestCase):
         self.assertEqual([c.bars for c in first], [c.bars for c in second])
 
     def test_select_best_candidate_prefers_preferred_bars(self) -> None:
-        outgoing = _analysis("a", 120.0, duration=600.0)
+        # 608 s at 120 BPM ends on a phrase boundary: 8 bars back is a phrase start.
+        outgoing = _analysis("a", 120.0, duration=608.0)
         incoming = _analysis("b", 120.0, duration=600.0)
         settings = AutoMixTransitionSettings(preferred_bars=8, max_transition_seconds=60.0)
         candidates = self._generate(outgoing, incoming, settings)
@@ -176,15 +177,55 @@ class AdvancedScoringTests(unittest.TestCase):
         )
         self.assertGreater(compatible, baseline)
 
-    def test_incompatible_key_is_not_penalized(self) -> None:
-        outgoing = _analysis("a", 128.0, duration=200.0)
-        incoming = _analysis("b", 128.0, duration=200.0)
+    def _generate(self, outgoing: TrackAnalysis, incoming: TrackAnalysis):
+        settings = AutoMixTransitionSettings(enabled=True)
+        return generate_candidates(outgoing, incoming, evaluate_compatibility(outgoing, incoming, settings), settings)
+
+    def test_incompatible_key_never_blocks_but_prefers_a_shorter_overlap(self) -> None:
+        outgoing = _analysis("a", 120.0, duration=180.0)
+        incoming = _analysis("b", 120.0, duration=180.0)
+        baseline = self._generate(outgoing, incoming)
+        clashing = self._generate(replace(outgoing, key="C major", key_confidence=0.8),
+                                  replace(incoming, key="F# major", key_confidence=0.8))  # 8B vs 2B
+        self.assertEqual([c.outgoing_source_time for c in clashing], [c.outgoing_source_time for c in baseline])
+        best, clash_best = select_best_candidate(baseline), select_best_candidate(clashing)
+        self.assertLess(clash_best.duration_seconds, best.duration_seconds)
+        self.assertEqual(clash_best.bars, 4)
+        self.assertTrue(any("keys clash" in reason for reason in clash_best.reasons))
+
+    def test_a_key_clash_the_tail_repitch_fixes_is_not_penalized(self) -> None:
+        outgoing = _analysis("a", 118.0, duration=180.0)
+        incoming = _analysis("b", 120.0, duration=180.0)
         baseline = self._best_score(outgoing, incoming)
-        incompatible = self._best_score(
-            replace(outgoing, key="C major", key_confidence=0.8),
-            replace(incoming, key="F# major", key_confidence=0.8),  # 8B vs 2B: not compatible
-        )
-        self.assertEqual(incompatible, baseline)
+        # 3B -> 8B clash, but the rate-matched tail is glided down a semitone into 8B.
+        repitched = self._best_score(replace(outgoing, key="C# major", key_confidence=0.8),
+                                     replace(incoming, key="C major", key_confidence=0.8))
+        self.assertEqual(repitched, baseline)
+
+    def test_blend_starts_on_a_phrase_boundary(self) -> None:
+        # 188 s at 120 BPM: phrases start every 16 s, the last one 12 s (6 bars) before the end;
+        # the regular 8-bar cue (172 s) would enter mid-phrase.
+        best = select_best_candidate(self._generate(_analysis("a", 120.0, duration=188.0),
+                                                    _analysis("b", 120.0, duration=180.0)))
+        self.assertAlmostEqual(best.outgoing_source_time, 176.0, places=3)
+        self.assertIn("+ blend starts on an 8-bar phrase boundary", best.reasons)
+
+    def test_energy_flow_sets_the_blend_length(self) -> None:
+        outgoing = _analysis("a", 120.0, duration=180.0)
+        incoming = _analysis("b", 120.0, duration=180.0)
+        settings = AutoMixTransitionSettings(enabled=True)
+
+        def best(outgoing_energy: float, incoming_energy: float):
+            structures = {name: _structure(name, 180.0, energy_curve=(energy,), hop=180.0)
+                          for name, energy in (("a", outgoing_energy), ("b", incoming_energy))}
+            return select_best_candidate(generate_candidates(
+                outgoing, incoming, evaluate_compatibility(outgoing, incoming, settings), settings,
+                outgoing_structure=structures["a"], incoming_structure=structures["b"]))
+
+        rise, drop = best(0.3, 0.8), best(0.8, 0.3)
+        self.assertGreater(rise.duration_seconds, drop.duration_seconds)
+        self.assertTrue(any("build-up" in reason for reason in rise.reasons))
+        self.assertTrue(any("short blend" in reason for reason in drop.reasons))
 
     def test_similar_energy_increases_score(self) -> None:
         outgoing = _analysis("a", 128.0, duration=200.0)
@@ -256,7 +297,7 @@ class VocalAwareWindowTests(unittest.TestCase):
         outgoing = replace(_analysis("a", 128.0, duration=200.0), vocal_activity=((10.0, 200.0),))
         incoming = replace(_analysis("b", 128.0, duration=200.0), vocal_activity=((30.0, 150.0),))
         best = select_best_candidate(self._generate(outgoing, incoming))
-        self.assertEqual(best.bars, 8)  # the full preferred blend, not a handoff
+        self.assertGreaterEqual(best.bars, 8)  # a full blend (here on the last phrase start), not a handoff
         self.assertLessEqual(best.incoming_source_time + best.duration_seconds, 30.0)
         self.assertIn("+ blending under the outgoing vocals: the incoming intro is instrumental", best.reasons)
         # An intro shorter than every bar length still gets the handoff, never a blend into its singer.
