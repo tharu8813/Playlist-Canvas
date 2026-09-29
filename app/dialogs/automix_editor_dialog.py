@@ -223,6 +223,8 @@ class AutoMixEditorDialog(QDialog):
         self.zoom_out_button = tool(icon="zoom_out")
         self.fit_button = tool()
         self.zoom_in_button = tool(icon="zoom_in")
+        self.tempo_button = tool()
+        self.tempo_button.clicked.connect(self._show_tempo)
         self.lanes_button = tool("", checkable=True)
         self.lanes_button.setChecked(True)
         self.properties_button = tool("", checkable=True)
@@ -297,6 +299,7 @@ class AutoMixEditorDialog(QDialog):
         for widget in (self.zoom_out_button, self.fit_button, self.zoom_in_button):
             tools_row.addWidget(widget)
         tools_row.addStretch(1)
+        tools_row.addWidget(self.tempo_button)
         tools_row.addWidget(self.lanes_button)
         tools_row.addWidget(self.properties_button)
 
@@ -551,6 +554,16 @@ class AutoMixEditorDialog(QDialog):
         """The timeline selected another target: the panel shows its settings (nothing is re-planned)."""
         self._selection = selection
         self.properties.set_selection(selection)
+
+    def _show_tempo(self) -> None:
+        """Enable tempo matching if available, or focus the existing tempo settings."""
+        self.properties.flush()
+        self.timeline.selected_part = "ramp"
+        self.timeline.set_selection("tempo")
+        self._selection_changed("tempo")
+        self.properties_button.setChecked(True)
+        if self.properties.tempo_check.isEnabled():
+            self.properties.tempo_check.setChecked(True)
 
     def _show(self, *, refit: bool = False, drawn=None, drawn_override=None) -> None:
         """Draw the selected junction and fill the side panel (``drawn``: a drag's draft and its override)."""
@@ -813,6 +826,10 @@ class AutoMixEditorDialog(QDialog):
                  "key_shift": ("키 맞춤", "Key match")}
         name = names.get(next(iter(changes), ""), ("편집", "Edit"))
         self._edit(changes, name[0 if self.korean else 1])
+        if changes.get("tempo_match") is False and self._selection == "tempo":
+            self.timeline.selected_part = None
+            self.timeline.set_selection("transition")
+            self._selection_changed("transition")
 
     def _reset(self) -> None:
         """Automatic again; with kept values, a new recommendation that keeps them instead."""
@@ -1295,6 +1312,7 @@ class AutoMixEditorDialog(QDialog):
         (self.advanced_button if advanced else self.simple_button).setChecked(True)
         self.properties.set_advanced(advanced)
         self.timeline.set_advanced(advanced)
+        self.tempo_button.setVisible(advanced)
         self.lanes_button.setVisible(advanced)
         if advanced:  # the target selected before switching to simple comes back
             self.timeline.set_selection(self._selection)
@@ -1324,6 +1342,7 @@ class AutoMixEditorDialog(QDialog):
         self.redo_button.setToolTip(self._text("다시 실행", "Redo") + (
             f": {self.undo_stack.redoText()}" if self.undo_stack.canRedo() else "") + " (Ctrl+Shift+Z)")
         has = self.junction is not None
+        self.tempo_button.setEnabled(has)
         self.copy_action.setEnabled(has)
         self.paste_action.setEnabled(self._copied is not None and has)
         self.paste_cues_action.setEnabled(self._copied is not None and has)
@@ -1355,6 +1374,9 @@ class AutoMixEditorDialog(QDialog):
         self.undo_button.setAccessibleName(self._text("실행 취소", "Undo"))
         self.redo_button.setAccessibleName(self._text("다시 실행", "Redo"))
         self.snap_label.setText(self._text("스냅", "Snap"))
+        self.tempo_button.setText(self._text("템포 맞춤", "Match tempo"))
+        self.tempo_button.setToolTip(self._text("템포 맞춤 켜기 · 이미 켜져 있으면 설정 선택",
+                                              "Enable tempo matching, or select its settings if already enabled"))
         for row, (ko, en) in enumerate((("끄기", "Off"), ("박자", "Beats"), ("마디", "Bars"))):
             self.snap_combo.setItemText(row, ko if korean else en)
         self.snap_combo.setToolTip(self._text(

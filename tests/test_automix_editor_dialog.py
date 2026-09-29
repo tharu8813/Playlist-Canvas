@@ -358,6 +358,43 @@ class EditorWorkflowTests(AutoMixEditorTests):
         editor._analysis_arrived()  # nor does new analysis move the selection
         self.assertEqual(editor.timeline.selection, "band:low")
 
+    def test_tempo_settings_remain_reachable_after_disabling_and_selecting_another_target(self):
+        host = self._storing_host()
+        host.automix_analyses = _analyses(host.playlist_service.tracks, (120.0, 126.0, 120.0))
+        _host, editor = self._editor(host)
+        editor._set_advanced(True)
+        editor.timeline._select("tempo")
+        panel = editor.properties
+        panel.tempo_check.setChecked(True)
+        self.assertIsNotNone(editor.timeline._ramp_span())
+        panel.tempo_check.click()
+        self.assertIsNone(editor.timeline._ramp_span())
+        self.assertEqual(editor.timeline.selection, "transition")
+        self.assertIsNone(editor.timeline.selected_part)
+        self.assertIs(panel.pages.currentWidget(), panel.page_widgets["transition"])
+        editor.timeline._select("incoming")
+        editor.properties_button.setChecked(False)
+        before = editor.undo_stack.count()
+
+        self.assertFalse(editor.tempo_button.isHidden())
+        editor.tempo_button.click()
+        self.assertTrue(editor.properties_button.isChecked())
+        self.assertEqual(editor.timeline.selection, "tempo")
+        self.assertIs(panel.pages.currentWidget(), panel.page_widgets["tempo"])
+        self.assertTrue(panel.tempo_check.isChecked())
+        self.assertTrue(panel.tempo_check.isEnabled())
+        self.assertEqual(editor.undo_stack.count(), before + 1)
+        self.assertTrue(host.project_settings.automix_overrides[pair_key("a", "b")]["tempo_match"])
+        self.assertIsNotNone(editor.timeline._ramp_span())
+        editor.timeline._select("incoming")
+        editor.tempo_button.click()
+        self.assertEqual(editor.timeline.selection, "tempo")
+        self.assertEqual(editor.undo_stack.count(), before + 1)
+        editor.undo_button.click()
+        self.assertFalse(panel.tempo_check.isChecked())
+        editor.redo_button.click()
+        self.assertTrue(panel.tempo_check.isChecked())
+
     def test_esc_cancels_a_drag_and_one_drag_is_one_undo_step(self):
         host, editor = self._editor()
         editor.timeline.resize(1000, 400)
