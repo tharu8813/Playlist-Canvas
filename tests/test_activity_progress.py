@@ -73,6 +73,40 @@ class ActivityProgressWidgetTests(unittest.TestCase):
         self.assertFalse(popup.isVisible())
         self.assertTrue(self.widget.isHidden())
 
+    def test_the_pin_button_shows_and_toggles_the_pinned_state(self) -> None:
+        self.widget.begin("export", "Exporting video", 0.1)
+        pin = self.widget.popup.pin_button
+        self.assertFalse(pin.isChecked())
+        self.click()  # clicking the status line pins: the button says so
+        self.assertTrue(self.widget.pinned)
+        self.assertTrue(pin.isChecked())
+        self.assertIn("unpin", pin.toolTip())
+        pin.click()  # the button unpins; the pointer is elsewhere, so the popup goes
+        self.assertFalse(self.widget.pinned)
+        self.assertFalse(self.widget.popup.isVisible())
+        pin.click()
+        self.assertTrue(self.widget.pinned)
+        self.assertTrue(self.widget.popup.isVisible())
+        self.widget.finish("export")  # nothing left: unpinned again for the next operation
+        self.assertFalse(pin.isChecked())
+
+    def test_long_text_ends_in_an_ellipsis_and_shows_in_full_on_hover(self) -> None:
+        long_detail = "Analyzing " + ", ".join(f"a rather long song title number {n}" for n in range(8))
+        self.widget.begin("analysis", "AutoMix track analysis", 0.5, long_detail,
+                          steps=[("Beats & vocals " * 8, 0.5)])
+        self.click()
+        QApplication.processEvents()
+        row = self.widget.popup.rows["analysis"]
+        self.assertEqual(row.detail.text(), long_detail)  # the full text is kept
+        shown = super(type(row.detail), row.detail).text()
+        self.assertTrue(shown.endswith("…"))
+        self.assertLessEqual(row.detail.fontMetrics().horizontalAdvance(shown), row.detail.width())
+        self.assertEqual(row.detail.toolTip(), long_detail)
+        step_name = row._step_widgets[0][0]
+        self.assertTrue(super(type(step_name), step_name).text().endswith("…"))
+        self.assertEqual(row.title.toolTip(), "")  # fits: no tooltip
+        self.assertLessEqual(self.widget.popup.width(), 340)
+
     def test_details_text_and_accessibility_carry_everything_the_popup_shows(self) -> None:
         self.widget.begin("analysis", "AutoMix track analysis", 0.5, "Keep editing",
                           steps=[("Beats & vocals", None)])

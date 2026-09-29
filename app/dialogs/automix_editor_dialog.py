@@ -29,6 +29,7 @@ from app.automix.settings import automix_settings_for
 from app.controllers.transition_audition_controller import (
     FAILED, READY, RENDERING, UNAVAILABLE, WAITING, TransitionAuditionController,
 )
+from app.widgets.activity_progress import activity_for
 from app.widgets.automix_timeline import AutoMixTimeline
 from app.widgets.transition_editor import (
     STYLE_CHOICES, EditContext, TransitionPropertiesPanel, bars_text, drag_override, edited_override,
@@ -717,6 +718,20 @@ class AutoMixEditorDialog(QDialog):
     def _on_audition_state(self, state: str, detail: str) -> None:
         self._audition_state = (state, detail)
         self._set_audition_text()
+        self._sync_activity(state == RENDERING)
+
+    def _sync_activity(self, rendering: bool) -> None:
+        """A window render also shows in the main window's status-bar activity line."""
+        bar = activity_for(self.host)
+        if bar is None:
+            return
+        if rendering:
+            bar.update(AUDITION_ACTIVITY, None,
+                       label=self._text("전환 미리듣기 준비", "Preparing transition audition"),
+                       detail=self._text("선택한 전환의 앞뒤 구간만 렌더합니다.",
+                                         "Rendering just the selected transition's window."))
+        else:
+            bar.finish(AUDITION_ACTIVITY)
 
     def _set_audition_text(self) -> None:
         state, detail = self._audition_state
@@ -1037,6 +1052,7 @@ class AutoMixEditorDialog(QDialog):
             self._player.stop()
             self._player.setSource(QUrl())
         self.audition.shutdown()
+        self._sync_activity(False)
         preview = getattr(self.host, "_inline_preview", None)
         if self._changed_keys and preview is not None and getattr(preview, "_transition_mode", "") == "automix":
             # Preview plays what it rendered before this editor opened: re-mix it once, not per edit.

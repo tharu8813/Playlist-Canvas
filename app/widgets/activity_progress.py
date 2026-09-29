@@ -2,9 +2,10 @@
 
 The status bar shows one line: a single operation's own title and progress,
 or, with several at once, "Working..." and their combined progress. Hovering
-opens a live details popup (clicking pins it) with every operation's title,
-percentage, bar, detail line and optional sub-steps -- the native tooltip
-could only show a frozen block of text.
+opens a live details popup with every operation's title, percentage, bar,
+detail line and optional sub-steps -- the native tooltip could only show a
+frozen block of text. The popup's pin button (or a click on the line) keeps
+it open; text too long for its row ends in "…" and shows in full on hover.
 """
 
 from __future__ import annotations
@@ -12,9 +13,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
+)
+
+from app.ui.studio_icons import pin_icon
+
+HIDE_DELAY_MS = 300
+"""Unpinned, the popup waits this long after the pointer leaves, so it can move onto the popup."""
 
 
 @dataclass(slots=True)
@@ -68,6 +76,46 @@ def _set_bar(bar: QProgressBar, progress: float | None) -> None:
         bar.setValue(round(progress * 1000))
 
 
+class ElidedLabel(QLabel):
+    """One line that ends in "…" when it does not fit; hovering it shows the whole text.
+
+    ``text()`` is always the full text.
+    """
+
+    def __init__(self, text: str = "", *, full_text_tooltip: bool = True) -> None:
+        super().__init__()
+        self._full = ""
+        self._full_text_tooltip = full_text_tooltip
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def text(self) -> str:  # noqa: D102 - QLabel API
+        return self._full
+
+    def setText(self, text: str) -> None:  # noqa: N802 - QLabel API
+        self._full = text or ""
+        self._elide()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        margins = self.contentsMargins()
+        return QSize(self.fontMetrics().horizontalAdvance(self._full) + margins.left() + margins.right() + 2,
+                     super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        width = self.contentsRect().width()
+        shown = (self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, width)
+                 if width > 0 else self._full)
+        super().setText(shown)
+        self.setToolTip(self._full if self._full_text_tooltip and shown != self._full else "")
+
+
 class ActivityProgressWidget(QWidget):
     """The status-bar line plus its live details popup."""
 
@@ -79,7 +127,8 @@ class ActivityProgressWidget(QWidget):
         # Insertion order is start order: rows never jump around while they update.
         self._activities: dict[str, ActivityState] = {}
         self._pinned = False
-        self.label = QLabel()
+        # The popup opens on hover, and it shows the whole title: no tooltip here.
+        self.label = ElidedLabel(full_text_tooltip=False)
         self.label.setObjectName("activityProgressLabel")
         self.label.setMaximumWidth(170)
         self.progress_bar = QProgressBar()
@@ -95,6 +144,11 @@ class ActivityProgressWidget(QWidget):
         self.setMinimumWidth(220)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.popup = ActivityDetailsPopup(self)
+        self.popup.pin_button.toggled.connect(self.set_pinned)
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.setInterval(HIDE_DELAY_MS)
+        self._hide_timer.timeout.connect(self._hide_unless_hovered)
         self.setVisible(False)
 
     @property
@@ -163,23 +217,40 @@ class ActivityProgressWidget(QWidget):
 
     # -- popup -----------------------------------------------------------------
 
+    @property
+    def pinned(self) -> bool:
+        return self._pinned
+
+    def set_pinned(self, pinned: bool) -> None:
+        """Keep the popup open (pinned) or let it follow the pointer again; the pin button shows which."""
+        self._pinned = bool(pinned)
+        if self.popup.pin_button.isChecked() != self._pinned:
+            self.popup.pin_button.setChecked(self._pinned)  # re-enters here once, a no-op
+            return
+        if self._pinned:
+            self._hide_timer.stop()
+            self._show_popup()
+        else:
+            self._hide_unless_hovered()
+
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self._hide_timer.stop()
         self._show_popup()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
         if not self._pinned:
-            self.popup.hide()
+            self._hide_timer.start()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
         if event.button() == Qt.MouseButton.LeftButton:
-            self._pinned = not self._pinned
-            if self._pinned:
-                self._show_popup()
-            elif not self.underMouse():
-                self.popup.hide()
+            self.set_pinned(not self._pinned)
         super().mousePressEvent(event)
+
+    def _hide_unless_hovered(self) -> None:
+        if not self._pinned and not self.underMouse() and not self.popup.underMouse():
+            self.popup.hide()
 
     def _show_popup(self) -> None:
         if not self._activities:
@@ -204,7 +275,8 @@ class ActivityProgressWidget(QWidget):
 
     def _refresh(self) -> None:
         if not self._activities:
-            self._pinned = False
+            self._hide_timer.stop()
+            self.set_pinned(False)
             self.popup.hide()
             self.setVisible(False)
             self.setAccessibleName("")
@@ -232,26 +304,76 @@ class ActivityProgressWidget(QWidget):
         self.activity_changed.emit()
 
 
+def activity_for(widget: object) -> ActivityProgressWidget | None:
+    """The main window's status-bar activity line, reached from any widget or dialog under it."""
+    current = widget
+    while current is not None:
+        bar = getattr(current, "activity_progress", None)
+        if isinstance(bar, ActivityProgressWidget):
+            return bar
+        parent = getattr(current, "parent", None)
+        current = parent() if callable(parent) else None
+    return None
+
+
 class ActivityDetailsPopup(QFrame):
     """Every running operation with its own bar, detail and sub-steps, updated live."""
 
     def __init__(self, owner: QWidget) -> None:
         super().__init__(owner, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        self._owner = owner
         self.setObjectName("activityPopup")
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # The popup never takes focus, yet its cut-off lines must still show their tooltips.
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips)
         self.setFixedWidth(340)
         self.heading = QLabel()
         self.heading.setObjectName("activityPopupHeading")
+        self.pin_button = QToolButton()
+        self.pin_button.setObjectName("activityPinButton")
+        self.pin_button.setCheckable(True)
+        self.pin_button.setAutoRaise(True)
+        self.pin_button.setIcon(pin_icon())
+        self.pin_button.setIconSize(QSize(14, 14))
+        self.pin_button.setFixedSize(22, 22)
+        self.pin_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pin_button.toggled.connect(self._describe_pin)
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        header.addWidget(self.heading, 1)
+        header.addWidget(self.pin_button, 0, Qt.AlignmentFlag.AlignTop)
         self._rows_layout = QVBoxLayout()
         self._rows_layout.setSpacing(10)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setContentsMargins(12, 8, 8, 12)
         layout.setSpacing(8)
-        layout.addWidget(self.heading)
+        layout.addLayout(header)
         layout.addLayout(self._rows_layout)
         self.rows: dict[str, _ActivityRow] = {}
+        self._korean = True
+        self._describe_pin(False)
+
+    def _describe_pin(self, pinned: bool) -> None:
+        if self._korean:
+            text = "고정됨 · 누르면 고정을 풉니다" if pinned else "누르면 이 창을 고정합니다"
+        else:
+            text = "Pinned · click to unpin" if pinned else "Click to keep this window open"
+        self.pin_button.setToolTip(text)
+        self.pin_button.setAccessibleName(text)
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self._owner._hide_timer.stop()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if not self.pin_button.isChecked():
+            self._owner._hide_timer.start()
+        super().leaveEvent(event)
 
     def sync(self, states: list[ActivityState], korean: bool) -> None:
+        if korean != self._korean:
+            self._korean = korean
+            self._describe_pin(self.pin_button.isChecked())
         self.heading.setText(
             (f"진행 중인 작업 {len(states)}개" if korean else f"{len(states)} active operation(s)")
         )
@@ -271,7 +393,7 @@ class ActivityDetailsPopup(QFrame):
 class _ActivityRow(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self.title = QLabel()
+        self.title = ElidedLabel()
         self.title.setObjectName("activityPopupTitle")
         self.percent = QLabel()
         self.percent.setObjectName("activityPopupPercent")
@@ -280,9 +402,8 @@ class _ActivityRow(QWidget):
         self.bar.setObjectName("activityPopupBar")
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(6)
-        self.detail = QLabel()
+        self.detail = ElidedLabel()
         self.detail.setObjectName("activityPopupDetail")
-        self.detail.setWordWrap(True)
         self.steps = QGridLayout()
         self.steps.setContentsMargins(10, 2, 0, 0)
         self.steps.setHorizontalSpacing(8)
@@ -313,7 +434,7 @@ class _ActivityRow(QWidget):
                 widget.deleteLater()
         while len(self._step_widgets) < len(state.steps):
             row = len(self._step_widgets)
-            name, bar, percent = QLabel(), QProgressBar(), QLabel()
+            name, bar, percent = ElidedLabel(), QProgressBar(), QLabel()
             name.setObjectName("activityPopupStep")
             bar.setObjectName("activityPopupBar")
             bar.setTextVisible(False)

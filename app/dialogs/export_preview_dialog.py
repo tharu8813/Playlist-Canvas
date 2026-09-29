@@ -73,10 +73,13 @@ from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
 from app.video.decoder_backpressure import VideoDecoderBackpressure
 from app.video.preview_proxy import PreviewProxyCache, PreviewProxyWorker
 from app.utils.i18n import Translator
+from app.widgets.activity_progress import activity_for
 from app.widgets.automix_details_panel import AutoMixDetailsPanel, ready_through
 from app.widgets.transition_inspector import TransitionInspectorWindow
 
 TIMELINE_SCALE = 100
+VIDEO_PROXY_ACTIVITY = "preview_video_proxy"
+AUDIO_ANALYSIS_ACTIVITY = "preview_audio_analysis"
 _BLENDED_AUDIO_TRACK_INDEX = -2
 """Sentinel for `_active_track_index` when playing the pre-rendered AutoMix/crossfade mix."""
 _TRANSITION_TYPE_LABELS = {
@@ -612,6 +615,7 @@ class ExportPreviewDialog(QDialog):
         self._last_video_prefetch_track_index = -1
         self._video_proxy_paths: dict[str, str] = {}
         self._video_proxy_queue: list[str] = []
+        self._video_proxy_total = 0  # queued this run, for the status-bar progress
         self._video_proxy_queued: set[str] = set()
         self._video_proxy_failures: set[str] = set()
         self._video_proxy_worker: PreviewProxyWorker | None = None
@@ -1740,10 +1744,12 @@ class ExportPreviewDialog(QDialog):
                 continue
             self._video_proxy_queue.append(key)
             self._video_proxy_queued.add(key)
+            self._video_proxy_total += 1
             changed = True
         if changed:
             self._start_next_video_proxy()
             self._update_frame_rate_label()
+            self._sync_background_activity()
 
     def _start_next_video_proxy(self) -> None:
         if (
@@ -1765,6 +1771,7 @@ class ExportPreviewDialog(QDialog):
         worker.failed.connect(self._video_proxy_failed)
         worker.finished.connect(self._video_proxy_finished)
         worker.start()
+        self._sync_background_activity()
 
     def _video_proxy_ready(
         self, original_path: str, preview_path: str, _proxied: bool,
@@ -1800,6 +1807,38 @@ class ExportPreviewDialog(QDialog):
             worker.deleteLater()
         self._start_next_video_proxy()
         self._update_frame_rate_label()
+        self._sync_background_activity()
+
+    def _sync_background_activity(self) -> None:
+        """Mirror Preview's own background work in the main window's status-bar activity line."""
+        bar = activity_for(self)
+        if bar is None:
+            return
+        korean = self.translator.is_korean
+        pending = len(self._video_proxy_queue) + (self._video_proxy_worker is not None)
+        total = self._video_proxy_total
+        if self._closing or not pending:
+            self._video_proxy_total = 0
+            bar.finish(VIDEO_PROXY_ACTIVITY)
+        else:
+            current = (Path(str(self._video_proxy_worker.source_path)).name
+                       if self._video_proxy_worker is not None else "")
+            done = max(0, total - pending)
+            bar.update(
+                VIDEO_PROXY_ACTIVITY, done / total if total else None,
+                label="미리보기용 영상 준비" if korean else "Preparing preview video",
+                detail=(f"{done + 1} / {total}개 · {current}" if korean else f"{done + 1} / {total} · {current}"),
+            )
+        analysis = self._analysis_worker
+        track = next((track for track in self.tracks if track.id == self._analysis_track_id), None)
+        if self._closing or analysis is None or track is None:
+            bar.finish(AUDIO_ANALYSIS_ACTIVITY)
+        else:
+            bar.update(
+                AUDIO_ANALYSIS_ACTIVITY, None,
+                label="오디오 반응 효과 분석" if korean else "Analyzing audio for visualizers",
+                detail=track.title or Path(track.file_path).name,
+            )
 
     def _video_frame_ready(self) -> None:
         """Present an asynchronously decoded seek frame while transport is paused."""
@@ -2904,6 +2943,7 @@ class ExportPreviewDialog(QDialog):
         self._analysis_worker.failed.connect(self._preview_worker_failed)
         self._analysis_worker.finished.connect(self._analysis_finished)
         self._analysis_worker.start()
+        self._sync_background_activity()
 
     def _store_track_levels(self, track_id: str, fps: int, levels: object) -> None:
         """Receive full-track FFT levels and refresh the current preview image."""
@@ -2926,6 +2966,7 @@ class ExportPreviewDialog(QDialog):
             self._analysis_track_id = ""
         if isinstance(worker, AudioAnalysisWorker):
             worker.deleteLater()
+        self._sync_background_activity()
         self._schedule_refresh()
 
     def _toggle_playback(self, playing: bool) -> None:
@@ -3558,6 +3599,7 @@ class ExportPreviewDialog(QDialog):
             self._video_proxy_worker.cancel()
             self._finish_or_detach_worker(self._video_proxy_worker)
         self._video_proxy_worker = None
+        self._sync_background_activity()  # closing: both lines leave the status bar
         if self._blended_audio_controller is not None:
             self._blended_audio_controller.shutdown()
         if self._blended_audio_temp_dir is not None:

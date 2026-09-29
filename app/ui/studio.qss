@@ -38,6 +38,9 @@ QLabel#activityPopupHeading { color: @muted; font-size: 11px; font-weight: 600; 
 QLabel#activityPopupTitle { color: @text; font-weight: 600; }
 QLabel#activityPopupPercent { color: @muted; font-size: 11px; }
 QLabel#activityPopupDetail, QLabel#activityPopupStep { color: @muted; font-size: 11px; }
+QToolButton#activityPinButton { padding: 0; min-height: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; }
+QToolButton#activityPinButton:hover { background: @hover; border-color: @border; }
+QToolButton#activityPinButton:checked { background: @hover; border-color: @accent; }
 QProgressBar#activityPopupBar { background: @field; border: 0; border-radius: 2px; }
 QProgressBar#activityPopupBar::chunk { background: @accent; border-radius: 2px; }
 

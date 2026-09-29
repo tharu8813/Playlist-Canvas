@@ -4034,17 +4034,26 @@ class MainWindow(QMainWindow):
                 progress.canceled.connect(cancel.set)
                 self._export_preparation_cancel = cancel
                 progress.show()
+                self.activity_progress.begin(
+                    "playlist_files", "재생목록 파일 만들기" if korean else "Creating playlist files",
+                    detail="믹스 시간 확인 중" if korean else "Preparing mix timestamps",
+                )
+
+                def report(_stage: str, fraction: float, message: str) -> None:
+                    progress.setLabelText(message)
+                    self.activity_progress.update("playlist_files", fraction, detail=message or None)
+
                 try:
                     with TemporaryDirectory(prefix="playlist-timestamps-", ignore_cleanup_errors=True) as directory:
                         _, compiled_plan = prepare_audio_for_ui(
                             renderer, tracks, Path(directory), self.project_settings.transition_mode,
-                            self.project_settings.crossfade_seconds, RenderSettings(), cancel,
-                            lambda stage, fraction, message: progress.setLabelText(message),
+                            self.project_settings.crossfade_seconds, RenderSettings(), cancel, report,
                             automix_settings=automix_settings_for(self.project_settings),
                         )
                 except RenderCancelledError:
                     return
                 finally:
+                    self.activity_progress.finish("playlist_files")
                     progress.close()
                     progress.deleteLater()
                     self._export_preparation_cancel = None
