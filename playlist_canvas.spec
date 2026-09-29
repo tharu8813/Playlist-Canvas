@@ -110,3 +110,16 @@ COLLECT(
     upx=False,
     name="Playlist Canvas",
 )
+
+# Settings → Maintenance → Integrity check compares the installed files with
+# this list (app/services/maintenance_service.py). Skip what setup.iss excludes.
+import hashlib
+import json
+
+_dist = Path(DISTPATH) / "Playlist Canvas"
+_integrity = {}
+for _path in sorted(_dist.rglob("*")):
+    if _path.is_file() and _path.suffix.lower() not in {".pdb", ".log", ".tmp"} and _path.name != "integrity.json":
+        with _path.open("rb") as _handle:
+            _integrity[_path.relative_to(_dist).as_posix()] = hashlib.file_digest(_handle, "sha256").hexdigest()
+(_dist / "integrity.json").write_text(json.dumps({"files": _integrity}, indent=1), encoding="utf-8")

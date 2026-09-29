@@ -127,6 +127,10 @@ def main() -> int:
     if "--smoke-test" in sys.argv:
         QTimer.singleShot(0, application.quit)
         return application.exec()
+    from app.dialogs.welcome_dialog import MAIN_GUIDE, MAIN_GUIDE_TITLE, WELCOME_KEY, GuideDialog, first_time
+
+    if first_time(WELCOME_KEY):
+        GuideDialog(MAIN_GUIDE, MAIN_GUIDE_TITLE, window.translator.is_korean, window).exec()
     if not open_initial_workspace(window, launch_project):
         window.close()
         # No exec() will run its cleanup, so delete the closed window here, not at exit.

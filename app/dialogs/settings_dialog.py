@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -467,6 +469,33 @@ class SettingsDialog(QDialog):
         automix_cache_row.addWidget(self.automix_cache_clear_button)
         content_form.addRow(self.automix_cache_label, automix_cache_row)
 
+        # Reinstall and reset need the main window (download, closing the
+        # program), so they close Settings and leave the action for the owner.
+        self.maintenance_action = ""
+        self.integrity_button = QPushButton()
+        self.program_reinstall_button = QPushButton()
+        self.reset_button = QPushButton()
+        self.reset_button.setObjectName("dangerButton")
+        self.integrity_label, self.program_reinstall_label, self.reset_label = QLabel(), QLabel(), QLabel()
+        self.integrity_hint, self.program_reinstall_hint, self.reset_hint = QLabel(), QLabel(), QLabel()
+        maintenance_group = QGroupBox()
+        maintenance_form = QFormLayout(maintenance_group)
+        for label, hint, button in (
+            (self.integrity_label, self.integrity_hint, self.integrity_button),
+            (self.program_reinstall_label, self.program_reinstall_hint, self.program_reinstall_button),
+            (self.reset_label, self.reset_hint, self.reset_button),
+        ):
+            hint.setObjectName("mutedLabel")
+            hint.setWordWrap(True)
+            button.setMinimumWidth(120)
+            row = QHBoxLayout()
+            row.addWidget(hint, 1)
+            row.addWidget(button)
+            maintenance_form.addRow(label, row)
+        self.integrity_button.clicked.connect(self._check_integrity)
+        self.program_reinstall_button.clicked.connect(self._confirm_program_reinstall)
+        self.reset_button.clicked.connect(self._confirm_reset)
+
         self.tabs = QTabWidget()
         self.tabs.setObjectName("settingsTabs")
         self.tabs.setDocumentMode(True)
@@ -477,11 +506,13 @@ class SettingsDialog(QDialog):
         self.ffmpeg_page = self._scroll_page(self.ffmpeg_about_card, self.ffmpeg_status_card, ffmpeg_group)
         self.content_page = self._scroll_page(content_group)
         self.notifications_page = self._scroll_page(notification_group)
+        self.maintenance_page = self._scroll_page(maintenance_group)
         self.tabs.addTab(self.general_page, "")
         self.tabs.addTab(self.export_page, "")
         self.tabs.addTab(self.ffmpeg_page, "")
         self.tabs.addTab(self.content_page, "")
         self.tabs.addTab(self.notifications_page, "")
+        self.tabs.addTab(self.maintenance_page, "")
         self.tabs.currentChanged.connect(self._settings_tab_changed)
 
         layout = QVBoxLayout(self)
@@ -492,7 +523,8 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.tabs, 1)
         self.button_box.button(QDialogButtonBox.StandardButton.Save).setObjectName("primaryButton")
         layout.addWidget(self.button_box)
-        for form in (app_form, content_form, render_form, output_form, ffmpeg_form, notification_form):
+        for form in (app_form, content_form, render_form, output_form, ffmpeg_form, notification_form,
+                     maintenance_form):
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
             form.setHorizontalSpacing(24)
@@ -504,6 +536,7 @@ class SettingsDialog(QDialog):
         self.notification_group = notification_group
         self.app_group = app_group
         self.content_group = content_group
+        self.maintenance_group = maintenance_group
         self.retranslate()
         self._update_smooth_scroll_ui()
         self._update_work_mode_hint()
@@ -991,6 +1024,35 @@ class SettingsDialog(QDialog):
         self.tabs.setTabText(2, "FFmpeg")
         self.tabs.setTabText(3, "콘텐츠" if korean else "Content")
         self.tabs.setTabText(4, "알림" if korean else "Notifications")
+        self.tabs.setTabText(5, "유지 관리" if korean else "Maintenance")
+        self.maintenance_group.setTitle("프로그램 관리" if korean else "Program maintenance")
+        self.integrity_label.setText("무결성 검사" if korean else "Integrity check")
+        self.integrity_hint.setText(
+            "설치된 프로그램 파일이 빠지거나 손상되지 않았는지 공식 배포본의 SHA-256 목록과 비교합니다."
+            if korean else
+            "Compares the installed program files with the official build's SHA-256 list to find "
+            "missing or damaged files."
+        )
+        self.integrity_button.setText("검사 시작" if korean else "Check now")
+        self.program_reinstall_label.setText("강제 재설치" if korean else "Force reinstall")
+        self.program_reinstall_hint.setText(
+            "GitHub에서 최신 공식 Setup을 내려받아 버전과 관계없이 다시 설치합니다. "
+            "프로젝트와 설정은 유지됩니다."
+            if korean else
+            "Downloads the latest official Setup from GitHub and installs it again regardless of "
+            "version. Projects and settings are kept."
+        )
+        self.program_reinstall_button.setText("재설치" if korean else "Reinstall")
+        self.reset_label.setText("프로그램 초기화" if korean else "Reset program")
+        self.reset_hint.setText(
+            "모든 설정·최근 프로젝트 목록·창 배치와 분석·미리보기 캐시를 지우고 처음 설치한 상태로 "
+            "다시 시작합니다. 프로젝트 파일, 사용자 프리셋, 언어팩, 설치된 FFmpeg는 지우지 않습니다."
+            if korean else
+            "Clears every setting, the recent projects list, the window layout and the analysis and "
+            "preview caches, then restarts as freshly installed. Project files, user presets, language "
+            "packs and the installed FFmpeg are kept."
+        )
+        self.reset_button.setText("초기화" if korean else "Reset")
         self.ffmpeg_about_title.setText(
             "FFmpeg이란?" if korean else "What is FFmpeg?"
         )
@@ -1303,6 +1365,127 @@ class SettingsDialog(QDialog):
 
         clear_caches()
         self._refresh_automix_cache_usage()
+
+    def _request_maintenance(self, action: str) -> None:
+        self.maintenance_action = action
+        self.reject()
+
+    def _check_integrity(self) -> None:
+        from app.services.maintenance_service import installation_root, verify_installation
+
+        korean = self.translator.is_korean
+        title = "무결성 검사" if korean else "Integrity check"
+        root = installation_root()
+        if root is None:
+            QMessageBox.information(
+                self, title,
+                "소스 코드에서 실행 중이라 비교할 설치 파일 목록이 없습니다. 설치된 프로그램에서 사용할 수 있습니다."
+                if korean else
+                "Running from source, so there is no installed file list to compare. "
+                "This check works in the installed program.",
+            )
+            return
+        progress = QProgressDialog(
+            "설치된 파일을 확인하는 중…" if korean else "Checking installed files…",
+            "취소" if korean else "Cancel", 0, 1000, self,
+        )
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        def step(fraction: float) -> bool:
+            progress.setValue(int(fraction * 1000))
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        # ponytail: hashes on the UI thread, repainting between files; move to a
+        # worker thread if one large DLL ever stalls the progress bar noticeably.
+        try:
+            report = verify_installation(root, step)
+        except (OSError, ValueError, KeyError, TypeError):
+            progress.close()
+            self._offer_program_reinstall(
+                title,
+                "설치 파일 목록(integrity.json)을 읽을 수 없습니다. 이전 버전으로 설치되었거나 파일이 손상되었습니다."
+                if korean else
+                "The installed file list (integrity.json) could not be read. The program was installed "
+                "by an older version or the file is damaged.",
+            )
+            return
+        progress.close()
+        if report is None:
+            return
+        if report.ok:
+            QMessageBox.information(
+                self, title,
+                f"설치 파일 {report.checked}개가 모두 정상입니다."
+                if korean else f"All {report.checked} installed files are intact.",
+            )
+            return
+        problems = (
+            [("없음: " if korean else "Missing: ") + name for name in report.missing]
+            + [("손상: " if korean else "Damaged: ") + name for name in report.damaged]
+        )
+        listed = "\n".join(problems[:10])
+        if len(problems) > 10:
+            listed += f"\n… 외 {len(problems) - 10}개" if korean else f"\n… and {len(problems) - 10} more"
+        self._offer_program_reinstall(
+            title,
+            (f"설치 파일 {report.checked}개 중 {len(problems)}개에 문제가 있습니다.\n\n{listed}"
+             if korean else
+             f"{len(problems)} of {report.checked} installed files have problems.\n\n{listed}"),
+        )
+
+    def _offer_program_reinstall(self, title: str, problem: str) -> None:
+        korean = self.translator.is_korean
+        answer = QMessageBox.warning(
+            self, title,
+            problem + ("\n\n강제 재설치로 복구할까요?" if korean else "\n\nRepair it with a forced reinstall?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._request_maintenance("reinstall")
+
+    def _confirm_program_reinstall(self) -> None:
+        korean = self.translator.is_korean
+        answer = QMessageBox.question(
+            self,
+            "강제 재설치" if korean else "Force reinstall",
+            "GitHub에서 최신 공식 Setup을 내려받아 다시 설치합니다.\n"
+            "다운로드와 SHA-256 검증이 끝나면 프로그램을 종료하고 Setup을 실행합니다.\n"
+            "프로젝트와 설정은 그대로 유지됩니다. 계속할까요?"
+            if korean else
+            "Download the latest official Setup from GitHub and install it again.\n"
+            "After the download is SHA-256 verified, Playlist Canvas closes and runs Setup.\n"
+            "Projects and settings are kept. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._request_maintenance("reinstall")
+
+    def _confirm_reset(self) -> None:
+        korean = self.translator.is_korean
+        answer = QMessageBox.warning(
+            self,
+            "프로그램 초기화" if korean else "Reset program",
+            "프로그램을 처음 설치한 상태로 되돌립니다.\n\n"
+            "지워지는 항목: 모든 설정, 최근 프로젝트 목록, 창 배치, AutoMix 편집기 프리셋, "
+            "AutoMix 분석 캐시, 미리보기 캐시, 내려받은 업데이트 파일\n"
+            "유지되는 항목: 프로젝트 파일, 사용자 프리셋, 언어팩, 설치된 FFmpeg\n\n"
+            "프로그램이 종료된 뒤 다시 시작됩니다. 계속할까요?"
+            if korean else
+            "Return the program to its freshly installed state.\n\n"
+            "Cleared: every setting, the recent projects list, the window layout, AutoMix editor "
+            "presets, the AutoMix analysis cache, the preview cache and downloaded updates\n"
+            "Kept: project files, user presets, language packs and the installed FFmpeg\n\n"
+            "Playlist Canvas closes and starts again. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._request_maintenance("reset")
 
     def _ffmpeg_browse_title(self) -> str:
         return "FFmpeg 실행 파일 선택" if self.translator.is_korean else "Choose FFmpeg executable"

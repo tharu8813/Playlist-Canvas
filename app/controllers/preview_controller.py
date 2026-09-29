@@ -87,6 +87,17 @@ class PreviewController:
 
         editor = AutoMixEditorDialog(self.window, (outgoing_track_id, incoming_track_id))
         editor.show()
+        QTimer.singleShot(0, editor, lambda: self._guide_automix_editor(editor))
+
+    @staticmethod
+    def _guide_automix_editor(editor) -> None:
+        """The first time the editor opens, walk through it once on top of it."""
+        from app.dialogs.welcome_dialog import AUTOMIX_GUIDE, AUTOMIX_GUIDE_KEY, AUTOMIX_GUIDE_TITLE, GuideDialog, first_time
+
+        if first_time(AUTOMIX_GUIDE_KEY):
+            guide = GuideDialog(AUTOMIX_GUIDE, AUTOMIX_GUIDE_TITLE, editor.korean, editor)
+            guide.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            guide.open()
 
     def select_edit_bottom_tab(self, index: int | None = None) -> None:
         """Select one persisted editing tab without recursively changing modes."""

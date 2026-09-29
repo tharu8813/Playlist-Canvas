@@ -430,6 +430,8 @@ class MainWindow(QMainWindow):
         self._update_service = GitHubUpdateService()
         self._update_check_worker: UpdateCheckWorker | None = None
         self._update_check_manual = False
+        self._update_check_reinstall = False
+        self._reset_after_close = False
         self._close_after_update_check = False
         self._update_download_worker: UpdateDownloadWorker | None = None
         self._update_download_dialog: UpdateDownloadDialog | None = None
@@ -3392,8 +3394,11 @@ class MainWindow(QMainWindow):
         """Check once after startup without delaying project selection or first paint."""
         QTimer.singleShot(1200, self, lambda: self._check_for_updates(manual=False))
 
-    def _check_for_updates(self, manual: bool) -> None:
-        """Request the latest stable GitHub Release on a background thread."""
+    def _check_for_updates(self, manual: bool, reinstall: bool = False) -> None:
+        """Request the latest stable GitHub Release on a background thread.
+
+        ``reinstall`` (Settings → Maintenance) downloads its Setup whatever its version.
+        """
         if self._update_check_worker and self._update_check_worker.isRunning():
             if manual:
                 self.statusBar().showMessage(
@@ -3406,6 +3411,7 @@ class MainWindow(QMainWindow):
         if self._update_download_worker and self._update_download_worker.isRunning():
             return
         self._update_check_manual = manual
+        self._update_check_reinstall = reinstall
         self.check_updates_action.setEnabled(False)
         if manual:
             self.statusBar().showMessage(
@@ -3432,6 +3438,18 @@ class MainWindow(QMainWindow):
             return  # the user is closing; don't pop release notes on the way out
         manual = self._update_check_manual
         korean = self.translator.is_korean
+        if self._update_check_reinstall:
+            if release.can_install:
+                self._start_update_download(release)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "강제 재설치" if korean else "Force reinstall",
+                    "최신 릴리즈에 검증된 Setup 파일이 없어 재설치할 수 없습니다."
+                    if korean else
+                    "The latest release has no verified Setup file, so it cannot be reinstalled.",
+                )
+            return
         try:
             release_version = normalized_version(release.version)
             current_version = normalized_version(__version__)
@@ -3644,6 +3662,28 @@ class MainWindow(QMainWindow):
         self._update_install_authorized = True
         self.close()
 
+    def _reset_program(self) -> None:
+        """Close normally (unsaved work is asked about); closeEvent then resets and restarts."""
+        busy = self._export_preparation_cancel is not None or any(
+            worker is not None and worker.isRunning() for worker in (
+                self._render_worker, self._ffmpeg_install_worker, self._ffmpeg_catalog_worker,
+                self._update_check_worker, self._update_download_worker,
+            )
+        )
+        if busy:
+            korean = self.translator.is_korean
+            QMessageBox.warning(
+                self,
+                "프로그램 초기화" if korean else "Reset program",
+                "진행 중인 작업(내보내기·다운로드 등)이 끝난 뒤 다시 시도해 주세요."
+                if korean else
+                "Try again once the running task (export, download, …) has finished.",
+            )
+            return
+        self._reset_after_close = True
+        if not self.close():
+            self._reset_after_close = False
+
     def _show_settings(self, focus_ffmpeg: bool = False) -> None:
         """Show and persist the Phase 4A application settings."""
         dialog = SettingsDialog(
@@ -3674,6 +3714,10 @@ class MainWindow(QMainWindow):
             dialog.open_ffmpeg_page()
         if dialog.exec() != dialog.DialogCode.Accepted:
             self._settings_dialog = None
+            if dialog.maintenance_action == "reinstall":
+                self._check_for_updates(manual=True, reinstall=True)
+            elif dialog.maintenance_action == "reset":
+                self._reset_program()
             return
         selected_settings = dialog.app_settings
         self.settings_service.save(selected_settings)
@@ -5214,6 +5258,11 @@ class MainWindow(QMainWindow):
                 )
             except (RuntimeError, TypeError):
                 pass
+        if self._reset_after_close:
+            from app.services.maintenance_service import reset_program_data, restart_arguments
+
+            reset_program_data()
+            QProcess.startDetached(*restart_arguments())
         event.accept()
 
     def _apply_style(self) -> None:
