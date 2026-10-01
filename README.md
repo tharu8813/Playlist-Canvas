@@ -20,6 +20,8 @@
 
 Playlist Canvas는 음악, 앨범 커버, 가사, 배경과 다양한 시각 효과를 배치해 **MP4 영상으로 만드는 Windows 프로그램**입니다. 디자인 프리셋으로 시작하고, 음악을 넣고, 원하는 모습으로 다듬으면 됩니다. 프로그래밍 지식이나 별도의 Python 설치는 필요하지 않습니다.
 
+**이 프로젝트는 아이디어 구상부터 구현까지 전 과정을 바이브 코딩(Vibe Coding) 방식으로 제작했습니다. 이용된 모델은 CHatGPT 5.6 Sol(Codex), Claude Opus 5.5(Claude Code)가 사용되었습니다.**
+
 ## 다운로드와 설치
 
 1. [최신 릴리즈 페이지](https://github.com/tharu8813/Playlist-Canvas/releases/latest)의 **Assets**에서 `Playlist.Canvas-1.3.0.0-setup.exe`를 내려받습니다. `Source code` 파일은 일반 사용자용 설치 파일이 아닙니다.
