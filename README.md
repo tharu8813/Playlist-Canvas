@@ -1,3 +1,5 @@
+> **개발 안내:** 현재 Claude Code 구독료를 유지하기 어려워 신규 기능 개발은 잠시 중단됩니다. 다만 버그 수정, 기타 최적화, 치명적인 오류 대응 등 필요한 유지보수는 계속 진행됩니다.
+
 <div align="center">
   <img src="docs/images/playlist-canvas-icon.png" width="128" alt="Playlist Canvas 아이콘">
   <h1>Playlist Canvas</h1>
