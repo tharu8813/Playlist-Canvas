@@ -22,6 +22,8 @@ Playlist Canvas는 음악, 앨범 커버, 가사, 배경과 다양한 시각 효
 
 **이 프로젝트는 아이디어 구상부터 구현까지 전 과정을 바이브 코딩(Vibe Coding) 방식으로 제작했습니다. 이용된 모델은 CHatGPT 5.6 Sol(Codex), Claude Opus 5.5(Claude Code)가 사용되었습니다.**
 
+예제 영상은 [이곳](https://www.youtube.com/watch?v=k2-e5Nhj7RY)을 클릭해서 확인하세요! (Playlist Canvas 1.3.0.0v AutoMix 기준)
+
 ## 다운로드와 설치
 
 1. [최신 릴리즈 페이지](https://github.com/tharu8813/Playlist-Canvas/releases/latest)의 **Assets**에서 `Playlist.Canvas-1.3.0.0-setup.exe`를 내려받습니다. `Source code` 파일은 일반 사용자용 설치 파일이 아닙니다.
