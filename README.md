@@ -149,4 +149,4 @@ https://github.com/tharu8813/Playlist-Canvas
 
 ---
 
-제작: **Ji Beak min (tharu8813)** · ChatGPT Codex와 Claude Code를 활용해 제작했습니다.
+제작: **Ji Beak min (tharu8813)** · [ChatGPT Codex](https://github.com/codex)와 Claude Code를 활용해 제작했습니다.
