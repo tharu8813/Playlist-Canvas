@@ -33,7 +33,7 @@ class _StubProvider:
 
 def _track(directory: Path, name: str, duration: float = 60.0) -> PlaylistTrack:
     path = directory / name
-    path.write_bytes(b"audio")
+    path.write_bytes(b"audio:" + name.encode())  # distinct songs must not share the content-keyed cache
     return PlaylistTrack(file_path=str(path), title=name, duration_seconds=duration)
 
 

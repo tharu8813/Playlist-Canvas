@@ -20,6 +20,8 @@ always advance. A reader that stops consuming is detected by
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 from collections.abc import Callable
 from dataclasses import dataclass
 import errno
@@ -420,6 +422,7 @@ class PipedCanvasStream:
             "-i", self.path,
         ]
 
+    @timed("export.frame_queue_seconds")
     def submit(self, image: QImage, duration_seconds: float) -> None:
         """Queue one captured state; conversion and pipe writes run off-thread."""
         if self._finished:
@@ -508,6 +511,7 @@ class PipedCanvasStream:
             and self.producer_cancel_event.is_set()
         )
 
+    @timed("export.frame_delivery_seconds")
     def _write_frame(self, frame: _QueuedCanvasFrame) -> None:
         self._written_seconds += frame.duration_seconds
         if self._reader_closed:

@@ -50,7 +50,8 @@ from app.widgets.transition_inspector import INCOMING_COLOR, OUTGOING_COLOR, _cl
 _SETTINGS_KEY = "automix_editor/advanced"
 AUDITION_ACTIVITY = "automix_audition"
 _COPIED_FIELDS = ("style", "duration", "tempo_match", "vocal_handoff", "eq_bands",
-                  "echo_beats", "echo_feedback", "echo_low_cut", "tape_entry", "key_shift", "ramp_seconds")
+                  "echo_beats", "echo_feedback", "echo_low_cut", "tape_entry", "key_shift", "ramp_seconds",
+                  "roll_beats", "filter_cutoff_hz")
 """What paste and presets carry to another transition: how it mixes, never where (cues belong to the songs)."""
 _PRESETS_KEY = "automix_editor/presets"
 _GEOMETRY_KEY = "automix_editor/geometry"
@@ -65,7 +66,8 @@ _FIELD_GROUPS = {"style": ("스타일", "style"), "duration": ("길이", "length
                  "vocal_handoff": ("대역", "bands"), "echo_beats": ("효과", "effect"),
                  "echo_feedback": ("효과", "effect"), "echo_low_cut": ("효과", "effect"),
                  "tape_entry": ("효과", "effect"), "outgoing_cue": ("A 큐", "A cue"),
-                 "incoming_cue": ("B 시작", "B start")}
+                 "incoming_cue": ("B 시작", "B start"), "roll_beats": ("효과", "effect"),
+                 "filter_cutoff_hz": ("효과", "effect")}
 """How an applied preset or paste names what it changed."""
 
 

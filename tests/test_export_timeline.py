@@ -83,6 +83,24 @@ class ExportTimelinePlannerTests(unittest.TestCase):
         elapsed = [round(sample.elapsed_seconds, 4) for sample in flowing]
         self.assertEqual(len(set(elapsed)), len(elapsed))
 
+    def test_ambient_flow_speed_and_bass_reaction_control_sampling(self) -> None:
+        from app.preview.album_art import AMBIENT_FLOW_HZ
+
+        track = PlaylistTrack(
+            file_path="reactive.mp3", title="Reactive", duration_seconds=2.0,
+        )
+        background = Source(
+            SourceType.BACKGROUND, "Cover", background_mode="album_art",
+            background_ambient=True, background_ambient_motion=2.0,
+        )
+        fast_flow = ExportTimelinePlanner.build([track], [background], 30)
+        self.assertEqual(len(fast_flow), round(2.0 * AMBIENT_FLOW_HZ * 2.0))
+
+        background.background_ambient_motion = 0.0
+        background.background_bass_reactive = True
+        bass_reactive = ExportTimelinePlanner.build([track], [background], 30)
+        self.assertEqual(len(bass_reactive), round(2.0 * 30))
+
     def test_album_background_transition_densifies_later_track_openings(self) -> None:
         first = PlaylistTrack(
             file_path="first.mp3", title="First", duration_seconds=3.0,
@@ -188,6 +206,7 @@ class ExportTimelinePlannerTests(unittest.TestCase):
                 "Lyrics",
                 subtitle_animation="glow",
                 subtitle_animation_duration=0.5,
+                subtitle_intro_enabled=False,  # Count cue transitions independently of the intro row.
             ),
             Source(
                 SourceType.NOW_PLAYING,

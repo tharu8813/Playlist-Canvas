@@ -282,7 +282,8 @@ class EditorPanelTests(unittest.TestCase):
         self.assertEqual(sum(not label.isHidden() for label in panel.group_labels), 3)
         simple = self._panel("short_fade", advanced=False)
         shown = [style for style, button in simple.style_buttons.items() if not button.isHidden()]
-        self.assertEqual(shown, ["auto", "short_fade", "vocal_safe_eq", "echo_out", "downbeat_cut"])
+        self.assertEqual(shown, ["auto", "short_fade", "vocal_safe_eq", "echo_out", "downbeat_cut",
+                                 "beat_roll", "lowpass_out"])
 
     def test_only_the_chosen_effects_settings_show(self) -> None:
         echo = self._panel("echo_out")
@@ -318,7 +319,7 @@ class FilterSweepSelectionTests(unittest.TestCase):
 
     def test_a_filter_style_is_not_repeated_back_to_back(self) -> None:
         self.assertIs(self._select(0.3, 0.8, previous=TransitionDsp.FILTER_SWEEP), TransitionDsp.FILTER_BLEND)
-        self.assertIs(self._select(0.8, 0.3, previous=TransitionDsp.FILTER_BLEND), TransitionDsp.FILTER_SWEEP)
+        self.assertIs(self._select(0.8, 0.3, previous=TransitionDsp.FILTER_BLEND), TransitionDsp.LOWPASS_OUT)
 
 
 class PhraseTests(unittest.TestCase):

@@ -363,6 +363,28 @@ class VideoFrameFilterTests(unittest.TestCase):
         self.assertFalse(stats.filter_pending)
         item.release_video_decoder()
 
+    def test_nominal_video_cadence_accepts_clock_jitter_but_still_throttles_double_rate(self) -> None:
+        image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+        image.fill(QColor("#336699"))
+        for fps, early_interval in ((30, 0.032), (60, 0.016)):
+            with self.subTest(fps=fps):
+                item = SourceItem(Source(SourceType.VIDEO, "Clock jitter"))
+                item._video_timeline_preview_active = True
+                item._video_preview_fps = fps
+                item._video_filter_busy = True  # isolate scheduling from worker completion
+                item._video_last_frame_accepted = 10.0
+                try:
+                    with patch("app.canvas.source_item.monotonic", return_value=10.0 + early_interval):
+                        item._video_frame_changed(QVideoFrame(image))
+                    self.assertEqual(item.video_decoder_stats().accepted_frames, 1)
+                    with patch("app.canvas.source_item.monotonic", return_value=10.0 + early_interval + 0.5 / fps):
+                        item._video_frame_changed(QVideoFrame(image))
+                    self.assertEqual(item.video_decoder_stats().accepted_frames, 1)
+                    self.assertEqual(item.video_decoder_stats().throttled_frames, 1)
+                    self.assertEqual(item.video_decoder_stats().pressure_drops, 0)
+                finally:
+                    item.release_video_decoder()
+
     def test_fps_backpressure_does_not_invalidate_resolution_filter(self) -> None:
         item = SourceItem(Source(SourceType.VIDEO, "Independent budgets"))
         generation = item._video_filter_generation

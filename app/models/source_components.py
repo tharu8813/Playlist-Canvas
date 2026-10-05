@@ -66,6 +66,10 @@ class AlbumCoverComponent(ImageComponent):
 class BackgroundComponent(ImageComponent):
     mode: str = _legacy("background_mode")
     ambient: bool = _legacy("background_ambient")
+    ambient_blur: float = _legacy("background_ambient_blur")
+    ambient_motion: float = _legacy("background_ambient_motion")
+    bass_reactive: bool = _legacy("background_bass_reactive")
+    bass_strength: float = _legacy("background_bass_strength")
     track_transition: bool = _legacy("background_track_transition")
     track_transition_seconds: float = _legacy("background_track_transition_seconds")
 
@@ -87,6 +91,16 @@ class TextComponent(SourceComponent):
     case: str = _legacy("text_case")
     gradient_fill: bool = _legacy("text_gradient")
     shadow_glyph: bool = _legacy("text_shadow_glyph")
+    music_reactive_enabled: bool
+    music_reactive_effect: str
+    music_reactive_strength: float
+    music_reactive_attack: float
+    music_reactive_release: float
+    music_reactive_band: str
+    music_reactive_sensitivity: float
+    music_reactive_threshold: float
+    music_reactive_curve: str
+    music_reactive_offset: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,14 +110,34 @@ class TimeComponent(TextComponent):
 
 @dataclass(frozen=True, slots=True)
 class LyricsComponent(TextComponent):
+    advanced_categories: list[str] = _legacy("subtitle_advanced_categories")
+    advanced_settings: dict[str, object] = _legacy("subtitle_advanced_settings")
     fallback: str = _legacy("subtitle_fallback")
     animation: str = _legacy("subtitle_animation")
     animation_duration: float = _legacy("subtitle_animation_duration")
+    flow_direction: str = _legacy("subtitle_flow_direction")
+    motion_easing: str = _legacy("subtitle_motion_easing")
+    motion_distance: float = _legacy("subtitle_motion_distance")
+    stagger: float = _legacy("subtitle_stagger")
+    stagger_order: str = _legacy("subtitle_stagger_order")
+    anchor: float = _legacy("subtitle_anchor")
+    zoom_amount: float = _legacy("subtitle_zoom_amount")
+    glow_strength: float = _legacy("subtitle_glow_strength")
+    glow_radius: float = _legacy("subtitle_glow_radius")
+    role_styles: dict[str, dict[str, object]] = _legacy("subtitle_role_styles")
     context_lines: int = _legacy("subtitle_context_lines")
     next_lines: int = _legacy("subtitle_next_lines")
     line_spacing: float = _legacy("subtitle_line_spacing")
     previous_opacity: float = _legacy("subtitle_previous_opacity")
     previous_blur: float = _legacy("subtitle_previous_blur")
+    previous_distance_fade: float = _legacy("subtitle_previous_distance_fade")
+    next_distance_fade: float = _legacy("subtitle_next_distance_fade")
+    intro_enabled: bool = _legacy("subtitle_intro_enabled")
+    intro_midtrack: bool = _legacy("subtitle_intro_midtrack")
+    intro_style: str = _legacy("subtitle_intro_style")
+    intro_gap: float = _legacy("subtitle_intro_gap")
+    intro_period: float = _legacy("subtitle_intro_period")
+    intro_scale: float = _legacy("subtitle_intro_scale")
     current_line: int = _legacy("subtitle_current_line")
     current_line_count: int = _legacy("subtitle_current_line_count")
     scroll_offset: float = _legacy("subtitle_scroll_offset")
@@ -111,6 +145,7 @@ class LyricsComponent(TextComponent):
     current_scale: float = _legacy("subtitle_current_scale")
     accent_enabled: bool = _legacy("subtitle_accent_enabled")
     accent_color: str = _legacy("subtitle_accent_color")
+    line_styles: list[dict[str, object]] = _legacy("subtitle_line_styles")
 
 
 @dataclass(frozen=True, slots=True)

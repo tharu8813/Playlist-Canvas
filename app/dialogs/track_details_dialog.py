@@ -1044,6 +1044,7 @@ class TrackDetailsDialog(QDialog):
         if dialog.saved_paths:
             self.selected_lyrics_path = str(dialog.saved_paths[-1].resolve())
         self._refresh_preview()
+        self._accept()
 
     def _export_current_lyrics_as_lrc(self) -> None:
         """Convert the attached/embedded cues to LRC with this track's offset applied."""

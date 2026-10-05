@@ -76,6 +76,7 @@ from app.video.frame_filter import VideoFrameFilterSettings, filter_video_frame
 from app.video.decoder_backpressure import VideoDecoderBackpressure
 from app.video.preview_proxy import PreviewProxyCache, PreviewProxyWorker
 from app.utils.i18n import Translator
+from app.utils.performance import ENABLED as PROFILE_ENABLED, PROFILE, timed
 from app.widgets.activity_progress import activity_for
 from app.widgets.automix_details_panel import AutoMixDetailsPanel, ready_through
 from app.widgets.transition_inspector import TransitionInspectorWindow
@@ -347,7 +348,8 @@ class AudioAnalysisWorker(QThread):
     def __init__(self, renderer: PythonVisualizerRenderer, track: PlaylistTrack,
                  bands: int, fps: int = 30, needs_waveform: bool = False,
                  overlays: tuple[VisualizerOverlay, ...] = (),
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, *, music_profiles: tuple = (),
+                 cached_analysis: dict | None = None) -> None:
         super().__init__(parent)
         self.renderer = renderer
         self.track = track
@@ -356,6 +358,8 @@ class AudioAnalysisWorker(QThread):
         self.needs_waveform = needs_waveform
         self.overlays = overlays
         self.cancel_event = threading.Event()
+        self.music_profiles = music_profiles
+        self.cached_analysis = cached_analysis
 
     def cancel(self) -> None:
         """Request cancellation before the next analysis block."""
@@ -363,59 +367,63 @@ class AudioAnalysisWorker(QThread):
 
     def run(self) -> None:
         try:
-            needs_meter = any(overlay.kind == "level_meter" for overlay in self.overlays)
-            stereo = (
-                self.renderer._decode_stereo_audio(
-                    Path(self.track.file_path), self.cancel_event,
-                )
-                if needs_meter else None
-            )
-            samples = (
-                np.mean(stereo, axis=1, dtype=np.float32)
-                if stereo is not None else
-                self.renderer._decode_mono_audio(Path(self.track.file_path), self.cancel_event)
-            )
-            levels = self.renderer._analyze_levels(samples, self.fps, self.bands, self.cancel_event)
-            waveform = (
-                self.renderer._analyze_waveform(samples, self.fps, max(32, self.bands), self.cancel_event)
-                if self.needs_waveform else np.zeros((1, max(32, self.bands)), dtype=np.float32)
-            )
-            processed = tuple(
-                (
-                    np.zeros((1, 1), dtype=np.float32)
-                    if overlay.kind in {"particles", "level_meter"} else
-                    self.renderer.process_level_sequence(
-                        waveform if overlay.kind == "waveform" else levels,
-                        overlay,
-                        max(4, min(96, overlay.bar_count)),
-                    )
-                )
-                for overlay in self.overlays
-            )
-            raw_meter = (
-                np.column_stack((
-                    self.renderer._analyze_rms(stereo[:, 0], self.fps, self.cancel_event),
-                    self.renderer._analyze_rms(stereo[:, 1], self.fps, self.cancel_event),
-                ))
-                if stereo is not None else None
-            )
-            meters = tuple(
-                self.renderer.process_meter_sequence(raw_meter, overlay, self.fps)
-                if overlay.kind == "level_meter" and raw_meter is not None else None
-                for overlay in self.overlays
-            )
+            payload = dict(self.cached_analysis) if self.cached_analysis is not None else self._analyze_audio()
+            payload["music_envelopes"] = {
+                profile: self.renderer.music_envelope(payload["levels"], self.fps, profile, self.cancel_event)
+                for profile in self.music_profiles
+            }
         except Exception as error:
             if not self.cancel_event.is_set():
                 self.failed.emit(str(error))
             return
         if not self.cancel_event.is_set():
-            self.ready.emit(
-                self.track.id, self.fps,
-                {
-                    "levels": levels, "waveform": waveform,
-                    "processed": processed, "meters": meters,
-                },
+            self.ready.emit(self.track.id, self.fps, payload)
+
+    def _analyze_audio(self) -> dict:
+        needs_meter = any(overlay.kind == "level_meter" for overlay in self.overlays)
+        stereo = (
+            self.renderer._decode_stereo_audio(
+                Path(self.track.file_path), self.cancel_event,
             )
+            if needs_meter else None
+        )
+        samples = (
+            np.mean(stereo, axis=1, dtype=np.float32)
+            if stereo is not None else
+            self.renderer._decode_mono_audio(Path(self.track.file_path), self.cancel_event)
+        )
+        levels = self.renderer._analyze_levels(samples, self.fps, self.bands, self.cancel_event)
+        waveform = (
+            self.renderer._analyze_waveform(samples, self.fps, max(32, self.bands), self.cancel_event)
+            if self.needs_waveform else np.zeros((1, max(32, self.bands)), dtype=np.float32)
+        )
+        processed = tuple(
+            (
+                np.zeros((1, 1), dtype=np.float32)
+                if overlay.kind in {"particles", "level_meter"} else
+                self.renderer.process_level_sequence(
+                    waveform if overlay.kind == "waveform" else levels,
+                    overlay,
+                    max(4, min(96, overlay.bar_count)),
+                )
+            )
+            for overlay in self.overlays
+        )
+        raw_meter = (
+            np.column_stack((
+                self.renderer._analyze_rms(stereo[:, 0], self.fps, self.cancel_event),
+                self.renderer._analyze_rms(stereo[:, 1], self.fps, self.cancel_event),
+            ))
+            if stereo is not None else None
+        )
+        meters = tuple(
+            self.renderer.process_meter_sequence(raw_meter, overlay, self.fps)
+            if overlay.kind == "level_meter" and raw_meter is not None else None
+            for overlay in self.overlays
+        )
+        return {"levels": levels, "waveform": waveform,
+                "bass": self.renderer.bass_envelope(levels, self.fps),
+                "processed": processed, "meters": meters}
 
 
 class VideoDurationProbeWorker(QThread):
@@ -445,6 +453,14 @@ class OverlayFrameWorker(QThread):
                  analysis: dict[str, np.ndarray],
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.cancel_event = threading.Event()
+        self.prepare(track_id, fps, generation, start_frame, frame_count,
+                     overlays, analysis_indices, analysis)
+
+    def prepare(self, track_id: str, fps: int, generation: int, start_frame: int, frame_count: int,
+                overlays: tuple[VisualizerOverlay, ...], analysis_indices: OverlaySignature,
+                analysis: dict[str, np.ndarray]) -> None:
+        """Reuse the worker only after its previous finished signal was joined."""
         self.track_id = track_id
         self.fps = fps
         self.generation = generation
@@ -456,7 +472,8 @@ class OverlayFrameWorker(QThread):
         self.analysis_indices = analysis_indices
         self.overlay_signature = analysis_indices
         self.analysis = analysis
-        self.cancel_event = threading.Event()
+        self.cancel_event.clear()
+        self.busy = True
 
     def cancel(self) -> None:
         """Discard this short prefetch batch at the next frame boundary."""
@@ -558,8 +575,16 @@ class ExportPreviewDialog(QDialog):
         self.translator = translator
         self.overlays = list(overlays or [])
         self.source_store = source_store
+        self._visualizer_ffmpeg_executable = ffmpeg_executable
+        self._bass_reactive = any(
+            isinstance(item, SourceItem)
+            and item.source.visible
+            and item.source.uses_bass_reaction
+            for item in self.scene.items()
+        )
         self.visualizer_renderer = (
-            PythonVisualizerRenderer(ffmpeg_executable) if ffmpeg_executable and self.overlays else None
+            PythonVisualizerRenderer(ffmpeg_executable)
+            if ffmpeg_executable and (self.overlays or self._bass_reactive) else None
         )
         self._preview_proxy_ffmpeg = (
             Path(ffmpeg_executable)
@@ -1376,6 +1401,7 @@ class ExportPreviewDialog(QDialog):
         if self._playing and not self._advancing_playhead:
             self._start_audio_at_playhead()
 
+    @timed("preview.refresh_seconds")
     def refresh_preview(self) -> None:
         """Render the global playhead with the same dynamic-overlay drawing as export."""
         if self._closing:
@@ -1388,6 +1414,8 @@ class ExportPreviewDialog(QDialog):
             # The playhead can advance faster than vsync on a busy scene. Keep
             # only the newest requested state instead of rendering a queue of
             # frames that will already be obsolete when presented.
+            if PROFILE_ENABLED:
+                PROFILE.observe("preview.deferred_refresh", 1.0)
             self._gpu_refresh_deferred = True
             return
         self._gpu_refresh_deferred = False
@@ -1402,6 +1430,7 @@ class ExportPreviewDialog(QDialog):
             track, elapsed, junction,
         )
         self._refresh_source_partitions()
+        bass_level = self._bass_level(track, elapsed)
         audio_dynamic_ids = self._cached_audio_dynamic_ids
         canvas_dynamic_ids = self._canvas_dynamic_source_ids(
             track_index,
@@ -1455,6 +1484,8 @@ class ExportPreviewDialog(QDialog):
                 timeline_seconds=self.timeline.value() / TIMELINE_SCALE,
                 animation_phase_duration=phase_duration,
                 junction=junction,
+                bass_level=bass_level,
+                music_levels=self._music_reaction_levels(track, elapsed),
             )
             self._base_track_id = track.id
             self._base_elapsed = elapsed
@@ -1521,6 +1552,8 @@ class ExportPreviewDialog(QDialog):
                         timeline_seconds=playlist_seconds,
                         animation_phase_duration=phase_duration,
                         junction=junction,
+                        bass_level=bass_level,
+                        music_levels=self._music_reaction_levels(track, elapsed),
                     )
                     self._dynamic_region_buffers[buffer_key] = buffer
                     target = QRectF(
@@ -1929,6 +1962,7 @@ class ExportPreviewDialog(QDialog):
             SourceType.VIDEO,
         }
         audio_dynamic_ids: set[str] = set()
+        bass_reactive = False
         always_dynamic_ids: set[str] = set()
         transition_backgrounds: list[tuple[str, float]] = []
         animated_source_ids: set[str] = set()
@@ -1942,6 +1976,9 @@ class ExportPreviewDialog(QDialog):
                 continue
             source = item.source
             source_items.append(item)
+            if source.source_type in {SourceType.TEXT, SourceType.LYRICS} and source.uses_bass_reaction:
+                always_dynamic_ids.add(source.id)
+                bass_reactive = True
             source_z_by_id[source.id] = float(source.z_index)
             visible_source_ids.add(source.id)
             if source.source_type is SourceType.VIDEO:
@@ -1956,6 +1993,9 @@ class ExportPreviewDialog(QDialog):
                     and source.background_mode == "album_art"):
                 if source.background_ambient:
                     always_dynamic_ids.add(source.id)
+                if source.background_bass_reactive:
+                    always_dynamic_ids.add(source.id)
+                    bass_reactive = True
                 if source.background_track_transition:
                     transition_backgrounds.append((
                         source.id,
@@ -1971,6 +2011,14 @@ class ExportPreviewDialog(QDialog):
             if source.animation_in != "none" or source.animation_out != "none":
                 animated_source_ids.add(source.id)
         self._cached_audio_dynamic_ids = frozenset(audio_dynamic_ids)
+        self._bass_reactive = bass_reactive
+        if (
+            bass_reactive and self.visualizer_renderer is None
+            and self._visualizer_ffmpeg_executable is not None
+        ):
+            self.visualizer_renderer = PythonVisualizerRenderer(
+                self._visualizer_ffmpeg_executable
+            )
         self._cached_always_dynamic_ids = frozenset(always_dynamic_ids)
         self._cached_track_transition_backgrounds = tuple(
             transition_backgrounds
@@ -2611,6 +2659,8 @@ class ExportPreviewDialog(QDialog):
             timeline_seconds=self.timeline.value() / TIMELINE_SCALE,
             animation_phase_duration=phase_duration,
             junction=getattr(self, "_frame_junction", None),
+            bass_level=self._bass_level(track, elapsed),
+            music_levels=self._music_reaction_levels(track, elapsed),
         )
         base = CanvasSnapshot.capture_track(
             self.scene, track, track_index + 1, len(self.tracks), start,
@@ -2739,6 +2789,8 @@ class ExportPreviewDialog(QDialog):
             timeline_seconds=self.timeline.value() / TIMELINE_SCALE,
             animation_phase_duration=phase_duration,
             junction=junction,
+            bass_level=self._bass_level(track, elapsed),
+            music_levels=self._music_reaction_levels(track, elapsed),
         )
         base = CanvasSnapshot.capture_track(
             self.scene, track, track_index + 1, len(self.tracks), start,
@@ -2871,7 +2923,9 @@ class ExportPreviewDialog(QDialog):
                                 overlay_signature: OverlaySignature,
                                 analysis: dict[str, np.ndarray]) -> None:
         """Keep a short, newest-first visualizer frame queue ready for presentation."""
-        if self._overlay_worker is not None and self._overlay_worker.isRunning():
+        if self._closing:
+            return
+        if self._overlay_worker is not None and self._overlay_worker.busy:
             if (
                 self._overlay_worker.track_id != track_id
                 or self._overlay_worker.overlay_signature != overlay_signature
@@ -2887,14 +2941,18 @@ class ExportPreviewDialog(QDialog):
         )
         if missing_frame is None:
             return
-        self._overlay_worker = OverlayFrameWorker(
+        request = (
             track_id, self.preview_fps, self._overlay_generation, missing_frame,
             min(self._overlay_prefetch_count, end_frame - missing_frame),
-            overlays, overlay_signature, analysis, self,
+            overlays, overlay_signature, analysis,
         )
-        self._overlay_worker.ready.connect(self._store_overlay_frames)
-        self._overlay_worker.failed.connect(self._preview_worker_failed)
-        self._overlay_worker.finished.connect(self._overlay_worker_finished)
+        if self._overlay_worker is None:
+            self._overlay_worker = OverlayFrameWorker(*request, parent=self)
+            self._overlay_worker.ready.connect(self._store_overlay_frames)
+            self._overlay_worker.failed.connect(self._preview_worker_failed)
+            self._overlay_worker.finished.connect(self._overlay_worker_finished)
+        else:
+            self._overlay_worker.prepare(*request)
         self._overlay_worker.start()
 
     def _store_overlay_frames(
@@ -2917,12 +2975,15 @@ class ExportPreviewDialog(QDialog):
         self._schedule_refresh()
 
     def _overlay_worker_finished(self) -> None:
-        """Schedule the next small prefetch batch after the current worker exits."""
+        """Join native thread teardown before reusing the retained worker."""
         worker = self.sender()
-        if worker is self._overlay_worker:
-            self._overlay_worker = None
         if isinstance(worker, OverlayFrameWorker):
-            worker.deleteLater()
+            worker.wait()
+            worker.busy = False
+            if self._closing:
+                if worker is self._overlay_worker:
+                    self._overlay_worker = None
+                worker.deleteLater()
         self._schedule_refresh()
 
     def _overlay_layers_for_frame(
@@ -3000,22 +3061,60 @@ class ExportPreviewDialog(QDialog):
 
     def _ensure_track_analysis(self, track: PlaylistTrack, bands: int) -> None:
         """Analyze each selected track once, then reuse its moving FFT frames."""
-        if track.id in self._track_levels or self.visualizer_renderer is None:
+        profiles = tuple({item.source.music_reaction_profile for item in self._cached_source_items
+                          if item.source.source_type in {SourceType.TEXT, SourceType.LYRICS}
+                          and item.source.uses_bass_reaction})
+        cached = self._track_levels.get(track.id)
+        if self.visualizer_renderer is None or (
+            isinstance(cached, dict) and all(profile in cached.get("music_envelopes", {}) for profile in profiles)
+        ):
             return
-        if self._analysis_worker is not None and self._analysis_worker.isRunning():
+        if self._closing or self._analysis_worker is not None:
             return
         self._analysis_track_id = track.id
         self._analysis_worker = AudioAnalysisWorker(
             self.visualizer_renderer, track, bands, self.preview_fps,
             needs_waveform=any(overlay.kind == "waveform" for overlay in self.overlays),
             overlays=tuple(self.overlays),
-            parent=self,
+            parent=self, music_profiles=profiles, cached_analysis=cached,
         )
         self._analysis_worker.ready.connect(self._store_track_levels)
         self._analysis_worker.failed.connect(self._preview_worker_failed)
         self._analysis_worker.finished.connect(self._analysis_finished)
         self._analysis_worker.start()
         self._sync_background_activity()
+
+    def _music_reaction_levels(self, track: PlaylistTrack, elapsed: float) -> dict[str, float]:
+        if not self._bass_reactive:
+            return {}
+        self._ensure_track_analysis(track, 24)
+        analysis = self._track_levels.get(track.id, {})
+        envelopes = analysis.get("music_envelopes", {}) if isinstance(analysis, dict) else {}
+        return {
+            item.source.id: PythonVisualizerRenderer.music_reaction_level(
+                envelopes.get(item.source.music_reaction_profile), self.preview_fps,
+                elapsed, item.source.music_reactive_offset,
+            )
+            for item in self._cached_source_items
+            if item.source.source_type in {SourceType.TEXT, SourceType.LYRICS}
+            and item.source.uses_bass_reaction
+        }
+
+    def _bass_level(self, track: PlaylistTrack, elapsed: float) -> float:
+        if not self._bass_reactive:
+            return 0.0
+        self._ensure_track_analysis(track, 24)
+        analysis = self._track_levels.get(track.id)
+        if not isinstance(analysis, dict):
+            return 0.0
+        envelope = analysis.get("bass")
+        if envelope is None:
+            return 0.0
+        try:
+            frame = max(0, round(elapsed * self.preview_fps))
+            return float(envelope[min(frame, len(envelope) - 1)])
+        except (IndexError, TypeError, ValueError):
+            return 0.0
 
     def _store_track_levels(self, track_id: str, fps: int, levels: object) -> None:
         """Receive full-track FFT levels and refresh the current preview image."""
@@ -3042,6 +3141,8 @@ class ExportPreviewDialog(QDialog):
         self._schedule_refresh()
 
     def _toggle_playback(self, playing: bool) -> None:
+        if playing and self.timeline.value() >= self.timeline.maximum():
+            self.timeline.setValue(self.timeline.minimum())
         self._playing = playing
         self._refresh_source_partitions()
         for item in self._cached_video_items:
@@ -3249,10 +3350,15 @@ class ExportPreviewDialog(QDialog):
             target_ms = round(elapsed * 1000)
 
         if target_index != self._active_track_index:
+            source_changed = self.media_player.source() != url
             self._active_track_index = target_index
-            self._media_source_ready = False
             self._media_source_generation += 1
-            self.media_player.setSource(url)
+            # stop()/the playlist end clears our active index but keeps Qt's
+            # source. setSource(the same URL) emits no loading/ready signals;
+            # waiting for them makes replay (and return from a gap) silent.
+            self._media_source_ready = not source_changed and self.media_player.isSeekable()
+            if source_changed:
+                self.media_player.setSource(url)
             self._apply_output_volume()
 
         if not self._media_source_ready:
@@ -3424,12 +3530,22 @@ class ExportPreviewDialog(QDialog):
         self._frame_stats_clock.restart()
         self._presented_frames = 0
         self._actual_preview_fps = 0.0
+        if PROFILE_ENABLED:
+            self._profile_presented_at = None
         self._update_frame_rate_label()
 
     def _record_presented_frame(self) -> None:
         """Show the cadence actually achieved by CPU/GPU frame presentation."""
         if not self._playing:
             return
+        if PROFILE_ENABLED:
+            now = monotonic()
+            previous = getattr(self, "_profile_presented_at", None)
+            self._profile_presented_at = now
+            if previous is not None:
+                interval = now - previous
+                PROFILE.observe("preview.presentation_interval_seconds", interval)
+                PROFILE.observe("preview.late_interval", float(interval > 1.5 / self.preview_fps))
         self._presented_frames += 1
         elapsed = self._frame_stats_clock.elapsed()
         if elapsed < 500:
@@ -3646,6 +3762,14 @@ class ExportPreviewDialog(QDialog):
         self._gpu_refresh_deferred = False
         self._gpu_watchdog.stop()
         self._gpu_health.cancel_wait()
+        if self.gpu_surface is not None:
+            surface = self.gpu_surface
+            self.preview_stack.removeWidget(surface)
+            surface.close()
+            surface.setParent(None)
+            surface.deleteLater()
+            self.gpu_surface = None
+            self.gpu_preview_enabled = False
         self._playing = False
         self.play_timer.stop()
         self._pending_media_seek_ms = None

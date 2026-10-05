@@ -9,6 +9,8 @@ overrides below.
 from __future__ import annotations
 
 import ctypes
+from dataclasses import asdict
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -21,15 +23,17 @@ import wave
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEvent, QTimer, QUrl
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtMultimedia import QAudioBufferOutput
+from PySide6.QtWidgets import QApplication, QStackedWidget, QVBoxLayout, QWidget
 
 from app.canvas.live_canvas import CanvasScene
 from app.canvas.source_item import SourceItem
 from app.dialogs.export_preview_dialog import ExportPreviewDialog
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
+from app.preview.gpu_texture_surface import GpuTexturePreviewSurface
 from app.services.source_store import SourceStore
 from app.utils.i18n import Translator
 from app.utils.subprocess_utils import hidden_process_kwargs
@@ -137,8 +141,59 @@ class RealVideoPreviewPerformanceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
 
+    def test_audio_returns_after_natural_end_and_rewind_for_raw_and_blended_preview(self):
+        import numpy as np
+
+        with TemporaryDirectory(prefix="playlist-replay-") as directory:
+            audio = Path(directory) / "tone.wav"
+            samples = (np.sin(np.arange(57_600) * (2 * np.pi * 440 / 48_000)) * 8_000).astype("<i2")
+            with wave.open(str(audio), "wb") as stream:
+                stream.setparams((1, 2, 48_000, 0, "NONE", "not compressed"))
+                stream.writeframes(samples.tobytes())
+            for blended in (False, True):
+                with self.subTest(blended=blended):
+                    scene = CanvasScene()
+                    scene.set_artboard_size(320, 180)
+                    tracks = [PlaylistTrack(str(audio), "Tone", duration_seconds=1.2)]
+                    if blended:
+                        tracks = [PlaylistTrack(str(audio), title, duration_seconds=0.6) for title in ("A", "B")]
+                    preview = ExportPreviewDialog(scene, tracks, Translator(), preferred_backend="cpu")
+                    if blended:
+                        preview._blended_audio_path = audio
+                    preview.audio_output.setMuted(True)
+                    preview.media_player.setAudioOutput(None)
+                    output = QAudioBufferOutput(preview)
+                    preview.media_player.setAudioBufferOutput(output)
+                    decoded = []
+                    output.audioBufferReceived.connect(
+                        lambda buffer: decoded.append(buffer.byteCount())
+                        if buffer.isValid() and any(buffer.constData()) else None
+                    )
+                    try:
+                        for cycle in range(3):
+                            decoded.clear()
+                            if cycle != 1:
+                                if cycle == 2:
+                                    # Also exercise the exact-end silent boundary:
+                                    # stop() retains the loaded URL in Qt.
+                                    preview._start_audio_at_playhead()
+                                    self.assertEqual(preview._active_track_index, -1)
+                                preview.timeline.setValue(0)
+                            preview.play_button.setChecked(True)
+                            deadline = monotonic() + 6
+                            while preview._playing and monotonic() < deadline:
+                                QTest.qWait(20)
+                            self.assertFalse(preview._playing, f"Playback did not finish on cycle {cycle}")
+                            self.assertEqual(preview.timeline.value(), preview.timeline.maximum())
+                            self.assertTrue(decoded, f"No audible PCM on cycle {cycle}")
+                    finally:
+                        preview._stop_preview()
+                        preview.deleteLater()
+                        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     def _create_preview(
         self, directory: Path, *, timeline_seconds: float, backend: str,
+        parent: QWidget | None = None,
     ) -> tuple[ExportPreviewDialog, SourceItem]:
         ffmpeg = _configured_ffmpeg()
         video_path = directory / "moving-pattern.mp4"
@@ -180,8 +235,9 @@ class RealVideoPreviewPerformanceTests(unittest.TestCase):
         self.addCleanup(probe.stop)
         preview = ExportPreviewDialog(
             scene, [track], Translator(), source_store=store,
-            preferred_backend=backend,
+            preferred_backend=backend, parent=parent, embedded=parent is not None,
         )
+        preview.audio_output.setMuted(True)
         preview._video_duration_cache[str(video_path)] = fixture_seconds
         preview.show()
         self.application.processEvents()
@@ -261,10 +317,12 @@ class RealVideoPreviewPerformanceTests(unittest.TestCase):
                 backend=backend,
             )
             heartbeat_count = 0
+            heartbeat_times: list[float] = []
 
             def heartbeat() -> None:
                 nonlocal heartbeat_count
                 heartbeat_count += 1
+                heartbeat_times.append(monotonic())
 
             heartbeat_timer = QTimer()
             heartbeat_timer.setInterval(100)
@@ -278,16 +336,35 @@ class RealVideoPreviewPerformanceTests(unittest.TestCase):
                 while monotonic() < warmup_deadline:
                     QTest.qWait(25)
                 start_stats = item.video_decoder_stats()
+                surface = preview.gpu_surface
+                if backend == "gpu_layers":
+                    self.assertIsNotNone(surface)
+                    self.assertTrue(surface.ready, "The GPU soak must use a real OpenGL context.")
+                    self.assertTrue(preview.gpu_preview_enabled)
+                gpu_start = asdict(surface.upload_stats) if surface else None
                 start_timeline = preview.timeline.value()
                 baseline_rss = _resident_set_bytes()
                 peak_rss = baseline_rss
                 heartbeat_start = heartbeat_count
+                last_progress_check = monotonic()
+                last_frames = start_stats.accepted_frames
+                loop_wraps = 0
+                last_video_position = item._video_player.position()
                 deadline = monotonic() + soak_seconds
                 while monotonic() < deadline:
                     QTest.qWait(25)
                     current_rss = _resident_set_bytes()
                     if current_rss is not None:
                         peak_rss = max(peak_rss or current_rss, current_rss)
+                    position = item._video_player.position()
+                    if position < last_video_position - 1000:
+                        loop_wraps += 1
+                    last_video_position = position
+                    if monotonic() - last_progress_check >= 6.0:
+                        frames = item.video_decoder_stats().accepted_frames
+                        self.assertGreater(frames, last_frames, "Video stalled during a loop.")
+                        last_frames = frames
+                        last_progress_check = monotonic()
 
                 end_stats = item.video_decoder_stats()
                 accepted = end_stats.accepted_frames - start_stats.accepted_frames
@@ -307,6 +384,21 @@ class RealVideoPreviewPerformanceTests(unittest.TestCase):
                     "Decoder pressure drops grew without a corresponding frame flow.",
                 )
                 self.assertFalse(preview._last_preview_error_title)
+                self.assertGreaterEqual(loop_wraps, int(soak_seconds / 6) - 2)
+                if backend == "gpu_layers":
+                    self.assertTrue(preview.gpu_preview_enabled, "GPU preview fell back during the soak.")
+                measured_pulses = heartbeat_times[heartbeat_start:]
+                gaps = [b - a for a, b in zip(measured_pulses, measured_pulses[1:])]
+                print("PREVIEW_SOAK " + json.dumps({
+                    "backend": backend, "seconds": soak_seconds, "loop_wraps": loop_wraps,
+                    "accepted_frames": accepted, "pressure_drops": pressure_drops,
+                    "seek_count": seeks, "heartbeats": heartbeats,
+                    "heartbeat_max_ms": max(gaps, default=0) * 1000,
+                    "rss_baseline_bytes": baseline_rss, "rss_peak_bytes": peak_rss,
+                    "rss_end_bytes": _resident_set_bytes(),
+                    "gpu_start": gpu_start,
+                    "gpu_end": asdict(surface.upload_stats) if surface else None,
+                }), flush=True)
                 if baseline_rss is not None and peak_rss is not None:
                     self.assertLessEqual(
                         peak_rss - baseline_rss,
@@ -317,10 +409,108 @@ class RealVideoPreviewPerformanceTests(unittest.TestCase):
                     )
             finally:
                 heartbeat_timer.stop()
+                print("PREVIEW_STATE " + json.dumps({
+                    "backend": backend, "timeline_seconds": preview.timeline.value() / 100,
+                    "timeline_max_seconds": preview.timeline.maximum() / 100,
+                    "playing": preview._playing, "timer_active": preview.play_timer.isActive(),
+                    "video_active": item._video_timeline_preview_active,
+                    "video_suppressed": item._video_preview_suppressed,
+                    "video_position": item._video_player.position(),
+                    "video_state": item._video_player.playbackState().name,
+                    "video_status": item._video_player.mediaStatus().name,
+                    "video_error": item._video_player.errorString(),
+                    "duration_cache": preview._video_duration_cache,
+                    "decoder": asdict(item.video_decoder_stats()),
+                    "gpu_enabled": preview.gpu_preview_enabled,
+                    "gpu_health": asdict(preview._gpu_health.stats),
+                }), flush=True)
                 preview._stop_preview()
                 preview.close()
                 self.application.processEvents()
                 self._release_editor_item(item)
+
+    def test_repeated_open_pause_seek_resume_close_releases_preview(self) -> None:
+        if os.environ.get("PLAYLIST_CANVAS_RUN_PREVIEW_SOAK", "").strip() != "1":
+            self.skipTest("Set PLAYLIST_CANVAS_RUN_PREVIEW_SOAK=1 for repeated real-media playback.")
+        backend = os.environ.get("PLAYLIST_CANVAS_PREVIEW_SOAK_BACKEND", "gpu_layers").strip()
+        baseline_rss = None
+        peak_rss = 0
+        rss_samples = []
+        # Match MainWindow's stable canvas host and its hidden GL anchor.
+        host = QWidget()
+        stack = QStackedWidget(host)
+        QVBoxLayout(host).addWidget(stack)
+        stack.addWidget(QWidget())
+        if backend == "gpu_layers":
+            stack.addWidget(GpuTexturePreviewSurface())
+        host.resize(960, 700)
+        host.show()
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        with TemporaryDirectory(prefix="playlist-preview-repeat-") as directory:
+            preview, item = self._create_preview(
+                Path(directory), timeline_seconds=12.0, backend=backend, parent=host,
+            )
+            scene, tracks, store = item.scene(), preview.tracks, preview.source_store
+            self.addCleanup(scene.deleteLater)
+            for cycle in range(10):
+                if cycle:
+                    preview = ExportPreviewDialog(
+                        scene, tracks, Translator(), source_store=store,
+                        preferred_backend=backend, parent=host, embedded=True,
+                    )
+                    preview.audio_output.setMuted(True)
+                    preview.show()
+                    self.application.processEvents()
+                stack.addWidget(preview)
+                stack.setCurrentWidget(preview)
+                try:
+                    before = item.video_decoder_stats().accepted_frames
+                    self._run_until_frames(preview, item, before + 8, 10.0)
+                    if backend == "gpu_layers":
+                        self.assertTrue(preview.gpu_preview_enabled)
+                        self.assertTrue(preview.gpu_surface.ready)
+                    preview.play_button.setChecked(False)
+                    self.assertFalse(preview.play_timer.isActive())
+                    preview._seek_to_seconds(7.0)
+                    before = item.video_decoder_stats().accepted_frames
+                    self._run_until_frames(preview, item, before + 5, 10.0)
+                    self.assertGreater(preview.timeline.value(), 700)
+                    self.assertFalse(preview._last_preview_error_title)
+                finally:
+                    surface = preview.gpu_surface
+                    preview.close()
+                    if surface is not None:
+                        self.assertEqual(surface.upload_stats.allocated_bytes, 0)
+                    self.application.processEvents()
+                    self._release_editor_item(item)
+                self.assertTrue(preview._closing)
+                self.assertFalse(preview.play_timer.isActive())
+                self.assertFalse(preview._gpu_watchdog.isActive())
+                self.assertEqual(preview.media_player.source(), QUrl())
+                self.assertFalse(item._video_timeline_preview_active)
+                self.assertIsNone(item._video_player)
+                self.assertIsNone(preview._video_probe_worker)
+                self.assertIsNone(preview._video_proxy_worker)
+                self.assertIsNone(preview.gpu_surface)
+                stack.setCurrentIndex(0)
+                stack.removeWidget(preview)
+                preview.deleteLater()
+                self.application.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.application.processEvents()
+                current_rss = _resident_set_bytes()
+                rss_samples.append(current_rss)
+                if current_rss is not None:
+                    if cycle == 0:
+                        baseline_rss = current_rss
+                    peak_rss = max(peak_rss, current_rss)
+        print("PREVIEW_REPEAT " + json.dumps({
+            "backend": backend, "embedded": True, "cycles": 10, "rss_baseline_bytes": baseline_rss,
+            "rss_peak_bytes": peak_rss, "rss_end_bytes": _resident_set_bytes(),
+            "rss_samples_bytes": rss_samples,
+        }), flush=True)
+        if baseline_rss is not None:
+            self.assertLessEqual(peak_rss - baseline_rss, 64 * MIB)
 
 
 if __name__ == "__main__":

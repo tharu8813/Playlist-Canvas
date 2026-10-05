@@ -57,6 +57,8 @@ from app.inspector.editors.track_list_editor import TrackListSection
 from app.models.source import Source, SourceType
 from app.models.source_registry import source_registry
 from app.dialogs.color_editor_dialog import ColorEditorDialog
+from app.dialogs.lyrics_line_style_dialog import LyricsLineStyleDialog
+from app.dialogs.lyrics_animation_dialog import LyricsAnimationDialog
 from app.dialogs.text_editor_dialog import TextEditorDialog
 from app.dialogs.video_source_dialog import VideoSourceDialog
 from app.services.source_store import SourceStore
@@ -185,6 +187,12 @@ class SourceInspector(QScrollArea):
         self.subtitle.setWordWrap(True)
         layout.addWidget(self.title)
         layout.addWidget(self.subtitle)
+        self.lyrics_mode_note = QLabel()
+        self.lyrics_mode_note.setObjectName("mutedLabel")
+        self.lyrics_mode_note.setWordWrap(True)
+        self.lyrics_mode_note.hide()
+        self._lyrics_locked_fields = set()
+        layout.addWidget(self.lyrics_mode_note)
 
         self.property_tabs = QTabWidget()
         self.property_tabs.setObjectName("inspectorPropertyTabs")
@@ -273,7 +281,7 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "video_settings", self.video_settings_button)
 
         self.shape_kind_combo = QComboBox()
-        for label, value in (("Rectangle", "rectangle"), ("Circle", "circle"), ("Line", "line")):
+        for label, value in (("Rectangle", "rectangle"), ("Circle", "circle")):
             self.shape_kind_combo.addItem(label, value)
         self.progress_style_combo = QComboBox()
         for label, value in (
@@ -300,6 +308,10 @@ class SourceInspector(QScrollArea):
                              ("Current album cover", "album_art")):
             self.background_mode_combo.addItem(label, value)
         self.background_ambient_check = QCheckBox()
+        self.background_ambient_blur_spin = self._spin(0, 80, 1)
+        self.background_ambient_motion_spin = self._spin(0, 3, 0.1)
+        self.background_bass_reactive_check = QCheckBox()
+        self.background_bass_strength_spin = self._spin(0, 0.2, 0.01)
         self.background_track_transition_check = QCheckBox()
         self.background_track_transition_seconds_spin = self._spin(0.2, 3.0, 0.1)
         self.progress_value_spin = self._spin(0, 1, 0.01)
@@ -317,6 +329,9 @@ class SourceInspector(QScrollArea):
         self.track_list = TrackListSection(self._spin, self._color_button)
         self.now_playing = NowPlayingSection(self._spin)
         self.lyrics = LyricsSection(self._spin, self._color_button)
+        self.lyrics_line_styles_button = QPushButton()
+        self.lyrics_transition_button = QPushButton()
+        self.lyrics_animation_button = QPushButton()
         self.typography = TypographySection(self._spin)
         self.motion = MotionSection(self._spin)
         self.visualizer_center_cover_button = QPushButton()
@@ -333,6 +348,18 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "image_fit", self.image_fit_combo)
         self._add_labeled_row(content_form, "background_mode", self.background_mode_combo)
         self._add_labeled_row(content_form, "background_ambient", self.background_ambient_check)
+        self._add_labeled_row(
+            content_form, "background_ambient_blur", self.background_ambient_blur_spin,
+        )
+        self._add_labeled_row(
+            content_form, "background_ambient_motion", self.background_ambient_motion_spin,
+        )
+        self._add_labeled_row(
+            content_form, "background_bass_reactive", self.background_bass_reactive_check,
+        )
+        self._add_labeled_row(
+            content_form, "background_bass_strength", self.background_bass_strength_spin,
+        )
         self._add_labeled_row(
             content_form, "background_track_transition",
             self.background_track_transition_check,
@@ -352,7 +379,15 @@ class SourceInspector(QScrollArea):
         self._add_labeled_row(content_form, "album_frame", self.album_frame_combo)
         self.track_list.add_rows(self._add_labeled_row, content_form)
         self.now_playing.add_rows(self._add_labeled_row, content_form)
-        self.lyrics.add_rows(self._add_labeled_row, content_form)
+        content_form.addRow(self.lyrics_transition_button)
+        self.lyrics.add_rows(
+            self._add_labeled_row, content_form,
+            keys=tuple(key for key in self.lyrics.widgets if key not in LyricsSection.TRANSITION_KEYS),
+        )
+        self._add_labeled_row(
+            content_form, "subtitle_line_styles", self.lyrics_line_styles_button,
+            section="sub_layout",
+        )
         self._add_labeled_row(content_form, "waveform_style", self.waveform_style_combo)
         self.level_meter.add_rows(self._add_labeled_row, content_form)
         self.particle.add_rows(self._add_labeled_row, content_form)
@@ -473,6 +508,8 @@ class SourceInspector(QScrollArea):
             ("contrast", self.contrast_spin),
         ):
             self._add_labeled_row(filter_form, key, widget)
+        self.lyrics.add_rows(self._add_labeled_row, animation_form, LyricsSection.TRANSITION_KEYS)
+        self._sections[("animation", "sub_transition")].form.addRow(self.lyrics_animation_button)
         for key, widget in (
             ("animation_in", self.animation_in_combo),
             ("animation_in_duration", self.animation_in_duration_spin),
@@ -482,6 +519,7 @@ class SourceInspector(QScrollArea):
         ):
             self._add_labeled_row(animation_form, key, widget)
         self.motion.add_rows(self._add_labeled_row, animation_form, MotionSection.LOOP_KEYS)
+        self.motion.add_rows(self._add_labeled_row, animation_form, MotionSection.REACTIVE_KEYS)
         animation_form.addRow("", self.animation_preview_button)
         self._add_labeled_row(other_form, "layer", self.z_spin)
         other_form.addRow(self.visible_check)
@@ -499,6 +537,8 @@ class SourceInspector(QScrollArea):
             *self.typography.widgets.values(), self.gradient_angle_spin,
             *self.motion.widgets.values(), self.visualizer_center_cover_button,
             self.background_mode_combo, self.background_ambient_check,
+            self.background_ambient_blur_spin, self.background_ambient_motion_spin,
+            self.background_bass_reactive_check, self.background_bass_strength_spin,
             self.background_track_transition_check,
             self.background_track_transition_seconds_spin,
             self.progress_track_color_button,
@@ -508,6 +548,8 @@ class SourceInspector(QScrollArea):
             *self.track_list.widgets.values(),
             *self.now_playing.widgets.values(),
             *self.lyrics.widgets.values(),
+            self.lyrics_transition_button,
+            self.lyrics_animation_button,
             self.waveform_style_combo,
             *self.level_meter.widgets.values(),
             *self.particle.widgets.values(),
@@ -608,13 +650,17 @@ class SourceInspector(QScrollArea):
             "name": ("레이어와 캔버스에서 이 요소를 구분하는 이름입니다. 영상에는 직접 표시되지 않습니다.", "Identifies this source in Layers and on the Canvas. It is not rendered into the video."),
             "text": ("표시할 문구입니다. %title%, %artist%, %album% 같은 토큰은 재생 중인 곡 정보로 자동 교체됩니다.", "Text to display. Tokens such as %title%, %artist%, and %album% are replaced with current-track data."),
             "file": ("이 요소에 사용할 이미지 파일입니다. 프로젝트를 다른 PC로 옮길 때는 포함 저장을 권장합니다.", "Image used by this source. Embedded project storage is recommended when moving the project to another PC."),
-            "shape": ("사각형, 원, 선 중 캔버스에 그릴 도형의 기본 형태를 선택합니다.", "Chooses whether this source is drawn as a rectangle, circle, or line."),
+            "shape": ("캔버스에 그릴 사각형 또는 원을 선택합니다.", "Chooses whether this source is drawn as a rectangle or circle."),
             "progress_style": ("진행 바의 모서리와 채움 형태를 미리 정의된 디자인으로 변경합니다.", "Changes the progress bar's corners and fill treatment using a preset design."),
             "text_alignment": ("요소 영역 안에서 텍스트를 왼쪽, 가운데 또는 오른쪽으로 정렬합니다.", "Aligns text left, center, or right inside the source box."),
             "text_overflow": ("영역보다 긴 문장을 줄바꿈할지, 말줄임표로 줄일지, 영역 밖을 자를지 정합니다.", "Chooses whether long text wraps, ends with an ellipsis, or is clipped to the source box."),
             "image_fit": ("원본 비율을 유지하며 채우기, 전체 이미지 맞추기 또는 영역에 늘이기 중 하나를 선택합니다.", "Chooses cover, contain, or stretch behavior for the image inside its source box."),
             "background_mode": ("단색·그라데이션, 지정 이미지 또는 현재 앨범 커버를 배경으로 사용합니다.", "Uses a color/gradient, selected image, or current album artwork as the background."),
             "background_ambient": ("앨범 커버를 확대하고 흐리게 처리해 캔버스를 채우는 앰비언트 배경을 만듭니다.", "Expands and blurs album artwork to create an ambient full-Canvas background."),
+            "background_ambient_blur": ("앨범 색상이 퍼지는 정도입니다. 값이 클수록 더 부드럽고 추상적으로 보입니다.", "Controls how broadly the album colors spread. Larger values look softer and more abstract."),
+            "background_ambient_motion": ("앰비언트 색상 흐름의 속도입니다. 0이면 멈춥니다.", "Speed of the ambient color flow. Set to 0 to freeze it."),
+            "background_bass_reactive": ("현재 곡의 저음에 맞춰 배경을 부드럽게 확대합니다. 전체 미리보기와 내보내기에 적용됩니다.", "Gently zooms the background with the current track's bass in Full Preview and export."),
+            "background_bass_strength": ("베이스가 가장 강할 때 추가되는 확대 비율입니다.", "Extra zoom applied at the strongest bass hit."),
             "background_track_transition": ("곡이 바뀔 때 이전 곡 배경에서 새 곡 배경으로 부드럽게 크로스페이드합니다. 편집 화면에는 나타나지 않고 미리보기와 내보내기에서만 적용됩니다.", "Cross-fades from the previous track's background to the new one at each track change. It appears only in preview and export, not on the editing canvas."),
             "background_track_transition_seconds": ("배경 크로스페이드가 진행되는 시간(초)입니다.", "How long the background cross-fade lasts, in seconds."),
             "progress_value": ("편집 화면에서 확인할 진행 비율입니다. 실제 미리보기와 내보내기에서는 재생 시간으로 자동 계산됩니다.", "Preview progress used while editing. Playback and export calculate it automatically from time."),
@@ -715,6 +761,9 @@ class SourceInspector(QScrollArea):
             note = self._field_notes.get(key, "")
             if note:
                 description = f"{description} {note}"
+            if key in self._lyrics_locked_fields:
+                description += (" 고급 모드가 활성화되어 있으므로 속성 탭에서 설정할 수 없습니다. 자막 전환 설정에서 변경하세요."
+                                if korean else " Advanced mode is active; this property cannot be edited here. Change it in Subtitle transition settings.")
             range_text = ""
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 minimum = f"{widget.minimum():g}"
@@ -803,6 +852,11 @@ class SourceInspector(QScrollArea):
         """Show useful categories and name the special tab after its source."""
         self._refresh_sections()
         source_types = {source.source_type for source in sources}
+        music_title = MotionSection.SECTION_TITLES["music_reaction"][0 if self.translator.is_korean else 1]
+        if source_types == {SourceType.LYRICS}:
+            music_title += " · 현재 자막만" if self.translator.is_korean else " · Current cue only"
+        self._sections[("animation", "music_reaction")].set_title(music_title)
+        self.lyrics_transition_button.setVisible(source_types == {SourceType.LYRICS})
         special_type = next(iter(source_types)) if len(source_types) == 1 else None
         self.property_tabs.setTabText(
             self._tab_indices["special"],
@@ -891,6 +945,16 @@ class SourceInspector(QScrollArea):
             and source.background_mode == "album_art"
         )
         self._set_field_visible("background_ambient", album_art_background)
+        ambient_background = (
+            album_art_background and source is not None and source.background_ambient
+        )
+        self._set_field_visible("background_ambient_blur", ambient_background)
+        self._set_field_visible("background_ambient_motion", ambient_background)
+        self._set_field_visible("background_bass_reactive", ambient_background)
+        self._set_field_visible(
+            "background_bass_strength",
+            ambient_background and source is not None and source.background_bass_reactive,
+        )
         self._set_field_visible(
             "background_track_transition", album_art_background,
         )
@@ -918,6 +982,9 @@ class SourceInspector(QScrollArea):
             self._set_field_visible(key, source_type is SourceType.NOW_PLAYING)
         for key in self.lyrics.widgets:
             self._set_field_visible(key, source_type is SourceType.LYRICS)
+        self._set_field_visible(
+            "subtitle_line_styles", source_type is SourceType.LYRICS,
+        )
         self._set_field_visible("waveform_style", source_type is SourceType.AUDIO_WAVEFORM)
         for key in (
             "level_meter_mode", "level_meter_style", "level_meter_orientation",
@@ -935,8 +1002,13 @@ class SourceInspector(QScrollArea):
             "particle_glow", "particle_secondary_color", "particle_seed",
         ):
             self._set_field_visible(key, source_type is SourceType.PARTICLE_OVERLAY)
-        for key in ("blur", "brightness", "contrast"):
+        self._set_field_visible(
+            "blur", source_type in self.IMAGE_BACKED_TYPES and not ambient_background,
+        )
+        for key in ("brightness", "contrast"):
             self._set_field_visible(key, source_type in self.IMAGE_BACKED_TYPES)
+        for key in MotionSection.REACTIVE_KEYS:
+            self._set_field_visible(key, source_type in {SourceType.TEXT, SourceType.LYRICS})
         for key in (
             "shadow", "shadow_color", "shadow_opacity", "shadow_blur",
             "shadow_x", "shadow_y", *MotionSection.LOOP_KEYS,
@@ -1082,6 +1154,18 @@ class SourceInspector(QScrollArea):
         self.image_fit_combo.currentIndexChanged.connect(lambda _index: self._update("image_fit_mode", self.image_fit_combo.currentData()))
         self.background_mode_combo.currentIndexChanged.connect(self._update_background_mode)
         self.background_ambient_check.toggled.connect(lambda value: self._update("background_ambient", value))
+        self.background_ambient_blur_spin.valueChanged.connect(
+            lambda value: self._update("background_ambient_blur", value)
+        )
+        self.background_ambient_motion_spin.valueChanged.connect(
+            lambda value: self._update("background_ambient_motion", value)
+        )
+        self.background_bass_reactive_check.toggled.connect(
+            lambda value: self._update("background_bass_reactive", value)
+        )
+        self.background_bass_strength_spin.valueChanged.connect(
+            lambda value: self._update("background_bass_strength", value)
+        )
         self.background_track_transition_check.toggled.connect(
             self._update_background_track_transition
         )
@@ -1101,16 +1185,20 @@ class SourceInspector(QScrollArea):
             apply_mixed_checkbox=self._apply_mixed_checkbox,
         )
         self.now_playing.connect(self._update)
-        self.motion.connect(self._update)
+        self.motion.connect(self._update, apply_mixed_checkbox=self._apply_mixed_checkbox)
         self.motion.widgets["loop_motion"].currentIndexChanged.connect(
             self._update_animation_preview_button
         )
+        self.motion.widgets["music_reactive_enabled"].toggled.connect(self._update_animation_preview_button)
         self.visualizer_center_cover_button.clicked.connect(self._add_center_cover)
         for section in (self.lyrics, self.typography):
             section.connect(
                 self._update, choose_color=self._choose_color,
                 apply_mixed_checkbox=self._apply_mixed_checkbox,
             )
+        self.lyrics_line_styles_button.clicked.connect(self._open_lyrics_line_styles)
+        self.lyrics_transition_button.clicked.connect(self._show_lyrics_transitions)
+        self.lyrics_animation_button.clicked.connect(self._show_lyrics_transitions)
         self.progress_knob_combo.currentIndexChanged.connect(
             lambda _index: self._update("progress_knob", self.progress_knob_combo.currentData())
         )
@@ -1192,6 +1280,7 @@ class SourceInspector(QScrollArea):
 
         direct_checks = (
             ("background_ambient", self.background_ambient_check),
+            ("background_bass_reactive", self.background_bass_reactive_check),
             ("background_track_transition", self.background_track_transition_check),
             ("animation_fit_mix", self.animation_fit_mix_check),
             ("visible", self.visible_check), ("locked", self.locked_check),
@@ -1212,7 +1301,7 @@ class SourceInspector(QScrollArea):
         )
 
     def _update(self, field: str, value: object) -> None:
-        if self._updating or not self._source_ids:
+        if self._updating or not self._source_ids or field in self._lyrics_locked_fields:
             return
         self._apply_updates({field: value})
 
@@ -1233,6 +1322,22 @@ class SourceInspector(QScrollArea):
         self._dirty_line_fields.add("text")
         self.text_edit.setText(value)
         self._update_line("text", self.text_edit)
+
+    def _show_lyrics_transitions(self) -> None:
+        source = self.store.get(self._source_id)
+        if source is None or source.source_type is not SourceType.LYRICS:
+            return
+        dialog = LyricsAnimationDialog(source, self.translator, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._apply_updates(dialog.settings())
+
+    def _open_lyrics_line_styles(self) -> None:
+        source = self.store.get(self._source_id)
+        if source is None or source.source_type is not SourceType.LYRICS:
+            return
+        dialog = LyricsLineStyleDialog(source, self.translator, self)
+        if dialog.exec():
+            self._update("subtitle_line_styles", dialog.styles())
 
     def _apply_updates(self, changes: dict[str, object]) -> None:
         source_ids = tuple(self._source_ids)
@@ -1465,10 +1570,12 @@ class SourceInspector(QScrollArea):
             self._update_source_specific_fields(sources[0])
 
     def _update_animation_preview_button(self, _value: object = None) -> None:
+        source = self.store.get(self._source_id)
         has_animation = (
             self.animation_in_combo.currentData() != "none"
             or self.animation_out_combo.currentData() != "none"
             or self.motion.widgets["loop_motion"].currentData() not in {None, "none"}
+            or (source is not None and source.source_type in {SourceType.TEXT, SourceType.LYRICS} and source.uses_bass_reaction)
         )
         self.animation_preview_button.setEnabled(
             self._source_id is not None and has_animation
@@ -1532,6 +1639,9 @@ class SourceInspector(QScrollArea):
         self.empty_state.setGeometry(self.viewport().rect())
 
     def retranslate(self) -> None:
+        self.shape_kind_combo.setPlaceholderText(
+            "도형 종류 선택" if self.translator.is_korean else "Choose a shape"
+        )
         labels = {
             "name": ("이름", "Name"), "text": ("텍스트", "Text"), "file": ("파일", "File"),
             "video_settings": ("영상 사용 범위", "Video scope"),
@@ -1571,6 +1681,10 @@ class SourceInspector(QScrollArea):
         labels.update({
             "background_mode": ("배경 모드", "Background mode"),
             "background_ambient": ("앨범 커버 앰비언트 블러", "Album art ambient blur"),
+            "background_ambient_blur": ("앰비언트 블러", "Ambient blur"),
+            "background_ambient_motion": ("앰비언트 흐름", "Ambient flow"),
+            "background_bass_reactive": ("베이스 반응 확대", "Bass-reactive zoom"),
+            "background_bass_strength": ("베이스 반응 강도", "Bass response strength"),
             "background_track_transition": ("곡 전환 시 배경 크로스페이드", "Cross-fade background on track change"),
             "background_track_transition_seconds": ("전환 길이(초)", "Transition length (s)"),
             "progress_mode": ("진행 기준", "Progress timing"),
@@ -1608,6 +1722,7 @@ class SourceInspector(QScrollArea):
             **ParticleSection.SECTION_TITLES,
             **LyricsSection.SECTION_TITLES,
             **NowPlayingSection.SECTION_TITLES,
+            **MotionSection.SECTION_TITLES,
         }
         for (_category, section), group in self._sections.items():
             pair = section_titles.get(section, (section, section))
@@ -1653,6 +1768,25 @@ class SourceInspector(QScrollArea):
         self.track_list.retranslate(korean)
         self.now_playing.retranslate(korean)
         self.lyrics.retranslate(korean)
+        self.lyrics_transition_button.setText(
+            "자막 전환 설정…" if korean else "Subtitle transition settings…"
+        )
+        self.lyrics_transition_button.setToolTip(
+            "실시간 미리보기로 이동 방향, 순차 이동과 이전·현재·다음 가사 스타일을 설정합니다."
+            if korean else "Customize direction, staggered motion and previous/current/next styles with a live preview."
+        )
+        self.lyrics_animation_button.setText("자막 전환 고급 설정…" if korean else "Advanced subtitle settings…")
+        self.lyrics_animation_button.setToolTip(self.lyrics_transition_button.toolTip())
+        source = self.store.get(self._source_id) if self._source_id else None
+        line_style_count = (
+            sum(bool(style) for style in source.subtitle_line_styles)
+            if source is not None and source.source_type is SourceType.LYRICS else 0
+        )
+        self.lyrics_line_styles_button.setText(
+            (f"설정된 줄 {line_style_count}개…" if line_style_count else "설정…")
+            if korean else
+            (f"{line_style_count} configured…" if line_style_count else "Configure…")
+        )
         self.typography.retranslate(korean)
         for index, label in enumerate(
             ("스타일 기본값", "없음", "원", "막대") if korean
@@ -1681,15 +1815,16 @@ class SourceInspector(QScrollArea):
             "애니메이션 미리보기" if korean else "Preview animation"
         )
         self.animation_preview_button.setToolTip(
-            "선택 요소의 등장 및 종료 애니메이션을 캔버스에서 재생합니다."
+            "등장·종료·반복 모션을 캔버스에서 재생합니다. 음악 반응은 예시 박자로 보여 주며, 실제 음악 반응은 메인 재생 미리보기에서 확인하세요."
             if korean else
-            "Play the selected source's entrance and exit animation on the Canvas."
+            "Play entrance, exit and loop motion. Music reaction uses sample hits here; use Full Preview to see the actual track response."
         )
         self.text_edit.setPlaceholderText(
             "%title% · %artist% · %album%"
         )
         self._install_property_tooltips()
         self._refresh_property_tabs(self._selected_sources())
+        self._apply_lyrics_mode()
         self.expand_text_button.setToolTip(
             "긴 텍스트를 별도의 창에서 편집합니다."
             if korean else "Edit long text in a separate window."
@@ -1742,6 +1877,7 @@ class SourceInspector(QScrollArea):
             self._update_source_specific_fields(None)
             self.title.setText(self.translator.text("inspector"))
             self.subtitle.setText(self.translator.text("select_object"))
+            self._apply_lyrics_mode()
             return
         if len(sources) == 1:
             source = sources[0]
@@ -1824,6 +1960,36 @@ class SourceInspector(QScrollArea):
         finally:
             self._updating = False
         self._update_animation_preview_button()
+        self._apply_lyrics_mode()
+
+    def _apply_lyrics_mode(self) -> None:
+        sources = self._selected_sources()
+        lyrics = [source for source in sources if source.source_type is SourceType.LYRICS]
+        active = {key for source in lyrics
+                  for key in source.subtitle_advanced_categories}
+        self._lyrics_locked_fields = {field for key in active for field in LyricsSection.ADVANCED_BASIC_FIELDS[key]}
+        for field in {field for fields in LyricsSection.ADVANCED_BASIC_FIELDS.values() for field in fields}:
+            widget = self._field_widgets[field]
+            enabled = bool(sources) and field not in self._lyrics_locked_fields
+            if field == "subtitle_animation_duration":
+                enabled = enabled and all(source.subtitle_animation != "none" for source in lyrics)
+            self._field_hosts[field].setEnabled(enabled)
+            widget.setEnabled(enabled)
+            slider = self._linked_sliders.get(widget)
+            if slider is not None:
+                slider.setEnabled(enabled and field not in self._mixed_fields)
+        self.lyrics_mode_note.setVisible(bool(lyrics))
+        korean = self.translator.is_korean
+        names = {"motion": ("움직임", "Motion"), "layout": ("줄 배치", "Layout"),
+                 "styles": ("줄 스타일", "Role styles"), "intro": ("인트로", "Intro")}
+        labels = ", ".join(names[key][0 if korean else 1] for key in names if key in active)
+        self.lyrics_mode_note.setText(
+            (f"고급 모드: {labels}\n고급 모드가 활성화되어 있으므로 관련 옵션은 속성 탭에서 설정할 수 없습니다."
+             if active else "기본 모드 · 속성 패널의 자막 설정을 적용합니다.") if korean else
+            (f"Advanced: {labels}\nAdvanced mode is active; related options cannot be edited in Properties."
+             if active else "Basic mode · subtitle settings follow Properties.")
+        )
+        self._install_property_tooltips()
 
     def _clear_mixed_visuals(self) -> None:
         """Restore normal control presentation before filling concrete values."""
@@ -1904,6 +2070,9 @@ class SourceInspector(QScrollArea):
             "progress_value": self.progress_value_spin,
             "background_track_transition_seconds":
                 self.background_track_transition_seconds_spin,
+            "background_ambient_blur": self.background_ambient_blur_spin,
+            "background_ambient_motion": self.background_ambient_motion_spin,
+            "background_bass_strength": self.background_bass_strength_spin,
             "blur": self.blur_spin, "brightness": self.brightness_spin,
             "contrast": self.contrast_spin,
             "text_stroke_width": self.text_stroke_width_spin,
@@ -1917,6 +2086,7 @@ class SourceInspector(QScrollArea):
         })
         add("check", {
             "background_ambient": self.background_ambient_check,
+            "background_bass_reactive": self.background_bass_reactive_check,
             "background_track_transition": self.background_track_transition_check,
             "animation_fit_mix": self.animation_fit_mix_check,
             "visible": self.visible_check, "locked": self.locked_check,
@@ -1980,7 +2150,7 @@ class SourceInspector(QScrollArea):
             if self.font_family_combo.findText(source.font_family) < 0:
                 self.font_family_combo.addItem(source.font_family)
             self.font_family_combo.setCurrentText(source.font_family)
-            self.shape_kind_combo.setCurrentIndex(max(0, self.shape_kind_combo.findData(source.shape_kind)))
+            self.shape_kind_combo.setCurrentIndex(self.shape_kind_combo.findData(source.shape_kind))
             self.progress_style_combo.setCurrentIndex(max(0, self.progress_style_combo.findData(source.progress_style)))
             self.visualizer.fill(source)
             self.text_alignment_combo.setCurrentIndex(max(0, self.text_alignment_combo.findData(source.text_alignment)))
@@ -1990,6 +2160,10 @@ class SourceInspector(QScrollArea):
             self.image_fit_combo.setCurrentIndex(max(0, self.image_fit_combo.findData(source.image_fit_mode)))
             self.background_mode_combo.setCurrentIndex(max(0, self.background_mode_combo.findData(source.background_mode)))
             self.background_ambient_check.setChecked(source.background_ambient)
+            self.background_ambient_blur_spin.setValue(source.background_ambient_blur)
+            self.background_ambient_motion_spin.setValue(source.background_ambient_motion)
+            self.background_bass_reactive_check.setChecked(source.background_bass_reactive)
+            self.background_bass_strength_spin.setValue(source.background_bass_strength)
             self.background_track_transition_check.setChecked(
                 source.background_track_transition
             )
@@ -2002,6 +2176,12 @@ class SourceInspector(QScrollArea):
             self.track_list.fill(source, set_color=self._set_color_button)
             self.now_playing.fill(source)
             self.lyrics.fill(source, set_color=self._set_color_button)
+            line_style_count = sum(bool(style) for style in source.subtitle_line_styles)
+            self.lyrics_line_styles_button.setText(
+                (f"설정된 줄 {line_style_count}개…" if line_style_count else "설정…")
+                if self.translator.is_korean else
+                (f"{line_style_count} configured…" if line_style_count else "Configure…")
+            )
             self.typography.fill(source)
             self.motion.fill(source)
             self.progress_knob_combo.setCurrentIndex(
@@ -2040,6 +2220,7 @@ class SourceInspector(QScrollArea):
         finally:
             self._updating = False
         self._update_animation_preview_button()
+        self._apply_lyrics_mode()
 
     @staticmethod
     def _serialized_color(color: QColor) -> str:
@@ -2065,8 +2246,8 @@ class SourceInspector(QScrollArea):
         else:
             button.setText(serialized)
         button.setStyleSheet(
-            f"background: rgba({color.red()}, {color.green()}, {color.blue()}, "
-            f"{color.alpha()}); color: {text_color}; border: 1px solid #7B8794;"
+            f"QPushButton:enabled {{ background: rgba({color.red()}, {color.green()}, {color.blue()}, "
+            f"{color.alpha()}); color: {text_color}; border: 1px solid #7B8794; }}"
         )
 
 

@@ -8,10 +8,13 @@ import os
 from pathlib import Path
 import re
 import unittest
+from unittest.mock import patch
 import weakref
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QCoreApplication, QEvent  # noqa: E402
+from PySide6.QtGui import QShortcut  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.dialogs.help_content import HELP_TAB_IDS, help_tabs, help_topics, topic_images  # noqa: E402
@@ -40,7 +43,7 @@ class HelpContentTests(unittest.TestCase):
             for topic in topics:
                 with self.subTest(topic=topic.identifier, language=language):
                     self.assertTrue(topic.tags)
-                    for target in topic.related + tuple(re.findall(r"topic:([a-z_]+)", topic.body)):
+                    for target in topic.related + tuple(re.findall(r"topic:([a-z0-9_]+)", topic.body)):
                         self.assertIn(target, identifiers)
                     for image in topic_images(topic):
                         self.assertTrue((HELP_IMAGES / language / f"{image}.png").is_file(), image)
@@ -83,6 +86,59 @@ class HelpWindowLifetimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_new_feature_topics_are_searchable_and_render_their_screenshots(self) -> None:
+        from app.utils.i18n import Language, Translator
+
+        translator = Translator()
+        for language, terms in (
+            (Language.KOREAN, ("음악 반응", "거리별 흐림", "간주", "줄별 스타일", "스냅", "ID3")),
+            (Language.ENGLISH, ("music reaction", "distance falloff", "interlude", "per-line styles", "snap", "ID3")),
+        ):
+            translator.set_language(language)
+            dialog = HelpDialog(translator)
+            try:
+                for term, identifier in zip(terms, ("music_reaction", "lyrics_transition", "lyrics_intro",
+                                                     "lyrics_line_styles", "timeline", "mp3_metadata")):
+                    with self.subTest(language=language, topic=identifier):
+                        dialog.search_edit.setText(term)
+                        dialog.select_tab("track" if identifier == "mp3_metadata" else "canvas")
+                        self.assertIn(identifier, dialog.visible_topic_ids())
+                        dialog.select_topic(identifier)
+                        self.assertEqual(dialog.current_topic_id, identifier)
+                        self.assertTrue(dialog.browser.images)
+                        self.assertIn(dialog._topic(identifier).title, dialog.browser.toPlainText())
+            finally:
+                dialog.close()
+                dialog.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_customization_dialogs_f1_open_their_own_updated_topics(self) -> None:
+        from app.dialogs.lyrics_animation_dialog import LyricsAnimationDialog
+        from app.dialogs.lyrics_line_style_dialog import LyricsLineStyleDialog
+        from app.dialogs.mp3_metadata_editor_dialog import Mp3MetadataEditorDialog
+        from app.models.source import Source, SourceType
+        from app.utils.i18n import Translator
+
+        translator = Translator()
+        source = Source(SourceType.LYRICS, "Lyrics", fill_color="#00000000")
+        for cls, arguments, tab, topic in (
+            (LyricsAnimationDialog, (source, translator), "canvas", "lyrics_transition"),
+            (LyricsLineStyleDialog, (source, translator), "canvas", "lyrics_line_styles"),
+            (Mp3MetadataEditorDialog, (translator,), "track", "mp3_metadata"),
+        ):
+            with self.subTest(dialog=cls.__name__):
+                dialog = cls(*arguments)
+                try:
+                    shortcuts = dialog.findChildren(QShortcut)
+                    self.assertEqual(len(shortcuts), 1)
+                    with patch("app.dialogs.help_dialog.open_help") as open_help:
+                        shortcuts[0].activated.emit()
+                        open_help.assert_called_once_with(dialog, translator, tab, topic)
+                finally:
+                    dialog.close()
+                    dialog.deleteLater()
+                    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_closed_help_dialog_is_released(self) -> None:
         dialog = HelpDialog(None, tab="preview")

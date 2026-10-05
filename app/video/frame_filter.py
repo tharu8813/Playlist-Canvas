@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 from dataclasses import dataclass
 import logging
 from math import ceil
@@ -83,6 +85,7 @@ def _log_filter_failure(
     )
 
 
+@timed("video.cpu_filter_seconds")
 def filter_video_frame(
     image: QImage, settings: VideoFrameFilterSettings,
 ) -> QImage:

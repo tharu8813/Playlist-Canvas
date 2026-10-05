@@ -6,8 +6,13 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
+from app.canvas.renderers import lyrics_renderer
+from app.canvas.source_item import SourceItem
+from app.dialogs.lyrics_line_style_dialog import LyricsLineStyleDialog
 from app.dialogs.video_source_dialog import VideoSourceDialog
 from app.models.project import ProjectDocument
 from app.models.source import Source, SourceType
@@ -15,6 +20,7 @@ from app.models.source_components import VideoComponent
 from app.models.source_registry import source_registry
 from app.services.history_service import HistoryService
 from app.services.source_store import SourceStore
+from app.utils.i18n import Translator
 
 
 class SourceComponentTests(unittest.TestCase):
@@ -140,6 +146,72 @@ class SourceComponentTests(unittest.TestCase):
         restored = ProjectDocument.from_dict(history.redo()).sources[0]
         self.assertEqual(source_registry.component_for(restored).speed, 2)
         self.assertEqual(restored.video_paths, ["b.mp4"])
+
+    def test_lyrics_line_styles_round_trip_and_render_independent_colors(self) -> None:
+        styles = [
+            {"color": "#FF0000", "font_size": 28.0, "font_weight": 700, "italic": False},
+            {"color": "#0000FF", "font_size_offset": -6.0, "font_weight": 400, "italic": True},
+        ]
+        source = Source(
+            SourceType.LYRICS, "Lyrics", width=400, height=180,
+            text="FIRST LINE\nSECOND LINE", subtitle_animation="none",
+            subtitle_current_line=0, subtitle_current_line_count=2,
+            subtitle_current_scale=1.0, subtitle_line_styles=styles,
+        )
+        restored = Source.from_dict(source.to_dict())
+        self.assertEqual(restored.subtitle_line_styles, styles)
+        self.assertEqual(source_registry.component_for(restored).line_styles, styles)
+
+        item = SourceItem(restored)
+        item._subtitle_line_style_indices = (0, 1)
+        image = QImage(400, 180, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        painter = QPainter(image)
+        try:
+            lyrics_renderer.paint_lines(item, painter, QRectF(0, 0, 400, 180))
+        finally:
+            painter.end()
+        red = blue = 0
+        for y in range(image.height()):
+            for x in range(image.width()):
+                color = image.pixelColor(x, y)
+                red += color.red() > 160 and color.blue() < 80 and color.alpha() > 20
+                blue += color.blue() > 160 and color.red() < 80 and color.alpha() > 20
+        self.assertGreater(red, 20)
+        self.assertGreater(blue, 20)
+        item.deleteLater()
+
+        for invalid in (
+            [{"color": "red"}], [{"font_size": 2}], [{"font_size_offset": 101}],
+            [{"font_size": 20, "font_size_offset": 2}], [{"font_weight": 42}],
+            [{"italic": "yes"}], [{"unknown": True}], [{}] * 13,
+        ):
+            payload = source.to_dict()
+            payload["subtitle_line_styles"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                Source.from_dict(payload)
+
+    def test_lyrics_line_style_size_mode_preserves_the_effective_size(self) -> None:
+        source = Source(
+            SourceType.LYRICS, "Lyrics", font_size=24,
+            subtitle_line_styles=[{}, {"font_size_offset": 6.0}],
+        )
+        dialog = LyricsLineStyleDialog(source, Translator())
+        try:
+            self.assertEqual(dialog.size_mode.currentData(), "relative")
+            self.assertEqual(dialog.font_size.prefix(), "+")
+            self.assertEqual(dialog._effective_size(), 30.0)
+
+            dialog.size_mode.setCurrentIndex(dialog.size_mode.findData("absolute"))
+            self.assertEqual(dialog.font_size.value(), 30.0)
+            self.assertEqual(dialog.styles()[1]["font_size"], 30.0)
+
+            dialog.size_mode.setCurrentIndex(dialog.size_mode.findData("relative"))
+            self.assertEqual(dialog.font_size.value(), 6.0)
+            self.assertEqual(dialog.styles()[1]["font_size_offset"], 6.0)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
 
     def test_video_dialog_reads_component_without_mutating_source_on_cancel(self) -> None:
         source = Source(SourceType.VIDEO, "Video", video_speed=1.5,

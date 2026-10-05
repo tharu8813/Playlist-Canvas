@@ -18,7 +18,7 @@ unavailable"):
     ---------------------------------------------------------------
     Average BPM confidence                          0.35     +
     Downbeat/meter confidence (BEAT_MATCH only)      0.15     +
-    Tempo shift vs. the allowed budget               0.25     -
+    Measured playback-rate shift vs. allowed budget  0.25     -
     Requested bar length actually used                0.15     +
     Cue proximity to the ideal anchor (beat/downbeat) 0.10     +
     Compatible key (Camelot wheel), if both known     0.06     + (never a blocker; a clash only shortens the overlap, below)
@@ -35,13 +35,15 @@ that had none of it:
     Incoming trim beyond INCOMING_TRIM_SOFT_LIMIT_SECONDS   0.08  -
     Outgoing tail beyond MAXIMUM_OUTGOING_TAIL_TRIM_SECONDS 0.05  -
 
-The pair-level factors above (confidence, tempo, key, global energy) are the
-same for every candidate of a pair, so they never change which one wins.
-Three candidate-level factors do, each a no-op without its data:
+The pair-level factors above (confidence, key, global energy) are the same
+for every candidate of a pair. The measured tempo cost and the following
+candidate-level factors compare the actual overlap windows, each a no-op
+without its data:
 
     Outgoing cue on an 8-bar phrase start (measured bar grid)  0.06  +
     Keys clash (and no re-pitch fixes it): per overlap length  0.30  - x severity x key confidence
     Local energy jump >= ENERGY_FLOW_THRESHOLD: per length     0.10  + on a rise (build-up), - on a drop
+    Combined measured beat-grid error inside the overlap       0.20  - (reject above a quarter beat)
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ from app.automix.analysis.key import camelot_compatible, harmonic_shift, key_cla
 from app.automix.beatgrid import fit_beat_grid
 from app.automix.compatibility import TransitionCompatibility
 from app.automix.models import RELIABLE_BPM_CONFIDENCE, TrackAnalysis
+from app.automix.music import character, context_score, music_tags_at
 from app.automix.phrases import PHRASE_BARS, phrase_starts
 from app.automix.settings import AutoMixTransitionSettings
 from app.automix.structure.models import TrackStructureAnalysis
@@ -96,9 +99,17 @@ to back, so the two voices overlap only briefly. A third of real pop tracks
 sing to their last sound, and most of those start singing right away too; two
 bars of a 64-80 BPM ballad were 6-7.5 s of both singing."""
 
+FIXED_HANDOFF_MAX_SECONDS = 2.0
+"""Without shared beats, keep simultaneous voices to a brief handoff."""
+
 LOCAL_GRID_SECONDS = 60.0
 """Beats this far into each side's mix region fit its local tempo: a live or
 drifting track is matched on the tempo it actually has around the cue."""
+
+MAX_PAIR_PHASE_ERROR_BEATS = 0.25
+"""Combined rhythm error above a quarter beat cannot sustain a clean beat match."""
+WEIGHT_RHYTHM_INSTABILITY = 0.20
+"""Prefer the overlap that stays steady, even when a longer length was requested."""
 
 # Commit C: structure-aware additions. Same discipline as the Phase 7 block
 # above -- additive bonuses/penalties applied only when the relevant
@@ -311,15 +322,17 @@ def generate_candidates(
     else:
         strategy = TransitionStrategy.BEAT_ALIGNED_CROSSFADE
 
-    bar_lengths = BAR_LENGTHS
+    # A short, clean handoff must compete even when a long blend fits. Rich
+    # audio measurements decide whether the extra lengths actually sound better.
+    bar_lengths = (1, 2, 3, 4, 6, 8, 12, 16) if outgoing.rms_curve and incoming.rms_curve else BAR_LENGTHS
     if not all(_has_reliable_downbeats(a) for a in (outgoing, incoming)):
         # The bar phase is a guess (the light analyzer's normal case), so a
         # blend may start mid-phrase: halve the preset's length (never below
         # the shortest) to keep any misplaced phrase start brief.
-        shortest = min(BAR_LENGTHS)
+        shortest = min(bar_lengths)
         cap = max(shortest, settings.preferred_bars // 2)
         settings = replace(settings, preferred_bars=cap)
-        bar_lengths = tuple(bars for bars in BAR_LENGTHS if bars <= cap)
+        bar_lengths = tuple(bars for bars in bar_lengths if bars <= cap)
 
     candidates = [
         candidate
@@ -370,6 +383,32 @@ def generate_candidates(
             )) is not None
         )
 
+    if outgoing.rms_curve and incoming.rms_curve:
+        # Land the END of the blend on a measured vocal/section/groove entry,
+        # rather than always starting both songs at their first available beat.
+        for base in tuple(candidates):
+            for landing in incoming_landmarks(incoming, incoming_structure):
+                cue = landing - base.duration_seconds
+                if cue < audible_start(incoming) - VOCAL_EDGE_TOLERANCE_SECONDS or any(
+                        a < cue and b > audible_start(incoming) for a, b in sung_spans(incoming)):
+                    continue  # a trimmed instrumental pickup is OK; discarding words is not
+                candidate = _beat_based_candidate(
+                    outgoing, incoming, compatibility, base.bars, strategy, settings,
+                    outgoing_naive_override=base.outgoing_source_time, incoming_naive_override=max(0.0, cue),
+                    outgoing_playback_rate=outgoing_playback_rate,
+                    outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+        # Even if a long instrumental blend exists, compare a brief voice
+        # handoff. The selector will account for words obscured by its envelopes.
+        if _sings_to_end(outgoing):
+            candidates.extend(c for bars in HANDOFF_BARS if (c := _beat_based_candidate(
+                outgoing, incoming, compatibility, bars, strategy, settings, handoff=True,
+                outgoing_playback_rate=outgoing_playback_rate,
+                outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
+            )) is not None and c.duration_seconds <= HANDOFF_MAX_SECONDS + _DURATION_EPSILON_SECONDS)
+
     candidates = _deduplicate_candidates(candidates)
 
     if not candidates and _sings_to_end(outgoing):
@@ -391,7 +430,38 @@ def generate_candidates(
             outgoing, incoming, settings, outgoing_playback_rate=outgoing_playback_rate,
             reasons=("- no bar length fit within the transition-length and track-duration limits",),
         )
+    if outgoing.rms_curve and incoming.rms_curve:
+        candidates.extend(_fallback_candidates(
+            outgoing, incoming, settings, outgoing_playback_rate=outgoing_playback_rate,
+            reasons=("+ natural-tempo handoff competes with beat matching",)))
     return candidates
+
+
+def incoming_landmarks(analysis: TrackAnalysis, structure: TrackStructureAnalysis | None = None) -> tuple[float, ...]:
+    """Early measured entries, not invented drop/chorus classifications."""
+    start = audible_start(analysis)
+    limit = min(audible_end(analysis), start + INCOMING_TRIM_SOFT_LIMIT_SECONDS)
+    points = [a for a, b in sung_spans(analysis) if b > start][:1]
+    if structure is not None:
+        points.extend(s.start_seconds for s in structure.sections)
+        if structure.intro_end_seconds is not None:
+            points.append(structure.intro_end_seconds)
+    # A sustained onset-strength rise marks drums arriving, even without an
+    # optional structure model. Require three measured seconds on each side.
+    drums = analysis.percussive_curve
+    points.extend(float(i) for i in range(3, min(len(drums) - 2, int(limit) + 1))
+                  if sum(drums[i:i + 3]) / 3 - sum(drums[i - 3:i]) / 3 >= 0.35)
+    anchors = analysis.downbeats if _has_reliable_downbeats(analysis) else analysis.beats
+    beat = 60.0 / analysis.bpm if analysis.bpm else 0.5
+    snapped = []
+    for point in sorted(set(points)):
+        if not start + 1.0 <= point <= limit:
+            continue
+        anchor, distance = _nearest_anchor(anchors, point)
+        # Keep an off-grid vocal pickup at its real time; never call a distant
+        # downbeat its entry. Candidate snapping remains independently bounded.
+        snapped.append(anchor if distance <= beat / 2 else point)
+    return tuple(sorted(set(snapped)))[:8]
 
 
 def _deduplicate_candidates(candidates: list[TransitionCandidate]) -> list[TransitionCandidate]:
@@ -461,7 +531,9 @@ def _beat_based_candidate(
     outgoing_grid = incoming_grid = None
     if strategy is TransitionStrategy.BEAT_MATCH:
         outgoing_grid = fit_beat_grid(outgoing.beats, audible_end(outgoing) - LOCAL_GRID_SECONDS, audible_end(outgoing))
-        incoming_grid = fit_beat_grid(incoming.beats, audible_start(incoming), audible_start(incoming) + LOCAL_GRID_SECONDS)
+        incoming_grid_start = (incoming_naive_override if incoming_naive_override is not None
+                               else audible_start(incoming))
+        incoming_grid = fit_beat_grid(incoming.beats, incoming_grid_start, incoming_grid_start + LOCAL_GRID_SECONDS)
         if outgoing_grid is None or incoming_grid is None:
             return None
         outgoing_rate = _nearest_octave_rate(outgoing_grid.period / incoming_grid.period, settings)
@@ -567,13 +639,32 @@ def _beat_based_candidate(
         return None
     # Otherwise the incoming track may already sing here: the outgoing one no longer does.
 
+    phase_error = None
+    if strategy is TransitionStrategy.BEAT_MATCH:
+        out_character = character(music_tags_at(outgoing, outgoing_source_time, outgoing_source_out))
+        in_character = character(music_tags_at(incoming, incoming_source_time, incoming_source_time + incoming_source_span))
+        gentle = max(out_character[0], in_character[0])
+        driven = max(out_character[1], in_character[1])
+        if gentle >= 0.55 and gentle > driven and abs(outgoing_rate - 1.0) * 100.0 > 3.0 + 1e-9:
+            return None  # expressive music keeps its phrasing; use the natural fade instead of a large tempo move
+        outgoing_error = outgoing_grid.phase_error(outgoing.beats, outgoing_source_time, outgoing_source_out)
+        incoming_error = incoming_grid.phase_error(
+            incoming.beats, incoming_source_time, incoming_source_time + incoming_source_span)
+        if outgoing_error is not None and incoming_error is not None:
+            phase_error = outgoing_error + incoming_error
+            if phase_error > MAX_PAIR_PHASE_ERROR_BEATS:
+                return None  # a shorter candidate or the existing safe fallback handles this pair
+
     confidence = min(outgoing.bpm_confidence, incoming.bpm_confidence)
+    if phase_error is not None:
+        confidence *= 1.0 - phase_error
     score, reasons = _score_beat_candidate(
         outgoing, incoming, compatibility, bars, strategy, settings, outgoing_snap, incoming_snap,
         outgoing_source_time, incoming_source_time, duration_seconds,
         outgoing_source_span=outgoing_source_span, incoming_source_span=incoming_source_span,
         outgoing_structure=outgoing_structure, incoming_structure=incoming_structure,
         outgoing_rate=outgoing_rate,
+        phase_error=phase_error,
     )
     if strategy is TransitionStrategy.BEAT_MATCH:
         alignment = "downbeat" if all(_has_reliable_downbeats(a) for a in (outgoing, incoming)) else "beat (bar phase uncertain)"
@@ -648,6 +739,7 @@ def _score_beat_candidate(
     outgoing_structure: TrackStructureAnalysis | None = None,
     incoming_structure: TrackStructureAnalysis | None = None,
     outgoing_rate: float = 1.0,
+    phase_error: float | None = None,
 ) -> tuple[float, tuple[str, ...]]:
     reasons: list[str] = list(compatibility.reasons)
     score = 0.0
@@ -666,8 +758,16 @@ def _score_beat_candidate(
         )
 
     tempo_budget = max(0.01, settings.max_tempo_change_percent)
-    tempo_component = max(0.0, 1.0 - compatibility.tempo_shift_percent / tempo_budget)
+    tempo_shift = (abs(outgoing_rate - 1.0) * 100.0 if strategy is TransitionStrategy.BEAT_MATCH
+                   else compatibility.tempo_shift_percent)
+    if tempo_shift < 1e-7:
+        tempo_shift = 0.0  # fitting an unchanged tempo must not disturb stable score ties
+    tempo_component = max(0.0, 1.0 - tempo_shift / tempo_budget)
     score += WEIGHT_TEMPO * tempo_component
+
+    if phase_error is not None:
+        score -= WEIGHT_RHYTHM_INSTABILITY * phase_error / MAX_PAIR_PHASE_ERROR_BEATS
+        reasons.append(f"{'+' if phase_error < 0.05 else '-'} measured overlap rhythm error {phase_error:.3f} beats")
 
     length_component = 1.0 if bars == settings.preferred_bars else 0.7
     score += WEIGHT_LENGTH * length_component
@@ -746,6 +846,14 @@ def _score_beat_candidate(
     if clash:
         score -= WEIGHT_KEY_CLASH * clash * min(1.0, duration_seconds / settings.max_transition_seconds)
         reasons.append(f"- keys clash ({outgoing.key} -> {incoming.key}): a shorter overlap is preferred")
+
+    if outgoing_source_span is not None and incoming_source_span is not None:
+        music_score, music_reasons = context_score(
+            outgoing, incoming, outgoing_source_time, outgoing_source_time + outgoing_source_span,
+            incoming_source_time, incoming_source_time + incoming_source_span,
+            duration_seconds, settings.max_transition_seconds)
+        score += music_score
+        reasons.extend(music_reasons)
 
     if incoming_source_time > INCOMING_TRIM_SOFT_LIMIT_SECONDS:
         # Deliberately uncapped (unlike the other components above): a
@@ -897,6 +1005,29 @@ def _fallback_candidates(
     outgoing: TrackAnalysis, incoming: TrackAnalysis, settings: AutoMixTransitionSettings,
     reasons: tuple[str, ...], outgoing_playback_rate: float = 1.0,
 ) -> list[TransitionCandidate]:
+    """Without shared tempo, measured music still gets a choice of handoff lengths."""
+    lengths = ((settings.fallback_crossfade_seconds, 1.0, 2.0, 4.0, 6.0, 8.0)
+               if outgoing.rms_curve and incoming.rms_curve else (settings.fallback_crossfade_seconds,))
+    candidates = _deduplicate_candidates([
+        candidate for length in lengths
+        for handoff in ((False, True) if outgoing.rms_curve and incoming.rms_curve else (False,))
+        for candidate in _fixed_candidates(outgoing, incoming, replace(settings, fallback_crossfade_seconds=length),
+                                            reasons, outgoing_playback_rate, handoff=handoff)
+    ])
+    fades = [candidate for candidate in candidates if candidate.strategy is not TransitionStrategy.CUT]
+    if outgoing.rms_curve and incoming.rms_curve:
+        # Tempo preservation and measured pair confidence apply to a natural
+        # handoff too. A missing shared beat is not a 0.3 ceiling on quality.
+        fades = [replace(candidate, score=candidate.score + WEIGHT_TEMPO + WEIGHT_CONFIDENCE *
+                         (outgoing.bpm_confidence + incoming.bpm_confidence) / 2) for candidate in fades]
+    return fades or candidates
+
+
+def _fixed_candidates(
+    outgoing: TrackAnalysis, incoming: TrackAnalysis, settings: AutoMixTransitionSettings,
+    reasons: tuple[str, ...], outgoing_playback_rate: float = 1.0,
+    *, handoff: bool = False,
+) -> list[TransitionCandidate]:
     """FIXED_CROSSFADE if both tracks have room for one, otherwise CUT.
 
     The crossfade spans the outgoing track's last *audible* seconds and the
@@ -904,7 +1035,8 @@ def _fallback_candidates(
     masters a fixed fade over the file's very end overlapped only silence.
     """
     outgoing_end, incoming_start = audible_end(outgoing), audible_start(incoming)
-    available = min(outgoing_end / outgoing_playback_rate, incoming.duration_seconds - incoming_start)
+    available = min((outgoing_end - audible_start(outgoing)) / outgoing_playback_rate,
+                    audible_end(incoming) - incoming_start, settings.max_transition_seconds)
     shortest = settings.min_transition_seconds
     # Two voices must not share the fade: it starts once the outgoing singer
     # stops, unless the incoming intro is instrumental. Sung to the very end on
@@ -912,14 +1044,21 @@ def _fallback_candidates(
     vocal_end = _last_vocal_end(outgoing, 0.0, outgoing_end)
     tail = (outgoing_end - vocal_end) / outgoing_playback_rate if vocal_end is not None else None
     fade = min(settings.fallback_crossfade_seconds, available)
-    if tail is not None and tail < fade:
+    if tail is not None and tail < fade and not handoff:
         if _instrumental(incoming, incoming_start, incoming_start + fade):
             reasons += ("+ fading under the outgoing vocals: the incoming intro is instrumental",)
-        elif tail >= MIN_AFTER_VOCAL_SECONDS:
-            available = tail
-            shortest = min(shortest, MIN_AFTER_VOCAL_SECONDS)
         else:
-            reasons += ("- both tracks sing across the junction: a short fade hands the voice over",)
+            intro_end = vocal_intro_end(incoming)
+            intro = max(0.0, intro_end - incoming_start) if intro_end is not None else 0.0
+            safe_window = max(tail, intro)
+            if safe_window >= MIN_AFTER_VOCAL_SECONDS:
+                available = min(available, safe_window)
+                shortest = min(shortest, MIN_AFTER_VOCAL_SECONDS)
+                reasons += ("+ shorter fade keeps the two vocal phrases apart",)
+            else:
+                available = min(available, FIXED_HANDOFF_MAX_SECONDS)
+                shortest = min(shortest, MIN_AFTER_VOCAL_SECONDS)
+                reasons += ("- both tracks sing across the junction: a short fade hands the voice over",)
     duration_seconds = min(settings.fallback_crossfade_seconds, available)
     if duration_seconds < shortest:
         # A cut still drops the silence between the two sounds.

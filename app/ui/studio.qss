@@ -7,7 +7,7 @@ QWidget { font-family: "Segoe UI", "Malgun Gothic"; font-size: 12px; outline: 0;
 QMainWindow, QDialog { background: @window; color: @text; }
 QMessageBox { background: @window; color: @text; }
 QLabel { color: @text; padding: 0; background: transparent; }
-QCheckBox:disabled, QLabel:disabled { color: @muted; }
+QCheckBox:disabled, QRadioButton:disabled, QLabel:disabled { color: @disabled_text; }
 
 /* --- Menu bar & menus ------------------------------------------------- */
 QMenuBar { background: @panel; color: @text; border-bottom: 1px solid @border; padding: 3px 8px; font-size: 11px; }
@@ -158,6 +158,18 @@ QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url("@spin_up"); width: 9p
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url("@spin_down"); width: 9px; height: 6px; }
 QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover { background: @hover; }
 QSpinBox::up-button:pressed, QSpinBox::down-button:pressed, QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed { background: @accent; }
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled,
+QSpinBox:disabled, QDoubleSpinBox:disabled {
+    background: @disabled; color: @disabled_text; border-color: @disabled;
+}
+QComboBox::drop-down:disabled, QSpinBox::up-button:disabled, QSpinBox::down-button:disabled,
+QDoubleSpinBox::up-button:disabled, QDoubleSpinBox::down-button:disabled {
+    background: @disabled; border-color: @disabled;
+}
+QComboBox::down-arrow:disabled, QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
+    image: url("@spin_down_disabled");
+}
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled { image: url("@spin_up_disabled"); }
 QCheckBox, QRadioButton { color: @text; spacing: 7px; padding: 2px 0; }
 QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #66716F; border-radius: 3px; background: @field; }
 QCheckBox::indicator:checked { background: @accent; border-color: @accent; image: url("@check"); }
@@ -322,6 +334,12 @@ QSlider::handle:horizontal:focus { border-color: @accent; }
 #timelineTrackTable::item, #timelineSourceTable::item { padding: 5px 8px; border: 0; }
 #timelineTrackTable::item:selected, #timelineSourceTable::item:selected { background: #304B44; color: @text; }
 #timelineMoveButton { min-width: 28px; max-width: 28px; min-height: 28px; padding: 0; font-size: 15px; font-weight: 600; }
+#timelineToolButton { min-height: 22px; padding: 3px 9px; }
+#timelineToolButton:checked { color: @accent; background: #2D443D; border-color: #4D7468; }
+#timelineViewCombo { min-width: 120px; padding-top: 3px; padding-bottom: 3px; }
+#timelineHint { color: @muted; font-size: 11px; }
+#visualTimeline { background: @field; border: 1px solid @border; border-radius: 4px; }
+#visualTimeline:focus { border-color: @accent; }
 
 /* --- Preview stage -------------------------------------- */
 #previewStage { border: 1px solid @border; border-radius: 4px; background: #121416; }
@@ -345,3 +363,23 @@ QPushButton#previewTransportButton:hover { background: @hover; border-color: @bo
 #previewErrorBanner[severity="warning"] { background: #40392B; border: 1px solid #BEA77C; border-radius: 4px; }
 #previewErrorTitle { font-weight: 600; }
 #videoScopeSummary, #videoTrackScopePanel { background: @alternate; border: 0; border-radius: 4px; padding: 8px; }
+
+/* --- Metadata and per-line lyric editors ------------------ */
+#metadataScroll, #metadataScroll > QWidget > QWidget,
+#lyricStyleScroll, #lyricStylePanel { background: @window; }
+#metadataCover { background: @alternate; color: @muted; border: 1px solid @border; border-radius: 6px; }
+#mp3MetadataEditor QGroupBox::title { color: @text; font-size: 13px; }
+#mp3MetadataEditor QPushButton, #lyricsLineStyleDialog QPushButton { min-height: 22px; padding: 6px 12px; }
+#lyricStyleLines { background: @panel; border: 0; border-radius: 4px; padding: 6px; }
+#lyricStyleLines::item { padding: 10px 12px; margin-bottom: 2px; border-radius: 3px; }
+#lyricStyleLines::item:hover { background: @hover; }
+#lyricStyleLines::item:selected { background: #304B44; color: @text; }
+#lyricStyleLines::item:focus { border: 1px solid @accent; }
+#lyricLineTitle { font-size: 17px; font-weight: 600; }
+#lyricStylePreview { background: @shadow; border: 1px solid @border; border-radius: 6px; }
+#lyricsAnimationDialog QScrollArea, #lyricsAnimationDialog QScrollArea > QWidget > QWidget { background: @window; }
+#subtitleMotionPreview { background: @shadow; border: 1px solid @border; border-radius: 6px; }
+#lyricsAnimationDialog QPushButton { min-height: 22px; padding: 6px 12px; }
+#lyricsAnimationDialog QGroupBox#lyricOptionGroup { margin-top: 16px; padding: 12px 0 4px; }
+#lyricsAnimationDialog QGroupBox#lyricOptionGroup::title { color: @text; font-size: 12px; }
+#lyricsAnimationDialog QGroupBox#lyricOptionGroup::title:disabled { color: @disabled_text; }

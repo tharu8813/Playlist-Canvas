@@ -10,10 +10,40 @@ from app.models.playlist import PlaylistTrack
 from app.models.project import (
     CURRENT_VERSION, CanvasSettings, ProjectDocument, ProjectSettings, migrate_project_payload,
 )
-from app.models.source import Source, SourceType
+from app.models.source import SUBTITLE_ADVANCED_GROUPS, Source, SourceType
 
 
 class ProjectModelValidationTests(unittest.TestCase):
+    def test_legacy_subtitle_master_switch_migrates_without_losing_drafts(self) -> None:
+        for enabled, categories in ((True, ["motion"]), (False, [])):
+            with self.subTest(enabled=enabled):
+                payload = ProjectDocument(sources=[
+                    Source(SourceType.LYRICS, "Lyrics", subtitle_animation="rise"),
+                    Source(SourceType.TEXT, "Title"),
+                ]).to_dict()
+                for source in payload["sources"]:
+                    source.update(subtitle_advanced_enabled=enabled,
+                                  subtitle_advanced_categories=["motion"],
+                                  subtitle_advanced_settings={"subtitle_animation": "cascade"})
+                original = copy.deepcopy(payload)
+                restored = ProjectDocument.from_dict(payload)
+                self.assertEqual(payload, original)
+                for source in restored.sources:
+                    self.assertEqual(source.subtitle_advanced_categories, categories)
+                    self.assertEqual(source.subtitle_advanced_settings, {"subtitle_animation": "cascade"})
+                    self.assertNotIn("subtitle_advanced_enabled", source.to_dict())
+                self.assertEqual(restored.sources[0].resolved_lyrics().subtitle_animation,
+                                 "cascade" if enabled else "rise")
+                reopened = ProjectDocument.from_dict(restored.to_dict())
+                self.assertEqual(reopened.to_dict(), restored.to_dict())
+        legacy = Source(SourceType.LYRICS, "Lyrics").to_dict()
+        legacy.pop("subtitle_advanced_categories")
+        legacy["subtitle_advanced_enabled"] = True
+        self.assertEqual(Source.from_dict(legacy).subtitle_advanced_categories, list(SUBTITLE_ADVANCED_GROUPS))
+        legacy["subtitle_advanced_enabled"] = "false"
+        with self.assertRaises(ValueError):
+            Source.from_dict(legacy)
+
     def test_project_collections_require_arrays(self) -> None:
         for field in ("sources", "groups", "playlist", "content_library"):
             for value in ({}, "", None):
@@ -40,6 +70,19 @@ class ProjectModelValidationTests(unittest.TestCase):
         self.assertEqual(restored.playlist[0].lyrics_timing_offset_seconds, 0.35)
         self.assertEqual(restored.playlist[0].cover_path, "cover.png")
         self.assertEqual(restored.app_version, __version__)
+
+    def test_ambient_background_controls_round_trip(self) -> None:
+        source = Source(
+            SourceType.BACKGROUND, "Reactive background",
+            background_mode="album_art", background_ambient=True,
+            background_ambient_blur=36.0, background_ambient_motion=1.4,
+            background_bass_reactive=True, background_bass_strength=0.09,
+        )
+        restored = Source.from_dict(source.to_dict())
+        self.assertEqual(restored.background_ambient_blur, 36.0)
+        self.assertEqual(restored.background_ambient_motion, 1.4)
+        self.assertTrue(restored.background_bass_reactive)
+        self.assertEqual(restored.background_bass_strength, 0.09)
 
     def test_legacy_project_without_app_version_remains_compatible(self) -> None:
         payload = ProjectDocument().to_dict()

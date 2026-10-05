@@ -28,7 +28,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.source import (
-    LOOP_MOTIONS, MASK_SHAPES, TEXT_CASES, TEXT_SOURCE_TYPES, Source, SourceType,
+    LOOP_MOTIONS, MASK_SHAPES, MUSIC_REACTIVE_EFFECTS, MUSIC_REACTIVE_BANDS,
+    MUSIC_REACTIVE_CURVES, TEXT_CASES, TEXT_SOURCE_TYPES, Source, SourceType,
 )
 
 if TYPE_CHECKING:
@@ -98,9 +99,10 @@ class FieldSection:
             elif kind == "check":
                 widget.toggled.connect(lambda value, key=key: update(key, value))
                 # A click on a mixed multi-selection value must still apply it.
-                widget.clicked.connect(
-                    lambda checked=False, key=key: apply_mixed_checkbox(key, checked)
-                )
+                if apply_mixed_checkbox is not None:
+                    widget.clicked.connect(
+                        lambda checked=False, key=key: apply_mixed_checkbox(key, checked)
+                    )
             elif kind == "color":
                 widget.clicked.connect(
                     lambda _checked=False, key=key, button=widget: choose_color(key, button)
@@ -232,24 +234,59 @@ class MotionSection(FieldSection):
 
     FAMILY = ("모션", "motion")
     LOOP_KEYS = ("loop_motion", "loop_motion_period", "loop_motion_amount")
+    REACTIVE_KEYS = ("music_reactive_enabled", "music_reactive_effect", "music_reactive_band",
+                     "music_reactive_strength", "music_reactive_attack", "music_reactive_release",
+                     "music_reactive_sensitivity", "music_reactive_threshold",
+                     "music_reactive_curve", "music_reactive_offset")
     ROWS = (
         ("loop_motion", None),
         ("loop_motion_period", None),
         ("loop_motion_amount", None),
         ("mask_shape", None),
+        ("music_reactive_enabled", "music_reaction"),
+        ("music_reactive_effect", "music_reaction"),
+        ("music_reactive_band", "music_reaction"),
+        ("music_reactive_strength", "music_reaction"),
+        ("music_reactive_attack", "music_response"),
+        ("music_reactive_release", "music_response"),
+        ("music_reactive_sensitivity", "music_response"),
+        ("music_reactive_threshold", "music_response"),
+        ("music_reactive_curve", "music_response"),
+        ("music_reactive_offset", "music_response"),
     )
     LABELS = {
         "loop_motion": ("반복 모션", "Loop motion"),
         "loop_motion_period": ("반복 주기 (초)", "Loop period (s)"),
         "loop_motion_amount": ("모션 세기", "Motion strength"),
         "mask_shape": ("마스크 모양", "Mask shape"),
+        "music_reactive_enabled": ("음악에 맞춰 반응", "React to music"),
+        "music_reactive_effect": ("반응 애니메이션", "Reaction effect"),
+        "music_reactive_strength": ("반응 강도", "Reaction strength"),
+        "music_reactive_band": ("반응 음역", "Frequency range"),
+        "music_reactive_attack": ("커지는 시간 (초)", "Attack time (s)"),
+        "music_reactive_release": ("돌아오는 시간 (초)", "Release time (s)"),
+        "music_reactive_sensitivity": ("반응 감도", "Sensitivity"),
+        "music_reactive_threshold": ("최소 반응 기준", "Threshold"),
+        "music_reactive_curve": ("반응 곡선", "Response curve"),
+        "music_reactive_offset": ("반응 시간 보정 (초)", "Reaction offset (s)"),
     }
-    SECTION_TITLES: ClassVar[dict[str, tuple[str, str]]] = {}
+    SECTION_TITLES = {"music_reaction": ("음악 반응", "Music reaction"),
+                      "music_response": ("반응 조절", "Response tuning")}
     HELP = {
         "loop_motion": ("요소가 화면에 있는 동안 계속 반복되는 움직임입니다. 등장·퇴장 애니메이션과 함께 적용됩니다.", "Movement repeated for as long as the source is on screen, on top of its entrance and exit."),
         "loop_motion_period": ("움직임 한 번에 걸리는 시간입니다. 회전은 이 시간마다 한 바퀴 돕니다.", "Seconds per cycle. Spin turns once per period."),
         "loop_motion_amount": ("움직임의 크기입니다. 0이면 멈추고, 1이 기본입니다.", "Size of the movement. 0 stops it; 1 is the default."),
         "mask_shape": ("요소 전체를 원·별·하트 같은 모양으로 잘라 냅니다. 그림자도 이 모양을 따릅니다.", "Cuts the whole source to a shape such as a circle, star or heart. Its shadow follows the shape."),
+        "music_reactive_enabled": ("실제 음악에 맞춰 움직입니다. 자막은 현재 가사 묶음에만 적용되며 이전·다음 가사와 인트로는 영향을 받지 않습니다. 전체 재생 미리보기와 내보내기에 적용됩니다.", "React to music. Subtitles affect only the current cue, leaving previous/next cues and intro indicators unchanged. Applies to Full Preview and export."),
+        "music_reactive_effect": ("확대·복귀, 위로 튀기, 가로 늘리기, 기울이기 중 선택합니다. 선택한 음역에 반응하며 등장·퇴장 및 반복 모션과 함께 적용됩니다.", "Choose scale pulse, upward bounce, horizontal stretch or tilt. Follows the selected frequency range and combines with entrance, exit and loop motion."),
+        "music_reactive_strength": ("0은 반응 없음, 1은 최대 반응입니다. 베이스 확대에서는 0.25가 최대 25% 확대를 뜻합니다. 음악이 없거나 무음이면 기본 크기를 유지합니다.", "Zero disables the response; one is strongest. For bass scale, 0.25 adds up to 25% size. Missing or silent audio leaves text at rest."),
+        "music_reactive_band": ("저음·중음·고음·전체 중 반응할 음역을 선택합니다. 저음은 킥과 베이스에 잘 반응합니다.", "Choose bass, midrange, treble or the full spectrum. Bass follows kicks and bass instruments."),
+        "music_reactive_attack": ("음악이 강해질 때 반응이 목표 크기의 약 90%에 도달하는 시간입니다. 작을수록 빠르게 커지고 0이면 즉시 반응합니다. 확대 외 효과에도 같은 속도가 적용됩니다.", "Time to reach about 90% of a stronger signal. Smaller is faster; zero reacts instantly. Also controls other effects."),
+        "music_reactive_release": ("음악이 약해지면 반응이 약 90% 줄어드는 시간입니다. 클수록 천천히 원래 모습으로 돌아오며 0이면 즉시 돌아옵니다.", "Time to decay by about 90% after the signal fades. Larger returns more slowly; zero returns instantly."),
+        "music_reactive_sensitivity": ("분석된 음악 신호를 증폭합니다. 1이 기본이며 약한 음악에는 높이고 너무 자주 반응하면 낮추세요. 최대 움직임은 반응 강도로 정합니다.", "Amplifies the analyzed signal. One is normal; raise for quiet passages or lower for fewer reactions. Strength sets maximum movement."),
+        "music_reactive_threshold": ("이 값보다 약한 신호는 무시합니다. 0은 모든 신호에 반응하며 높일수록 강한 비트에만 반응합니다.", "Ignores signals below this value. Zero accepts every signal; higher values isolate stronger beats."),
+        "music_reactive_curve": ("부드럽게는 약한 소리도 살리고, 선형은 신호에 비례하며, 강한 비트 중심은 작은 반응을 줄입니다.", "Soft boosts subtle sounds; linear follows signal strength; punchy suppresses smaller reactions."),
+        "music_reactive_offset": ("양수는 음악 반응을 늦추고 음수는 앞당깁니다. 가사 시간 보정과 별개로 적용됩니다.", "Positive delays the reaction; negative advances it. Independent of lyric timing offset."),
     }
     LOOP_LABELS = {
         "none": ("없음", "None"), "float": ("둥실 떠다니기", "Float"),
@@ -257,6 +294,16 @@ class MotionSection(FieldSection):
         "sway": ("흔들림", "Sway"), "spin": ("회전", "Spin"),
         "drift": ("떠돌기", "Drift"), "wobble": ("출렁임", "Wobble"),
     }
+    REACTIVE_LABELS = {
+        "bass_scale": ("확대·복귀", "Scale pulse"),
+        "bass_bounce": ("위로 튀기", "Upward bounce"),
+        "bass_stretch": ("가로 늘리기", "Horizontal stretch"),
+        "bass_tilt": ("기울이기", "Tilt"),
+    }
+    BAND_LABELS = {"bass": ("저음 · 베이스", "Bass"), "mid": ("중음", "Midrange"),
+                   "treble": ("고음", "Treble"), "full": ("전체 음역", "Full spectrum")}
+    CURVE_LABELS = {"soft": ("부드럽게", "Soft"), "linear": ("선형", "Linear"),
+                    "punchy": ("강한 비트 중심", "Punchy")}
     MASK_LABELS = {
         "none": ("없음", "None"), "circle": ("원", "Circle"), "pill": ("알약", "Pill"),
         "arch": ("아치", "Arch"), "diamond": ("다이아몬드", "Diamond"),
@@ -271,19 +318,41 @@ class MotionSection(FieldSection):
         mask = QComboBox()
         for value in MASK_SHAPES:
             mask.addItem(value, value)
+        reactive = QComboBox()
+        for value in MUSIC_REACTIVE_EFFECTS:
+            reactive.addItem(value, value)
+        band, curve = QComboBox(), QComboBox()
+        for value in MUSIC_REACTIVE_BANDS:
+            band.addItem(value, value)
+        for value in MUSIC_REACTIVE_CURVES:
+            curve.addItem(value, value)
         self.widgets: dict[str, QWidget] = {
             "loop_motion": loop,
             "loop_motion_period": spin(0.2, 60.0, 0.25),
             "loop_motion_amount": spin(0.0, 5.0, 0.1),
             "mask_shape": mask,
+            "music_reactive_enabled": QCheckBox(),
+            "music_reactive_effect": reactive,
+            "music_reactive_strength": spin(0.0, 1.0, 0.05),
+            "music_reactive_band": band,
+            "music_reactive_attack": spin(0.0, 3.0, 0.01),
+            "music_reactive_release": spin(0.0, 5.0, 0.05),
+            "music_reactive_sensitivity": spin(0.0, 4.0, 0.1),
+            "music_reactive_threshold": spin(0.0, 0.95, 0.05),
+            "music_reactive_curve": curve,
+            "music_reactive_offset": spin(-2.0, 2.0, 0.01),
         }
 
     def hidden_when_off(self, source: Source) -> dict[str, bool]:
         moving = source.loop_motion != "none"
-        return {"loop_motion_period": moving, "loop_motion_amount": moving}
+        return {"loop_motion_period": moving, "loop_motion_amount": moving,
+                **{key: source.music_reactive_enabled for key in self.REACTIVE_KEYS[1:]}}
 
     def retranslate(self, korean: bool) -> None:
-        for key, labels in (("loop_motion", self.LOOP_LABELS), ("mask_shape", self.MASK_LABELS)):
+        for key, labels in (("loop_motion", self.LOOP_LABELS), ("mask_shape", self.MASK_LABELS),
+                            ("music_reactive_effect", self.REACTIVE_LABELS),
+                            ("music_reactive_band", self.BAND_LABELS),
+                            ("music_reactive_curve", self.CURVE_LABELS)):
             combo = self.widgets[key]
             for index in range(combo.count()):
                 combo.setItemText(index, labels[combo.itemData(index)][0 if korean else 1])
@@ -303,6 +372,7 @@ TYPE_SPECIFIC_FIELD_KEYS: tuple[str, ...] = (
     "text", "font_size", "font_weight", "font_family",
     "text_stroke_color", "text_stroke_width", "text_alignment", "text_overflow",
     *(key for key, _section in TypographySection.ROWS),
+    *MotionSection.REACTIVE_KEYS,
     "file", "image_fit", "blur", "brightness", "contrast",
     "shape", "video_settings",
     "progress_style", "progress_value", "progress_track_color", "progress_mode",
@@ -312,7 +382,9 @@ TYPE_SPECIFIC_FIELD_KEYS: tuple[str, ...] = (
     "visualizer_min_level", "visualizer_max_level", "visualizer_attack",
     "visualizer_release", "visualizer_smoothing", "visualizer_curve",
     "visualizer_inner_radius", "visualizer_center_cover",
-    "background_mode", "background_ambient", "background_track_transition",
+    "background_mode", "background_ambient", "background_ambient_blur",
+    "background_ambient_motion", "background_bass_reactive",
+    "background_bass_strength", "background_track_transition",
     "background_track_transition_seconds",
     "album_frame",
     "track_list_count", "track_list_style", "track_list_window",
@@ -326,7 +398,7 @@ TYPE_SPECIFIC_FIELD_KEYS: tuple[str, ...] = (
     "subtitle_animation", "subtitle_animation_duration", "subtitle_context_lines",
     "subtitle_next_lines", "subtitle_line_spacing", "subtitle_previous_opacity",
     "subtitle_previous_blur", "subtitle_timing_offset", "subtitle_current_scale",
-    "subtitle_accent_enabled", "subtitle_accent_color",
+    "subtitle_accent_enabled", "subtitle_accent_color", "subtitle_line_styles",
     "waveform_style",
     "level_meter_mode", "level_meter_style", "level_meter_orientation",
     "level_meter_sensitivity", "level_meter_attack", "level_meter_release",

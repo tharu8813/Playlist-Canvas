@@ -39,6 +39,8 @@ bonus anchor, never a forced cut point.
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import importlib.util
 import logging
 import threading
@@ -105,6 +107,7 @@ class SonaraStructureProvider:
         # eagerly loads sonara just to compute a version string.
         self.version = f"{SonaraStructureProvider.version}+pkg{_installed_sonara_version()}"
 
+    @timed("automix.structure_analysis_seconds")
     def analyze(
         self,
         track: PlaylistTrack,

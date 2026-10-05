@@ -19,11 +19,51 @@ from tests.test_automix_manual_transitions import _analyses, _tracks  # noqa: E4
 
 
 class AutoMixEditorTests(unittest.TestCase):
+    def test_dj_effect_controls_commit_custom_values_and_undo(self):
+        host, editor = self._editor()
+        panel = editor.properties
+        panel.style_buttons["beat_roll"].click()
+        self.assertFalse(panel.roll_box.isHidden())
+        self.assertTrue(panel.cutoff_box.isHidden())
+        panel.roll_combo.setCurrentIndex(0)
+        self.assertEqual(editor._overrides["a>b"].roll_beats, 0.25)
+        self.assertEqual(editor._plan.audio.transitions[0].roll_beats, 0.25)
+        editor.undo_stack.undo()
+        self.assertEqual(editor._overrides["a>b"].roll_beats, 0.5)
+        panel.style_buttons["lowpass_out"].click()
+        self.assertFalse(panel.cutoff_box.isHidden())
+        self.assertTrue(panel.roll_box.isHidden())
+        panel.cutoff_spin.setValue(350)
+        panel.flush()
+        self.assertEqual(editor._plan.audio.transitions[0].filter_cutoff_hz, 350)
+        self.assertEqual(host._set_automix_override.call_args.args[1].filter_cutoff_hz, 350)
+        editor._copy()
+        editor._user_select(1)
+        editor._paste()
+        self.assertEqual(editor._overrides["b>c"].filter_cutoff_hz, 350)
+        self.assertEqual(editor._overrides["b>c"].style, "lowpass_out")
+        self.addCleanup(QSettings().remove, "automix_editor/presets")
+        editor._save_presets({"DJ lowpass": editor._overrides["b>c"]})
+        self.assertEqual(editor._load_presets()["DJ lowpass"].filter_cutoff_hz, 350)
+        editor._reset_item("effect")
+        self.assertEqual(editor._overrides["b>c"].filter_cutoff_hz, 800)
+        editor._apply_preset("DJ lowpass")
+        self.assertEqual(editor._overrides["b>c"].filter_cutoff_hz, 350)
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # The bilingual layout check changes persistent settings. Keep the same
+        # Korean baseline as the main-window suites and restore it after each test.
+        settings = QSettings()
+        previous_language = settings.value("language", None)
+        settings.setValue("language", "ko")
+        if previous_language is None:
+            self.addCleanup(settings.remove, "language")
+        else:
+            self.addCleanup(settings.setValue, "language", previous_language)
         QSettings().setValue("automix_editor/advanced", False)
         for key in ("geometry", "splitter", "properties_visible", "lanes_visible", "snap"):
             QSettings().remove(f"automix_editor/{key}")

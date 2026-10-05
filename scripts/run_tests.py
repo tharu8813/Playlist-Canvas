@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from time import perf_counter
@@ -32,6 +33,8 @@ def _text(value: str | bytes | None) -> str:
 
 
 def main() -> int:
+    # This process prints captured Unicode too, not just the child processes.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -84,9 +87,13 @@ def main() -> int:
 
         seconds = perf_counter() - begin
         status = "fail" if completed.returncode else "pass"
+        summary = re.search(r"Ran (\d+) tests?", completed.stderr)
+        skipped = re.search(r"OK \(skipped=(\d+)\)", completed.stderr)
         runs.append({
             "module": module, "status": status, "seconds": round(seconds, 2),
             "returncode": completed.returncode,
+            "tests": int(summary.group(1)) if summary else 0,
+            "skipped": int(skipped.group(1)) if skipped else 0,
         })
         if completed.returncode:
             print(f"FAIL    {module} ({seconds:.1f}s, exit {completed.returncode})", flush=True)
@@ -99,6 +106,7 @@ def main() -> int:
 
     total = len(runs)
     print(f"\n{total - len(failures)}/{total} module runs passed in {perf_counter() - started:.0f}s")
+    print(f"Tests: {sum(run.get('tests', 0) for run in runs)}, skipped: {sum(run.get('skipped', 0) for run in runs)}")
     slowest = sorted(runs, key=lambda run: run["seconds"], reverse=True)[:5]
     print("Slowest: " + ", ".join(f"{run['module'].removeprefix('tests.')} {run['seconds']}s" for run in slowest))
     if args.report is not None:

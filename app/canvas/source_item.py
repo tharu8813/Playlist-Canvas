@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 from collections.abc import Callable
+from contextlib import contextmanager
 from math import atan2, ceil, cos, degrees, radians, sin
 from pathlib import Path
 from time import monotonic
 
 import numpy as np
+from scipy.ndimage import gaussian_filter
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QThreadPool, QUrl, Signal
 from PySide6.QtGui import (
     QColor, QBrush, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter,
@@ -50,7 +54,7 @@ from app.utils.level_meter_painter import paint_level_meter
 from app.utils.particle_painter import paint_particles
 from app.video.frame_filter import (
     VideoFrameFilterSettings, VideoFrameFilterSignals, VideoFrameFilterTask,
-    _box_blur, _rgb_pixels, apply_color_filters,
+    _rgb_pixels, apply_color_filters,
 )
 from app.video.preview_decoder import (
     VideoDecoderStats, video_position_needs_seek, video_seek_tolerance_ms,
@@ -151,13 +155,18 @@ class SourceItem(QGraphicsObject):
         self._raw_pixmap_path: str | None = None
         self._lyric_fonts: dict[str, QFont] = {}
         self._lyric_ghost_cache: dict[tuple[object, ...], tuple[QPixmap, float]] = {}
-        self._lyric_resource_key: tuple[str, int, float, int] | None = None
+        self._lyric_resource_key: tuple[object, ...] | None = None
         self._text_outline_path_key: tuple[object, ...] | None = None
         self._text_outline_path = QPainterPath()
         self._text_shadow_cache: dict[tuple[object, ...], tuple[QPixmap, float]] = {}
         # Preview/export assigns this transient value while a timed lyric cue
         # enters. Keeping it on the graphics item avoids serializing render state.
         self._subtitle_transition_progress = 1.0
+        self._subtitle_transition_raw = 1.0
+        self._subtitle_intro_state = None
+        self._music_reaction_level = 0.0
+        self._music_preview_current_line: int | None = None
+        self._subtitle_cue_layout: tuple[tuple[int, int, int], ...] = ()
         self._subtitle_anchor_line = -1
         self._subtitle_anchor_line_count = 1
         self._subtitle_previous_line_count = 0
@@ -166,6 +175,7 @@ class SourceItem(QGraphicsObject):
         self._subtitle_emphasis = 1.0
         self._subtitle_previous_emphasis = 1.0
         self._subtitle_incoming_visible = True
+        self._subtitle_line_style_indices: tuple[int, ...] = ()
         self.setFlags(
             QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemIsSelectable
@@ -175,10 +185,25 @@ class SourceItem(QGraphicsObject):
         self.apply_source()
 
     def boundingRect(self) -> QRectF:
-        """Return local bounds including room for selection handles."""
+        """Include painted shape effects so partial repaints clear them on moves."""
         margin = 30.0 if self.isSelected() else 1.0
-        return QRectF(-margin, -margin, self.source.width + margin * 2,
-                     self.source.height + margin * 2)
+        bounds = self.content_rect().adjusted(-margin, -margin, margin, margin)
+        if self.source.source_type is SourceType.SHAPE:
+            rect = self.content_rect()
+            stroke = max(0.0, self.source.outline_width) / 2
+            painted = rect.adjusted(-stroke, -stroke, stroke, stroke)
+            if self.source.shape_kind == "line":
+                # Legacy lines use a height-wide pen with square end caps.
+                cap = max(1.0, self.source.height) / 2
+                painted = rect.adjusted(-cap, 0, cap, 0)
+            if self.source.shadow.enabled:
+                shadow = self.source.shadow
+                spread = max(0.0, shadow.blur_radius * 0.18)
+                painted = painted.united(rect.translated(
+                    shadow.offset_x, shadow.offset_y,
+                ).adjusted(-spread, -spread, spread, spread))
+            bounds = bounds.united(painted.adjusted(-1, -1, 1, 1))
+        return bounds
 
     def content_rect(self) -> QRectF:
         """Return the visible content rectangle in item coordinates."""
@@ -359,7 +384,8 @@ class SourceItem(QGraphicsObject):
         """Apply current model properties without emitting changes."""
         if self.source.font_path:
             load_application_font(self.source.font_path)
-        self._rebuild_lyric_resources()
+        with self.lyric_settings():
+            self._rebuild_lyric_resources()
         self.prepareGeometryChange()
         self._sync_transform_origin()
         previous_suppression = self._suppress_position_sync
@@ -492,11 +518,15 @@ class SourceItem(QGraphicsObject):
             self._video_pause_after_frame = True
             self._video_player.play()
 
+    @timed("video.frame_callback_seconds")
     def _video_frame_changed(self, frame: QVideoFrame) -> None:
         now = monotonic()
         if self._video_timeline_preview_active:
             minimum_interval = 1.0 / max(1, self._video_preview_fps)
-            if now - self._video_last_frame_accepted < minimum_interval:
+            # Qt's nominal 30/60 fps callbacks arrive a few milliseconds early.
+            # ponytail: soft cap allows 10% jitter; use accumulated deadlines if
+            # a strict rate cap is needed. Exact intervals dropped every other frame.
+            if now - self._video_last_frame_accepted < minimum_interval * 0.90:
                 self._video_dropped_frames += 1
                 self._video_throttled_frames += 1
                 return
@@ -939,16 +969,38 @@ class SourceItem(QGraphicsObject):
     def _rebuild_lyric_resources(self) -> None:
         """Create lyric fonts once per source edit instead of once per paint call."""
         base_size = max(10, min(96, int(self.source.font_size)))
-        current_size = max(base_size, round(base_size * self.source.subtitle_current_scale))
+        style_sizes = [
+            max(8.0, min(120.0, float(style.get(
+                "font_size",
+                self.source.font_size + float(style.get("font_size_offset", 0.0)),
+            ))))
+            for style in self.source.subtitle_line_styles if style
+        ]
+        largest_size = max([float(base_size), *style_sizes])
+        role_scale = max(
+            [float(self.source.subtitle_role_styles.get("current", {}).get("scale", self.source.subtitle_current_scale)),
+             *(float(style.get("scale", 1.0)) for style in self.source.subtitle_role_styles.values())]
+        )
+        role_sizes = [
+            max(8.0, min(120.0, float(style.get("font_size", largest_size)) + float(style.get("font_size_offset", 0))))
+            for style in self.source.subtitle_role_styles.values()
+        ]
+        current_size = max(base_size, round(max([largest_size, *role_sizes]) * role_scale))
+        line_styles_key = tuple(
+            tuple(sorted(style.items())) for style in self.source.subtitle_line_styles
+        )
         resource_key = (
             self.source.font_family, base_size, current_size,
             self.source.subtitle_line_spacing,
             round(self.source.subtitle_previous_blur),
+            line_styles_key,
+            tuple((role, tuple(sorted(style.items()))) for role, style in sorted(self.source.subtitle_role_styles.items())),
             *self._typography_key(),
         )
         if resource_key == self._lyric_resource_key:
             return
-        # Rows share one font; "regular" only sets the context rows' size.
+        # These two fonts define the tallest row; each line gets its own font
+        # during painting while all rows retain one stable vertical rhythm.
         self._lyric_fonts = {
             "regular": self.text_font(base_size, self.source.font_weight),
             "current": self.text_font(current_size, self.source.font_weight),
@@ -979,15 +1031,15 @@ class SourceItem(QGraphicsObject):
     @staticmethod
     def _blurred_raster(
         paint: Callable[[QPainter], None], size: QSizeF, radius: float, pixel_ratio: float,
+        *, solid_color: QColor | None = None,
     ) -> tuple[QPixmap, float]:
         """Rasterise ``paint`` (logical coordinates within ``size``) and blur it.
 
         Returns the pixmap and its logical margin. It is rendered at device
         resolution, so callers cache it and only blit it with an opacity.
         """
-        pixel_radius = max(1, round(radius * pixel_ratio))
-        # Two box passes per axis spread up to 2 * radius; keep that margin.
-        margin = pixel_radius * 2 + 2
+        pixel_radius = max(0.0, round(radius * pixel_ratio, 2))
+        margin = ceil(pixel_radius * 3) + 2
         image = QImage(
             ceil(size.width() * pixel_ratio) + margin * 2,
             ceil(size.height() * pixel_ratio) + margin * 2,
@@ -1001,11 +1053,24 @@ class SourceItem(QGraphicsObject):
         raster_painter.scale(pixel_ratio, pixel_ratio)
         paint(raster_painter)
         raster_painter.end()
-        # Premultiplied channels blur together without dark fringes.
         pixels = _rgb_pixels(image)
-        values = pixels.astype(np.float32)
-        for axis in (1, 0, 1, 0):
-            values = _box_blur(values, pixel_radius, axis)
+        if solid_color is not None:
+            # Single-colour glyphs need only one Gaussian pass. Reconstruct
+            # premultiplied BGR from coverage, keeping transparent edges clean.
+            coverage = gaussian_filter(
+                pixels[:, :, 3].astype(np.float32), sigma=pixel_radius,
+                mode="constant", truncate=3.0,
+            )
+            channels = np.array([
+                solid_color.blueF(), solid_color.greenF(), solid_color.redF(), 1.0,
+            ], dtype=np.float32)
+            values = coverage[:, :, None] * channels
+        else:
+            # General artwork can contain multiple colours.
+            values = gaussian_filter(
+                pixels.astype(np.float32), sigma=(pixel_radius, pixel_radius, 0),
+                mode="constant", truncate=3.0,
+            )
         pixels[:] = np.clip(values + 0.5, 0.0, 255.0).astype(np.uint8)
         pixmap = QPixmap.fromImage(image)
         pixmap.setDevicePixelRatio(pixel_ratio)
@@ -1013,10 +1078,12 @@ class SourceItem(QGraphicsObject):
 
     def _lyric_blur_pixmap(self, line: str, color: QColor, radius: float,
                            content_width: float, line_height: float,
-                           pixel_ratio: float, flags: int) -> tuple[QPixmap, float]:
-        """Return a Gaussian-like blurred lyric row and its logical margin."""
-        key = (line, color.rgba(), round(radius * pixel_ratio), round(content_width),
-               round(line_height), pixel_ratio, int(flags))
+                           pixel_ratio: float, flags: int,
+                           font: QFont | None = None) -> tuple[QPixmap, float]:
+        """Return a Gaussian-blurred lyric row and its logical margin."""
+        font = font or self._lyric_fonts["current"]
+        key = (line, color.rgba(), round(radius * pixel_ratio, 2), round(content_width),
+               round(line_height), pixel_ratio, int(flags), font.toString())
         cached = self._lyric_ghost_cache.get(key)
         if cached is None:
             if len(self._lyric_ghost_cache) >= 96:
@@ -1024,13 +1091,13 @@ class SourceItem(QGraphicsObject):
 
             def paint(blur_painter: QPainter) -> None:
                 blur_painter.setPen(color)
-                blur_painter.setFont(self._lyric_fonts["current"])
+                blur_painter.setFont(font)
                 blur_painter.drawText(
                     QRectF(0.0, 0.0, content_width, line_height), flags, line,
                 )
 
             cached = self._blurred_raster(
-                paint, QSizeF(content_width, line_height), radius, pixel_ratio,
+                paint, QSizeF(content_width, line_height), radius, pixel_ratio, solid_color=color,
             )
             self._lyric_ghost_cache[key] = cached
         return cached
@@ -1373,7 +1440,7 @@ class SourceItem(QGraphicsObject):
         color.setAlpha(255)
         # Position-independent: the raster is drawn at the path's own bounds.
         key = (painter.font().key(), text, round(rect.width(), 3), round(rect.height(), 3),
-               int(flags), color.rgba(), round(radius * pixel_ratio), pixel_ratio, stroke,
+               int(flags), color.rgba(), round(radius * pixel_ratio, 2), pixel_ratio, stroke,
                self._line_spacing(flags))
         cached = self._text_shadow_cache.get(key)
         if cached is None:
@@ -1471,6 +1538,15 @@ class SourceItem(QGraphicsObject):
         self._text_outline_path = QPainterPath(path)
         return path
 
+    @contextmanager
+    def lyric_settings(self):
+        original = self.source
+        self.source = original.resolved_lyrics()
+        try:
+            yield self.source
+        finally:
+            self.source = original
+
     def paint(
         self,
         painter: QPainter,
@@ -1481,7 +1557,8 @@ class SourceItem(QGraphicsObject):
         renderer = source_registry.get(self.source.source_type).renderer
         if renderer is None:
             raise RuntimeError(f"No renderer registered for {self.source.source_type.value}")
-        renderer(self, painter, option, widget)
+        with self.lyric_settings():
+            renderer(self, painter, option, widget)
 
     def _paint_legacy(
         self,
@@ -1846,7 +1923,12 @@ class SourceItem(QGraphicsObject):
                 )
         painter.restore()
 
-        if self.isSelected():
+        scene = self.scene()
+        multi_selected = bool(
+            scene is not None and hasattr(scene, "has_multi_selection")
+            and scene.has_multi_selection()  # type: ignore[attr-defined]
+        )
+        if self.isSelected() and not multi_selected:
             guide_color = QColor("#55B8FF")
             if self.source.opacity <= 0.25:
                 guide_color = QColor(255, 255, 255, 190)

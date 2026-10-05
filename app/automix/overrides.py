@@ -28,13 +28,15 @@ STYLE_EQ = "eq"
 """Hand-set band timing: when each band (lows, mids, highs) of each track fades."""
 MANUAL_STYLES = (
     STYLE_AUTO, "bass_swap", "vocal_safe_eq", "filter_sweep", "filter_blend",
-    "short_fade", "drop_in", "echo_out", "tape_stop", "downbeat_cut", STYLE_LEGACY, STYLE_CUT, STYLE_EQ,
+    "short_fade", "drop_in", "echo_out", "tape_stop", "downbeat_cut", "beat_roll", "lowpass_out",
+    STYLE_LEGACY, STYLE_CUT, STYLE_EQ,
 )
 STYLE_ALIASES = {"legacy": "short_fade", STYLE_CUT: "downbeat_cut"}
 """Saved styles the editor shows as another one: a plain crossfade is the short
 fade without its peak limiter, a cut the downbeat cut without its click guard.
 Both still load and plan exactly as saved."""
 ECHO_BEAT_CHOICES = (0.5, 1.0, 2.0)
+ROLL_BEAT_CHOICES = (0.25, 0.5, 1.0, 2.0)
 MAX_DURATION_SECONDS = 60.0
 MAX_RAMP_SECONDS = 120.0
 MAX_ECHO_FEEDBACK = 0.95
@@ -81,6 +83,8 @@ class TransitionOverride:
     delay in outgoing beats, each repeat's level against the previous one,
     and whether the repeats lose their lows.
     ``tape_entry``: tape_stop only, 0..1 of the window where the incoming song enters.
+    ``roll_beats``: beat_roll only, length of the repeated beat slice.
+    ``filter_cutoff_hz``: lowpass_out only, where the closing filter ends.
     ``key_shift``: semitones the outgoing tail glides by to meet the incoming
     key (0: never; ``None``: automatic, as the planner decides).
     ``ramp_seconds``: with a tempo match (or key glide), how long -- in outgoing
@@ -107,6 +111,8 @@ class TransitionOverride:
     ramp_seconds: float | None = None
     locked: tuple[str, ...] = ()
     recommend: bool = False
+    roll_beats: float = 0.5
+    filter_cutoff_hz: float = 800.0
 
     def __post_init__(self) -> None:
         if not _number(self.outgoing_cue) or self.outgoing_cue < 0.0:
@@ -147,6 +153,10 @@ class TransitionOverride:
         object.__setattr__(self, "locked", tuple(name for name in LOCKABLE_FIELDS if name in self.locked))
         if not isinstance(self.recommend, bool):
             raise ValueError("Manual transition recommend must be a boolean.")
+        if not _number(self.roll_beats) or self.roll_beats not in ROLL_BEAT_CHOICES:
+            raise ValueError("Manual transition roll_beats must be one of 0.25, 0.5, 1, 2 beats.")
+        if not _number(self.filter_cutoff_hz) or not 200.0 <= self.filter_cutoff_hz <= 8000.0:
+            raise ValueError("Manual transition filter_cutoff_hz must be between 200 and 8000 Hz.")
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -162,6 +172,8 @@ class TransitionOverride:
             "tape_entry": float(self.tape_entry),
             "key_shift": self.key_shift,
             "ramp_seconds": None if self.ramp_seconds is None else float(self.ramp_seconds),
+            "roll_beats": float(self.roll_beats),
+            "filter_cutoff_hz": float(self.filter_cutoff_hz),
         }
         if self.eq_bands is not None:
             data["eq"] = {
@@ -194,6 +206,8 @@ class TransitionOverride:
             ramp_seconds=data.get("ramp_seconds"),
             locked=data.get("locked", ()),
             recommend=data.get("recommend", False),
+            roll_beats=data.get("roll_beats", 0.5),
+            filter_cutoff_hz=data.get("filter_cutoff_hz", 800.0),
         )
 
 

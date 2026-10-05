@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 
@@ -16,11 +18,13 @@ from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
 from app.preview.canvas_snapshot import CanvasSnapshot
 from app.preview.frame_state import (
-    resolve_edge_animation, resolve_lyrics_cue_state, resolve_now_playing_exit_state,
+    resolve_edge_animation, resolve_lyrics_cue_state, resolve_lyrics_intro_state, resolve_now_playing_exit_state,
     resolve_timeline_window_phase,
 )
 from app.preview.text_template import expand_track_template
+from app.services.lyrics_intro_service import instrumental_spans
 from app.renderer.export_timeline import ExportFrameSample
+from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.renderer.ffmpeg_renderer import RenderFrame, StaticOverlayLayer
 
 
@@ -40,6 +44,8 @@ class ExportCanvasCapturer:
         *,
         retain_static_frames: bool = True,
         output_scale: float = 1.0,
+        bass_envelopes: dict[object, object] | None = None,
+        bass_fps: int = 30,
     ) -> None:
         self.scene = scene
         self.tracks = list(tracks)
@@ -53,6 +59,8 @@ class ExportCanvasCapturer:
         self.ensure_not_cancelled = ensure_not_cancelled
         self.after_capture = after_capture
         self.retain_static_frames = retain_static_frames
+        self.bass_envelopes = bass_envelopes or {}
+        self.bass_fps = max(1, int(bass_fps))
         self._static_band_frames: list[list[RenderFrame]] = [
             [] for _band in self.z_bands[1:]
         ]
@@ -145,6 +153,7 @@ class ExportCanvasCapturer:
         self, source: Source, sample: ExportFrameSample,
     ) -> tuple[object, ...] | None:
         """Resolve the sample-dependent pixels of one Canvas source."""
+        source = source.resolved_lyrics()
         global_seconds = max(0.0, sample.timeline_seconds)
         timing_end = source.timeline_start + source.timeline_duration
         visible = not (
@@ -192,9 +201,12 @@ class ExportCanvasCapturer:
                 source.subtitle_animation, source.subtitle_animation_duration,
             )
             transition = cue_state.transition_progress if cue_state.transitioning else None
+            intro_state = resolve_lyrics_intro_state(sample.track, source, sample.elapsed_seconds,
+                                                    instrumental_spans(sample.track, source))
             content_state = (
                 "lyrics", id(sample.track), cue_state.cue_index, cue_state.active_cue_index,
                 transition, cue_state.release_progress,
+                intro_state,
             )
         elif source.source_type is SourceType.TRACK_LIST:
             content_state = ("track_list", sample.track_number)
@@ -233,13 +245,20 @@ class ExportCanvasCapturer:
                     sample.track.file_path,
                     sample.track.cover_path,
                     source.background_ambient,
+                    source.background_ambient_blur,
+                    source.background_ambient_motion,
+                    source.background_bass_reactive,
+                    source.background_bass_strength,
                 )
                 if source.background_ambient:
                     # The ambient colour field drifts, so a new frame is needed
                     # at the flow rate even while the track stays the same.
                     background_state = (
                         *background_state,
-                        round(global_seconds * AMBIENT_FLOW_HZ),
+                        round(
+                            global_seconds * source.background_ambient_motion
+                            * AMBIENT_FLOW_HZ
+                        ),
                     )
                 previous_track = (
                     self.tracks[sample.track_number - 2]
@@ -313,6 +332,8 @@ class ExportCanvasCapturer:
         if source.loop_motion != "none":
             # A looping motion changes every frame; key on the exact time.
             animation_state = (*animation_state, "loop", round(global_seconds, 4))
+        if source.uses_bass_reaction:
+            animation_state = (*animation_state, "bass", round(global_seconds, 4))
         personal_color_state = (
             (
                 sample.track.file_path,
@@ -350,6 +371,7 @@ class ExportCanvasCapturer:
             self.capture_stream(sample, f"layer:{index}")
         return base
 
+    @timed("export.frame_generation_seconds")
     def capture_stream(
         self, sample: ExportFrameSample, stream_key: str,
     ) -> RenderFrame:
@@ -362,6 +384,8 @@ class ExportCanvasCapturer:
             "playlist_tracks": self.tracks,
             "timeline_seconds": sample.timeline_seconds,
             "junction": sample.junction,
+            "bass_level": self._bass_level(sample),
+            "music_levels": self._music_reaction_levels(sample, stream_key),
         }
         if sample.animation_phase is not None:
             common.update({
@@ -434,6 +458,28 @@ class ExportCanvasCapturer:
             self._static_band_frames[retained_layer_index].append(rendered)
         self.after_capture(sample.track_number, stream_key)
         return rendered
+
+    def _music_reaction_levels(self, sample: ExportFrameSample, stream_key: str) -> dict[str, float]:
+        return {
+            item.source.id: PythonVisualizerRenderer.music_reaction_level(
+                self.bass_envelopes.get((sample.track.id, item.source.music_reaction_profile),
+                                        self.bass_envelopes.get(sample.track.id)),
+                self.bass_fps, sample.elapsed_seconds, item.source.music_reactive_offset,
+            )
+            for item in self._stream_source_items[stream_key]
+            if item.source.source_type in {SourceType.TEXT, SourceType.LYRICS}
+            and item.source.uses_bass_reaction
+        }
+
+    def _bass_level(self, sample: ExportFrameSample) -> float:
+        envelope = self.bass_envelopes.get(sample.track.id)
+        if envelope is None:
+            return 0.0
+        try:
+            index = max(0, round(sample.elapsed_seconds * self.bass_fps))
+            return float(envelope[min(index, len(envelope) - 1)])
+        except (IndexError, TypeError, ValueError):
+            return 0.0
 
     def capture_invariant_stream(
         self,

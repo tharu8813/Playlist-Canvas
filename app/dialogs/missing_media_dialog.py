@@ -120,9 +120,9 @@ class MissingMediaDialog(QDialog):
         self.setWindowTitle("누락된 미디어" if korean else "Missing media")
         self.heading.setText("프로젝트에서 찾을 수 없는 파일" if korean else "Files missing from this project")
         self.description.setText(
-            "각 항목의 새 경로를 지정하세요. 경로를 지정하지 않고 계속하면 이미지 소스와 사용자 커버는 비워지고, 음원 트랙은 비활성화됩니다."
+            "각 항목의 새 경로를 지정하세요. 경로를 지정하지 않고 계속하면 이미지 소스와 사용자 커버는 비워지고, 음원 트랙은 비활성화됩니다. 누락된 가사 파일은 경로만 해제하며 프로젝트에 저장된 가사는 유지합니다."
             if korean else
-            "Choose a replacement for each item. Continuing without one clears image sources and custom covers, and disables audio tracks."
+            "Choose a replacement for each item. Continuing without one clears image sources and custom covers, disables audio tracks, and detaches missing lyric files while keeping lyrics stored in the project."
         )
         self.table.setHorizontalHeaderLabels(
             ["종류", "이름", "저장된 경로", "동작"]

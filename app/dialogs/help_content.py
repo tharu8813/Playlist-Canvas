@@ -147,7 +147,7 @@ _CANVAS = (
 <ul>
 <li><b>프로젝트 정보</b>: 이름과 작성자(설명은 프로젝트 설정에서)</li>
 <li><b>화면 비율 및 캔버스</b>: 16:9, 9:16, 1:1, 4:3, 3:4, 8:19, 21:9 또는 사용자 지정 크기</li>
-<li><b>시작 디자인</b>: 기본 프로젝트나 <a href='topic:presets_ai'>디자인 프리셋</a>을 미리보기와 함께 선택</li>
+<li><b>시작 디자인</b>: 기본 프로젝트나 <a href='topic:presets'>디자인 프리셋</a>을 미리보기와 함께 선택</li>
 <li><b>곡 전환</b>: 없음(즉시 전환) · 크로스페이드 · <a href='topic:automix'>AutoMix</a></li>
 <li><b>콘텐츠 저장</b>: 프로젝트에 포함(다른 PC에서도 열림) 또는 원본 위치 참조(파일이 작음)</li>
 <li><b>시작 음악(선택)</b>: 음악 파일이나 M3U8 플레이리스트를 고르거나 창으로 끌어 놓기</li>
@@ -167,7 +167,7 @@ _CANVAS = (
 <ul>
 <li><b>Project information</b>: name and author (the description lives in Project settings)</li>
 <li><b>Aspect ratio and canvas</b>: 16:9, 9:16, 1:1, 4:3, 3:4, 8:19, 21:9 or a custom size</li>
-<li><b>Starting design</b>: the default project or a <a href='topic:presets_ai'>design preset</a>, with a preview</li>
+<li><b>Starting design</b>: the default project or a <a href='topic:presets'>design preset</a>, with a preview</li>
 <li><b>Transitions</b>: none (cut) · crossfade · <a href='topic:automix'>AutoMix</a></li>
 <li><b>Content storage</b>: include in the project (opens on any PC) or reference the originals (smaller file)</li>
 <li><b>Starting music (optional)</b>: pick music files or an M3U8 playlist, or drop them on the window</li>
@@ -307,10 +307,11 @@ _CANVAS = (
 <li><b>모양</b>: 투명도와 그림자(색·투명도·흐림·X/Y 거리)</li>
 <li><b>채우기</b>: 채움 색, 모서리 반경, 윤곽선, 그라데이션(시작·끝 색, 각도)</li>
 <li><b>필터</b>: 이미지·영상의 흐림, 밝기, 대비</li>
-<li><b>애니메이션</b>: 곡 시작·종료 효과 — <a href='topic:animation'>애니메이션</a> 참고</li>
+<li><b>애니메이션</b>: 곡 시작·종료 효과, 자막 전환, 텍스트·현재 자막의 <a href='topic:music_reaction'>음악 반응</a> — <a href='topic:animation'>애니메이션</a> 참고</li>
 <li><b>기타</b>: 레이어 순서(Z), 표시·잠금</li>
 </ul>
 <p>항목에 마우스를 올리면 설명과 값의 범위·조절 단위가 나옵니다. 머리글(▸)을 눌러 하위 묶음을 접고 펼 수 있습니다.</p>
+<p>회색으로 표시된 설정은 현재 변경할 수 없습니다. 자막의 특정 카테고리에 고급 모드를 켰다면 해당 기본 항목이 잠깁니다. <a href='topic:lyrics_transition'>자막 전환 설정</a>에서 수정하거나 그 카테고리의 고급 모드를 끄세요.</p>
 <h2>색상과 퍼스널 컬러</h2>
 <p>색상 칸을 누르면 색상 편집기가 열립니다. 빠른 색상, 색조·채도·밝기·투명도, <code>#RRGGBB</code>/<code>#AARRGGBB</code> 입력을 지원합니다. <b>현재 트랙에 퍼스널 컬러 사용하기</b>를 켜면 재생 중인 곡의 앨범 커버 대표색을 씁니다. 밝기·채도 보정, 색조 이동, 적용 강도를 정하고 <b>곡별 미리보기</b>로 곡마다 결과를 확인할 수 있습니다. 커버가 없는 곡은 기준 색을 씁니다.</p>
 <h2>여러 요소 한 번에</h2>
@@ -325,10 +326,11 @@ _CANVAS = (
 <li><b>Appearance</b>: opacity and shadow (color, opacity, blur, X/Y offset)</li>
 <li><b>Fill</b>: fill color, corner radius, outline, gradient (start/end color, angle)</li>
 <li><b>Filters</b>: blur, brightness and contrast for images and video</li>
-<li><b>Animation</b>: track start and end effects — see <a href='topic:animation'>Animation</a></li>
+<li><b>Animation</b>: track start/end effects, subtitle transitions and <a href='topic:music_reaction'>music reaction</a> for text and current subtitles — see <a href='topic:animation'>Animation</a></li>
 <li><b>More</b>: stacking order (Z), visibility and lock</li>
 </ul>
 <p>Hover a field for its explanation, range and step. Click a heading (▸) to fold a group.</p>
+<p>Grayed-out settings cannot currently be edited. Enabling advanced mode for a subtitle category locks its matching basic controls. Edit them in <a href='topic:lyrics_transition'>Subtitle transition settings</a> or turn off advanced mode for that category.</p>
 <h2>Colors and personal color</h2>
 <p>Click a color field for the color editor: quick colors, hue/saturation/brightness/opacity and <code>#RRGGBB</code>/<code>#AARRGGBB</code> input. <b>Use personal color for the current track</b> takes the dominant color of the playing track's cover; adjust brightness, saturation, hue shift and strength, and check each track under <b>Preview per track</b>. Tracks without a cover keep the base color.</p>
 <h2>Several sources at once</h2>
@@ -431,6 +433,7 @@ _CANVAS = (
 <li>크로스페이드나 AutoMix에서는 두 곡이 겹치는 구간의 가운데에서 화면이 다음 곡으로 넘어갑니다. 관련 옵션으로 종료 효과가 겹침 구간에 맞춰 재생되도록 할 수 있습니다.</li>
 </ul>
 <p><b>애니메이션 미리보기</b>를 누르면 선택한 요소의 효과가 캔버스에서 바로 재생됩니다. 재생 중에는 편집이 잠기고, 다른 동작을 하면 멈추며, 끝나면 위치와 선택이 원래대로 돌아옵니다.</p>
+<p>텍스트·가사 요소에는 <a href='topic:music_reaction'>음악에 맞춰 반응</a>도 있습니다. 가사가 바뀔 때의 효과는 <a href='topic:lyrics_transition'>자막 전환 설정</a>에서 따로 조절합니다.</p>
 <div class='note'>배경 요소는 곡이 바뀔 때 이전 배경에서 새 배경으로 부드럽게 넘어가는 <b>곡 전환 크로스페이드</b>를 따로 켤 수 있습니다. 현재 재생 카드는 표시 시간과 퇴장 효과를 따로 가집니다.</div>""",
        """<p>The inspector's <b>Animation</b> tab sets how a source appears and leaves with each track.</p>
 <ul>
@@ -439,10 +442,153 @@ _CANVAS = (
 <li>With crossfade or AutoMix the screen switches to the next track in the middle of the overlap; an option lets the exit effect line up with that overlap.</li>
 </ul>
 <p><b>Preview animation</b> plays the selected source's effects right on the canvas. Editing is locked while it plays, any other action stops it, and position and selection are restored afterwards.</p>
+<p>Text and lyric sources also support <a href='topic:music_reaction'>React to music</a>. Effects between lyric cues are configured separately in <a href='topic:lyrics_transition'>Subtitle transition settings</a>.</p>
 <div class='note'>A Background source can separately <b>crossfade between tracks</b>, easing from the previous track's background to the next. The Now playing card has its own display time and exit effect.</div>""",
        ("properties", "timeline", "preview_mix"),
        ("등장 퇴장 시작 종료 효과 페이드 슬라이드 줌 팝 애니메이션 미리보기 배경 크로스페이드",
         "entrance exit effect fade slide zoom pop bounce preview animation background crossfade")),
+
+    _e("canvas", "music_reaction", ("텍스트·현재 자막의 음악 반응", "Music reaction for text and current subtitles"),
+       ("음악 반응,애니메이션,텍스트,자막", "music reaction,animation,text,subtitles"),
+       """<p>텍스트 또는 가사 / 자막 요소를 선택한 뒤 <b>속성 → 애니메이션 → 음악에 맞춰 반응</b>을 켜세요. 토글을 켜면 효과와 세부 조절 항목이 나타납니다.</p>
+[[img:canvas_music_reaction]]
+<h2>효과와 반응 음역</h2>
+<ul>
+<li><b>반응 애니메이션</b>: 확대·복귀, 위로 튀기, 가로 늘리기, 기울이기</li>
+<li><b>반응 음역</b>: 저음·중음·고음·전체. 킥이나 베이스에 맞추려면 저음을 선택합니다.</li>
+<li><b>반응 강도</b>: 최대 움직임. 확대·복귀에서 0.25는 최대 25% 확대를 뜻합니다. 0이면 반응하지 않습니다.</li>
+</ul>
+<h2>속도와 감도</h2>
+<ul>
+<li><b>커지는 시간</b>: 작을수록 빠르게 반응합니다. <b>돌아오는 시간</b>: 클수록 천천히 원래 모습으로 돌아옵니다. 둘 다 0이면 즉시 바뀝니다.</li>
+<li><b>반응 감도</b>: 작은 소리에도 반응하도록 신호를 키웁니다. 최대 크기는 반응 강도로 정합니다.</li>
+<li><b>최소 반응 기준</b>: 약한 신호를 무시합니다. 높이면 강한 비트 위주로 반응합니다.</li>
+<li><b>반응 곡선</b>: 부드럽게는 약한 소리를 살리고, 선형은 신호에 비례하며, 강한 비트 중심은 작은 반응을 줄입니다.</li>
+<li><b>반응 시간 보정</b>: 양수는 늦추고 음수는 앞당깁니다. 가사 시간 보정과는 별개입니다.</li>
+</ul>
+<p>예를 들어 저음 + 확대·복귀, 강도 0.25, 커지는 시간 0.06초, 돌아오는 시간 0.4초로 시작해 보세요. 떨림이 많으면 최소 반응 기준을 높이거나 돌아오는 시간을 늘립니다.</p>
+<div class='note'>자막은 <b>현재 가사 묶음에만</b> 적용됩니다. 같은 묶음의 여러 텍스트 줄은 함께 움직이고 이전·다음 가사와 인트로 표시는 영향을 받지 않습니다. 고급 자막 모드를 켜지 않아도 사용할 수 있습니다.</div>
+<h2>확인하고 끄기</h2>
+<p><b>애니메이션 미리보기</b>는 예시 박자로 움직임을 확인하는 기능입니다. 실제 곡의 반응은 메인 <b>미리보기</b> 재생에서 확인하세요. 내보내기에도 적용되며, 무음에서는 원래 모습으로 돌아옵니다. 토글을 끄면 반응은 적용되지 않고 조절 값은 유지됩니다.</p>""",
+       """<p>Select a Text or Lyrics / subtitles source, then enable <b>Inspector → Animation → React to music</b>. The effect and tuning controls appear when enabled.</p>
+[[img:canvas_music_reaction]]
+<h2>Effect and frequency range</h2>
+<ul>
+<li><b>Reaction effect</b>: scale pulse, upward bounce, horizontal stretch or tilt</li>
+<li><b>Frequency range</b>: bass, midrange, treble or full spectrum. Choose bass for kicks and bass instruments.</li>
+<li><b>Reaction strength</b>: maximum movement. For scale pulse, 0.25 allows up to 25% enlargement. Zero produces no reaction.</li>
+</ul>
+<h2>Speed and sensitivity</h2>
+<ul>
+<li><b>Attack time</b>: smaller reacts faster. <b>Release time</b>: larger returns to the original appearance more slowly. Zero changes instantly.</li>
+<li><b>Sensitivity</b>: amplifies quiet signals; strength sets maximum movement.</li>
+<li><b>Threshold</b>: ignores weak signals. Raise it to focus on stronger beats.</li>
+<li><b>Response curve</b>: soft boosts subtle sounds, linear follows signal strength, punchy suppresses smaller reactions.</li>
+<li><b>Reaction offset</b>: positive delays and negative advances the reaction, independently of lyric timing.</li>
+</ul>
+<p>Try bass + scale pulse, strength 0.25, attack 0.06 s and release 0.4 s. For less jitter, raise the threshold or increase release time.</p>
+<div class='note'>Subtitles react only on the <b>current cue</b>. Its text lines move together; previous/next cues and intro indicators are unchanged. Advanced subtitle mode is not required.</div>
+<h2>Checking and disabling</h2>
+<p><b>Preview animation</b> uses a sample beat. Check the actual song in the main <b>Preview</b> player. Export uses the reaction too; silence returns the source to its original appearance. Turning the toggle off stops the effect while keeping its tuning values.</p>""",
+       ("animation", "lyrics_transition", "full_preview"),
+       ("베이스 저음 반응 커지는 속도 감소 속도 어택 릴리즈 감도 기준 시간 보정",
+        "bass reactive attack release decay speed sensitivity threshold offset")),
+
+    _e("canvas", "lyrics_transition", ("자막 전환과 카테고리별 고급 모드", "Subtitle transitions and advanced categories"),
+       ("자막,고급 모드,애니메이션,블러", "subtitles,advanced mode,animation,blur"),
+       """<p>가사 / 자막 요소를 선택하고 <b>속성 → 애니메이션 → 자막 전환 고급 설정…</b>을 여세요. 왼쪽 탭은 움직임·줄 배치·줄 스타일·인트로로 나뉘며, 각 탭 안에서 관련 옵션을 묶어 보여 줍니다. 옵션에 마우스를 올리면 툴팁을 볼 수 있습니다.</p>
+[[img:lyrics_transition]]
+<h2>기본 설정과 고급 설정의 우선순위</h2>
+<ol>
+<li>간단히 조절하려면 속성 패널의 기본 설정을 사용합니다.</li>
+<li>더 세밀하게 조절할 탭에서 <b>고급 모드</b>를 켭니다. 켠 카테고리의 값만 이 창에서 우선 적용됩니다.</li>
+<li>같은 카테고리의 기본 항목은 속성 패널에서 회색으로 잠기고 이유가 표시됩니다. 다른 카테고리의 기본 항목은 계속 편집할 수 있습니다.</li>
+<li><b>적용</b>으로 저장합니다. 고급 모드가 꺼진 카테고리의 고급 값은 저장해 두되 영상에는 적용하지 않습니다. 다시 끄면 기본 설정으로 돌아갑니다.</li>
+</ol>
+<h2>움직임</h2>
+<p>글로우·라이즈·페이드·슬라이드·줌·순차 이동·바운스·없음 중 선택하고 전환 시간, 이동 방향, 속도 곡선을 조절합니다. <b>아래 → 위</b>는 다음 가사가 아래에서 현재 위치로 올라오고 현재 가사는 위로 이동하는 방향입니다. 나머지 방향도 선택할 수 있습니다.</p>
+<p><b>순차 이동</b>의 시차는 다음 가사에만 적용됩니다. 가까운 가사부터 또는 먼 가사부터 움직이도록 선택하세요. 추가 이동 거리, 크기 변화와 글로우 항목은 해당 효과에 맞춰 조절합니다.</p>
+<h2>줄 배치</h2>
+<p>현재 가사의 기준 위치, 글자 정렬, 이전·다음 가사 묶음 수와 간격을 정합니다. 묶음 하나에 원문·번역 등 여러 텍스트 줄이 있을 수 있습니다. 줄 수 <b>자동</b>은 요소 크기에 맞추고, 0은 해당 쪽 가사를 숨깁니다.</p>
+<h2>이전·현재·다음 줄 스타일</h2>
+[[img:lyrics_role_styles]]
+<p><b>편집할 위치</b>에서 이전·현재·다음을 각각 선택하고 <b>크기 배율·불투명도·블러</b>만 조절합니다. 블러 0은 선명하고 불투명도 1은 불투명합니다. 색상과 글꼴은 속성 패널 및 줄별 스타일에서 설정합니다.</p>
+<p><b>거리별 흐림 강도</b>는 이전·다음에 각각 적용합니다. 0은 같은 흐림, 1은 현재 가사에 가까울수록 선명하고 불투명한 모습입니다. 해당 쪽의 블러와 불투명도는 가장 먼 가사의 기준값이 됩니다.</p>
+<div class='note'>고급 줄 스타일을 켜도 <a href='topic:lyrics_line_styles'>줄별 스타일</a>의 색상·굵기·기울임·크기는 계속 편집할 수 있습니다. 설정한 기본·줄별 크기에 고급 크기 배율을 곱합니다. 이전 버전의 고급 색상·글꼴 값은 사용하지 않습니다. 현재 자막의 음악 반응은 <a href='topic:music_reaction'>별도 옵션</a>입니다.</div>
+<h2>예시 미리보기</h2>
+<p>오른쪽에서 실제 렌더러의 전환을 확인하고 <b>다시 재생</b>할 수 있습니다. <b>미리보기 줄 수</b>는 이 창의 예시만 바꿉니다. 영상에 표시할 묶음 수는 줄 배치 탭에서 정하세요. 첫 가사 전·곡 중간 예시는 인트로 탭에서 선택합니다.</p>""",
+       """<p>Select a Lyrics / subtitles source and open <b>Inspector → Animation → Advanced subtitle settings…</b>. The left tabs group options into Motion, Layout, Styles and Intro. Hover any option for its tooltip.</p>
+[[img:lyrics_transition]]
+<h2>Basic and advanced priorities</h2>
+<ol>
+<li>Use basic inspector settings for simple adjustments.</li>
+<li>Enable <b>Advanced mode</b> on the tab you want to customize. Only enabled categories use this dialog's values.</li>
+<li>The matching basic controls become gray and show why they are locked. Other categories remain editable in the inspector.</li>
+<li>Click <b>Apply</b>. Advanced drafts in disabled categories are retained but do not affect the video. Disable a category to return to its basic settings.</li>
+</ol>
+<h2>Motion</h2>
+<p>Choose Glow, Rise, Fade, Slide, Zoom, Staggered flow, Bounce or None, then tune duration, flow direction and easing. <b>Bottom → top</b> brings upcoming lyrics up into the current position as the current cue moves upward. Other directions are available.</p>
+<p><b>Staggered flow</b> delays only upcoming cues. Choose nearest or farthest first. Extra travel, scale and glow controls apply to the corresponding effects.</p>
+<h2>Layout</h2>
+<p>Set the current cue anchor, text alignment, previous/upcoming cue counts and spacing. A cue can contain several text lines, such as original text and a translation. <b>Auto</b> fits the source size; zero hides that side.</p>
+<h2>Previous, current and next styles</h2>
+[[img:lyrics_role_styles]]
+<p>Select a <b>Role</b> and adjust only <b>size scale, opacity and blur</b> independently. Blur zero is sharp; opacity one is opaque. Set colors and typography in Properties and Per-line styles.</p>
+<p><b>Distance falloff</b> is independent for previous and next cues. Zero keeps them uniform; one makes nearby cues clearer and more opaque. That side's blur and opacity define the farthest cue.</p>
+<div class='note'><a href='topic:lyrics_line_styles'>Per-line</a> color, weight, italic and size remain editable with advanced roles enabled. The advanced scale multiplies the base/per-line size. Older advanced color and typography values are ignored. Current subtitles have a <a href='topic:music_reaction'>separate music reaction option</a>.</div>
+<h2>Sample preview</h2>
+<p>The right side uses the real renderer; click <b>Replay</b> to restart. <b>Preview cues</b> changes only the sample in this dialog. Set actual video cue counts under Layout. Choose before-first-lyric or mid-track examples under Intro.</p>""",
+       ("lyrics", "lyrics_intro", "lyrics_line_styles", "music_reaction"),
+       ("고급 설정 잠금 우선순위 기본 모드 순차 이동 정렬 이전 현재 다음 거리 흐림 블러 투명도",
+        "advanced settings priority locked basic mode stagger flow alignment previous current next distance blur opacity")),
+
+    _e("canvas", "lyrics_intro", ("인트로·간주 임시 줄", "Temporary intro and interlude rows"),
+       ("자막,인트로,고급 모드", "subtitles,intro,advanced mode"),
+       """<p><b>자막 전환 설정 → 인트로</b>에서 이 카테고리의 <b>고급 모드</b>를 켜고 표시할 구간을 선택하세요.</p>
+[[img:lyrics_intro]]
+<ul>
+<li><b>첫 가사 전 대기 표시</b>: 첫 가사 시간이 오기 전 임시 줄을 현재 기준 위치에 표시합니다. 첫 가사는 다음 줄에 보이고, 시작 시 임시 줄이 같은 전환 효과로 빠져나간 뒤 사라집니다.</li>
+<li><b>곡 중간의 간주에도 표시</b>: 긴 자막 공백을 보컬 분석하여 음악이 있고 보컬이 없는 구간에만 표시합니다. 이전 가사와 다음 가사 사이에 임시 줄이 추가되고 구간이 끝나면 사라집니다. 긴 자막 공백만으로는 표시되지 않습니다.</li>
+<li><b>표시 스타일</b>: 세 점이 차례로 밝아짐, 숨쉬기, 웨이브, 리듬 막대, 회전 링</li>
+<li><b>최소 간주 길이</b>: 중간 표시를 위한 최소 무보컬 구간 길이. 첫 가사 전 표시에는 적용하지 않습니다.</li>
+<li><b>한 사이클 시간 / 표시 크기</b>: 표시 내부의 반복 속도와 크기입니다. 줄 전체의 이동은 움직임 탭의 전환 설정을 따릅니다.</li>
+</ul>
+<p>인트로 색상·불투명도는 현재 가사 스타일을 따릅니다. 이 표시는 가사 파일을 수정하지 않습니다. <b>미리보기 구간</b>으로 첫 가사 전 또는 곡 중간 예시를 확인하고, 실제 곡에서는 분석 결과가 준비된 후 메인 미리보기로 확인하세요.</p>""",
+       """<p>Open <b>Subtitle transition settings → Intro</b>, enable <b>Advanced mode</b> for this category and choose where to show the indicator.</p>
+[[img:lyrics_intro]]
+<ul>
+<li><b>Show before the first lyric</b>: a temporary row occupies the current cue anchor while the first lyric appears next. When the lyric starts, the row exits with the same transition and disappears.</li>
+<li><b>Show during instrumental interludes</b>: long lyric gaps are analyzed for vocals. A row is inserted between previous and next lyrics only while music plays without vocals, then disappears. A long lyric gap alone is insufficient.</li>
+<li><b>Indicator style</b>: sequential-light dots, breathing dots, wave dots, rhythm bars or spinning ring</li>
+<li><b>Minimum interlude</b>: minimum vocal-free interval for mid-track rows; does not affect the opening wait.</li>
+<li><b>Cycle duration / indicator scale</b>: the inner animation speed and size. Motion settings control movement of the whole row.</li>
+</ul>
+<p>Indicators follow current-lyric color and opacity and do not change the lyric file. <b>Preview segment</b> switches between opening and mid-track examples. Check the actual song in the main Preview after its analysis is ready.</p>""",
+       ("lyrics_transition", "track_analysis", "full_preview"),
+       ("세 점 대기 간주 보컬 없는 무보컬 차례로 밝아짐 임시 줄", "dots waiting instrumental vocal-free interlude temporary row")),
+
+    _e("canvas", "lyrics_line_styles", ("가사 줄별 스타일", "Per-line lyric styles"),
+       ("가사,텍스트,스타일", "lyrics,text,styles"),
+       """<p>가사 / 자막 요소의 <b>속성 → 가사 → 줄별 스타일</b>에서 한 가사 묶음 안의 원문·번역 등 텍스트 줄을 다르게 꾸밉니다. 시간순으로 2번째 가사를 고르는 기능이 아니라 <b>각 묶음의 2번째 텍스트 줄</b>에 반복 적용하는 기능입니다.</p>
+[[img:lyrics_line_styles]]
+<ol>
+<li>왼쪽에서 줄을 선택합니다. 1번 줄은 전체 텍스트 스타일을 따르며 목록에서 제외됩니다. 기본 목록은 2·3·4번 줄이고 <b>목록 펼치기</b>로 최대 12번 줄까지 볼 수 있습니다.</li>
+<li><b>개별 스타일 사용</b>을 켜고 색상·굵기·기울임·크기를 조절합니다. 크기는 기본 글꼴 크기에 더하거나 빼는 상대 크기 또는 고정 크기로 선택합니다.</li>
+<li>2번 줄 편집 시에는 미리보기에 1번 줄도 함께 표시되어 크기와 색상을 비교할 수 있습니다.</li>
+<li>개별 설정을 끄면 전체 스타일을 따릅니다. <b>적용</b>으로 저장합니다.</li>
+</ol>
+<div class='note'>자막 전환의 <b>줄 스타일 고급 모드</b>를 켜도 이 창의 색상·굵기·기울임·크기는 잠기지 않습니다. 기본·줄별 크기에 고급 크기 배율을 곱하고 불투명도·블러를 함께 적용합니다.</div>""",
+       """<p>Use <b>Inspector → Lyrics → Per-line styles</b> to style original text, translations and other text lines inside each cue. This targets the <b>second text line of every cue</b>, not the second lyric in time.</p>
+[[img:lyrics_line_styles]]
+<ol>
+<li>Select a line on the left. Line 1 uses the overall text style and is omitted. Lines 2, 3 and 4 appear initially; <b>Expand list</b> reveals lines through 12.</li>
+<li>Enable <b>Custom style</b> and adjust color, weight, italic and size. Choose a relative offset added to the base font size or a fixed font size.</li>
+<li>Editing line 2 also shows line 1 in the preview so you can compare size and color.</li>
+<li>Disable custom styling to inherit the overall style, then click <b>Apply</b> to save.</li>
+</ol>
+<div class='note'>Advanced <b>Role styles</b> do not lock this dialog's color, weight, italic or size controls. Advanced size scale multiplies the base/per-line size; opacity and blur also apply.</div>""",
+       ("lyrics", "lyrics_transition", "properties"),
+       ("번역 원문 두번째 줄 2번 줄 목록 펼치기 개별 스타일 글꼴 크기 상대 크기", "translation original second line expand list custom style font size relative offset")),
 
     _e("canvas", "playlist", ("플레이리스트", "The playlist"),
        ("플레이리스트,음악", "playlist,music"),
@@ -484,25 +630,49 @@ _CANVAS = (
        ("음악 추가 곡 순서 m3u8 m3u 가져오기 내보내기 검색 복제 삭제 포함 제외 순서 편집 드래그",
         "add music track order m3u8 m3u import export search duplicate delete include exclude reorder drag")),
 
-    _e("canvas", "timeline", ("타임라인", "The timeline"),
+    _e("canvas", "timeline", ("시각 타임라인과 숫자 편집", "Visual timeline and numeric editing"),
        ("타임라인,플레이리스트,애니메이션", "timeline,playlist,animation"),
        """<p>하단 <b>타임라인</b> 탭은 곡이 전체 영상의 어디에 놓이는지와 요소가 보이는 시간을 보여 줍니다.</p>
 [[img:canvas_timeline]]
+<h2>막대로 직접 편집하기</h2>
+<ol>
+<li>상단에서 <b>시각 편집</b>을 선택합니다. 음악 행에는 곡들이, 그 아래에는 요소마다 한 행씩 표시됩니다.</li>
+<li>음악 막대의 몸통을 끌어 시작 위치를 바꿉니다. 곡 길이는 유지되고 뒤 곡은 새 위치에 맞춰 배치됩니다. 앞 곡 종료 전으로는 옮길 수 없습니다.</li>
+<li>요소 막대를 선택하면 캔버스와 속성 패널도 같은 요소를 선택합니다. 몸통을 끌면 시작 위치, 양끝 손잡이를 끌면 시작·종료를 조절합니다. 잠긴 요소는 이동할 수 없습니다.</li>
+<li>마우스를 놓으면 변경이 반영됩니다. 드래그 중 <code>Esc</code>는 취소하고, 반영 후 <code>Ctrl+Z</code>로 실행 취소합니다.</li>
+</ol>
+<h2>정확하게 맞추고 미리보기</h2>
 <ul>
-<li><b>음악 타임라인</b>: 곡마다 시작·길이·종료. 곡은 겹치지 않게 차례로 놓이며, 시작 시간을 늦춰 곡 사이에 간격을 둘 수 있습니다(앞 곡이 끝나기 전으로는 옮길 수 없습니다).</li>
-<li><b>소스 타이밍</b>: 선택한 요소의 <b>시작</b>(전체 영상 기준 나타나는 시각)과 <b>지속 시간</b>(0이면 영상 끝까지)</li>
+<li><b>스냅</b>: 다른 막대의 시작·끝, 재생 커서와 시간 눈금에 붙입니다. <code>Shift</code>를 누르는 동안 스냅 상태가 반대로 바뀝니다.</li>
+<li><b>전체 보기</b>, <b>− / +</b>, <code>Ctrl+휠</code>: 전체 길이에 맞추거나 확대합니다. <code>Shift+휠</code> 또는 마우스 가운데 버튼으로 가로 이동하고, 일반 휠로 요소 목록을 세로 이동합니다.</li>
+<li>눈금이나 빈 곳을 누르거나 시간 칸에 값을 넣어 재생 커서를 옮긴 뒤 <b>이 위치 미리보기</b>로 메인 재생 화면에서 확인합니다. 시간은 <code>분:초.소수</code>로 표시됩니다.</li>
+<li>선택한 막대는 <code>← / →</code>로 1초씩, <code>Shift+← / →</code>로 0.1초씩 이동합니다. <code>↑ / ↓</code>로 막대를 선택하고 <code>Home</code>으로 커서를 처음으로 옮깁니다.</li>
 </ul>
+<h2>숫자 편집과 자동 길이</h2>
+<p><b>숫자 편집</b>으로 바꾸면 기존 음악 타임라인·소스 타이밍 표에서 시작·지속 시간을 직접 입력할 수 있습니다. 요소의 지속 시간 0은 <b>곡 끝까지</b>, 즉 전체 플레이리스트가 끝날 때까지 표시한다는 뜻입니다. 막대 우클릭에서도 자동 길이로 복원하거나 숫자 편집으로 전환할 수 있습니다.</p>
 <div class='note'>크로스페이드·AutoMix를 쓰면 곡이 겹치는 만큼 전체 길이가 줄어듭니다. 실제 전환 위치는 <a href='topic:preview_mix'>미리보기</a>의 타임라인에서 확인하세요.</div>""",
        """<p>The <b>Timeline</b> tab shows where each track sits in the video and when sources are visible.</p>
 [[img:canvas_timeline]]
+<h2>Edit directly with blocks</h2>
+<ol>
+<li>Select <b>Visual edit</b>. Music occupies one row, followed by one row per source.</li>
+<li>Drag a music block to change its start. Its length stays fixed and following tracks adjust to the new position. It cannot start before the previous track ends.</li>
+<li>Select a source block to select the same source on the canvas and in the inspector. Drag its body to move it or its edge handles to change its start/end. Locked sources cannot move.</li>
+<li>Release the mouse to commit. Press <code>Esc</code> during a drag to cancel, or <code>Ctrl+Z</code> after committing to undo.</li>
+</ol>
+<h2>Precise placement and preview</h2>
 <ul>
-<li><b>Music timeline</b>: start, length and end of each track. Tracks never overlap here; move a start later to leave a gap (never before the previous track ends).</li>
-<li><b>Source timing</b>: the selected source's <b>start</b> (in whole-video time) and <b>duration</b> (0 = until the end)</li>
+<li><b>Snap</b>: aligns to block edges, the playhead and time ticks. Hold <code>Shift</code> to temporarily invert snapping.</li>
+<li><b>Fit all</b>, <b>− / +</b>, <code>Ctrl+wheel</code>: fit the whole duration or zoom. <code>Shift+wheel</code> or middle-button dragging pans horizontally; ordinary wheel scrolling moves through source rows.</li>
+<li>Click the ruler or blank space, or enter a time, to position the playhead; use <b>Preview here</b> to open the main player at that time. Times display as <code>minutes:seconds.fraction</code>.</li>
+<li><code>Left / Right</code> nudges the selected block by one second; hold <code>Shift</code> for 0.1 s. <code>Up / Down</code> selects blocks; <code>Home</code> resets the playhead.</li>
 </ul>
+<h2>Numeric editing and automatic duration</h2>
+<p>Choose <b>Numeric edit</b> for the existing Music timeline and Source timing tables. Source duration zero means <b>Playlist end</b>. Right-click a block to restore automatic timing or switch to numeric editing.</p>
 <div class='note'>Crossfade and AutoMix shorten the video by the overlaps. See the real transition points on the <a href='topic:preview_mix'>Preview</a> timeline.</div>""",
        ("playlist", "animation"),
-       ("시작 시간 지속 시간 종료 곡 간격 소스 타이밍 음악 타임라인",
-        "start time duration end gap source timing music timeline")),
+       ("시각 편집 숫자 편집 드래그 막대 손잡이 스냅 확대 여기서 미리보기 시작 시간 지속 시간 소스 타이밍",
+        "visual edit numeric edit drag block handles snap zoom preview here start time duration source timing")),
 
     _e("canvas", "project_content", ("프로젝트 콘텐츠", "Project content"),
        ("콘텐츠,미디어", "content,media"),
@@ -530,27 +700,17 @@ _CANVAS = (
        ("라이브러리 미디어 재사용 이미지 오디오 영상 폰트 가사 미리보기 파일 없음 가져오기",
         "library media reuse image audio video font lyrics preview missing import")),
 
-    _e("canvas", "presets_ai", ("디자인 프리셋과 AI 프로젝트 빌더", "Design presets and AI Project Builder"),
+    _e("canvas", "presets", ("디자인 프리셋", "Design presets"),
        ("디자인,프로젝트", "design,project"),
        """<h2>디자인 프리셋</h2>
-<p><b>프로젝트 → 디자인 프리셋</b>(도구 모음에도 있음)에서 오로라·카세트·미드나잇·느와르 등 완성된 레이아웃을 미리보고 적용합니다. 캔버스의 모든 요소가 프리셋 요소로 바뀌고 플레이리스트는 유지되며, <code>Ctrl+Z</code>로 되돌릴 수 있습니다. 프리셋은 현재 캔버스 비율에 맞게 배치됩니다.</p>
-<p><b>프로젝트 → 현재 캔버스를 프리셋으로 저장</b>하면 나만의 프리셋이 생깁니다. 사용자 프리셋은 선택 창에서 삭제하거나 내보낼 수 있습니다.</p>
-<h2>AI 프로젝트 빌더</h2>
-<p>다른 AI(챗봇)에게 Playlist Canvas 호환 프로젝트 파일을 만들게 하는 <b>프롬프트</b>를 생성합니다. 앱 안에서 AI를 실행하지는 않습니다.</p>
-<ol><li><b>프로젝트 요구사항</b>에 영상의 목적·분위기·곡·원하는 구성을 적습니다.</li>
-<li>질문 정책(필요할 때만 질문 권장), 대화 언어, 프로젝트 형식, 콘텐츠 처리, 캔버스, 스타일, 사용할 기능, 검증 옵션을 고릅니다.</li>
-<li><b>프롬프트 복사</b> 후 AI에 붙여 넣고, 받은 프로젝트 파일을 엽니다.</li></ol>""",
+<p><b>프로젝트 → 디자인 프리셋</b>에서 오로라·카세트·미드나잇·느와르 등 완성된 레이아웃을 미리보고 적용합니다. 캔버스의 모든 요소가 프리셋 요소로 바뀌고 플레이리스트는 유지되며, <code>Ctrl+Z</code>로 되돌릴 수 있습니다. 프리셋은 현재 캔버스 비율에 맞게 배치됩니다.</p>
+<p><b>프로젝트 → 현재 캔버스를 프리셋으로 저장</b>하면 나만의 프리셋이 생깁니다. 사용자 프리셋은 선택 창에서 삭제하거나 내보낼 수 있습니다.</p>""",
        """<h2>Design presets</h2>
-<p><b>Project → Design Presets</b> (also on the toolbar) previews and applies finished layouts such as Aurora, Cassette, Midnight and Noir. Every canvas source is replaced by the preset's, the playlist stays, and <code>Ctrl+Z</code> undoes it. Presets adapt to the current canvas ratio.</p>
-<p><b>Project → Save current canvas as preset</b> makes your own preset; user presets can be deleted or exported from the picker.</p>
-<h2>AI Project Builder</h2>
-<p>Builds a <b>prompt</b> that asks another AI (a chatbot) to create a Playlist Canvas project file. It does not run an AI inside the app.</p>
-<ol><li>Describe the video's purpose, mood, songs and layout under <b>Project requirements</b>.</li>
-<li>Pick the question policy (ask only when needed is recommended), conversation language, project format, content handling, canvas, style, features and checks.</li>
-<li><b>Copy prompt</b>, paste it into the AI, and open the project file you get back.</li></ol>""",
+<p><b>Project → Design Presets</b> previews and applies finished layouts such as Aurora, Cassette, Midnight and Noir. Every canvas source is replaced by the preset's, the playlist stays, and <code>Ctrl+Z</code> undoes it. Presets adapt to the current canvas ratio.</p>
+<p><b>Project → Save current canvas as preset</b> makes your own preset; user presets can be deleted or exported from the picker.</p>""",
        ("start", "projects"),
-       ("프리셋 템플릿 레이아웃 사용자 프리셋 저장 AI 빌더 프롬프트 챗봇",
-        "preset template layout user preset save ai builder prompt chatbot")),
+       ("프리셋 템플릿 레이아웃 사용자 프리셋 저장",
+        "preset template layout user preset save")),
 
     _e("canvas", "canvas_shortcuts", ("메인 창 단축키", "Main window shortcuts"),
        ("단축키,캔버스", "shortcuts,canvas"),
@@ -934,31 +1094,35 @@ _LYRICS = (
        ("가사,요소,타이밍", "lyrics,sources,timing"),
        """<p>곡에 가사를 연결하고 캔버스에 <b>가사 / 자막</b> 요소를 추가하면, 재생 위치에 맞춰 가사가 표시됩니다.</p>
 <h2>표시 규칙</h2>
-<p>가사가 있는 곡은 첫 줄을 곡 시작부터 보여 주되, 그 줄의 시간이 되기 전에는 강조하지 않습니다. 가사 사이의 빈 시간에는 직전 줄이 남고, 강조와 전환 효과는 해당 가사의 시간 동안만 적용됩니다.</p>
-<h2>가사 요소 설정(속성 → 가사 탭)</h2>
+<p>현재 가사와 이전·다음 가사 묶음이 재생 시간에 맞춰 이동합니다. 첫 가사 전에는 <a href='topic:lyrics_intro'>인트로 임시 줄</a>을 표시할 수 있습니다. 중간의 긴 무보컬 구간에도 임시 줄을 넣을 수 있으며, 끝나면 가사 전환과 함께 사라집니다.</p>
+<h2>가사 요소의 속성 설정</h2>
 <ul>
-<li><b>전환</b>: 소프트 포커스(부드러운 초점·페이드), 스무스 슬라이드(짧고 선명한 이동), 블러 리빌(흐림에서 또렷하게) 등</li>
-<li><b>문맥 줄</b>: 현재 줄 앞뒤로 보여 줄 이전·다음 줄 수, 줄 간격, 이전 줄의 투명도·흐림</li>
-<li><b>대체 문구</b>: 가사가 없는 곡에 보여 줄 문구</li>
+<li><b>속성 → 애니메이션</b>: 글로우·라이즈·페이드·슬라이드·줌·순차 이동·바운스 등의 기본 전환과 <a href='topic:lyrics_transition'>자막 전환 설정</a>. 이동 방향·줄 배치·이전/현재/다음 스타일·인트로는 카테고리별 고급 모드로 조절합니다.</li>
+<li><b>문맥 줄</b>: 이전·다음 묶음 수, 줄 간격, 이전 가사의 불투명도·블러. 거리별 흐림은 고급 줄 스타일에서 이전·다음 각각 설정합니다.</li>
+<li><b>줄별 스타일</b>: 각 묶음 안의 2번째 텍스트 줄부터 원문·번역의 글꼴과 크기를 다르게 정합니다. <a href='topic:lyrics_line_styles'>사용 방법</a></li>
+<li><b>음악에 맞춰 반응</b>: 현재 가사 묶음만 음악에 맞춰 확대하거나 움직입니다. <a href='topic:music_reaction'>반응 조절</a></li>
+<li><b>대체 문구</b>: 가사가 없는 곡에 보여 줄 문구. 이전·현재·다음 가사에 지정한 블러와 불투명도는 적용하지 않고 선명하게 표시합니다.</li>
 <li><b>타이밍 보정</b>: 모든 곡에 공통으로 적용되며, 곡별 보정과 더해집니다.</li>
 </ul>
 <h2>곡별 타이밍</h2>
 <p>한 곡만 어긋나면 <a href='topic:track_lyrics'>곡 정보/설정 → 가사 설정</a>의 <b>곡별 타이밍 보정</b>을 씁니다. 양수는 가사를 더 빠르게, 음수는 더 늦게 표시합니다. 크게 틀리면 <a href='topic:lrc_generator'>가사 편집기</a>로 다시 기록하세요.</p>""",
        """<p>Attach lyrics to a track and add a <b>Lyrics / subtitles</b> source to the canvas: lyrics then follow the playback position.</p>
 <h2>How lines appear</h2>
-<p>A track with lyrics shows its first line from the start of the track but does not highlight it before its time. Between lyrics the previous line stays; highlighting and transition effects apply only during a lyric's own time.</p>
-<h2>Lyrics source settings (inspector → Lyrics tab)</h2>
+<p>Current, previous and upcoming cues move with playback time. A <a href='topic:lyrics_intro'>temporary intro row</a> can appear before the first lyric and during long vocal-free gaps, then disappear with the lyric transition.</p>
+<h2>Lyrics source settings in the inspector</h2>
 <ul>
-<li><b>Transition</b>: soft focus (gentle focus and fade), smooth slide (short, crisp move), blur reveal (from blurred to sharp) and more</li>
-<li><b>Context lines</b>: how many previous/next lines to show, line spacing, and the previous line's opacity and blur</li>
-<li><b>Fallback text</b>: what to show for tracks without lyrics</li>
+<li><b>Inspector → Animation</b>: basic transitions such as Glow, Rise, Fade, Slide, Zoom, Staggered flow and Bounce, plus <a href='topic:lyrics_transition'>Subtitle transition settings</a>. Advanced mode is independent for motion, layout, role styles and intro.</li>
+<li><b>Context lines</b>: previous/next cue counts, spacing and previous opacity/blur. Advanced styles add separate distance falloff for previous and next cues.</li>
+<li><b>Per-line styles</b>: different fonts and sizes for original text and translations, starting with text line 2 in each cue. <a href='topic:lyrics_line_styles'>Instructions</a></li>
+<li><b>React to music</b>: only the current cue scales or moves with the audio. <a href='topic:music_reaction'>Tuning the response</a></li>
+<li><b>Fallback text</b>: what to show for tracks without lyrics. It stays sharp and does not inherit previous/current/next cue blur or opacity.</li>
 <li><b>Timing offset</b>: applies to every track and adds to each track's own offset.</li>
 </ul>
 <h2>Per-track timing</h2>
 <p>If just one track is off, use <b>Per-track timing offset</b> in <a href='topic:track_lyrics'>Track information/settings → Lyrics settings</a>: positive shows lyrics earlier, negative later. If it is badly off, re-record it in the <a href='topic:lrc_generator'>lyrics editor</a>.</p>""",
        ("lyrics_files", "track_lyrics", "lrc_generator"),
-       ("가사 요소 자막 표시 하이라이트 강조 소프트 포커스 스무스 슬라이드 블러 리빌 문맥 줄 보정",
-        "lyrics source subtitles highlight soft focus smooth slide blur reveal context lines offset")),
+       ("가사 요소 자막 표시 하이라이트 강조 인트로 줄별 스타일 음악 반응 문맥 줄 보정",
+        "lyrics source subtitles highlight intro per-line styles music reaction context lines offset")),
 
     _e("lyrics_editor", "lyrics_files", ("가사 파일 연결하기", "Attaching lyric files"),
        ("가사,플레이리스트", "lyrics,playlist"),
@@ -1336,15 +1500,39 @@ _TRACK = (
 <li><b>기본 정보</b>: 제목·아티스트·앨범. 텍스트 요소의 <code>%title%</code> 같은 <a href='topic:text_tokens'>토큰</a>과 트랙 목록·현재 재생 카드에 쓰입니다. 원본 파일의 태그는 바꾸지 않습니다.</li>
 <li><b>파일</b>: 위치, 재생 시간, 형식(모노/스테레오), 음질(비트레이트·샘플레이트·비트 깊이), 크기. <b>폴더에서 보기</b>는 탐색기에서 음원 파일을 선택해 보여 줍니다.</li>
 <li><b>앨범 커버</b>: <b>이미지 변경…</b>으로 프로젝트에서 쓸 곡별 커버를 고르고, <b>내장 커버 사용</b>으로 음원에 들어 있는 커버로 돌아갑니다. 앨범 커버·배경·퍼스널 컬러가 이 커버를 씁니다.</li>
-</ul>""",
+</ul><p>원본 MP3의 태그와 커버를 수정하려면 도구 메뉴의 <a href='topic:mp3_metadata'>MP3 메타데이터 편집기</a>를 사용하세요.</p>""",
        """<ul>
 <li><b>Basic information</b>: title, artist and album, used by <a href='topic:text_tokens'>tokens</a> such as <code>%title%</code>, the track list and the now playing card. The file's tags are not changed.</li>
 <li><b>File</b>: location, length, format (mono/stereo), quality (bitrate, sample rate, bit depth) and size. <b>Show in folder</b> selects the audio file in Explorer.</li>
 <li><b>Album cover</b>: <b>Change image…</b> picks a per-track cover for this project; <b>Use embedded artwork</b> goes back to the one inside the audio file. Album cover sources, backgrounds and personal color use it.</li>
-</ul>""",
+</ul><p>To edit tags and artwork in the original MP3, use <a href='topic:mp3_metadata'>MP3 Metadata Editor</a> in the Tools menu.</p>""",
        ("track_details", "text_tokens"),
        ("제목 아티스트 앨범 태그 커버 이미지 변경 내장 커버 폴더에서 보기 음질 비트레이트",
         "title artist album tags cover change image embedded cover show in folder quality bitrate")),
+
+    _e("track", "mp3_metadata", ("MP3 메타데이터 편집기", "MP3 Metadata Editor"),
+       ("메타데이터,MP3,음악", "metadata,MP3,music"),
+       """<p><b>도구 → MP3 메타데이터 편집기</b>에서 MP3 파일에 저장된 ID3 태그와 앨범 커버를 편집합니다.</p>
+[[img:mp3_metadata]]
+<ol>
+<li><b>파일 열기…</b>로 파일을 선택합니다. 파일을 열기 전에는 입력 칸과 저장 버튼이 비활성화됩니다.</li>
+<li>제목·아티스트·앨범·앨범 아티스트·연도·장르·트랙 번호·디스크 번호·BPM·설명을 수정합니다.</li>
+<li>커버를 선택하거나 제거하고 미리보기로 확인합니다.</li>
+<li><b>저장</b>을 누르면 선택한 원본 MP3 파일에 태그와 커버를 씁니다. 창을 닫는 것만으로는 저장되지 않습니다.</li>
+</ol>
+<div class='note'><a href='topic:track_info'>곡 정보/설정</a>은 프로젝트 안에서 쓸 제목·아티스트·앨범·커버를 바꾸는 기능입니다. MP3 편집기는 원본 파일을 변경하며, 이미 추가한 곡의 프로젝트 정보는 곡 정보/설정에서 따로 확인하세요.</div>""",
+       """<p>Open <b>Tools → MP3 Metadata Editor</b> to edit the ID3 tags and artwork stored in an MP3 file.</p>
+[[img:mp3_metadata]]
+<ol>
+<li>Use <b>Open file…</b> to select a file. Input fields and Save remain disabled until a file is opened.</li>
+<li>Edit title, artist, album, album artist, year, genre, track/disc number, BPM and comment.</li>
+<li>Select or remove artwork and check its preview.</li>
+<li><b>Save</b> writes tags and artwork into the selected original file. Closing the window does not save.</li>
+</ol>
+<div class='note'><a href='topic:track_info'>Track information/settings</a> changes project-specific titles, artists, albums and covers. This editor changes the original MP3; check project information separately for tracks already added.</div>""",
+       ("track_info", "text_tokens"),
+       ("ID3 태그 원본 파일 커버 앨범 아티스트 장르 연도 트랙 번호 디스크 BPM 코멘트 저장",
+        "ID3 tags original file artwork album artist genre year track disc BPM comment save")),
 
     _e("track", "track_analysis", ("분석 탭", "Analysis tab"),
        ("곡 정보,분석,AutoMix", "track info,analysis,AutoMix"),

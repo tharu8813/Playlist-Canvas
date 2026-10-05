@@ -37,6 +37,21 @@ class BeatGrid:
         """The fitted grid beat nearest ``seconds``."""
         return self.origin + round((seconds - self.origin) / self.period) * self.period
 
+    def phase_error(self, beats: Sequence[float], start: float, end: float) -> float | None:
+        """90th-percentile error in beats inside the actual overlap; None if unmeasured.
+
+        Missing detections do not change phase, and isolated false detections
+        should not disqualify an otherwise steady rhythm. Unlike the fit's
+        inlier residual, this includes the beats rejected during fitting.
+        """
+        times = np.asarray(beats, dtype=float)
+        times = times[(times >= start) & (times <= end)]
+        if len(times) < 4:
+            return None
+        positions = (times - self.origin) / self.period
+        error = float(np.quantile(np.abs(positions - np.rint(positions)), 0.9))
+        return 0.0 if error < 1e-9 else error
+
 
 def _beat_numbers(times: np.ndarray, period: float) -> np.ndarray:
     """Integer beat numbers, robust to a missed or doubled detection between two beats."""

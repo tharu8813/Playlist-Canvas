@@ -175,7 +175,6 @@ class ProjectMediaService:
                 tracks[entry.identifier].cover_path = ""
             elif entry.kind == "lyrics" and entry.identifier in tracks:
                 tracks[entry.identifier].lyrics_path = ""
-                tracks[entry.identifier].lyrics = []
             elif entry.kind in {"video", "track_video"}:
                 owner_id, _, index_text = entry.identifier.rpartition(":")
                 owner = sources.get(owner_id) if entry.kind == "video" else tracks.get(owner_id)

@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "date": "2026-10-05",
+  "scope": "ExportSession bass preparation; no audio playback",
+  "before": {
+    "benchmark": "export_bass_preparation",
+    "audio_seconds": 600,
+    "fps": 30,
+    "preparation_seconds": 1.6958847999339923,
+    "heartbeat_interval_ms": 20,
+    "heartbeat_count": 0,
+    "max_heartbeat_gap_ms": 1695.8847999339923,
+    "envelope_frames": 18000,
+    "envelope_sha256": "4edad114d2261cd222eff3df5782967c95805f136bfdcc79dd000b7d9d933bc3",
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "after": {
+    "benchmark": "export_bass_preparation",
+    "audio_seconds": 600,
+    "fps": 30,
+    "preparation_seconds": 1.5266874000662938,
+    "heartbeat_interval_ms": 20,
+    "heartbeat_count": 75,
+    "max_heartbeat_gap_ms": 37.96510002575815,
+    "envelope_frames": 18000,
+    "envelope_sha256": "4edad114d2261cd222eff3df5782967c95805f136bfdcc79dd000b7d9d933bc3",
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "cancel": {
+    "benchmark": "export_bass_preparation",
+    "audio_seconds": 600,
+    "fps": 30,
+    "preparation_seconds": 0.12960059999022633,
+    "heartbeat_interval_ms": 20,
+    "heartbeat_count": 6,
+    "max_heartbeat_gap_ms": 22.6821000687778,
+    "envelope_frames": null,
+    "envelope_sha256": null,
+    "cancelled": true,
+    "cancel_request_ms": 125.31630008015782,
+    "cancel_completion_ms": 4.284299910068512,
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "validation": {
+    "tests": 240,
+    "skipped": 9,
+    "failures": 0,
+    "errors": 0,
+    "seconds": 67.513
+  },
+  "bass_reactive_h264_export": {
+    "intermediate": {
+      "seconds": 14.89,
+      "peak_temp_bytes": 16096063,
+      "frames": 90,
+      "bytes": 1706497
+    },
+    "live": {
+      "seconds": 3.25,
+      "peak_temp_bytes": 3258492,
+      "frames": 90,
+      "bytes": 1810468
+    },
+    "psnr_live_vs_intermediate": "PSNR y:57.349927 u:55.199701 v:55.642711 average:56.605272 min:55.574551 max:59.525248"
+  }
+}

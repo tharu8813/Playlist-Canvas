@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import MISSING, asdict, dataclass, field, fields
+from copy import deepcopy
+from dataclasses import MISSING, asdict, dataclass, field, fields, replace
 from enum import Enum
 from math import isfinite
+from re import fullmatch
 from typing import Any
 from uuid import uuid4
+
+
+SUBTITLE_ADVANCED_GROUPS = {
+    "motion": ("subtitle_animation", "subtitle_animation_duration", "subtitle_flow_direction",
+               "subtitle_motion_easing", "subtitle_motion_distance", "subtitle_stagger",
+               "subtitle_stagger_order", "subtitle_zoom_amount", "subtitle_glow_strength", "subtitle_glow_radius"),
+    "layout": ("subtitle_context_lines", "subtitle_next_lines", "subtitle_line_spacing", "subtitle_anchor", "text_alignment"),
+    "styles": ("subtitle_role_styles", "subtitle_previous_distance_fade", "subtitle_next_distance_fade"),
+    "intro": ("subtitle_intro_enabled", "subtitle_intro_midtrack", "subtitle_intro_style",
+              "subtitle_intro_gap", "subtitle_intro_period", "subtitle_intro_scale"),
+}
 
 
 class SourceType(str, Enum):
@@ -49,10 +62,13 @@ class Shadow:
     opacity: float = 0.35
 
 
-SUBTITLE_ANIMATIONS = ("glow", "rise", "none")
+SUBTITLE_ANIMATIONS = ("glow", "rise", "crossfade", "slide", "zoom", "cascade", "bounce", "none")
 TEXT_CASES = ("none", "upper", "lower", "capitalize", "small_caps")
 PROGRESS_KNOBS = ("auto", "none", "circle", "bar")
 LOOP_MOTIONS = ("none", "float", "breathe", "pulse", "sway", "spin", "drift", "wobble")
+MUSIC_REACTIVE_EFFECTS = ("bass_scale", "bass_bounce", "bass_stretch", "bass_tilt")
+MUSIC_REACTIVE_BANDS = ("bass", "mid", "treble", "full")
+MUSIC_REACTIVE_CURVES = ("soft", "linear", "punchy")
 MASK_SHAPES = (
     "none", "circle", "pill", "arch", "diamond", "triangle", "hexagon", "star", "heart",
 )
@@ -145,6 +161,10 @@ class Source:
     image_fit_mode: str = "cover"
     background_mode: str = "color"
     background_ambient: bool = False
+    background_ambient_blur: float = 24.0
+    background_ambient_motion: float = 1.0
+    background_bass_reactive: bool = False
+    background_bass_strength: float = 0.06
     # When on, an album-art background cross-fades from the previous track's
     # artwork to the new one over background_track_transition_seconds at each
     # track change instead of switching in a single frame.
@@ -175,11 +195,31 @@ class Source:
     subtitle_fallback: str = "Lyrics are not available for this track."
     subtitle_animation: str = "glow"
     subtitle_animation_duration: float = 0.36
+    subtitle_flow_direction: str = "up"
+    subtitle_motion_easing: str = "auto"
+    subtitle_motion_distance: float = 22.0
+    subtitle_stagger: float = 0.3
+    subtitle_stagger_order: str = "near_first"
+    subtitle_anchor: float = 0.5
+    subtitle_zoom_amount: float = 0.12
+    subtitle_glow_strength: float = 0.3
+    subtitle_glow_radius: float = 7.0
+    subtitle_role_styles: dict[str, dict[str, object]] = field(default_factory=dict)
+    subtitle_advanced_categories: list[str] = field(default_factory=list)
+    subtitle_advanced_settings: dict[str, object] = field(default_factory=dict)
     subtitle_context_lines: int = 1
     subtitle_next_lines: int = 1
     subtitle_line_spacing: float = 14.0
     subtitle_previous_opacity: float = 0.34
     subtitle_previous_blur: float = 1.5
+    subtitle_previous_distance_fade: float = 1.0
+    subtitle_next_distance_fade: float = 1.0
+    subtitle_intro_enabled: bool = True
+    subtitle_intro_midtrack: bool = False
+    subtitle_intro_style: str = "dots"
+    subtitle_intro_gap: float = 5.0
+    subtitle_intro_period: float = 3.0
+    subtitle_intro_scale: float = 1.0
     subtitle_current_line: int = -1
     subtitle_current_line_count: int = 1
     subtitle_scroll_offset: float = 0.0
@@ -188,6 +228,9 @@ class Source:
     subtitle_current_scale: float = 1.08
     subtitle_accent_enabled: bool = False
     subtitle_accent_color: str = "#FFE08A"
+    # Optional overrides by physical line position inside each multi-line cue.
+    # Empty entries inherit the source's shared typography.
+    subtitle_line_styles: list[dict[str, object]] = field(default_factory=list)
     track_list_count: int = 5
     track_list_style: str = "compact"
     track_list_window: str = "centered"
@@ -257,6 +300,16 @@ class Source:
     loop_motion: str = "none"
     loop_motion_period: float = 4.0
     loop_motion_amount: float = 1.0
+    music_reactive_enabled: bool = False
+    music_reactive_effect: str = "bass_scale"
+    music_reactive_strength: float = 0.25
+    music_reactive_attack: float = 0.06
+    music_reactive_release: float = 0.4
+    music_reactive_band: str = "bass"
+    music_reactive_sensitivity: float = 1.0
+    music_reactive_threshold: float = 0.0
+    music_reactive_curve: str = "linear"
+    music_reactive_offset: float = 0.0
     # Cut the whole source to a shape (see app.utils.mask_shapes).
     mask_shape: str = "none"
     timeline_start: float = 0.0
@@ -289,6 +342,34 @@ class Source:
         )
         return result
 
+    @property
+    def uses_bass_reaction(self) -> bool:
+        return (self.source_type is SourceType.BACKGROUND and self.background_bass_reactive) or (
+            self.source_type in {SourceType.TEXT, SourceType.LYRICS} and self.music_reactive_enabled
+            and self.music_reactive_strength > 0
+        )
+
+    @property
+    def music_reaction_profile(self) -> tuple:
+        return (self.music_reactive_band, self.music_reactive_attack,
+                self.music_reactive_release, self.music_reactive_sensitivity,
+                self.music_reactive_threshold, self.music_reactive_curve)
+
+    def resolved_lyrics(self) -> Source:
+        """Resolve active overrides without changing the saved basic settings."""
+        if self.source_type is not SourceType.LYRICS or not self.subtitle_advanced_categories:
+            return self
+        keys = {key for category in self.subtitle_advanced_categories for key in SUBTITLE_ADVANCED_GROUPS[category]}
+        values = {key: deepcopy(value) for key, value in self.subtitle_advanced_settings.items() if key in keys}
+        if "styles" in self.subtitle_advanced_categories:
+            # Keep old projects readable without letting former role typography
+            # override basic text or per-line styles.
+            values["subtitle_role_styles"] = {
+                role: {key: value for key, value in style.items() if key in {"scale", "opacity", "blur"}}
+                for role, style in values.get("subtitle_role_styles", self.subtitle_role_styles).items()
+            }
+        return replace(self, **values, subtitle_advanced_categories=[])
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Source":
         """Restore a source from JSON-compatible data."""
@@ -296,6 +377,16 @@ class Source:
             raise ValueError("Project sources must be objects.")
         source_data = data.copy()
         source_data["source_type"] = SourceType(source_data["source_type"])
+        if "subtitle_advanced_enabled" in source_data:
+            # The former master switch gated the category switches. Preserve
+            # that effective state while retaining saved advanced drafts.
+            legacy_advanced_enabled = source_data.pop("subtitle_advanced_enabled")
+            if not isinstance(legacy_advanced_enabled, bool):
+                raise ValueError("Invalid legacy subtitle advanced mode.")
+            if legacy_advanced_enabled:
+                source_data.setdefault("subtitle_advanced_categories", list(SUBTITLE_ADVANCED_GROUPS))
+            else:
+                source_data["subtitle_advanced_categories"] = []
         # ``subtitle_style`` was a small preset selector that overrode the
         # actual text colour while previewing/exporting lyrics.  Keep old
         # projects visually stable by migrating its effective colour into the
@@ -350,6 +441,8 @@ class Source:
             raise ValueError(
                 f"Source '{source.name}' personal color flag must be true or false."
             )
+        if not isinstance(source.music_reactive_enabled, bool):
+            raise ValueError("Music reaction flag must be true or false.")
         personal_color_ranges = {
             "personal_color_brightness": (-100.0, 100.0),
             "personal_color_saturation": (-100.0, 100.0),
@@ -377,6 +470,55 @@ class Source:
             isinstance(path, str) for path in source.video_paths
         ):
             raise ValueError(f"Source '{source.name}' has invalid video paths.")
+        if not isinstance(source.subtitle_line_styles, list) or len(source.subtitle_line_styles) > 12:
+            raise ValueError(f"Source '{source.name}' has invalid lyric line styles.")
+        allowed_line_style_keys = {
+            "color", "font_size", "font_size_offset", "font_weight", "italic",
+        }
+        if (not isinstance(source.subtitle_role_styles, dict)
+                or not set(source.subtitle_role_styles) <= {"previous", "current", "next"}):
+            raise ValueError(f"Source '{source.name}' has invalid lyric role styles.")
+        all_styles = [(style, False) for style in source.subtitle_line_styles]
+        all_styles.extend((style, True) for style in source.subtitle_role_styles.values())
+        for style, role_style in all_styles:
+            allowed = allowed_line_style_keys | ({"scale", "opacity", "blur"} if role_style else set())
+            if not isinstance(style, dict) or not set(style) <= allowed:
+                raise ValueError(f"Source '{source.name}' has invalid lyric line styles.")
+            color = style.get("color")
+            if color is not None and (
+                not isinstance(color, str)
+                or fullmatch(r"#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?", color) is None
+            ):
+                raise ValueError(f"Source '{source.name}' has an invalid lyric line color.")
+            font_size = style.get("font_size")
+            if font_size is not None and (
+                not isinstance(font_size, (int, float)) or isinstance(font_size, bool)
+                or not isfinite(float(font_size)) or not 8.0 <= float(font_size) <= 120.0
+            ):
+                raise ValueError(f"Source '{source.name}' has an invalid lyric line size.")
+            font_size_offset = style.get("font_size_offset")
+            if font_size_offset is not None and (
+                "font_size" in style
+                or not isinstance(font_size_offset, (int, float))
+                or isinstance(font_size_offset, bool)
+                or not isfinite(float(font_size_offset))
+                or not -100.0 <= float(font_size_offset) <= 100.0
+            ):
+                raise ValueError(f"Source '{source.name}' has an invalid lyric line size offset.")
+            font_weight = style.get("font_weight")
+            if font_weight is not None and (
+                not isinstance(font_weight, int) or isinstance(font_weight, bool)
+                or not 100 <= font_weight <= 900
+            ):
+                raise ValueError(f"Source '{source.name}' has an invalid lyric line weight.")
+            if "italic" in style and not isinstance(style["italic"], bool):
+                raise ValueError(f"Source '{source.name}' has an invalid lyric line italic flag.")
+            for key, (minimum, maximum) in {"scale": (0.25, 3.0), "opacity": (0.0, 1.0), "blur": (0.0, 12.0)}.items():
+                if key in style and (
+                    not isinstance(style[key], (int, float)) or isinstance(style[key], bool)
+                    or not isfinite(float(style[key])) or not minimum <= float(style[key]) <= maximum
+                ):
+                    raise ValueError(f"Source '{source.name}' has an invalid lyric {key}.")
         if source.video_cycle_count < 1 or source.video_cycle_count > 100_000:
             raise ValueError(f"Source '{source.name}' video cycle count is out of range.")
         if not 0.05 <= source.video_speed <= 8.0:
@@ -390,19 +532,50 @@ class Source:
         for name, allowed in (
             ("text_case", TEXT_CASES), ("progress_knob", PROGRESS_KNOBS),
             ("loop_motion", LOOP_MOTIONS), ("mask_shape", MASK_SHAPES),
+            ("music_reactive_effect", MUSIC_REACTIVE_EFFECTS),
+            ("music_reactive_band", MUSIC_REACTIVE_BANDS),
+            ("music_reactive_curve", MUSIC_REACTIVE_CURVES),
             ("now_playing_align", ("left", "center", "right")),
+            ("subtitle_flow_direction", ("up", "down", "left", "right")),
+            ("subtitle_motion_easing", ("auto", "linear", "ease_in", "ease_out", "smooth")),
+            ("subtitle_stagger_order", ("near_first", "far_first")),
+            ("subtitle_intro_style", ("dots", "breathing", "wave", "bars", "ring")),
         ):
             if getattr(source, name) not in allowed:
                 raise ValueError(f"Source '{source.name}' has an invalid {name}.")
         if not isinstance(source.now_playing_label, str):
             raise ValueError(f"Source '{source.name}' has an invalid now-playing label.")
+        for name in ("subtitle_intro_enabled", "subtitle_intro_midtrack"):
+            if not isinstance(getattr(source, name), bool):
+                raise ValueError(f"Source '{source.name}' has an invalid {name}.")
         for name, (minimum, maximum) in {
             "text_letter_spacing": (-10.0, 60.0),
             "text_line_gap": (-40.0, 200.0),
             "subtitle_current_scale": (1.0, 2.0),
+            "subtitle_animation_duration": (0.05, 3.0),
+            "subtitle_motion_distance": (0.0, 200.0),
+            "subtitle_stagger": (0.0, 0.8),
+            "subtitle_anchor": (0.0, 1.0),
+            "subtitle_zoom_amount": (0.0, 0.5),
+            "subtitle_glow_strength": (0.0, 1.0),
+            "subtitle_glow_radius": (0.0, 30.0),
+            "subtitle_previous_distance_fade": (0.0, 1.0),
+            "subtitle_next_distance_fade": (0.0, 1.0),
+            "subtitle_intro_gap": (2.0, 30.0),
+            "subtitle_intro_period": (1.0, 10.0),
+            "subtitle_intro_scale": (0.25, 3.0),
             "visualizer_inner_radius": (0.1, 0.95),
+            "background_ambient_blur": (0.0, 80.0),
+            "background_ambient_motion": (0.0, 3.0),
+            "background_bass_strength": (0.0, 0.2),
             "loop_motion_period": (0.2, 60.0),
             "loop_motion_amount": (0.0, 5.0),
+            "music_reactive_strength": (0.0, 1.0),
+            "music_reactive_attack": (0.0, 3.0),
+            "music_reactive_release": (0.0, 5.0),
+            "music_reactive_sensitivity": (0.0, 4.0),
+            "music_reactive_threshold": (0.0, 0.95),
+            "music_reactive_offset": (-2.0, 2.0),
         }.items():
             if not minimum <= float(getattr(source, name)) <= maximum:
                 raise ValueError(
@@ -430,4 +603,32 @@ class Source:
                 )
         if source.group_id is not None and not isinstance(source.group_id, str):
             raise ValueError(f"Source '{source.name}' has an invalid group ID.")
+        if "subtitle_advanced_categories" not in source_data and source.subtitle_role_styles:
+            # Older role overrides were already advanced settings. Keep their
+            # appearance and expose their ownership instead of silently hiding
+            # why the basic style controls do not affect those roles.
+            source.subtitle_advanced_categories = ["styles"]
+            source.subtitle_advanced_settings = {
+                "subtitle_role_styles": deepcopy(source.subtitle_role_styles),
+                "subtitle_previous_distance_fade": source.subtitle_previous_distance_fade,
+                "subtitle_next_distance_fade": source.subtitle_next_distance_fade,
+            }
+            source.subtitle_role_styles = {}
+        categories = source.subtitle_advanced_categories
+        if (not isinstance(categories, list) or not all(isinstance(key, str) and key in SUBTITLE_ADVANCED_GROUPS for key in categories)
+                or len(set(categories)) != len(categories)):
+            raise ValueError("Invalid subtitle advanced categories.")
+        values = source.subtitle_advanced_settings
+        allowed = {key for keys in SUBTITLE_ADVANCED_GROUPS.values() for key in keys}
+        if not isinstance(values, dict) or not set(values) <= allowed:
+            raise ValueError("Invalid subtitle advanced settings.")
+        if values:
+            if "subtitle_animation" in values and values["subtitle_animation"] not in SUBTITLE_ANIMATIONS:
+                raise ValueError("Invalid advanced subtitle effect.")
+            if "text_alignment" in values and values["text_alignment"] not in {"left", "center", "right"}:
+                raise ValueError("Invalid advanced subtitle alignment.")
+            # Reuse the same validation for basic and advanced values, including
+            # inactive drafts, so an invalid saved override cannot surface later.
+            cls.from_dict(source.to_dict() | values | {"subtitle_advanced_settings": {},
+                          "subtitle_advanced_categories": []})
         return source

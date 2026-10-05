@@ -244,7 +244,7 @@ class WorkerLifetimeTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('PLAYLIST_CANVAS_TEST_FFMPEG'), 'Real FFmpeg is opt-in')
 class RealSharedPlanTests(unittest.TestCase):
-    def test_prepared_mix_canvas_switch_chapters_and_video_duration_agree(self):
+    def test_prepared_mix_preserves_audio_chapters_and_midpoint_canvas_handover(self):
         from tests.test_automix_ffmpeg_integration import _write_tone_wav
         from app.automix.analysis.service import AnalysisBatchResult
         executable = Path(os.environ['PLAYLIST_CANVAS_TEST_FFMPEG'])
@@ -261,8 +261,8 @@ class RealSharedPlanTests(unittest.TestCase):
             with patch('app.automix.workflow.AutoMixWorkflow.analyze', return_value=AnalysisBatchResult(analyses, {})):
                 audio = renderer.prepare_playlist_audio(tracks, directory, settings, 'automix', plan_callback=plans.append)
             plan = plans[0]
-            # The compiled plan is the authority for where the switch lands
-            # (C.1 exact geometry); audio, chapters, and canvas must all agree on it.
+            # Chapters start with incoming audio; the Canvas hands over when
+            # that audio becomes dominant at the overlap's midpoint.
             switch_time = plan.metadata.chapters[1].start
             self.assertAlmostEqual(plan.audio.clips[1].timeline_start, switch_time)
             self.assertGreater(switch_time, 0.3)
@@ -276,7 +276,8 @@ class RealSharedPlanTests(unittest.TestCase):
             self.assertAlmostEqual(result.validation.duration_seconds, plan.duration_seconds, delta=.2)
             info = subprocess.run([str(executable.with_name('ffprobe.exe')), '-v', 'error', '-show_chapters', '-of', 'json', str(result.output_path)], capture_output=True, check=True, text=True)
             self.assertAlmostEqual(float(json.loads(info.stdout)['chapters'][1]['start_time']), switch_time)
-            for second, channel in [(switch_time - 0.3, 0), (switch_time + 0.3, 2)]:
+            visual_switch = switch_time + plan.audio.transitions[0].duration / 2
+            for second, channel in [(switch_time + 0.3, 0), (visual_switch - 0.3, 0), (visual_switch + 0.3, 2)]:
                 pixels = subprocess.run([str(executable), '-v', 'error', '-ss', str(second), '-i', str(result.output_path), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], capture_output=True, check=True).stdout
                 self.assertGreater(pixels[channel], 200)
                 self.assertLess(pixels[2 if channel == 0 else 0], 40)

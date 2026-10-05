@@ -21,6 +21,7 @@ from app.automix.analysis.vocals import merge_spans
 from app.automix.candidates import TransitionCandidate, TransitionStrategy, sung_spans, vocals_measured
 from app.automix.compatibility import TransitionCompatibility
 from app.automix.models import TrackAnalysis
+from app.automix.music import character, music_tags_at, tags_text
 from app.automix.structure.models import TrackStructureAnalysis
 from app.timeline.render_plan import AudioRenderTransition, TransitionDsp
 
@@ -57,6 +58,8 @@ class TransitionDspDecision:
     ``None`` values mean unknown."""
     vocal_handoff: float | None = None
     """VOCAL_SAFE_EQ only: window progress of the mid-band handoff (see VocalMap.handoff)."""
+    band_windows: tuple | None = None
+    """Measured, independently timed low/mid/high handoffs; renderer-ready."""
 
 
 SWEEP_MIN_SECONDS = 8.0
@@ -90,7 +93,8 @@ def select_transition_dsp(
     5. BEAT_MATCH -> BASS_SWAP; BEAT_ALIGNED_CROSSFADE -> ``None`` (legacy qsin).
     Then: vocal activity unknown on either side -> VOCAL_SAFE_EQ (rules 3-5).
     Playlist flow: a filter style the previous junction (``previous_style``)
-    already used gives way to the other filter style.
+    already used gives way to another filter style; a repeated falling-energy
+    blend closes the outgoing highs with LOWPASS_OUT instead.
     """
     strategy = candidate.strategy
     duration = candidate.duration_seconds
@@ -105,12 +109,19 @@ def select_transition_dsp(
     conflict = vocals is not None and vocals.overlap_ratio >= VOCAL_CONFLICT_MIN_RATIO
     handoff = vocals.handoff() if conflict else None
     decayed = _outgoing_decayed(candidate, outgoing)
+    out_tags = music_tags_at(outgoing, candidate.outgoing_source_time, candidate.outgoing_source_out)
+    in_tags = music_tags_at(incoming, candidate.incoming_source_time,
+                            candidate.incoming_source_time + duration * candidate.incoming_rate)
+    out_character, in_character = character(out_tags), character(in_tags)
+    gentle = max(out_character[0], in_character[0]) > max(out_character[1], in_character[1])
     metrics = (
         ("vocal_overlap", vocals.overlap_ratio if vocals is not None else None),
         ("vocal_handoff", handoff), ("key_clash", keys),
         ("energy_delta", energy), ("energy_rise", rise), ("energy_source", energy_source or None),
         ("kick_drift_ms", drift * 1000.0 if strategy is TransitionStrategy.BEAT_ALIGNED_CROSSFADE else None),
         ("outgoing_decayed", decayed),
+        ("outgoing_genres", tags_text(out_tags)), ("incoming_genres", tags_text(in_tags)),
+        ("outgoing_moods", tags_text(out_tags, moods=True)), ("incoming_moods", tags_text(in_tags, moods=True)),
     )
     if decayed:
         # Fading in the next track over a tail that is already 15 dB+ down
@@ -145,6 +156,9 @@ def select_transition_dsp(
         dsp, rule = TransitionDsp.SHORT_FADE, f"transition only {duration:.1f}s (< {SHORT_FADE_MAX_SECONDS:.1f}s)"
     elif conflict or keys:
         dsp, rule = TransitionDsp.VOCAL_SAFE_EQ, "vocals overlap" if conflict else "keys clash"
+    elif gentle:
+        dsp = TransitionDsp.SHORT_FADE if vocals is not None else TransitionDsp.VOCAL_SAFE_EQ
+        rule = "gentle genre/mood: preserve expression with a smooth handoff"
     elif energy is not None and energy >= ENERGY_JUMP_THRESHOLD:
         if rise is not None and rise > 0.0 and duration >= SWEEP_MIN_SECONDS:
             dsp, rule = TransitionDsp.FILTER_SWEEP, f"{energy_source} energy rises {energy:.2f}: sweep up into it"
@@ -158,7 +172,10 @@ def select_transition_dsp(
         dsp, rule = None, "aligned crossfade with no conflicts: legacy equal-power"
     swap = {TransitionDsp.FILTER_SWEEP: TransitionDsp.FILTER_BLEND, TransitionDsp.FILTER_BLEND: TransitionDsp.FILTER_SWEEP}
     if dsp in swap and dsp is previous_style and (dsp is TransitionDsp.FILTER_SWEEP or duration >= SWEEP_MIN_SECONDS):
-        dsp, rule = swap[dsp], f"{rule}; previous junction used {previous_style.value}"
+        dsp = (TransitionDsp.LOWPASS_OUT
+               if dsp is TransitionDsp.FILTER_BLEND and rise is not None and rise < 0.0
+               else swap[dsp])
+        rule = f"{rule}; previous junction used {previous_style.value}"
     if vocals is None and dsp is not TransitionDsp.SHORT_FADE:
         # The light analyzer never measures vocals, so this is the normal case.
         # A full-window mid crossfade lets two singers overlap for the whole

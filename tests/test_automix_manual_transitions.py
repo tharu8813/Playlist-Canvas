@@ -39,6 +39,17 @@ def _manual(settings, **overrides):
 
 
 class OverrideStorageTests(unittest.TestCase):
+    def test_dj_effect_parameters_survive_project_save_and_validate(self) -> None:
+        for style in ("beat_roll", "lowpass_out"):
+            override = TransitionOverride(150.0, style=style, roll_beats=0.25, filter_cutoff_hz=350.0)
+            document = ProjectDocument(settings=ProjectSettings(automix_overrides={"a>b": override.to_dict()}))
+            settings = automix_settings_for(ProjectDocument.from_dict(document.to_dict()).settings)
+            self.assertEqual(settings.override_for("a", "b"), override)
+        for values in ({"roll_beats": 0}, {"roll_beats": True}, {"roll_beats": float("nan")},
+                       {"filter_cutoff_hz": 100}, {"filter_cutoff_hz": float("inf")}):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                TransitionOverride(150.0, **values)
+
     def test_round_trip_and_broken_entries_are_dropped(self) -> None:
         good = TransitionOverride(150.0, 4.0, 12.0, "filter_sweep", False, None)
         parsed = parse_overrides({
@@ -71,6 +82,19 @@ class OverrideStorageTests(unittest.TestCase):
 
 
 class ManualPlanTests(unittest.TestCase):
+    def test_dj_effects_keep_custom_parameters_in_the_render_plan(self) -> None:
+        tracks = _tracks()
+        for style in ("beat_roll", "lowpass_out"):
+            override = TransitionOverride(150.0, duration=4.0, style=style, tempo_match=False,
+                                          roll_beats=0.25, filter_cutoff_hz=350.0, echo_beats=2.0)
+            plan = compile_automix(tracks, _analyses(tracks), _manual(ENABLED, **{"a>b": override}))
+            validate_compiled_render_plan(plan)
+            transition = plan.audio.transitions[0]
+            self.assertEqual(transition.dsp.value, style)
+            self.assertEqual((transition.roll_beats, transition.filter_cutoff_hz), (0.25, 350.0))
+            if style == "beat_roll":
+                self.assertAlmostEqual(transition.beat_seconds, 0.5)  # independent of echo settings
+
     def test_manual_junction_uses_the_users_cues_length_and_style(self) -> None:
         tracks = _tracks()
         override = TransitionOverride(150.0, 4.0, 12.0, "filter_sweep", tempo_match=False)

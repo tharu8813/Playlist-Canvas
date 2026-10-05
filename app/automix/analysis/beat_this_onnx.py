@@ -22,6 +22,8 @@ is BeatThisAnalysisProvider's.
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import importlib.util
 import os
 import sys
@@ -107,6 +109,7 @@ class OnnxAudio2Beats:
         options.add_session_config_entry("session.intra_op.allow_spinning", "0")
         self._session = onnxruntime.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
 
+    @timed("automix.beat_downbeat_model_seconds")
     def __call__(self, signal: np.ndarray, sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
         if sample_rate != SAMPLE_RATE:
             raise ValueError(f"Beat This expects {SAMPLE_RATE} Hz audio, got {sample_rate}")
@@ -132,8 +135,9 @@ class BeatThisOnnxAnalysisProvider(BeatThisAnalysisProvider):
     Open-Unmix (also ONNX) instead of Demucs for vocal activity."""
 
     provider_id = "beat_this_onnx"
-    ONNX_VERSION = "3"
-    """2: the basic analyzer's version 6 fields (decay start). 3: vocal_coverage."""
+    ONNX_VERSION = "5"
+    """2: basic version 6 (decay start). 3: vocal_coverage. 4: YAMNet genre/mood tags.
+    5: basic version 8 (acoustic curves)."""
 
     def __init__(self, ffmpeg_executable: Path) -> None:
         super().__init__(ffmpeg_executable)

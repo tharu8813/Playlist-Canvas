@@ -86,6 +86,7 @@ class ColorEditorDialog(QDialog):
         title: str,
         parent: QWidget | None = None,
         tracks: list[PlaylistTrack] | None = None,
+        show_personal_color: bool = True,
     ) -> None:
         super().__init__(parent)
         install_help_shortcut(self, ("canvas", "properties"), translator)
@@ -128,10 +129,12 @@ class ColorEditorDialog(QDialog):
         personal_page_layout = QVBoxLayout(personal_page)
         personal_page_layout.setContentsMargins(10, 12, 10, 10)
         tabs.addTab(color_page, "색상" if self._korean else "Color")
-        tabs.addTab(
-            personal_page,
-            "퍼스널 컬러" if self._korean else "Personal color",
-        )
+        if show_personal_color:
+            tabs.addTab(
+                personal_page,
+                "퍼스널 컬러" if self._korean else "Personal color",
+            )
+        tabs.tabBar().setVisible(show_personal_color)
         root.addWidget(tabs, 1)
 
         preview_card = QFrame()

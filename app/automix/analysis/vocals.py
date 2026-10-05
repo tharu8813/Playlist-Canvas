@@ -22,6 +22,8 @@ Two separators share activity_spans:
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import importlib.util
 import logging
 import sys
@@ -117,6 +119,7 @@ class DemucsVocalDetector:
         self._model = None
         self._lock = threading.Lock()
 
+    @timed("automix.vocal_seconds")
     def detect(self, path: Path, duration: float, cancel_event: threading.Event) -> tuple[tuple[float, float], ...]:
         spans: list[tuple[float, float]] = []
         for start, length in mix_regions(duration):
@@ -176,6 +179,7 @@ class OnnxVocalDetector:
         self._session = None
         self._lock = threading.Lock()
 
+    @timed("automix.vocal_seconds")
     def detect(self, path: Path, duration: float, cancel_event: threading.Event) -> tuple[tuple[float, float], ...]:
         spans: list[tuple[float, float]] = []
         for start, length in mix_regions(duration):

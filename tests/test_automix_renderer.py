@@ -6,6 +6,7 @@ import subprocess
 import threading
 import unittest
 import wave
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -242,6 +243,26 @@ def _styled(clip_a: str, clip_b: str, start: float, duration: float, dsp: Transi
 
 
 class TransitionStyleGraphTests(unittest.TestCase):
+    def test_dj_effect_graphs_loop_samples_and_command_the_lowpass(self) -> None:
+        from app.automix.renderer import roll_slice_seconds
+
+        clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 56.0, 60.0)]
+        roll = replace(_styled("a", "b", 56.0, 4.0, TransitionDsp.BEAT_ROLL),
+                       beat_seconds=0.5, roll_beats=0.25)
+        graph, _ = build_filter_graph(clips, [roll])
+        self.assertIn("aloop=loop=31:size=6000", graph)
+        self.assertIn("atrim=end_sample=192000", graph)
+        self.assertIn("curve1=nofade:curve2=qsin", graph)
+        lowpass = replace(roll, dsp=TransitionDsp.LOWPASS_OUT, filter_cutoff_hz=350.0)
+        graph, _ = build_filter_graph(clips, [lowpass])
+        self.assertIn("lowpass@close0=f=18000", graph)
+        self.assertIn("lowpass@close0 f 350.00", graph)
+        self.assertNotIn("aloop", graph)
+        fallback, _ = build_filter_graph(clips, [roll], transition_dsp=False)
+        self.assertNotIn("aloop", fallback)
+        self.assertEqual(roll_slice_seconds(replace(roll, beat_seconds=3.0, roll_beats=1.0)), 3.0)
+        self.assertEqual(roll_slice_seconds(replace(roll, duration=0.05)), 0.05)
+
     def _pair_graph(self, dsp: TransitionDsp | None, kind: TransitionType = TransitionType.BEAT_MATCH) -> str:
         clips = [_clip("a", "a", 0.0, 60.0), _clip("b", "b", 52.0, 60.0)]
         return build_filter_graph(clips, [_styled("a", "b", 52.0, 8.0, dsp, kind)])[0]
@@ -651,6 +672,51 @@ def _spectrum_level(segment: np.ndarray, frequency: float) -> float:
     "Set PLAYLIST_CANVAS_TEST_FFMPEG to run real FFmpeg bass-swap checks.",
 )
 class RealBassSwapRenderTests(unittest.TestCase):
+    def test_dj_effect_auditions_match_the_full_mix_samples(self) -> None:
+        from types import SimpleNamespace
+        from app.automix.progressive import render_window
+
+        paths = {"a": self._source("a", _tones([(100, 0.1), (2000, 0.1)], 8.0)),
+                 "b": self._source("b", _tones([(700, 0.1)], 8.0))}
+        clips = [_clip("a", "a", 0.0, 8.0), _clip("b", "b", 4.0, 8.0)]
+        for style in (TransitionDsp.BEAT_ROLL, TransitionDsp.LOWPASS_OUT):
+            with self.subTest(style=style):
+                transition = replace(_styled("a", "b", 4.0, 4.0, style),
+                                     beat_seconds=0.5, roll_beats=0.25, filter_cutoff_hz=350)
+                full = self._render(clips, [transition], paths)
+                plan = SimpleNamespace(audio=AudioRenderPlan(tuple(clips), (transition,)))
+                window = render_window(plan, 0, 1.0, preroll=1.0, postroll=1.0)
+                audition = self._render(window.plan.clips, window.plan.transitions, paths)
+                first = round(window.origin * SAMPLE_RATE)
+                self.assertLess(np.max(np.abs(audition - full[first:first + len(audition)])), 2e-5)
+
+    def test_lowpass_out_removes_highs_and_preserves_the_solo_and_length(self) -> None:
+        paths = {"a": self._source("a", _tones([(100, 0.1), (6000, 0.1)], 8.0)),
+                 "b": self._source("b", np.zeros((8 * SAMPLE_RATE, 2)))}
+        clips = [_clip("a", "a", 0.0, 8.0), _clip("b", "b", 4.0, 8.0)]
+        transition = replace(_styled("a", "b", 4.0, 4.0, TransitionDsp.LOWPASS_OUT),
+                             filter_cutoff_hz=350.0)
+        audio = self._render(clips, [transition], paths)
+        self._assert_exact_length(audio, 12.0)
+        solo = audio[SAMPLE_RATE:2 * SAMPLE_RATE, 0]
+        self.assertAlmostEqual(_spectrum_level(solo, 6000), 0.1, delta=0.005)
+        closing = audio[7 * SAMPLE_RATE:int(7.5 * SAMPLE_RATE), 0]
+        self.assertLess(_spectrum_level(closing, 6000), _spectrum_level(closing, 100) * 0.1)
+
+    def test_beat_roll_repeats_the_cue_slice_and_preserves_length(self) -> None:
+        original = _tones([(500, 0.1)], 8.0)
+        original[int(4.25 * SAMPLE_RATE):] = _tones([(2500, 0.1)], 3.75)
+        paths = {"a": self._source("a", original),
+                 "b": self._source("b", np.zeros((8 * SAMPLE_RATE, 2)))}
+        clips = [_clip("a", "a", 0.0, 8.0), _clip("b", "b", 4.0, 8.0)]
+        transition = replace(_styled("a", "b", 4.0, 4.0, TransitionDsp.BEAT_ROLL),
+                             beat_seconds=0.5, roll_beats=0.5)
+        audio = self._render(clips, [transition], paths)
+        self._assert_exact_length(audio, 12.0)
+        loop = audio[5 * SAMPLE_RATE:6 * SAMPLE_RATE, 0]
+        self.assertGreater(_spectrum_level(loop, 500), 0.05)
+        self.assertLess(_spectrum_level(loop, 2500), 0.005)
+
     def setUp(self) -> None:
         self.executable = Path(os.environ["PLAYLIST_CANVAS_TEST_FFMPEG"].strip())
         self._directory = TemporaryDirectory(prefix="automix-bass-swap-")

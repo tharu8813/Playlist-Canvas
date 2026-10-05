@@ -316,8 +316,34 @@ class VocalAwareWindowTests(unittest.TestCase):
                 incoming = replace(_analysis("b", 90.0, duration=200.0), vocal_activity=incoming_vocals)
                 (candidate,) = self._generate(outgoing, incoming)
                 self.assertIs(candidate.strategy, TransitionStrategy.FIXED_CROSSFADE)
-                self.assertEqual(candidate.duration_seconds, 3.0)
+                self.assertEqual(candidate.duration_seconds, 2.0 if incoming_vocals[0][0] == 0.0 else 3.0)
                 self.assertIn(reason, candidate.reasons)
+
+    def test_fixed_fade_uses_short_measured_intro_without_overlapping_voices(self) -> None:
+        outgoing = replace(_analysis("a", None, duration=200.0), vocal_activity=((10.0, 200.0),))
+        incoming = replace(_analysis("b", None, duration=200.0),
+                           audible_start_seconds=1.0, vocal_activity=((2.5, 150.0),))
+        (candidate,) = self._generate(outgoing, incoming)
+        self.assertIs(candidate.strategy, TransitionStrategy.FIXED_CROSSFADE)
+        self.assertAlmostEqual(candidate.duration_seconds, 1.5)
+        self.assertAlmostEqual(candidate.incoming_source_time + candidate.duration_seconds, 2.5)
+        self.assertEqual(candidate.outgoing_source_out, 200.0)
+
+    def test_fixed_fade_does_not_treat_unmeasured_intro_as_instrumental(self) -> None:
+        outgoing = replace(_analysis("a", None), vocal_activity=((10.0, 180.0),))
+        incoming = replace(_analysis("b", None), vocal_activity=((30.0, 150.0),), vocal_coverage=())
+        (candidate,) = self._generate(outgoing, incoming)
+        self.assertEqual(candidate.duration_seconds, 2.0)
+
+    def test_fixed_fade_stays_within_audible_audio_and_duration_limit(self) -> None:
+        outgoing = replace(_analysis("a", None), audible_start_seconds=178.5)
+        incoming = replace(_analysis("b", None), audible_start_seconds=1.0, audible_end_seconds=2.5)
+        settings = AutoMixTransitionSettings(min_transition_seconds=1.0, max_transition_seconds=1.2)
+        (candidate,) = generate_candidates(outgoing, incoming,
+                                          evaluate_compatibility(outgoing, incoming, settings), settings)
+        self.assertAlmostEqual(candidate.duration_seconds, 1.2)
+        self.assertGreaterEqual(candidate.outgoing_source_time, 178.5)
+        self.assertLessEqual(candidate.incoming_source_time + candidate.duration_seconds, 2.5)
 
 def _structure(
     track_id: str, duration: float, *,

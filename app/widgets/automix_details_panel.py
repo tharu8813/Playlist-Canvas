@@ -16,6 +16,8 @@ from app.automix.diagnostics import transition_rows
 from app.utils.i18n import Language, Translator
 
 _STYLE_LABELS = {
+    "beat_roll": ("비트 롤", "Beat roll"),
+    "lowpass_out": ("로우패스 아웃", "Lowpass out"),
     "bass_swap": ("베이스 스왑", "Bass swap"),
     "vocal_safe_eq": ("보컬 보호 EQ", "Vocal-safe EQ"),
     "filter_blend": ("필터 블렌드", "Filter blend"),
@@ -35,6 +37,12 @@ _DETAIL_FIELDS = (
     ("strategy", "전략", "Strategy"),
     ("bars", "마디", "Bars"),
     ("score", "후보 점수", "Candidate score"),
+    ("acoustic_cost", "음향 충돌 예측 비용", "Predicted acoustic cost"),
+    ("predicted_hole_db", "예측 음량 공백(dB)", "Predicted level deficit (dB)"),
+    ("obscured_vocal_seconds", "가려지는 보컬 예측(초)", "Predicted obscured vocals (s)"),
+    ("voice_collision_seconds", "동시 보컬 예측(초)", "Predicted voice collision (s)"),
+    ("skipped_vocal_seconds", "생략되는 첫 보컬(초)", "Skipped opening vocals (s)"),
+    ("landing_distance_seconds", "진입점 착지 오차(초)", "Entry landing distance (s)"),
     ("outgoing_bpm", "나가는 곡 BPM", "Outgoing BPM"),
     ("incoming_bpm", "들어오는 곡 BPM", "Incoming BPM"),
     ("target_bpm", "목표 BPM", "Target BPM"),
@@ -50,6 +58,10 @@ _DETAIL_FIELDS = (
     ("outgoing_structure_anchor", "구조 큐: 아웃트로", "Structure cue: outro"),
     ("incoming_structure_anchor", "구조 큐: 인트로 끝", "Structure cue: intro end"),
     ("energy_delta", "에너지 차이", "Energy delta"),
+    ("outgoing_genres", "나가는 구간 장르", "Outgoing region genres"),
+    ("incoming_genres", "들어오는 구간 장르", "Incoming region genres"),
+    ("outgoing_moods", "나가는 구간 분위기", "Outgoing region moods"),
+    ("incoming_moods", "들어오는 구간 분위기", "Incoming region moods"),
     ("vocal_overlap", "보컬 겹침", "Vocal overlap"),
     ("key_clash", "키 충돌", "Key clash"),
     ("outgoing_downbeat_confidence", "나가는 곡 다운비트 신뢰도", "Outgoing downbeat confidence"),

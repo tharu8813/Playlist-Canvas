@@ -1281,6 +1281,15 @@ class FunctionalRegressionTests(unittest.TestCase):
                 displayed_active = np.max(displayed, axis=0)
                 self.assertTrue(np.all(displayed_active[[0, 1, 3, 5, 8]] > 0.0))
 
+    def test_bass_envelope_normalizes_low_frequency_hits(self) -> None:
+        levels = np.full((12, 24), 0.01, dtype=np.float32)
+        levels[4:7, :4] = 0.8
+        envelope = PythonVisualizerRenderer.bass_envelope(levels)
+        self.assertEqual(envelope.shape, (12,))
+        self.assertTrue(np.all((0.0 <= envelope) & (envelope <= 1.0)))
+        self.assertGreater(float(envelope[5]), float(envelope[1]))
+        self.assertGreater(float(envelope[7]), 0.0)  # release is smooth, not a snap
+
     def test_batched_visualizer_fft_is_exact_and_uses_bounded_calls(self) -> None:
         renderer = PythonVisualizerRenderer(Path("ffmpeg.exe"))
         rng = np.random.default_rng(20260829)
@@ -2054,7 +2063,8 @@ class FunctionalRegressionTests(unittest.TestCase):
         self.assertGreater(apple[3], 0.0)
         self.assertLess(apple[3], 1.0)
         self.assertEqual(apple[4], 1)
-        self.assertAlmostEqual(apple[2], spotify[2])
+        # Glow settles symmetrically; Rise moves quickly then slows down.
+        self.assertGreater(apple[2], spotify[2])
         self.assertAlmostEqual(item.opacity(), 1.0)
         self.assertAlmostEqual(item.scale(), source.scale)
         self.assertAlmostEqual(source.subtitle_scroll_offset, 0.0)

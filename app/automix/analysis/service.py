@@ -19,6 +19,7 @@ from app.automix.models import TrackAnalysis
 from app.automix.settings import AutoMixAnalysisSettings
 from app.models.playlist import PlaylistTrack
 from app.utils.subprocess_utils import lower_thread_if_background
+from app.utils.performance import timed
 
 LOGGER = logging.getLogger(__name__)
 
@@ -150,6 +151,7 @@ class AnalysisService:
             groups[key].append(track)
         return groups, order
 
+    @timed("automix.analysis_cache_or_analysis_seconds")
     def _analyze_one(
         self, group: list[PlaylistTrack], cancel_event: threading.Event,
         step_progress: StepCallback | None = None,

@@ -62,6 +62,7 @@ class LrcGeneratorDialog(QDialog):
         parent: QWidget | None = None,
         *,
         playlist_tracks: list[PlaylistTrack] | None = None,
+        target_track_id: str = "",
         track_edit_mode: bool = False,
         initial_audio_path: str = "",
         initial_cues: list[dict[str, object]] | None = None,
@@ -93,6 +94,7 @@ class LrcGeneratorDialog(QDialog):
         self._initial_title = initial_title
         self._initial_artist = initial_artist
         self._playlist_tracks = list(playlist_tracks or [])
+        self._target_track_id = target_track_id
         self._applied_lyrics_track: PlaylistTrack | None = None
         self._lyrics_choice_audio = ""
         self._timing_baseline_lines: list[str] = []
@@ -579,6 +581,45 @@ class LrcGeneratorDialog(QDialog):
     @property
     def add_saved_files_to_project(self) -> bool:
         return self.add_to_project_check.isChecked()
+
+    @property
+    def result_track_id(self) -> str:
+        """Return the unambiguous playlist track matching the edited audio."""
+        if not self.audio_path:
+            return ""
+        try:
+            audio = Path(self.audio_path).expanduser().resolve()
+        except OSError:
+            return ""
+        matches: list[PlaylistTrack] = []
+        for track in self._playlist_tracks:
+            try:
+                if Path(track.file_path).expanduser().resolve() == audio:
+                    matches.append(track)
+            except OSError:
+                continue
+        preferred = next(
+            (track for track in matches if track.id == self._target_track_id), None
+        )
+        if preferred is not None:
+            return preferred.id
+        return matches[0].id if len(matches) == 1 else ""
+
+    def accept(self) -> None:
+        """Close only when the result has a durable file or an application target."""
+        if (
+            not self.track_edit_mode
+            and not self.saved_paths
+            and not self.result_track_id
+        ):
+            self._set_status(
+                "적용할 플레이리스트 곡이 없습니다. 곡을 선택해 다시 열거나 LRC 파일을 먼저 저장하세요."
+                if self._korean else
+                "There is no playlist track to apply to. Select a track and reopen, or save an LRC file first.",
+                True,
+            )
+            return
+        super().accept()
 
     def _use_project_audio(self) -> None:
         """Compatibility wrapper for selecting the current project-audio item."""

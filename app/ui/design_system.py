@@ -15,7 +15,7 @@ COLORS = {
     "window": "#191B1D", "panel": "#212426", "field": "#191C1E",
     "button": "#2C3033", "hover": "#373D40", "text": "#E6E8E7",
     "muted": "#A3AAA9", "border": "#393E40", "disabled": "#25292B",
-    # Clearly dimmer than @muted: a disabled button must not read as clickable.
+    # Distinct from explanatory text: disabled controls keep their values visible.
     "disabled_text": "#6C7472",
     "alternate": "#272B2D", "shadow": "#111314", "accent": "#79C7B4",
     "accent_hover": "#96D7C7",
@@ -28,7 +28,9 @@ def studio_stylesheet() -> str:
     for name, value in sorted(COLORS.items(), key=lambda item: -len(item[0])):
         sheet = sheet.replace(f"@{name}", value)
     icon_root = root / "assets/icons" if getattr(sys, "frozen", False) else root / "app/assets/icons"
-    return sheet.replace("@spin_up", (icon_root / "spin_up.svg").as_posix()).replace(
+    return sheet.replace("@spin_up_disabled", (icon_root / "spin_up_disabled.svg").as_posix()).replace(
+        "@spin_down_disabled", (icon_root / "spin_down_disabled.svg").as_posix(),
+    ).replace("@spin_up", (icon_root / "spin_up.svg").as_posix()).replace(
         "@spin_down", (icon_root / "spin_down.svg").as_posix(),
     ).replace("@check", (icon_root / "check.svg").as_posix())
 
@@ -59,7 +61,9 @@ def apply_studio_style(application: QApplication | None) -> None:
     for role, color in roles.items():
         palette.setColor(getattr(QPalette.ColorRole, role), QColor(COLORS[color]))
     for role in (QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText, QPalette.ColorRole.WindowText):
-        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(COLORS["muted"]))
+        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(COLORS["disabled_text"]))
+    for role in (QPalette.ColorRole.Base, QPalette.ColorRole.Button):
+        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(COLORS["disabled"]))
     application.setPalette(palette)
     application.setStyleSheet(studio_stylesheet())
     application.setProperty("playlistCanvasEffectiveTheme", "dark")

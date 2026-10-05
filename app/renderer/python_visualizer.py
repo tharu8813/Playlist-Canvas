@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import math
 import os
 import subprocess
@@ -208,6 +210,7 @@ class PythonVisualizerRenderer:
             process.kill()
             process.wait(timeout=3)
 
+    @timed("audio.rms_seconds")
     def _analyze_rms(self, samples: np.ndarray, fps: int,
                      cancel_event: threading.Event) -> np.ndarray:
         """Return one actual channel RMS value per rendered frame."""
@@ -222,6 +225,7 @@ class PythonVisualizerRenderer:
             result[index] = float(np.sqrt(np.mean(window * window))) if len(window) else 0.0
         return result
 
+    @timed("audio.waveform_seconds")
     def _analyze_waveform(self, samples: np.ndarray, fps: int, points: int,
                           cancel_event: threading.Event) -> np.ndarray:
         """Sample signed PCM windows for a genuine time-domain waveform."""
@@ -270,6 +274,70 @@ class PythonVisualizerRenderer:
         return self._frequency_band_values(spectrum, frequencies, bins, probes)
 
     @staticmethod
+    def music_envelope(levels: np.ndarray, fps: float, profile: tuple,
+                       cancel_event: threading.Event | None = None) -> np.ndarray:
+        """Source-specific response, evaluated once on the track clock."""
+        values = np.asarray(levels, dtype=np.float32)
+        if values.ndim == 1:
+            values = values.reshape(1, -1)
+        if values.size == 0:
+            return np.zeros(1, dtype=np.float32)
+        band, attack_seconds, release_seconds, sensitivity, threshold, curve = profile
+        count = values.shape[1]
+        # FFT bands are logarithmic, from 35 Hz to Nyquist.
+        bounds = {"bass": (0, max(1, count // 6)),
+                  "mid": (count // 6, max(count // 6 + 1, count * 2 // 3)),
+                  "treble": (count * 2 // 3, count), "full": (0, count)}
+        start, end = bounds[band]
+        energy = np.mean(values[:, start:end], axis=1)
+        floor, ceiling = np.percentile(energy, (20, 95))
+        normalized = np.clip((energy - floor) / max(1e-6, ceiling - floor), 0, 1)
+        target = np.clip((normalized * sensitivity - threshold) / (1 - threshold), 0, 1)
+        target = target ** {"soft": 0.6, "linear": 1.0, "punchy": 2.0}[curve]
+        rates = [1.0 if seconds <= 0 else 1 - math.exp(-math.log(10) / (max(1, fps) * seconds))
+                 for seconds in (attack_seconds, release_seconds)]
+        result = np.zeros_like(target, dtype=np.float32)
+        previous = 0.0
+        for index, value in enumerate(target):
+            if cancel_event is not None and index % 1024 == 0 and cancel_event.is_set():
+                raise PythonVisualizerError("Music reaction analysis cancelled.")
+            previous += (float(value) - previous) * rates[0 if value > previous else 1]
+            result[index] = previous
+        return result
+
+    @staticmethod
+    def music_reaction_level(envelope: object, fps: float, elapsed: float, offset: float = 0) -> float:
+        if envelope is None or elapsed - offset < 0:
+            return 0.0
+        try:
+            frame = round((elapsed - offset) * fps)
+            return float(envelope[frame]) if frame < len(envelope) else 0.0
+        except (IndexError, TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def bass_envelope(levels: np.ndarray, fps: float = 30) -> np.ndarray:
+        """Return a smooth, track-normalized 0..1 low-frequency envelope."""
+        values = np.asarray(levels, dtype=np.float32)
+        if values.ndim == 1:
+            values = values.reshape(1, -1)
+        if values.size == 0:
+            return np.zeros(1, dtype=np.float32)
+        low = np.mean(values[:, :max(1, values.shape[1] // 6)], axis=1)
+        floor = float(np.percentile(low, 20))
+        ceiling = float(np.percentile(low, 95))
+        target = np.clip((low - floor) / max(1e-6, ceiling - floor), 0.0, 1.0)
+        result = np.zeros_like(target, dtype=np.float32)
+        step = 30.0 / max(1.0, fps)
+        attack, release = 1.0 - 0.28 ** step, 1.0 - 0.82 ** step
+        previous = 0.0
+        for index, value in enumerate(target):
+            rate = attack if value > previous else release
+            previous += (float(value) - previous) * rate
+            result[index] = previous
+        return result
+
+    @staticmethod
     def preview_image(width: int, height: int, overlay: object, levels: np.ndarray,
                       frame_index: int, processed: bool = False,
                       frame_rate: int = 60,
@@ -289,6 +357,7 @@ class PythonVisualizerRenderer:
             peak_values=peak_values,
         )
 
+    @timed("audio.fft_levels_seconds")
     def _analyze_levels(self, samples: np.ndarray, fps: int, bands: int,
                         cancel_event: threading.Event) -> np.ndarray:
         """Return smooth logarithmic-frequency levels for every output frame."""

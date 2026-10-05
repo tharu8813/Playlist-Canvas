@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from app.inspector.editors.base import editing, show_fields
+from app.inspector.editors.base import MotionSection, editing, show_fields
 from app.models.source import Source
 
 if TYPE_CHECKING:
@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 _OWN_FIELD_KEYS = (
     "text", "font_size", "font_weight", "font_family",
     "text_stroke_color", "text_stroke_width", "text_alignment", "text_overflow",
+    *MotionSection.REACTIVE_KEYS,
 )
 
 

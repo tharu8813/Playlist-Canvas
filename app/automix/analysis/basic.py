@@ -34,6 +34,8 @@ this analyzer:
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import logging
 import subprocess
 import threading
@@ -50,6 +52,8 @@ from app.automix.analysis.provider import (
 )
 from app.automix.beatgrid import fit_beat_grid
 from app.automix.models import TrackAnalysis
+from app.automix.music import analyze_music
+from app.automix.structure.timbre import timbre_curves
 from app.models.playlist import PlaylistTrack
 from app.utils.subprocess_utils import hidden_process_kwargs
 
@@ -149,16 +153,18 @@ class BasicAnalysisProvider:
     """The always-available default AnalysisProvider (see AnalysisProvider Protocol)."""
 
     provider_id = "basic"
-    version = "6"
+    version = "8"
     """Bumped from "1": Phase 7 added key/energy/vocal_activity to the
     output, which invalidates any cache entry from before those fields
     existed (see app/automix/cache.py -- analyzer_version is part of the
     cache key). "3": audible start/end bounds. "4": no voice-band vocal guess.
-    "5": BPM from a fitted beat grid. "6": decay start."""
+    "5": BPM from a fitted beat grid. "6": decay start. "7": local YAMNet genre/mood tags.
+    "8": measured one-second RMS/timbre for acoustic transition search."""
 
     def __init__(self, ffmpeg_executable: Path) -> None:
         self.ffmpeg_executable = Path(ffmpeg_executable)
 
+    @timed("automix.basic_seconds")
     def analyze(
         self,
         track: PlaylistTrack,
@@ -207,6 +213,15 @@ class BasicAnalysisProvider:
         key, key_confidence = self._estimate_key(signal)
         energy = self._estimate_energy(signal)
         audible_start, audible_end = audible_bounds(signal, duration_seconds)
+        music_tags = analyze_music(signal, SAMPLE_RATE, duration_seconds, cancel_event)
+        report(0.95, STEP_KEY_ENERGY)
+        # Reuse the decoded PCM and the existing spectral extractor, including
+        # when Sonara is absent. Do not manufacture verse/chorus labels.
+        measured = signal[:min(len(signal), round(duration_seconds * SAMPLE_RATE))]
+        bass, brightness, percussive = timbre_curves(measured, SAMPLE_RATE)
+        rms = tuple(float(np.sqrt(np.mean(np.square(measured[start:start + SAMPLE_RATE], dtype=np.float64))))
+                    for start in range(0, len(measured), SAMPLE_RATE))
+        report(0.99, STEP_KEY_ENERGY)
 
         return TrackAnalysis(
             track_id=track.id, source_path=track.file_path, duration_seconds=duration_seconds,
@@ -215,6 +230,8 @@ class BasicAnalysisProvider:
             energy=energy,
             audible_start_seconds=audible_start, audible_end_seconds=audible_end,
             decay_start_seconds=decay_start(signal, duration_seconds),
+            music_tags=music_tags,
+            rms_curve=rms, bass_curve=bass, brightness_curve=brightness, percussive_curve=percussive,
             analyzer_id=self.provider_id, analyzer_version=self.version,
         )
 
@@ -224,6 +241,7 @@ class BasicAnalysisProvider:
             return analysis  # silent/too short: analyze_signal never tracks beats there
         return replace(analysis, **self._rhythm_fields(signal, analysis.duration_seconds, lambda *_: None))
 
+    @timed("automix.beat_analysis_seconds")
     def _rhythm_fields(
         self, signal: np.ndarray, duration_seconds: float, report: Callable[[float, str], None],
     ) -> dict[str, object]:
@@ -253,6 +271,7 @@ class BasicAnalysisProvider:
             "meter_confidence": meter_confidence,
         }
 
+    @timed("automix.decode_seconds")
     def _decode_mono_pcm(
         self, path: Path, cancel_event: threading.Event, *,
         sample_rate: int = SAMPLE_RATE, channels: int = 1, start: float = 0.0, duration: float | None = None,
@@ -340,6 +359,7 @@ class BasicAnalysisProvider:
         return max(0.0, min(1.0, 1.0 - coefficient_of_variation * 2.0))
 
     @staticmethod
+    @timed("automix.downbeat_guess_seconds")
     def _infer_downbeats(beat_times: np.ndarray) -> tuple[np.ndarray, float]:
         """Provisional 4/4 bar guess: every 4th beat starting at the first.
 
@@ -352,6 +372,7 @@ class BasicAnalysisProvider:
         return beat_times[0::4], PROVISIONAL_METER_CONFIDENCE
 
     @staticmethod
+    @timed("automix.key_seconds")
     def _estimate_key(signal: np.ndarray) -> tuple[str | None, float]:
         chroma = librosa.feature.chroma_stft(y=signal, sr=SAMPLE_RATE)
         chroma_mean = np.mean(chroma, axis=1)
@@ -359,6 +380,7 @@ class BasicAnalysisProvider:
         return (key, confidence) if confidence > 0.0 else (None, 0.0)
 
     @staticmethod
+    @timed("automix.energy_seconds")
     def _estimate_energy(signal: np.ndarray) -> float:
         """RMS relative to ENERGY_REFERENCE_RMS -- a documented heuristic, not LUFS."""
         rms = float(np.sqrt(np.mean(np.square(signal))))

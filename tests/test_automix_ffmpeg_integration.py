@@ -265,11 +265,15 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             sequential_duration = renderer._timeline_duration(tracks)
             self.assertEqual(sequential_duration, 40.0)
 
+            plans = []
             parts = renderer._render_automix_audio_segments(
                 tracks, directory, sequential_duration, None, __import__("threading").Event(),
+                plan_callback=plans.append,
             )
             self.assertIsNotNone(parts)
-            self.assertAlmostEqual(sum(part.count for part in parts) / 48000, 37.0, delta=0.05)
+            self.assertEqual(len(plans), 1)
+            self.assertLess(plans[0].duration_seconds, sequential_duration)
+            self.assertAlmostEqual(sum(part.count for part in parts) / 48000, plans[0].duration_seconds, delta=0.05)
             for part in parts:
                 # The intermediate AutoMix mix must be lossless, not a second
                 # lossy AAC encode -- the final combine step already encodes to
@@ -299,11 +303,21 @@ class RealAutomixExportIntegrationTests(unittest.TestCase):
             )
             renderer = FFmpegRenderer(executable)
             output_path = directory / "out.mp4"
-            result = renderer.render(
-                [image, image], tracks, output_path, settings, transition_mode="automix",
-            )
+            from app.automix.planner import compile_automix
+
+            plans = []
+            def record_plan(*args, **kwargs):
+                plan = compile_automix(*args, **kwargs)
+                plans.append(plan)
+                return plan
+            with patch("app.automix.planner.compile_automix", side_effect=record_plan):
+                result = renderer.render(
+                    [image, image], tracks, output_path, settings, transition_mode="automix",
+                )
             self.assertTrue(output_path.is_file())
-            self.assertAlmostEqual(result.validation.duration_seconds, 17.0, delta=0.5)
+            self.assertEqual(len(plans), 1)
+            self.assertLess(plans[0].duration_seconds, 20.0)
+            self.assertAlmostEqual(result.validation.duration_seconds, plans[0].duration_seconds, delta=0.5)
             # The final mux still encodes audio exactly once, to AAC.
             self.assertEqual(_audio_codec(executable, output_path), "aac")
             # And loudness normalization must actually have run for this

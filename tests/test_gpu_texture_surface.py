@@ -4,6 +4,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QRectF, QSize
@@ -29,6 +31,54 @@ class GpuTextureSurfaceTests(unittest.TestCase):
             api="OpenGL", version="4.6", vendor="Vendor", renderer="Renderer",
         )
         self.assertEqual(info.label, "OpenGL 4.6 · Renderer")
+
+    @unittest.skipUnless(GPU_TEXTURE_SURFACE_AVAILABLE, "Qt OpenGL unavailable")
+    def test_repaint_swaps_do_not_count_as_new_scene_frames(self) -> None:
+        surface = GpuTexturePreviewSurface()
+        surface._frame_serial = 1
+        surface._on_frame_swapped()
+        surface._on_frame_swapped()
+        surface._frame_serial = 2
+        surface._on_frame_swapped()
+        self.assertEqual(surface.upload_stats.presented_frames, 3)
+        self.assertEqual(surface.upload_stats.presented_scene_frames, 2)
+        surface.deleteLater()
+
+    @unittest.skipUnless(GPU_TEXTURE_SURFACE_AVAILABLE, "Qt OpenGL unavailable")
+    def test_plane_preparation_preserves_padded_rows_odd_sizes_and_owned_storage(self) -> None:
+        class MappedPlane:
+            def __init__(self, width: int, rows: int, channels: int, padding: int) -> None:
+                self.stride = width * channels + padding
+                self.raw = bytearray((index * 17 + 3) % 256 for index in range(self.stride * rows))
+
+            def bytesPerLine(self, _plane: int) -> int:
+                return self.stride
+
+            def bits(self, _plane: int) -> memoryview:
+                return memoryview(self.raw)
+
+        for width, rows, channels, padding in ((17, 9, 1, 0), (17, 9, 1, 7), (9, 5, 2, 5), (9, 5, 4, 0)):
+            frame = MappedPlane(width, rows, channels, padding)
+            original = bytes(frame.raw)
+            packed = GpuTexturePreviewSurface._copy_video_plane(frame, 0, width * channels, rows)
+            self.assertEqual(packed, b"".join(
+                original[row * frame.stride:row * frame.stride + width * channels]
+                for row in range(rows)
+            ))
+            for target_width, target_rows in ((width, rows), (7, 3), (1, 1), (width, 3), (7, rows)):
+                with self.subTest(shape=(width, rows, channels, padding, target_width, target_rows)):
+                    pixels = np.frombuffer(original, dtype=np.uint8).reshape(rows, frame.stride)
+                    pixels = pixels[:, :width * channels].reshape(rows, width, channels)
+                    y = np.linspace(0, rows - 1, target_rows).astype(np.intp)
+                    x = np.linspace(0, width - 1, target_width).astype(np.intp)
+                    expected = pixels[y[:, None], x[None, :], :].tobytes()
+                    actual = GpuTexturePreviewSurface._copy_scaled_video_plane(
+                        frame, 0, width, rows, target_width, target_rows, channels=channels,
+                    )
+                    self.assertEqual(actual, expected)
+                    frame.raw[:] = bytes(len(frame.raw))
+                    self.assertEqual(actual, expected)  # pixels outlive mapped storage
+                    frame.raw[:] = original
 
     @unittest.skipUnless(
         GPU_TEXTURE_SURFACE_AVAILABLE, "Qt OpenGL widgets are unavailable",
@@ -153,10 +203,12 @@ class GpuTextureSurfaceTests(unittest.TestCase):
         self.assertEqual(entry.video_format, "Format_NV12")
         self.assertEqual((entry.width, entry.height), (2, 2))
         self.assertEqual(entry.allocated_bytes, 6)
+        self.assertEqual(surface.upload_stats.texture_allocations, 2)
         with patch.object(surface, "_upload_raw_texture") as upload_again:
             surface._upload_video_frame_layer(layer)
         upload_again.assert_not_called()
         self.assertEqual(surface.upload_stats.texture_reuses, 1)
+        self.assertEqual(surface.upload_stats.texture_allocations, 2)
         surface._textures.clear()
         surface.deleteLater()
 

@@ -36,7 +36,7 @@ STEP_NAMES = {
     STEP_DECODE: ("오디오 읽기", "Reading audio"),
     STEP_RHYTHM: ("템포·비트 찾기", "Tempo and beats"),
     STEP_BARS: ("마디 나누기", "Bars"),
-    STEP_KEY_ENERGY: ("키·에너지·무음 구간", "Key, energy, silence"),
+    STEP_KEY_ENERGY: ("키·에너지·장르·분위기", "Key, energy, genre, mood"),
     STEP_BEAT_MODEL: ("비트 모델(Beat This!)", "Beat model (Beat This!)"),
     STEP_VOCALS: ("보컬 감지", "Vocal detection"),
     STRUCTURE_STAGE: ("곡 구조(인트로·구간·에너지)", "Song structure (intro, sections, energy)"),

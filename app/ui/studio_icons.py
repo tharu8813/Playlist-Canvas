@@ -91,6 +91,7 @@ _MENU_SHAPES = {
     "reset_layout": '<path d="M4 10a8 8 0 1 1 1 8 M4 4v6h6"/>',
     "timeline": '<rect x="3" y="5" width="10" height="5" rx="1"/><rect x="9" y="14" width="12" height="5" rx="1"/>',
     "automix": '<path d="M3 6c6 0 12 12 18 12 M3 18c6 0 12-12 18-12"/>',
+    "audio": '<path d="M4 8h4v8H4z M10 5h4v14h-4z M16 10h4v4h-4z"/>',
     "language": '<circle cx="12" cy="12" r="9"/><path d="M3 12h18 M12 3a14 14 0 0 1 0 18 M12 3a14 14 0 0 0 0 18"/>',
     "help": '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6 M12 17v.5"/>',
     "shortcuts": '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h1 M11 10h1 M16 10h1 M7 14h10"/>',

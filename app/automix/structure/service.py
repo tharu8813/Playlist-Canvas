@@ -15,6 +15,8 @@ off-thread execution wraps this in QThread/QRunnable and forwards
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import logging
 import os
 import threading
@@ -152,6 +154,7 @@ class StructureAnalysisService:
             groups[key].append(track)
         return groups, order
 
+    @timed("automix.structure_cache_or_analysis_seconds")
     def _analyze_one(
         self, group: list[PlaylistTrack], cancel_event: threading.Event,
     ) -> tuple[str, TrackStructureAnalysis | None, str | None]:

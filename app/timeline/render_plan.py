@@ -65,8 +65,9 @@ class AudioRenderClip:
         ramp = self.tempo_ramp
         if ramp is None:
             return ((self.source_in, self.source_out, self.playback_rate),)
-        start = min(max(ramp.source_start, self.source_in), self.source_out)
-        end = min(max(ramp.source_end, start), self.source_out)
+        # Keep the original rate-step grid when an audition trims into a
+        # ramp. Restarting its interpolation at source_in changes the music.
+        start, end = ramp.source_start, ramp.source_end
         step = (end - start) / ramp.steps
         segments = [(self.source_in, start, self.playback_rate)]
         segments.extend(
@@ -75,7 +76,9 @@ class AudioRenderClip:
             for index in range(ramp.steps)
         )
         segments.append((end, self.source_out, ramp.end_rate))
-        return tuple(segment for segment in segments if segment[1] > segment[0])
+        return tuple((max(a, self.source_in), min(b, self.source_out), rate)
+                     for a, b, rate in segments
+                     if min(b, self.source_out) > max(a, self.source_in))
 
     def timeline_at(self, source_seconds: float) -> float:
         """Timeline second at which this clip plays ``source_seconds`` of its track."""
@@ -134,6 +137,8 @@ class TransitionDsp(str, Enum):
     DOWNBEAT_CUT = "downbeat_cut"
     """A hard cut from one downbeat to the next track's, with only a few
     milliseconds of equal-power overlap so it does not click."""
+    BEAT_ROLL = "beat_roll"
+    LOWPASS_OUT = "lowpass_out"
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +178,10 @@ class AudioRenderTransition:
     """ECHO_OUT: thin the repeats below the low cut."""
     tape_entry: float | None = None
     """TAPE_STOP: window progress where the incoming track enters (``None``: the renderer's default)."""
+    roll_beats: float = 0.5
+    """BEAT_ROLL: length of the repeated outgoing slice, in beats."""
+    filter_cutoff_hz: float = 800.0
+    """LOWPASS_OUT: final cutoff of the outgoing lowpass sweep."""
 
 
 @dataclass(frozen=True, slots=True)

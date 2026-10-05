@@ -87,9 +87,9 @@ def excerpt_plan(plan, transition, style: str) -> tuple[AudioRenderPlan, float]:
     """Just this transition plus EXCERPT_CONTEXT_SECONDS of solo audio each side, same geometry."""
     clips = {clip.clip_id: clip for clip in plan.audio.clips}
     outgoing, incoming = clips[transition.clip_a], clips[transition.clip_b]
-    cue = outgoing.source_in + (transition.timeline_start - outgoing.timeline_start) * outgoing.playback_rate
-    source_in = max(outgoing.source_in, cue - EXCERPT_CONTEXT_SECONDS * outgoing.playback_rate)
-    lead = (cue - source_in) / outgoing.playback_rate
+    cue = outgoing.source_at(transition.timeline_start)
+    source_in = outgoing.source_at(max(outgoing.timeline_start, transition.timeline_start - EXCERPT_CONTEXT_SECONDS))
+    lead = transition.timeline_start - outgoing.timeline_at(source_in)
     outgoing = replace(outgoing, timeline_start=0.0, source_in=source_in, gain=1.0)
     incoming = replace(
         incoming, timeline_start=lead, gain=1.0,
@@ -110,6 +110,7 @@ def main() -> int:
     parser.add_argument("songs", nargs="+", type=Path)
     parser.add_argument("--ffmpeg", type=Path, default=None)
     parser.add_argument("--ab", action="store_true", help="render every transition once per DSP style")
+    parser.add_argument("--compare", action="store_true", help="render old-rule and acoustic-search junction excerpts")
     args = parser.parse_args()
     ffmpeg = FFmpegRenderer.find_executable(args.ffmpeg)
     out_dir: Path = args.out_dir
@@ -138,6 +139,20 @@ def main() -> int:
     paths = {track.id: track.file_path for track in tracks}
     mix = pipeline.render(plan.audio, paths, out_dir, container="flac")
     samples = decode_mono(ffmpeg, mix.path)
+    if args.compare:
+        before = compile_automix(tracks, {key: replace(value, rms_curve=(), bass_curve=(), brightness_curve=(),
+                                 percussive_curve=()) for key, value in analyses.items()}, AUTOMIX_SETTINGS,
+                                 structures=structures, log_diagnostics=False)
+        comparisons = []
+        for name, compared in (("before", before), ("after", plan)):
+            for index, transition in enumerate(compared.audio.transitions, 1):
+                style = transition.dsp.value if transition.dsp else "legacy"
+                excerpt, lead = excerpt_plan(compared, transition, style)
+                rendered = pipeline.render(excerpt, paths, out_dir / "compare" / f"{index:02d}_{name}", container="flac")
+                comparisons.append({"index": index, "version": name, "style": style, "duration": transition.duration,
+                                    "audio": str(rendered.path), **dict(transition.details),
+                                    **window_metrics(decode_mono(ffmpeg, rendered.path), METRIC_RATE, lead, transition.duration)})
+        (out_dir / "comparison.json").write_text(rows_to_json(comparisons), encoding="utf-8")
     transitions = {t.timeline_start: t for t in plan.audio.transitions}
     for row in rows:
         transition = transitions.get(row["timeline_start"]) if row["duration"] else None

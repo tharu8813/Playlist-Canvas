@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
+from dataclasses import replace
+from functools import wraps
 from math import ceil, floor
 from pathlib import Path
 
@@ -10,9 +15,10 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QTransform
 
 from app.canvas.live_canvas import CanvasScene
+from app.animation.lyrics import lyric_progress
 from app.canvas.source_item import SourceItem
 from app.animation.curves import (
-    animation_pose, ease_in_out_cubic, loop_pose, motion_padding,
+    AnimationPose, animation_pose, ease_in_out_cubic, loop_pose, motion_padding, music_reactive_pose,
 )
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
@@ -24,7 +30,7 @@ from app.preview.album_art import (
     extract_track_personal_color,
 )
 from app.preview.frame_state import (
-    MixJunction, resolve_edge_animation, resolve_lyrics_cue_state,
+    MixJunction, resolve_edge_animation, resolve_lyrics_cue_state, resolve_lyrics_intro_state,
     resolve_now_playing_exit_state, resolve_timeline_window_phase,
 )
 from app.preview.text_template import (
@@ -32,6 +38,7 @@ from app.preview.text_template import (
     expand_track_template,
 )
 from app.services.lyrics_service import LyricsService
+from app.services.lyrics_intro_service import instrumental_spans
 
 # Text template tokens whose resolved value changes during an export: every
 # token the renderer substitutes except ``track_total``, which is constant for
@@ -66,10 +73,12 @@ def _effective_lyric_context(
     cues: Sequence[dict[str, object]],
     cue_index: int,
 ) -> tuple[int, int]:
-    """Resolve automatic previous/next cue counts against available height."""
+    """Resolve automatic context; horizontal flow keeps one cue on each side."""
     source = graphics_item.source
     previous_setting = int(source.subtitle_context_lines)
     next_setting = int(source.subtitle_next_lines)
+    if source.subtitle_flow_direction in {"left", "right"}:
+        return max(0, previous_setting) if previous_setting >= 0 else 1, max(0, next_setting) if next_setting >= 0 else 1
     if previous_setting >= 0 and next_setting >= 0:
         return previous_setting, next_setting
 
@@ -77,6 +86,7 @@ def _effective_lyric_context(
     following_available = max(0, len(cues) - cue_index - 1)
     following = min(following_available, max(0, next_setting))
     used_rows = _lyric_cue_line_count(cues[cue_index])
+    used_rows += int(graphics_item._subtitle_intro_state is not None)
     used_rows += sum(
         _lyric_cue_line_count(cues[index])
         for index in range(cue_index - previous, cue_index)
@@ -168,10 +178,25 @@ def _crossfade_pixmaps(
     return merged
 
 
+def _with_lyric_settings(capture):
+    @wraps(capture)
+    def resolved(scene, *args, **kwargs):
+        # Cover state evaluation as well as painting: even a failed evaluation
+        # must return each item to its original editable basic model.
+        with ExitStack() as settings:
+            items = kwargs.get("band_source_items")
+            for item in scene.items() if items is None else items:
+                if isinstance(item, SourceItem) and item.source.subtitle_advanced_categories:
+                    settings.enter_context(item.lyric_settings())
+            return capture(scene, *args, **kwargs)
+    return resolved
+
+
 class CanvasSnapshot:
     """Captures only the export artboard, without editor handles or workspace chrome."""
 
     @staticmethod
+    @timed("canvas.scene_render_seconds")
     def capture(scene: CanvasScene, output_scale: float = 1.0,
                 z_min: float | None = None, z_max: float | None = None,
                 transparent: bool = False, image_buffer: QImage | None = None,
@@ -351,6 +376,8 @@ class CanvasSnapshot:
                 source.loop_motion, source.loop_motion_amount,
                 source.width, source.height,
             ) * scale
+            if source.source_type is SourceType.TEXT and source.uses_bass_reaction:
+                padding += max(source.width, source.height, source.font_size) * source.music_reactive_strength * scale
             if source.source_type is SourceType.NOW_PLAYING:
                 if source.now_playing_exit_animation in slide_styles:
                     padding += 24.0 * scale
@@ -451,7 +478,7 @@ class CanvasSnapshot:
         positive could freeze a time-dependent element in the final video.
         """
         if (source.animation_in != "none" or source.animation_out != "none"
-                or source.loop_motion != "none"):
+                or source.loop_motion != "none" or source.uses_bass_reaction):
             return False
         if source.personal_color_enabled:
             return False
@@ -644,6 +671,8 @@ class CanvasSnapshot:
         return invariant
 
     @staticmethod
+    @timed("canvas.capture_seconds")
+    @_with_lyric_settings
     def capture_track(scene: CanvasScene, track: PlaylistTrack, track_number: int,
                       track_total: int, start_seconds: float, animation_phase: str | None = None,
                       animation_progress: float = 1.0, elapsed_seconds: float = 0.0,
@@ -660,7 +689,10 @@ class CanvasSnapshot:
                       partial_render: bool = False,
                       render_metrics: dict[str, object] | None = None,
                       band_source_items: Sequence[SourceItem] | None = None,
-                      junction: MixJunction | None = None) -> QImage:
+                      junction: MixJunction | None = None,
+                      bass_level: float = 0.0,
+                      music_levels: dict[str, float] | None = None,
+                      lyric_instrumental_spans: tuple | None = None) -> QImage:
         """Capture one track state with metadata, cover art, and an optional Z band.
 
         ``junction``: the frame sits at a crossfade/AutoMix handover of the
@@ -674,6 +706,7 @@ class CanvasSnapshot:
             else elapsed_seconds
         )
         original_text: list[tuple[SourceItem, str]] = []
+        original_music_levels: list[tuple[SourceItem, float, int | None]] = []
         original_transforms: list[
             tuple[SourceItem, object, float, float, float, QTransform]
         ] = []
@@ -684,6 +717,8 @@ class CanvasSnapshot:
         original_subtitle_lines: list[tuple[SourceItem, int, int]] = []
         original_subtitle_offsets: list[tuple[SourceItem, float]] = []
         original_subtitle_transitions: list[tuple[SourceItem, float]] = []
+        original_subtitle_style_indices: list[tuple[SourceItem, tuple[int, ...]]] = []
+        original_subtitle_motion = []
         original_subtitle_anchors: list[
             tuple[SourceItem, int, int, int, int]
         ] = []
@@ -766,6 +801,17 @@ class CanvasSnapshot:
                 original_subtitle_transitions.append((
                     graphics_item, graphics_item._subtitle_transition_progress,
                 ))
+                original_subtitle_style_indices.append((
+                    graphics_item, graphics_item._subtitle_line_style_indices,
+                ))
+                original_subtitle_motion.append((
+                    graphics_item, graphics_item._subtitle_transition_raw, graphics_item._subtitle_cue_layout,
+                    graphics_item._subtitle_intro_state,
+                ))
+                graphics_item._subtitle_intro_state = resolve_lyrics_intro_state(
+                    track, source, elapsed_seconds,
+                    instrumental_spans(track, source) if lyric_instrumental_spans is None else lyric_instrumental_spans,
+                )
                 original_subtitle_anchors.append((
                     graphics_item, graphics_item._subtitle_anchor_line,
                     graphics_item._subtitle_anchor_line_count,
@@ -777,6 +823,8 @@ class CanvasSnapshot:
                     graphics_item._subtitle_incoming_visible,
                 ))
                 graphics_item._subtitle_transition_progress = 1.0
+                graphics_item._subtitle_transition_raw = 1.0
+                graphics_item._subtitle_cue_layout = ()
                 graphics_item._subtitle_previous_line_count = 0
                 graphics_item._subtitle_leaving_line_count = 0
                 graphics_item._subtitle_entering_line_count = 0
@@ -797,10 +845,8 @@ class CanvasSnapshot:
                 transitioning = cue_state.transitioning
                 eased = 1.0
                 if transitioning:
-                    # A symmetric ease keeps the lyric stack from jumping most of
-                    # its distance in the first few frames. The two styles differ
-                    # in how each line is painted, not in this scroll timing.
-                    eased = ease_in_out_cubic(cue_state.transition_progress)
+                    eased = lyric_progress(source, cue_state.transition_progress)
+                    graphics_item._subtitle_transition_raw = cue_state.transition_progress
                 if cue_index is not None:
                     context, next_context = _effective_lyric_context(
                         graphics_item, track.lyrics, cue_index,
@@ -828,8 +874,23 @@ class CanvasSnapshot:
                         max(1, len([line for line in block.splitlines() if line.strip()]))
                         for block in blocks
                     ]
+                    graphics_item._subtitle_line_style_indices = tuple(
+                        line_index
+                        for line_count in block_line_counts
+                        for line_index in range(line_count)
+                    )
+                    graphics_item._subtitle_cue_layout = tuple(
+                        (slot, line_index, line_count)
+                        for slot, line_count in enumerate(block_line_counts)
+                        for line_index in range(line_count)
+                    )
                     source.text = "\n".join(block for block in blocks if block) or source.subtitle_fallback
                     relative_index = max(0, cue_index - first)
+                    intro_state = graphics_item._subtitle_intro_state
+                    if intro_state is not None and intro_state.held_cue_index is not None:
+                        graphics_item._subtitle_intro_state = replace(
+                            intro_state, held_slot=intro_state.held_cue_index - first,
+                        )
                     anchor_line = sum(block_line_counts[:relative_index])
                     graphics_item._subtitle_anchor_line = anchor_line
                     graphics_item._subtitle_anchor_line_count = block_line_counts[relative_index]
@@ -854,6 +915,11 @@ class CanvasSnapshot:
                         source.subtitle_current_line_count = 1
                 else:
                     source.text = lyric or source.text or source.subtitle_fallback
+                    graphics_item._subtitle_line_style_indices = tuple(
+                        range(max(1, len([
+                            line for line in source.text.splitlines() if line.strip()
+                        ])))
+                    )
                     source.subtitle_current_line = -1
                     source.subtitle_current_line_count = 1
                     graphics_item._subtitle_anchor_line = -1
@@ -862,9 +928,8 @@ class CanvasSnapshot:
                 if transitioning:
                     graphics_item._subtitle_transition_progress = eased
                     # Keep the lyric card/background stable. Only its text layout
-                    # moves, so context lines no longer pulse and fade each time a
-                    # cue changes. A full previous-cue height compensates for the
-                    # new anchored layout and produces a continuous upward scroll.
+                    # moves. Measure between cue centers so differing multiline
+                    # cue heights stay continuous across the boundary.
                     previous_line_count = 0
                     if cue_index and cue_index > 0 and (context > 0 or extra_leading):
                         previous_text = LyricsService.decode_line_breaks(
@@ -888,7 +953,8 @@ class CanvasSnapshot:
                             graphics_item._subtitle_entering_line_count = block_line_counts[-1]
                     line_height = graphics_item._lyric_line_height()
                     source.subtitle_scroll_offset = (
-                        previous_line_count * line_height * (1.0 - eased)
+                        (previous_line_count + graphics_item._subtitle_anchor_line_count) / 2
+                        * line_height * (1.0 - eased) if previous_line_count else 0.0
                     )
                 graphics_item.update()
             if source.source_type is SourceType.TRACK_LIST:
@@ -990,17 +1056,20 @@ class CanvasSnapshot:
             if source.source_type is SourceType.BACKGROUND and source.background_mode == "album_art":
                 original_backgrounds.append((graphics_item, QPixmap(graphics_item._pixmap)))
                 if source.background_ambient:
-                    flow_step = round(global_seconds * AMBIENT_FLOW_HZ)
+                    ambient_motion = max(0.0, min(3.0, source.background_ambient_motion))
+                    flow_step = round(global_seconds * ambient_motion * AMBIENT_FLOW_HZ)
                     graphics_item._pixmap = _filtered_track_pixmap(
                         graphics_item,
                         lambda: create_cached_ambient_background(
                             track.file_path, max(1, round(source.width)),
-                            max(1, round(source.height)), max(18.0, source.blur),
+                            max(1, round(source.height)), source.background_ambient_blur,
                             track.cover_path, phase=global_seconds,
+                            motion=ambient_motion,
                             brightness=source.brightness, contrast=source.contrast,
                         ),
                         ("ambient", round(source.width), round(source.height),
-                         flow_step, *filter_key),
+                         round(source.background_ambient_blur, 2), flow_step,
+                         *filter_key),
                         prefiltered=True,
                     )
                 else:
@@ -1028,13 +1097,14 @@ class CanvasSnapshot:
                                 previous_track.file_path,
                                 max(1, round(source.width)),
                                 max(1, round(source.height)),
-                                max(18.0, source.blur),
+                                source.background_ambient_blur,
                                 previous_track.cover_path, phase=global_seconds,
+                                motion=ambient_motion,
                                 brightness=source.brightness, contrast=source.contrast,
                             ),
                             ("ambient-prev", round(source.width),
                              round(source.height),
-                             round(global_seconds * AMBIENT_FLOW_HZ),
+                             round(source.background_ambient_blur, 2), flow_step,
                              previous_track.file_path,
                              previous_track.cover_path, *filters),
                             prefiltered=True,
@@ -1108,6 +1178,26 @@ class CanvasSnapshot:
                 source.loop_motion, global_seconds, source.loop_motion_period,
                 source.loop_motion_amount, source.width, source.height,
             )
+            if (source.source_type is SourceType.BACKGROUND
+                    and source.background_bass_reactive):
+                level = max(0.0, min(1.0, float(bass_level)))
+                bass_scale = 1.0 + level * source.background_bass_strength
+                pose = pose.combined(AnimationPose(
+                    dx=-source.width * (bass_scale - 1.0) * 0.5,
+                    dy=-source.height * (bass_scale - 1.0) * 0.5,
+                    scale=bass_scale,
+                ))
+            music_level = music_levels.get(source.id, 0.0) if music_levels is not None else bass_level
+            if source.source_type is SourceType.LYRICS:
+                original_music_levels.append((graphics_item, graphics_item._music_reaction_level,
+                                              graphics_item._music_preview_current_line))
+                graphics_item._music_preview_current_line = None
+                graphics_item._music_reaction_level = music_level if source.uses_bass_reaction else 0.0
+            elif source.source_type is SourceType.TEXT and source.uses_bass_reaction:
+                pose = pose.combined(music_reactive_pose(
+                    source.music_reactive_effect, music_level,
+                    source.music_reactive_strength, source.font_size,
+                ))
             if edge is not None and edge[1] != "none":
                 phase, style, local_progress = edge
                 pose = animation_pose(
@@ -1167,6 +1257,10 @@ class CanvasSnapshot:
                 render_metrics["capture_rect"] = effective_capture_rect
             return captured
         finally:
+            for graphics_item, level, current_line in original_music_levels:
+                graphics_item._music_reaction_level = level
+                graphics_item._music_preview_current_line = current_line
+                graphics_item.update()
             for graphics_item, colors, gradient_colors in original_personal_colors:
                 for field, value in colors.items():
                     setattr(graphics_item.source, field, value)
@@ -1186,6 +1280,14 @@ class CanvasSnapshot:
                 graphics_item.update()
             for graphics_item, progress in original_subtitle_transitions:
                 graphics_item._subtitle_transition_progress = progress
+                graphics_item.update()
+            for graphics_item, indices in original_subtitle_style_indices:
+                graphics_item._subtitle_line_style_indices = indices
+                graphics_item.update()
+            for graphics_item, raw, layout, intro_state in original_subtitle_motion:
+                graphics_item._subtitle_transition_raw = raw
+                graphics_item._subtitle_cue_layout = layout
+                graphics_item._subtitle_intro_state = intro_state
                 graphics_item.update()
             for (
                 graphics_item, anchor_line, anchor_count, previous_line_count,

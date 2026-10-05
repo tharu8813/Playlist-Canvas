@@ -50,6 +50,7 @@ from app.automix.candidates import (
 from app.automix.analysis.key import shift_key
 from app.automix.compatibility import evaluate_compatibility
 from app.automix.exits import CUT_SECONDS, plan_phrase_exit
+from app.automix.intelligence import choose_transition, optimize_handoff
 from app.automix.models import TrackAnalysis
 from app.automix.overrides import (
     MAX_DURATION_SECONDS, STYLE_AUTO, STYLE_CUT, STYLE_EQ, STYLE_LEGACY, TransitionOverride,
@@ -116,11 +117,23 @@ def compile_automix(
     rejects such a playlist up front; Preview still has to plan it.
     """
     selected = [track for track in tracks if track.enabled and track.duration_seconds > 0.0]
-    structures = structures or {}
+    structures = dict(structures or {})
     analyses = {
         track_id: _with_lyric_vocals(track, analyses[track_id])
         for track in selected if (track_id := track.id) in analyses
     }
+    for track_id, analysis in analyses.items():
+        if analysis.rms_curve:
+            structure = structures.get(track_id) or TrackStructureAnalysis(
+                track_id=track_id, source_path=analysis.source_path, duration_seconds=analysis.duration_seconds)
+            # Measured energy/timbre remains available without Sonara. Keep its
+            # real section boundaries and curves whenever it supplied them.
+            structures[track_id] = replace(
+                structure, energy_curve=structure.energy_curve or tuple(min(1.0, v / 0.3) for v in analysis.rms_curve),
+                energy_curve_hop_seconds=structure.energy_curve_hop_seconds if structure.energy_curve else 1.0,
+                bass_curve=structure.bass_curve or analysis.bass_curve,
+                brightness_curve=structure.brightness_curve or analysis.brightness_curve,
+                percussive_curve=structure.percussive_curve or analysis.percussive_curve)
     clips, transitions = _place_tracks(selected, analyses, structures, settings, log_diagnostics)
     presentation, metadata, duration = build_presentation_and_metadata(clips)
     plan = CompiledRenderPlan(
@@ -290,7 +303,12 @@ def _plan_overlap(
     unlocked = select_best_candidate(candidates)
     if override is not None:  # a recommendation that keeps the user's locked values
         candidates = _honour_locks(candidates, override, outgoing_analysis, incoming_analysis)
-    best = select_best_candidate(candidates)
+    # Never rank a window that collides with the preceding junction. A later,
+    # shorter candidate can still fit even when the preferred long one cannot.
+    candidates = [c for c in candidates if c.outgoing_source_time >= max(ramp_floor, previous_clip.source_in) - _GAP_EPSILON]
+    best, planned_decision = choose_transition(
+        candidates, compatibility, outgoing_analysis, incoming_analysis,
+        structures.get(previous_track.id), structures.get(track.id), previous_style=previous_style)
     phrase_exit = None
     if best is None or best.strategy in (TransitionStrategy.FIXED_CROSSFADE, TransitionStrategy.CUT):
         # No shared tempo: leave on a phrase boundary instead of the same end fade every time.
@@ -355,7 +373,7 @@ def _plan_overlap(
     # DSP Phase 2: the mixing style is decided here, where the analysis and
     # the exact window both exist, and travels in the plan -- the renderer
     # never re-derives it. Timing above is already final and is not touched.
-    decision = phrase_exit.decision if phrase_exit is not None else select_transition_dsp(
+    decision = phrase_exit.decision if phrase_exit is not None else planned_decision or select_transition_dsp(
         best, compatibility, selector_outgoing, incoming_analysis,
         structures.get(previous_track.id), structures.get(track.id), previous_style=previous_style,
     )
@@ -401,6 +419,7 @@ def _plan_overlap(
         clip_a=previous_clip.clip_id, clip_b=f"automix:{track.id}",
         timeline_start=timeline_start, duration=overlap, type=transition_type,
         dsp=decision.dsp, dsp_reasons=decision.reasons, details=details, vocal_handoff=decision.vocal_handoff,
+        band_windows=decision.band_windows,
         beat_seconds=phrase_exit.beat_seconds if phrase_exit is not None else None,
     )
     # One line per transition in the app log, for tuning against real music.
@@ -558,6 +577,7 @@ def _plan_manual(
     metrics: tuple[tuple[str, object], ...] = ()
     reasons: tuple[str, ...] = ()
     handoff = override.vocal_handoff
+    band_windows = None
     if override.style == STYLE_AUTO:
         if outgoing_analysis is not None and incoming_analysis is not None:
             strategy = (TransitionStrategy.BEAT_MATCH if rate != 1.0
@@ -579,6 +599,9 @@ def _plan_manual(
                 candidate, compatibility, heard, incoming_analysis,
                 outgoing_structure, incoming_structure,
             )
+            if override.vocal_handoff is None:
+                _, decision = optimize_handoff(candidate, decision, heard, incoming_analysis, incoming_structure)
+                band_windows = decision.band_windows
             dsp, reasons, metrics = decision.dsp, decision.reasons, decision.metrics
             handoff = handoff if handoff is not None else decision.vocal_handoff
         else:
@@ -591,8 +614,6 @@ def _plan_manual(
         band_windows = override.eq_bands if override.eq_bands is not None else default_eq_bands()
     else:
         dsp = None if override.style == STYLE_LEGACY else TransitionDsp(override.style)
-    if override.style != STYLE_EQ:
-        band_windows = None
     if dsp is not TransitionDsp.VOCAL_SAFE_EQ:
         handoff = None
     # BEAT_MATCH without a dsp renders the bass swap; a plain crossfade must stay EQUAL_POWER.
@@ -632,9 +653,11 @@ def _plan_manual(
         timeline_start=timeline_start, duration=duration, type=transition_type,
         dsp=dsp, dsp_reasons=(f"* manual: {style_name}", *reasons[1:]), details=details, vocal_handoff=handoff,
         band_windows=band_windows,
-        beat_seconds=(60.0 / outgoing_analysis.bpm / rate * override.echo_beats
+        beat_seconds=(60.0 / outgoing_analysis.bpm / rate *
+                      (1.0 if dsp is TransitionDsp.BEAT_ROLL else override.echo_beats)
                       if outgoing_analysis is not None and outgoing_analysis.bpm else None),
         echo_feedback=override.echo_feedback, echo_low_cut=override.echo_low_cut, tape_entry=override.tape_entry,
+        roll_beats=override.roll_beats, filter_cutoff_hz=override.filter_cutoff_hz,
     )
     if log_diagnostics:
         LOGGER.info("AutoMix transition (manual): %s", describe_transition(

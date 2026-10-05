@@ -246,6 +246,21 @@ def loop_pose(
     return AnimationPose()
 
 
+def music_reactive_pose(effect: str, level: float, strength: float,
+                        font_size: float) -> AnimationPose:
+    """Deterministic text pose from the shared fast-attack, slow-release bass envelope."""
+    amount = clamp_progress(level) * strength
+    if effect == "bass_scale":
+        return AnimationPose(scale=1.0 + amount)
+    if effect == "bass_bounce":
+        return AnimationPose(dy=-font_size * 0.6 * amount)
+    if effect == "bass_stretch":
+        return AnimationPose(scale_x=1.0 + amount)
+    if effect == "bass_tilt":
+        return AnimationPose(rotation=-10.0 * amount)
+    return AnimationPose()
+
+
 def motion_padding(styles: set[str] | frozenset[str], loop: str, loop_amount: float,
                    width: float, height: float) -> float:
     """How far a source can travel outside its resting box while animating."""

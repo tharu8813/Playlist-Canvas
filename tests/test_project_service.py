@@ -66,6 +66,27 @@ class ProjectServiceTests(unittest.TestCase):
             ProjectMediaService.apply_replacements(document, missing)
             self.assertEqual(document.playlist[0].cover_path, "")
 
+    def test_missing_lyrics_file_keeps_cues_embedded_in_project(self) -> None:
+        with TemporaryDirectory(prefix="pvs-lyrics-relink-") as raw_directory:
+            directory = Path(raw_directory)
+            audio = directory / "audio.wav"
+            audio.write_bytes(b"audio")
+            cues = [{"start": 1.0, "end": 3.0, "text": "Keep me"}]
+            document = ProjectDocument(playlist=[PlaylistTrack(
+                str(audio), "Track",
+                lyrics_path=str(directory / "missing.lrc"),
+                lyrics=[cue.copy() for cue in cues],
+            )])
+            missing = ProjectMediaService.validate(
+                document, directory / "project.pvsproj",
+            )
+
+            self.assertEqual([entry.kind for entry in missing], ["lyrics"])
+            ProjectMediaService.apply_replacements(document, missing)
+
+            self.assertEqual(document.playlist[0].lyrics_path, "")
+            self.assertEqual(document.playlist[0].lyrics, cues)
+
     def test_portable_package_embeds_and_reloads_content(self) -> None:
         with TemporaryDirectory(prefix="pvs-project-test-") as raw_directory:
             directory = Path(raw_directory)

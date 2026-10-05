@@ -32,6 +32,7 @@ from app.automix.candidates import (
     sung_spans,
 )
 from app.automix.models import TrackAnalysis
+from app.automix.music import character, music_tags_at
 from app.automix.phrases import in_peak, phrase_starts
 from app.automix.renderer import TAPE_STOP_ENTRY
 from app.automix.structure.models import TrackStructureAnalysis
@@ -85,6 +86,11 @@ def plan_phrase_exit(
     if outgoing.bpm is None or outgoing.beat_alignment_quality() != "reliable" or not outgoing.downbeats:
         return None
     end = audible_end(outgoing)
+    incoming_start = audible_start(incoming)
+    a = character(music_tags_at(outgoing, max(audible_start(outgoing), end - 20.0), end))
+    b = character(music_tags_at(incoming, incoming_start, min(audible_end(incoming), incoming_start + 20.0)))
+    if max(a[0], b[0]) > max(a[1], b[1]):
+        return None  # gentle music keeps the natural fade instead of a cut, echo or turntable brake
     decay = outgoing.decay_start_seconds
     natural_min, natural_max = NATURAL_ENDING_SECONDS
     if decay is not None and natural_min <= end - decay <= natural_max:
@@ -118,6 +124,16 @@ def plan_phrase_exit(
                 rule += "; the voice is still going: taken out with it"
         if exit_point is None:
             continue
+        if outgoing.rms_curve and incoming.rms_curve and style is not TransitionDsp.DOWNBEAT_CUT:
+            # An incompatible BPM alone is not a musical reason to interrupt
+            # the ending. Preserve words beyond an echo's sampled beat, and
+            # reserve theatrical exits for a measured, drum-driven passage.
+            dry_end = exit_point + beat if style is TransitionDsp.ECHO_OUT else exit_point
+            if any(a < end and b > dry_end + SUNG_MARGIN_SECONDS for a, b in sung_spans(outgoing)):
+                continue
+            drums = _timbre(outgoing_structure, "percussive_curve", exit_point, min(end, exit_point + bar))
+            if drums is None or drums < DRUMS:
+                continue
         source_in = incoming_cue
         if style is TransitionDsp.TAPE_STOP:
             # The incoming downbeat lands where it enters (TAPE_STOP_ENTRY of the window).

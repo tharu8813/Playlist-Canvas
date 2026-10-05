@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -10,9 +11,11 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QImage
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from app.models.playlist import PlaylistTrack
+from app.models.source import Source, SourceType
 from app.preview.export_plan import ExportPlan
 from app.preview import export_session as export_session_module
 from app.preview.export_session import (
@@ -29,6 +32,9 @@ from app.renderer.ffmpeg_renderer import (
     RenderFrame,
 )
 from app.renderer.static_video_stream import StaticVideoStreamResult
+from app.renderer.python_visualizer import PythonVisualizerError
+
+import numpy as np
 
 
 def _samples(count: int = 2) -> list[ExportFrameSample]:
@@ -232,6 +238,87 @@ class ExportSessionTests(unittest.TestCase):
                 session.run()
             session.cancel_streams()
         self.assertTrue(recorder.cancelled)
+
+    def test_bass_preparation_keeps_ui_alive_and_caches_unchanged_output(self) -> None:
+        session = self._session(_plan(streamed=False, direct=False), _StagingRecorder(), None, threading.Event())
+        main_thread = threading.get_ident()
+        worker_threads = []
+        progress_threads = []
+        pulses = []
+        session._scene = SimpleNamespace(items=lambda: [SimpleNamespace(source=Source(
+            SourceType.TEXT, "Title", music_reactive_enabled=True,
+        ))])
+        session._pump_ui = self.app.processEvents
+        session._report_progress = lambda *_: progress_threads.append(threading.get_ident())
+        levels = np.ones((2, 24), dtype=np.float32)
+
+        def decode(_path, cancel):
+            worker_threads.append(threading.get_ident())
+            cancel.wait(0.15)
+            return np.ones(10, dtype=np.float32)
+
+        timer = QTimer()
+        timer.setInterval(10)
+        timer.timeout.connect(lambda: pulses.append(True))
+        timer.start()
+        try:
+            with patch.object(export_session_module.PythonVisualizerRenderer, "_decode_mono_audio", side_effect=decode) as decoded, patch.object(export_session_module.PythonVisualizerRenderer, "_analyze_levels", return_value=levels):
+                result = session._prepare_bass_envelopes()
+                self.assertIs(session._prepare_bass_envelopes(), result)
+            self.assertEqual(decoded.call_count, 1)
+        finally:
+            timer.stop()
+        self.assertGreaterEqual(len(pulses), 3)
+        self.assertTrue(worker_threads and all(thread != main_thread for thread in worker_threads))
+        self.assertTrue(progress_threads and all(thread == main_thread for thread in progress_threads))
+        np.testing.assert_array_equal(result[session._tracks[0].id], export_session_module.PythonVisualizerRenderer.bass_envelope(levels))
+
+    def test_cancel_during_bass_decode_finishes_worker_before_returning(self) -> None:
+        cancel = threading.Event()
+        session = self._session(_plan(streamed=False, direct=False), _StagingRecorder(), None, cancel)
+        session._scene = SimpleNamespace(items=lambda: [SimpleNamespace(source=Source(
+            SourceType.BACKGROUND, "Background", background_bass_reactive=True,
+        ))])
+        session._pump_ui = self.app.processEvents
+        started = threading.Event()
+        finished = threading.Event()
+
+        def decode(_path, cancellation):
+            started.set()
+            cancellation.wait(0.5)
+            finished.set()
+            raise PythonVisualizerError("Rendering was cancelled.")
+
+        timer = QTimer()
+        timer.timeout.connect(lambda: cancel.set() if started.is_set() else None)
+        timer.start(10)
+        try:
+            with patch.object(export_session_module.PythonVisualizerRenderer, "_decode_mono_audio", side_effect=decode):
+                with self.assertRaises(RenderCancelledError):
+                    session._prepare_bass_envelopes()
+        finally:
+            timer.stop()
+        self.assertTrue(finished.is_set())
+        self.assertIsNone(session._bass_envelopes)
+        self.assertFalse(any(thread.name.startswith("export-bass") for thread in threading.enumerate()))
+
+    def test_bass_failure_keeps_other_tracks_and_invisible_background_skips_work(self) -> None:
+        session = self._session(_plan(streamed=False, direct=False), _StagingRecorder(), None, threading.Event())
+        background = Source(SourceType.BACKGROUND, "Background", background_bass_reactive=True, visible=False)
+        session._scene = SimpleNamespace(items=lambda: [SimpleNamespace(source=background)])
+        with patch.object(export_session_module, "ThreadPoolExecutor") as executor:
+            self.assertEqual(session._prepare_bass_envelopes(), {})
+            executor.assert_not_called()
+
+        session = self._session(_plan(streamed=False, direct=False), _StagingRecorder(), None, threading.Event())
+        background.visible = True
+        session._scene = SimpleNamespace(items=lambda: [SimpleNamespace(source=background)])
+        good_track = PlaylistTrack("good.wav", "Good", duration_seconds=2)
+        session._tracks.append(good_track)
+        levels = np.ones((2, 24), dtype=np.float32)
+        with patch.object(export_session_module.PythonVisualizerRenderer, "_decode_mono_audio", side_effect=[PythonVisualizerError("Bad file"), np.ones(10, dtype=np.float32)]), patch.object(export_session_module.PythonVisualizerRenderer, "_analyze_levels", return_value=levels), self.assertLogs(export_session_module.LOGGER, level="WARNING"):
+            result = session._prepare_bass_envelopes()
+        self.assertEqual(set(result), {good_track.id})
 
 
 

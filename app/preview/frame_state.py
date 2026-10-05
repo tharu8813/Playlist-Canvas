@@ -17,9 +17,68 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.animation.curves import ease_in_out_cubic
+from app.animation.lyrics import lyric_progress
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source
 from app.services.lyrics_service import LyricsService
+
+
+def lyric_instrumental_windows(track: PlaylistTrack, source: Source) -> tuple[tuple[float, float], ...]:
+    """Audio-clock candidates; LRC holds each cue until the next start.
+
+    A long held LRC cue needs measured vocals to find the actual phrase end.
+    Explicit subtitle ends remain the lower bound for an interlude.
+    """
+    offset = track.lyrics_timing_offset_seconds + source.subtitle_timing_offset
+    cues = [cue for cue in track.lyrics if str(cue.get("text", "")).strip()]
+    windows = []
+    for previous, following in zip(cues, cues[1:]):
+        start, end = float(previous["start"]), float(previous["end"])
+        next_start = float(following["start"])
+        lower = end if end < next_start - 0.001 else start + min(2.0, end - start)
+        lower, upper = max(0.0, lower - offset), min(track.duration_seconds, next_start - offset)
+        if upper - lower >= source.subtitle_intro_gap:
+            windows.append((lower, upper))
+    return tuple(windows)
+
+
+@dataclass(slots=True, frozen=True)
+class LyricsIntroState:
+    elapsed: float
+    remaining: float
+    opacity: float
+    before_first: bool = False
+    raw_progress: float = 1.0
+    progress: float = 1.0
+    exiting: bool = False
+    held_cue_index: int | None = None
+    held_slot: int = -1
+
+
+def resolve_lyrics_intro_state(track: PlaylistTrack, source: Source, elapsed: float,
+                              instrumental_spans=()) -> LyricsIntroState | None:
+    """First-cue wait or a measured instrumental interlude, on the audio clock."""
+    cues = [cue for cue in track.lyrics if str(cue.get("text", "")).strip()]
+    if not cues:
+        return None  # Missing lyrics are not an intro.
+    first = float(cues[0]["start"]) - track.lyrics_timing_offset_seconds - source.subtitle_timing_offset
+    duration = source.subtitle_animation_duration if source.subtitle_animation != "none" else 0.0
+    before_first = source.subtitle_intro_enabled and first > 0 and 0.0 <= elapsed < first + duration
+    window = (0.0, first) if before_first else None
+    if window is None and source.subtitle_intro_midtrack:
+        window = next(((a, b) for a, b in instrumental_spans
+                       if b - a >= source.subtitle_intro_gap and a <= elapsed < b + duration), None)
+    if window is None:
+        return None
+    age, remaining = elapsed - window[0], window[1] - elapsed
+    exiting = remaining <= 0
+    raw = min(1.0, (elapsed - window[1] if exiting else age) / duration) if duration else 1.0
+    progress = lyric_progress(source, raw)
+    held = None if before_first else LyricsService.display_cue_index(
+        track.lyrics, window[0] + track.lyrics_timing_offset_seconds + source.subtitle_timing_offset,
+    )
+    return LyricsIntroState(age, remaining, 1 - progress if exiting else progress,
+                           before_first, raw, progress, exiting, held)
 
 
 @dataclass(slots=True, frozen=True)

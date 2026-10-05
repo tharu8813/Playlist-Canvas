@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import json
 import math
 import shutil
@@ -297,6 +299,7 @@ class FFmpegRenderer:
             return Path(found)
         raise FFmpegNotFoundError("FFmpeg executable was not found.")
 
+    @timed("export.renderer_seconds")
     def render(self, image: QImage | list[QImage] | list[RenderFrame] | PreparedVideoInput
                | PipedVideoInput,
                tracks: list[PlaylistTrack], output_path: str | Path,
@@ -1269,6 +1272,7 @@ class FFmpegRenderer:
             cap = max(1, min(4, cpu_count // 2))
         return min(track_count, cap)
 
+    @timed("export.audio_prepare_seconds")
     def prepare_playlist_audio(
         self, active_tracks: list[PlaylistTrack], output_directory: Path,
         settings: RenderSettings,
@@ -1909,6 +1913,7 @@ class FFmpegRenderer:
             lines.append(f"file '{quote(frames[-1][0])}'")
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    @timed("ffmpeg.process_wall_seconds")
     def _run(self, arguments: list[str], progress_parser: Callable[[str], None] | None = None,
              cancel_event: threading.Event | None = None,
              capture_stderr: list[str] | None = None) -> None:

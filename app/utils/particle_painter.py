@@ -6,6 +6,7 @@ from math import cos, floor, pi, radians, sin
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from app.utils.performance import timed
 
 
 def _random_unit(index: int, channel: int, seed: int) -> float:
@@ -14,6 +15,7 @@ def _random_unit(index: int, channel: int, seed: int) -> float:
     return value - floor(value)
 
 
+@timed("canvas.particle_paint_seconds")
 def paint_particles(
     painter: QPainter,
     rect: QRectF,

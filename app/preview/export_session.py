@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import logging
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from heapq import heappop, heappush
 from pathlib import Path
@@ -13,9 +16,12 @@ import threading
 from PySide6.QtGui import QImage
 
 from app.models.playlist import PlaylistTrack
+from app.models.source import SourceType
+from app.services.lyrics_intro_service import request_instrumental_analysis
 from app.preview.export_canvas_capture import ExportCanvasCapturer
 from app.preview.export_plan import ExportPlan
 from app.renderer.export_timeline import ExportFrameSample
+from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.renderer.canvas_pipe import (
     CanvasPipeCancelledError,
     CanvasPipeError,
@@ -125,6 +131,7 @@ class ExportSession:
         self._live_encoder_reached = False
         self._encoder_reached_at: float | None = None
         self._final_render_stopped: Callable[[], str | None] = lambda: None
+        self._bass_envelopes: dict[object, object] | None = None
 
     @property
     def capture_count(self) -> int:
@@ -150,6 +157,7 @@ class ExportSession:
 
     # -- capture loop -----------------------------------------------------
 
+    @timed("export.capture_session_seconds")
     def run(self) -> ExportArtifacts:
         plan = self._plan
         stream_specs, stream_keys = self._prepare_capture(piped=False)
@@ -178,6 +186,22 @@ class ExportSession:
         )
         self._total_captures = max(1, independent_capture_count)
 
+        # Finish vocal detection before coalescing: every export frame sees one
+        # immutable analysis result, even if the live preview was still analyzing.
+        scene_items = getattr(self._scene, "items", lambda: ())
+        sources = [item.source.resolved_lyrics() for item in scene_items()
+                   if hasattr(item, "source") and item.source.visible
+                   and item.source.source_type is SourceType.LYRICS]
+        futures = {future for track in self._tracks for source in sources
+                   if (future := request_instrumental_analysis(track, source)) is not None}
+        if futures:
+            self._report_progress(0, "가사 공백의 보컬을 분석하고 있습니다." if self._korean else
+                                  "Analyzing vocals in lyric gaps.")
+        while futures:
+            self._ensure_not_cancelled()
+            _done, futures = wait(futures, timeout=0.05)
+            self._pump_ui()
+
         capturer = ExportCanvasCapturer(
             self._scene,
             self._tracks,
@@ -193,6 +217,8 @@ class ExportSession:
             self._after_capture,
             retain_static_frames=not (plan.use_streamed_visuals or piped),
             output_scale=plan.canvas_render_scale,
+            bass_envelopes=self._prepare_bass_envelopes(),
+            bass_fps=self._settings.fps,
         )
         self._capturer = capturer
         self._invariant_stream_keys = capturer.invariant_stream_keys
@@ -247,6 +273,70 @@ class ExportSession:
             ),
         )
         return stream_specs, stream_keys
+
+    @timed("export.bass_prepare_seconds")
+    def _prepare_bass_envelopes(self) -> dict[object, object]:
+        """Prepare music responses off the GUI thread, keeping cancel/paint alive."""
+        self._ensure_not_cancelled()
+        if self._bass_envelopes is not None:
+            return self._bass_envelopes
+        scene_items = getattr(self._scene, "items", None)
+        reactive = callable(scene_items) and any(
+            bool(getattr(getattr(item, "source", None), "uses_bass_reaction", False))
+            and bool(getattr(getattr(item, "source", None), "visible", False))
+            for item in scene_items()
+        )
+        if not reactive:
+            self._bass_envelopes = {}
+            return self._bass_envelopes
+        analyzer = PythonVisualizerRenderer(self._renderer.executable)
+        profiles = {
+            item.source.music_reaction_profile for item in scene_items()
+            if getattr(item, "source", None) is not None and item.source.visible
+            and item.source.source_type in {SourceType.TEXT, SourceType.LYRICS}
+            and item.source.uses_bass_reaction
+        }
+
+        def analyze(path: Path) -> object:
+            self._ensure_not_cancelled()
+            samples = analyzer._decode_mono_audio(path, self._cancel)
+            levels = analyzer._analyze_levels(samples, self._settings.fps, 24, self._cancel)
+            return (analyzer.bass_envelope(levels, self._settings.fps), {
+                profile: analyzer.music_envelope(levels, self._settings.fps, profile, self._cancel)
+                for profile in profiles
+            })
+
+        envelopes = {}
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="export-bass") as executor:
+            for index, track in enumerate(self._tracks, 1):
+                self._ensure_not_cancelled()
+                self._report_progress(0.0, (
+                    f"음악 반응 준비 중 · 곡 {index}/{len(self._tracks)}"
+                    if self._korean else
+                    f"Preparing music reaction · track {index}/{len(self._tracks)}"
+                ))
+                future = executor.submit(analyze, Path(track.file_path))
+                try:
+                    while not future.done():
+                        self._pump_ui()
+                        # Keep pumping even after cancel until FFmpeg/FFT exits;
+                        # staging files must outlive the worker using them.
+                        wait((future,), timeout=0.01)
+                finally:
+                    if not future.done():
+                        self._cancel.set()
+                self._ensure_not_cancelled()
+                try:
+                    bass, music = future.result()
+                    envelopes[track.id] = bass
+                    envelopes.update({(track.id, profile): values for profile, values in music.items()})
+                except RenderCancelledError:
+                    raise
+                except Exception as error:
+                    LOGGER.warning("Music reaction analysis failed: %s", error)
+        self._ensure_not_cancelled()
+        self._bass_envelopes = envelopes
+        return self._bass_envelopes
 
     # -- streamed lossless path ----------------------------------------
 
@@ -425,6 +515,7 @@ class ExportSession:
 
     # -- live piped path -----------------------------------------------
 
+    @timed("export.piped_capture_session_seconds")
     def run_piped(
         self,
         start_final_render: Callable[[ExportArtifacts], None],

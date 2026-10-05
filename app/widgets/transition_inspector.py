@@ -29,7 +29,7 @@ from app.automix.renderer import (
     BAND_ENVELOPES, DROP_IN_ATTACK_SECONDS, ECHO_FEEDBACK, ECHO_FIRST_LEVEL,
     HIGH_CROSSOVER_HZ, LOW_CROSSOVER_HZ, SWEEP_SHAPES, TAPE_STOP_FADE,
     _CURVE_BY_TRANSITION_TYPE, _band_envelope, band_windows_of, echo_beat, tape_entry, tape_stop_schedule,
-    transition_dsp_style,
+    transition_dsp_style, lowpass_cutoff, roll_slice_seconds,
 )
 from app.dialogs.help_dialog import install_help_shortcut
 from app.timeline.render_plan import (
@@ -41,6 +41,10 @@ INCOMING_COLOR = QColor("#38BDF8")
 PLAYHEAD_COLOR = QColor("#EF4444")
 
 _STYLE_DESCRIPTIONS = {
+    "beat_roll": ("큐의 짧은 박자 구간을 반복하며 앞 곡을 페이드아웃합니다. 반복 길이는 박 단위로 조절합니다.",
+                  "Loops a short beat slice at the cue while fading out; loop length is set in beats."),
+    "lowpass_out": ("앞 곡의 고음을 점차 닫으면서 다음 곡으로 넘깁니다. 마지막 필터 주파수를 조절할 수 있습니다.",
+                    "Closes the outgoing highs while blending into the next song; the final cutoff is adjustable."),
     "bass_swap": ("저음을 겹침 가운데에서 짧게 맞바꿔 두 베이스가 동시에 울리지 않게 합니다. 중·고음은 부드럽게 교차합니다.",
                   "Swaps the lows quickly mid-overlap so two bass lines never play together; mids and highs cross smoothly."),
     "vocal_safe_eq": ("저음에 이어 중음(보컬 대역)도 짧게 맞바꿔 두 보컬이 겹치는 시간을 최소화합니다.",
@@ -137,6 +141,18 @@ def mix_lanes(transition: AudioRenderTransition) -> list[MixLane]:
         attack = min(1.0, DROP_IN_ATTACK_SECONDS / max(transition.duration, 1e-6))
         return [MixLane("level", "음량", "Level", _fade(whole, False), _fade((0.0, attack), True))]
     duration = max(transition.duration, 1e-6)
+    if style in (TransitionDsp.BEAT_ROLL, TransitionDsp.LOWPASS_OUT):
+        lanes = [MixLane("level", "음량", "Level", _fade(whole, False), _fade(whole, True))]
+        if style is TransitionDsp.BEAT_ROLL:
+            seconds = roll_slice_seconds(transition)
+            lanes.append(MixLane("roll", f"반복\n{transition.roll_beats:g}박", f"Loop\n{transition.roll_beats:g} beats",
+                                 lambda progress: (progress * duration % seconds) / seconds,
+                                 lambda _progress: 0.0))
+        else:
+            lanes.append(MixLane("lowpass", "필터 개방\n(로우패스)", "Filter opening\n(lowpass)",
+                                 lambda progress: lowpass_cutoff(transition, progress) / 18000.0,
+                                 lambda _progress: 0.0))
+        return lanes
     if style is TransitionDsp.ECHO_OUT:
         beat = echo_beat(transition)
         feedback = ECHO_FEEDBACK if transition.echo_feedback is None else transition.echo_feedback
@@ -255,10 +271,10 @@ def _clock(seconds: float, precise: bool = False) -> str:
 
 def _nice_step(span: float, pixels: float) -> float:
     target = span / max(1.0, pixels / 90.0)
-    for step in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600):
+    for step in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200, 14400, 21600, 43200, 86400):
         if step >= target:
             return float(step)
-    return 1200.0
+    return float(math.ceil(target / 86400) * 86400)
 
 
 # -- drawing ----------------------------------------------------------------------

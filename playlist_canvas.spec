@@ -35,6 +35,7 @@ HEAVY_ANALYZER_PACKAGES = (
 AUTOMIX_MODEL_DIRECTORY = project_root / "app" / "automix" / "analysis" / "models"
 AUTOMIX_MODEL_FILES = (
     "beat_this_final0_int8.onnx", "BEAT_THIS_LICENSE.txt", "umxhq_vocals_int8.onnx", "OPEN_UNMIX_LICENSE.txt",
+    "yamnet.onnx", "yamnet_class_map.csv", "YAMNET_LICENSE.txt", "YAMNET_NOTICE.md",
 )
 _missing = [name for name in (*AUTOMIX_PACKAGES, "onnxruntime") if importlib.util.find_spec(name) is None]
 _missing += [name for name in AUTOMIX_MODEL_FILES if not (AUTOMIX_MODEL_DIRECTORY / name).is_file()]
@@ -68,6 +69,8 @@ analysis = Analysis(
         (str(project_root / "app" / "resources" / "en.json"), "app/resources"),
         (str(project_root / "app" / "assets" / "icons" / "spin_down.svg"), "assets/icons"),
         (str(project_root / "app" / "assets" / "icons" / "spin_up.svg"), "assets/icons"),
+        (str(project_root / "app" / "assets" / "icons" / "spin_down_disabled.svg"), "assets/icons"),
+        (str(project_root / "app" / "assets" / "icons" / "spin_up_disabled.svg"), "assets/icons"),
         (str(project_root / "LICENSE.txt"), "."),
     ] + [(str(AUTOMIX_MODEL_DIRECTORY / name), "app/automix/analysis/models") for name in AUTOMIX_MODEL_FILES]
     # User Guide screenshots (tools/capture_help_images.py), one folder per language.

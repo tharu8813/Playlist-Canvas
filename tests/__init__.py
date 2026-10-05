@@ -13,7 +13,7 @@ import shutil
 import tempfile
 from tempfile import mkdtemp
 
-from PySide6.QtCore import QCoreApplication, QEvent, QStandardPaths
+from PySide6.QtCore import QCoreApplication, QEvent, QSettings, QStandardPaths
 from PySide6.QtWidgets import QApplication
 
 
@@ -23,6 +23,13 @@ atexit.register(shutil.rmtree, _TEST_LOCAL_APP_DATA, ignore_errors=True)
 # left the AutoMix cache, presets, language packs and logs writing into the
 # developer's real %LOCALAPPDATA%\PlaylistCanvas during test runs.
 os.environ["LOCALAPPDATA"] = _TEST_LOCAL_APP_DATA
+# Native Windows QSettings uses the registry, outside this disposable data root.
+# Give tests a writable, isolated store without requiring registry permissions.
+QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+QSettings.setPath(
+    QSettings.Format.IniFormat, QSettings.Scope.UserScope,
+    os.path.join(_TEST_LOCAL_APP_DATA, "settings"),
+)
 # Same for the temp folder: extracted .pvsproj caches and other app temp data
 # landed in the real %TEMP% (2.4 GB of project-cache in two weeks) and every
 # package load then rescanned them all. One folder per test process, removed

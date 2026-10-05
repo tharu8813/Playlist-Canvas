@@ -17,7 +17,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QAbstractItemView, QDialog, QFileDialog, QMessageBox, QWidget
 from app.models.project import ProjectContent
 from app.models.playlist import PlaylistTrack
-from app.models.source import Source, SourceType
+from app.models.source import SUBTITLE_ANIMATIONS, Source, SourceType
 from app.dialogs.settings_dialog import SettingsDialog
 from app.dialogs.audio_metadata_dialog import AudioMetadataDialog
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
@@ -35,7 +35,7 @@ class MainWindowPlaylistTests(MainWindowTestCase):
             self.window.inspector.lyrics.widgets["subtitle_animation"].itemData(index)
             for index in range(self.window.inspector.lyrics.widgets["subtitle_animation"].count())
         }
-        self.assertEqual(values, {"glow", "rise", "none"})
+        self.assertEqual(values, set(SUBTITLE_ANIMATIONS))
         self.assertEqual(Source(SourceType.LYRICS, "Lyrics").subtitle_animation, "glow")
         labels = [
             self.window.inspector.lyrics.widgets["subtitle_animation"].itemText(index)
@@ -776,6 +776,7 @@ class MainWindowPlaylistTests(MainWindowTestCase):
             self.assertEqual(dialog.selected_lyrics, edited)
             self.assertEqual(dialog.selected_lyrics_path, str(saved))
             self.assertEqual(track.lyrics[0]["text"], "Original")
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
         finally:
             dialog.close()
 

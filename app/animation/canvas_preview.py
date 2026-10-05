@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import numpy as np
 
 from PySide6.QtCore import (
     QObject, QPauseAnimation, QPointF, QSequentialAnimationGroup, QVariantAnimation,
@@ -11,8 +12,9 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QTransform
 
 from app.canvas.source_item import SourceItem
-from app.models.source import Source
-from app.animation.curves import AnimationPose, animation_pose, loop_pose
+from app.models.source import Source, SourceType
+from app.animation.curves import AnimationPose, animation_pose, loop_pose, music_reactive_pose
+from app.renderer.python_visualizer import PythonVisualizerRenderer
 
 
 class CanvasAnimationPreviewController(QObject):
@@ -24,23 +26,26 @@ class CanvasAnimationPreviewController(QObject):
         super().__init__(parent)
         self._group: QSequentialAnimationGroup | None = None
         self._item: SourceItem | None = None
-        self._original: tuple[QPointF, float, float, float, QTransform, bool] | None = None
+        self._original: tuple[QPointF, float, float, float, QTransform, bool, float, int | None] | None = None
 
     @property
     def active(self) -> bool:
         return self._group is not None
 
     def preview(self, item: SourceItem, source: Source) -> bool:
-        """Play the entrance, a stretch of the loop motion and the exit."""
+        """Play entrance, loop, sample music reaction and exit without editing the source."""
+        music_reactive = source.source_type in {SourceType.TEXT, SourceType.LYRICS} and source.uses_bass_reaction
         if self.active or (
             source.animation_in == "none" and source.animation_out == "none"
-            and source.loop_motion == "none"
+            and source.loop_motion == "none" and not music_reactive
         ):
             return False
         self._item = item
         self._original = (
             QPointF(item.pos()), item.scale(), item.rotation(), item.opacity(),
             item.transform(), item.isSelected(),
+            item._music_reaction_level,
+            item._music_preview_current_line,
         )
         item._suppress_position_sync = True
         self._set_selected_without_signal(item, False)
@@ -66,6 +71,30 @@ class CanvasAnimationPreviewController(QObject):
                     source.loop_motion, progress * loop_seconds, source.loop_motion_period,
                     source.loop_motion_amount, width, height,
                 ),
+            ))
+        if music_reactive:
+            # This button demonstrates two sample hits; Full Preview uses real audio.
+            if source.source_type is SourceType.LYRICS and source.subtitle_current_line < 0:
+                lines = (item._render_text() or source.subtitle_fallback).splitlines()
+                item._music_preview_current_line = len([line for line in lines if line.strip()]) // 2
+            samples = np.zeros((120, 24), dtype=np.float32)
+            samples[12:18] = 1
+            samples[54:60] = 0.7
+            envelope = PythonVisualizerRenderer.music_envelope(samples, 30, source.music_reaction_profile)
+
+            def music_pose(progress: float) -> AnimationPose:
+                level = PythonVisualizerRenderer.music_reaction_level(
+                    envelope, 30, progress * 4, source.music_reactive_offset,
+                )
+                if source.source_type is SourceType.LYRICS:
+                    item._music_reaction_level = level
+                    item.update()
+                    return AnimationPose()
+                return music_reactive_pose(source.music_reactive_effect, level,
+                                           source.music_reactive_strength, source.font_size)
+
+            sequence.addAnimation(self._phase(
+                item, source, 4000, music_pose,
             ))
         if source.animation_out != "none":
             sequence.addAnimation(QPauseAnimation(320))
@@ -121,7 +150,9 @@ class CanvasAnimationPreviewController(QObject):
         self._item = None
         self._original = None
         if item is not None and original is not None:
-            position, scale, rotation, opacity, transform, selected = original
+            position, scale, rotation, opacity, transform, selected, music_level, current_line = original
+            item._music_reaction_level = music_level
+            item._music_preview_current_line = current_line
             item.setPos(position)
             item.setScale(scale)
             item.setRotation(rotation)

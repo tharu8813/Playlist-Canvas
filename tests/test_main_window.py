@@ -135,10 +135,6 @@ class MainWindowWorkspaceTests(MainWindowTestCase):
             self.assertEqual(self.window.recent_projects_menu.title(), "최근 프로젝트")
             self.assertNotIn(self.window.preview_action, self.window.file_menu.actions())
             self.assertIn(self.window.presets_action, self.window.project_menu.actions())
-            self.assertIn(
-                self.window.ai_project_builder_action,
-                self.window.project_menu.actions(),
-            )
             self.assertIn(self.window.preview_action, self.window.view_menu.actions())
             self.assertIn(self.window.settings_action, self.window.tools_menu.actions())
             self.assertIn(self.window.lrc_generator_action, self.window.tools_menu.actions())
@@ -1361,16 +1357,21 @@ class MainWindowWorkspaceTests(MainWindowTestCase):
         self.assertIn("Ctrl+Shift+H", self.window.center_horizontal_action.toolTip())
         self.assertIn("Ctrl+Shift+V", self.window.center_vertical_action.toolTip())
 
+        original_delta = (second.x - first.x, second.y - first.y)
         artboard = self.window.canvas.scene_model.artboard_rect
         self.window.center_horizontal_action.trigger()
         self.window.center_vertical_action.trigger()
-        for source in (first, second):
-            self.assertAlmostEqual(
-                source.x, artboard.center().x() - source.width * source.scale / 2
-            )
-            self.assertAlmostEqual(
-                source.y, artboard.center().y() - source.height * source.scale / 2
-            )
+        items = [
+            self.window.canvas._items[first.id],
+            self.window.canvas._items[second.id],
+        ]
+        bounds = items[0].mapRectToScene(items[0].content_rect()).united(
+            items[1].mapRectToScene(items[1].content_rect())
+        )
+        self.assertAlmostEqual(bounds.center().x(), artboard.center().x())
+        self.assertAlmostEqual(bounds.center().y(), artboard.center().y())
+        self.assertAlmostEqual(second.x - first.x, original_delta[0])
+        self.assertAlmostEqual(second.y - first.y, original_delta[1])
 
         self.window.store.update(first.id, locked=True)
         self.window.store.update(second.id, locked=True)
@@ -1378,6 +1379,49 @@ class MainWindowWorkspaceTests(MainWindowTestCase):
         self.assertFalse(self.window.center_vertical_action.isEnabled())
         self.window.store.select(None)
         self.assertFalse(self.window.center_horizontal_action.isEnabled())
+
+    def test_multi_selection_guide_resizes_sources_as_one_group(self) -> None:
+        first = Source(
+            SourceType.SHAPE, "First", x=100, y=100, width=100, height=80,
+        )
+        second = Source(
+            SourceType.TEXT, "Second", x=300, y=200, width=100, height=80,
+        )
+        self.window.store.replace([first, second])
+        self.window.store.select_many([first.id, second.id], second.id)
+        self.window.show()
+        self.application.processEvents()
+
+        canvas = self.window.canvas
+        scene = canvas.scene_model
+        original = scene.multi_selection_bounds()
+        self.assertIsNotNone(original)
+        self.assertTrue(scene.has_multi_selection())
+        assert original is not None
+        self.assertFalse(canvas.viewport().grab().isNull())
+        self.assertEqual(
+            canvas._group_handle_at_view_position(
+                canvas.mapFromScene(original.bottomRight())
+            ),
+            "se",
+        )
+
+        canvas._begin_group_resize("se")
+        target = original.topLeft() + (
+            original.bottomRight() - original.topLeft()
+        ) * 0.5
+        canvas._resize_group_to(target)
+        canvas._finish_group_resize()
+
+        resized = scene.multi_selection_bounds()
+        self.assertIsNotNone(resized)
+        assert resized is not None
+        self.assertAlmostEqual(resized.left(), original.left())
+        self.assertAlmostEqual(resized.top(), original.top())
+        self.assertAlmostEqual(resized.width(), original.width() * 0.5)
+        self.assertAlmostEqual(resized.height(), original.height() * 0.5)
+        self.assertAlmostEqual(first.scale, 0.5)
+        self.assertAlmostEqual(second.scale, 0.5)
 
     def test_canvas_context_menu_exposes_multi_source_editing_commands(self) -> None:
         first = Source(SourceType.TEXT, "First", x=40, y=80, z_index=0)
@@ -1746,6 +1790,29 @@ class MainWindowWorkspaceTests(MainWindowTestCase):
         panel.track_table.selectRow(2)
         self.assertTrue(panel.up_button.isEnabled())
         self.assertFalse(panel.down_button.isEnabled())
+
+    def test_visual_timeline_edits_undo_and_restore_shared_selection(self) -> None:
+        source = Source(SourceType.TEXT, "Timed title", timeline_start=5, timeline_duration=10)
+        self.window.store.add(source)
+        self.window._history_ready = True
+        self.window._history_timer.stop()
+        self.window.history.reset(self.window._project_document().to_dict())
+        panel = self.window.timeline_panel
+        panel._commit_visual_timing("source", source.id, 8.25, 6.5)
+        self.assertEqual(source.timeline_start, 8.25)
+        self.window._undo()
+        restored = self.window.store.get(source.id)
+        self.assertEqual((restored.timeline_start, restored.timeline_duration), (5, 10))
+        self.assertEqual(self.window.store.selected.id, source.id)
+        self.window._redo()
+        restored = self.window.store.get(source.id)
+        self.assertEqual((restored.timeline_start, restored.timeline_duration), (8.25, 6.5))
+        self.application.processEvents()
+        self.assertEqual(panel.visual.selected, ("source", source.id))
+        self.window.show()
+        self.window._show_bottom_panel(1)
+        self.application.processEvents()
+        self.assertTrue(panel.visual.hasFocus())
 
     def test_snap_setting_round_trip(self) -> None:
         self.window.canvas.scene_model.snap_enabled = False

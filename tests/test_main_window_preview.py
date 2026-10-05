@@ -60,6 +60,34 @@ from tests.main_window_base import MainWindowTestCase
 
 
 class MainWindowPreviewTests(MainWindowTestCase):
+    def test_visual_timeline_preview_button_opens_player_at_cursor(self) -> None:
+        self.window.playlist_service.add_tracks([PlaylistTrack("preview.wav", "Song", duration_seconds=20)])
+        self.window.timeline_panel.refresh()
+        self.window._show_bottom_panel(1)
+        self.window.timeline_panel.visual.set_playhead(7.25)
+
+        class StubPreview(QDialog):
+            def __init__(self, *_args, **_kwargs):
+                super().__init__()
+                self.controls_page = QWidget()
+                self.track_list_panel = QFrame()
+                self.position = None
+
+            def build_embedded_controls_page(self):
+                return self.controls_page
+
+            def _seek_to_seconds(self, seconds):
+                self.position = seconds
+
+            def _stop_preview(self):
+                pass
+
+        with patch("app.controllers.preview_controller.ExportPreviewDialog", StubPreview):
+            self.window.timeline_panel.preview_button.click()
+        self.assertEqual(self.window.bottom_tabs.currentIndex(), 2)
+        self.assertEqual(self.window._inline_preview.position, 7.25)
+        self.window._finish_inline_preview()
+
     @staticmethod
     def _automix_plan(track_a: PlaylistTrack, track_b: PlaylistTrack):
         """A CompiledRenderPlan shaped like a real AutoMix result: two audio
@@ -353,6 +381,26 @@ class MainWindowPreviewTests(MainWindowTestCase):
         self.assertIn("simulated context loss", preview.preview_mode_label.toolTip())
         preview._stop_preview()
         controls_page.deleteLater()
+        preview.deleteLater()
+
+    def test_stopping_preview_closes_gpu_surface_before_deletion(self) -> None:
+        preview = ExportPreviewDialog(
+            self.window.canvas.scene_model,
+            [PlaylistTrack("preview.wav", "Preview", duration_seconds=10.0)],
+            self.window.translator,
+            parent=self.window,
+            source_store=self.window.store,
+            embedded=True,
+            preferred_backend="cpu",
+        )
+        surface = QWidget()
+        preview.preview_stack.addWidget(surface)
+        preview.gpu_surface = surface
+
+        with patch.object(surface, "close", wraps=surface.close) as close:
+            preview._stop_preview()
+            close.assert_called_once_with()
+        self.assertIsNone(preview.gpu_surface)
         preview.deleteLater()
 
     def test_preview_errors_are_visible_deduplicated_and_expandable(self) -> None:
@@ -2291,11 +2339,15 @@ class MainWindowPreviewTests(MainWindowTestCase):
                 window.set_playing(True)
                 junction = window.junction
                 with patch.object(preview, "_start_audio_at_playhead") as restart:
-                    self._play_at(preview, junction.end + 2.1)
-                    restart.assert_not_called()
-                    self.application.processEvents()
-                    restart.assert_called_once()
-                    self.assertAlmostEqual(preview._playhead_seconds, junction.start - 4, places=2)
+                    for cycle in range(50):
+                        self._play_at(preview, junction.end + 2.1)
+                        # Multiple frame updates must still queue only one seek.
+                        window.set_playhead(junction.end + 2.2)
+                        self.assertEqual(restart.call_count, cycle)
+                        self.application.processEvents()
+                        self.assertEqual(restart.call_count, cycle + 1)
+                        self.assertAlmostEqual(preview._playhead_seconds, junction.start - 4, places=2)
+                        self.assertFalse(window._loop_seek_timer.isActive())
 
     def test_background_mix_progress_clears_on_failure_or_when_preview_closes(self) -> None:
         track_a = PlaylistTrack("a.wav", "A", duration_seconds=100.0)

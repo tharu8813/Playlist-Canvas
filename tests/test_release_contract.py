@@ -5,9 +5,6 @@ import re
 import unittest
 
 from app import __version__
-from app.services.ai_project_prompt_service import (
-    AIProjectPromptService, AIProjectPromptSettings,
-)
 from app.utils.subprocess_utils import hidden_process_kwargs
 
 
@@ -15,38 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseContractTests(unittest.TestCase):
-    def test_ai_prompt_is_deployment_self_contained(self) -> None:
-        prompt = AIProjectPromptService().generate(
-            AIProjectPromptSettings(language="ko"), "ko"
-        )
-        self.assertIn("project.json", prompt)
-        self.assertIn(".pvsproj", prompt)
-        self.assertIn('"start": 시작초', prompt)
-        self.assertIn("소스코드", prompt)
-
-    def test_adaptive_builder_prefers_one_shot_and_embeds_brief(self) -> None:
-        prompt = AIProjectPromptService().generate(
-            AIProjectPromptSettings(
-                language="ko",
-                question_policy="adaptive",
-                project_brief="세로형 재즈 플레이리스트 영상을 만들어줘.",
-                canvas_preset="portrait",
-                design_style="cinematic",
-            ),
-            "ko",
-        )
-        self.assertIn("세로형 재즈 플레이리스트 영상을 만들어줘.", prompt)
-        self.assertIn("추가 질문 없이", prompt)
-        self.assertIn("1080×1920", prompt)
-        self.assertNotIn("질문지부터 제시한다", prompt)
-
-    def test_never_ask_policy_is_explicit(self) -> None:
-        prompt = AIProjectPromptService().generate(
-            AIProjectPromptSettings(language="en", question_policy="never"), "en"
-        )
-        self.assertIn("Do not ask follow-up questions", prompt)
-        self.assertIn("generate the final deliverable immediately", prompt)
-
     def test_pyinstaller_does_not_bundle_development_ffmpeg(self) -> None:
         specification = (ROOT / "playlist_canvas.spec").read_text(encoding="utf-8")
         self.assertNotIn("bundled_ffmpeg", specification)

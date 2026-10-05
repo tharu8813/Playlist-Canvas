@@ -22,6 +22,8 @@ is its size / 8, which the seams need exactly.
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import logging
 import math
 import re
@@ -134,6 +136,7 @@ def plan_seams(plan: AudioRenderPlan, workers: int) -> list[tuple[int, float]]:
     return seams
 
 
+@timed("automix.parallel_mix_seconds")
 def render_parts(
     pipeline: AutoMixAudioPipeline,
     plan: AudioRenderPlan,

@@ -94,6 +94,59 @@ class CanvasScene(QGraphicsScene):
         if self.guide_y is not None:
             painter.drawLine(self.artboard_rect.left(), self.guide_y,
                              self.artboard_rect.right(), self.guide_y)
+        selection_bounds = self.multi_selection_bounds()
+        if selection_bounds is not None:
+            guide_color = QColor("#55B8FF")
+            guide_pen = QPen(guide_color, 1.5, Qt.PenStyle.DashLine)
+            guide_pen.setCosmetic(True)
+            painter.setPen(guide_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(selection_bounds)
+
+            zoom = max(0.01, abs(painter.worldTransform().m11()))
+            handle_size = 9.0 / zoom
+            half = handle_size / 2.0
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.0))
+            painter.setBrush(guide_color)
+            for point in self.multi_selection_handle_points(selection_bounds).values():
+                painter.drawRect(QRectF(
+                    point.x() - half, point.y() - half,
+                    handle_size, handle_size,
+                ))
+
+    def multi_selection_items(self) -> list[SourceItem]:
+        """Return visible editable items participating in a multi-selection."""
+        return [
+            item for item in self.selectedItems()
+            if (isinstance(item, SourceItem) and item.isVisible()
+                and not item.source.locked)
+        ]
+
+    def has_multi_selection(self) -> bool:
+        """Return whether selection controls should represent a temporary group."""
+        return len(self.multi_selection_items()) >= 2
+
+    def multi_selection_bounds(self) -> QRectF | None:
+        """Return the exact scene-space union of selected source content."""
+        items = self.multi_selection_items()
+        if len(items) < 2:
+            return None
+        bounds = items[0].mapRectToScene(items[0].content_rect())
+        for item in items[1:]:
+            bounds = bounds.united(
+                item.mapRectToScene(item.content_rect())
+            )
+        return bounds
+
+    @staticmethod
+    def multi_selection_handle_points(bounds: QRectF) -> dict[str, QPointF]:
+        """Return the four proportional-resize handles for collective bounds."""
+        return {
+            "nw": bounds.topLeft(),
+            "ne": bounds.topRight(),
+            "se": bounds.bottomRight(),
+            "sw": bounds.bottomLeft(),
+        }
 
     @staticmethod
     def grid_positions(rect: QRectF, step: int = 40) -> tuple[range, range]:
@@ -304,7 +357,8 @@ class CanvasScene(QGraphicsScene):
             if (not isinstance(other, SourceItem) or other in excluded
                     or not other.isVisible()):
                 continue
-            bounds = other.sceneBoundingRect()
+            # Snap to content edges, independently of paint effects/handles.
+            bounds = other.mapRectToScene(other.content_rect())
             candidates_x.extend((bounds.left(), bounds.center().x(), bounds.right()))
             candidates_y.extend((bounds.top(), bounds.center().y(), bounds.bottom()))
         return candidates_x, candidates_y
@@ -381,6 +435,10 @@ class LiveCanvas(QGraphicsView):
         self._setting_selection = False
         self._scene_selection_pending = False
         self._pan_origin = QPoint()
+        self._group_resize_handle: str | None = None
+        self._group_resize_anchor = QPointF()
+        self._group_resize_vector = QPointF()
+        self._group_resize_states: dict[SourceItem, tuple[QPointF, float]] = {}
         self.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate)
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
@@ -535,6 +593,7 @@ class LiveCanvas(QGraphicsView):
             self.store.select_many(selected_ids, active_id)
         finally:
             self._scene_selection_pending = False
+        self.scene_model.update()
         self.selection_changed.emit(items)
 
     def _select_sources_from_store(
@@ -559,6 +618,7 @@ class LiveCanvas(QGraphicsView):
             self._items[source_id] for source_id in source_ids
             if source_id in self._items
         ] if isinstance(source_ids, (tuple, list)) else []
+        self.scene_model.update()
         self.selection_changed.emit(items)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
@@ -839,13 +899,22 @@ class LiveCanvas(QGraphicsView):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()  # type: ignore[union-attr]
             return
+        if button == Qt.MouseButton.LeftButton:
+            group_handle = self._group_handle_at_view_position(
+                event.position().toPoint()  # type: ignore[union-attr]
+            )
+            if group_handle is not None:
+                self._begin_group_resize(group_handle)
+                event.accept()  # type: ignore[union-attr]
+                return
         # A selected resize handle is an editing control, even when another
         # higher-Z source overlaps the same scene position.  Temporarily remove
         # other sources from mouse hit testing for this synchronous press; once
         # the selected item becomes the scene mouse grabber, move/release events
         # continue to reach it normally.
         handle_target: tuple[SourceItem, str] | None = None
-        if button == Qt.MouseButton.LeftButton:
+        if (button == Qt.MouseButton.LeftButton
+                and not self.scene_model.has_multi_selection()):
             selected = sorted(
                 (
                     item for item in self.scene_model.selectedItems()
@@ -889,6 +958,12 @@ class LiveCanvas(QGraphicsView):
 
     def mouseMoveEvent(self, event: object) -> None:
         """Move the viewport during panning."""
+        if self._group_resize_handle is not None:
+            self._resize_group_to(
+                self.mapToScene(event.position().toPoint())  # type: ignore[union-attr]
+            )
+            event.accept()  # type: ignore[union-attr]
+            return
         if self._panning:
             delta = event.pos() - self._pan_origin  # type: ignore[union-attr]
             self._pan_origin = event.pos()  # type: ignore[union-attr]
@@ -899,6 +974,14 @@ class LiveCanvas(QGraphicsView):
         super().mouseMoveEvent(event)  # type: ignore[arg-type]
         if (self._space_panning
                 or event.buttons() != Qt.MouseButton.NoButton):  # type: ignore[union-attr]
+            return
+        group_handle = self._group_handle_at_view_position(
+            event.position().toPoint()  # type: ignore[union-attr]
+        )
+        if group_handle is not None:
+            self.viewport().setCursor(
+                SourceItem.cursor_for_edit_handle(group_handle, 0.0)
+            )
             return
         # Mirror the press-time handle priority so an overlapping, higher-Z item
         # cannot hide the cursor of a selected source's visible edit handle.
@@ -945,8 +1028,99 @@ class LiveCanvas(QGraphicsView):
         )
         return item.edit_handle_at(local_position, tolerance)
 
+    def _group_handle_at_view_position(self, position: QPoint) -> str | None:
+        """Hit-test collective resize handles in stable viewport pixels."""
+        bounds = self.scene_model.multi_selection_bounds()
+        if bounds is None:
+            return None
+        for handle, scene_point in self.scene_model.multi_selection_handle_points(
+            bounds
+        ).items():
+            view_point = self.mapFromScene(scene_point)
+            if abs(view_point.x() - position.x()) <= 7 and abs(
+                view_point.y() - position.y()
+            ) <= 7:
+                return handle
+        return None
+
+    def _begin_group_resize(self, handle: str) -> None:
+        """Snapshot a multi-selection before proportional collective resizing."""
+        bounds = self.scene_model.multi_selection_bounds()
+        items = self.scene_model.multi_selection_items()
+        if bounds is None or len(items) < 2:
+            return
+        points = self.scene_model.multi_selection_handle_points(bounds)
+        opposite = {"nw": "se", "ne": "sw", "se": "nw", "sw": "ne"}
+        moving = points[handle]
+        self._group_resize_handle = handle
+        self._group_resize_anchor = points[opposite[handle]]
+        self._group_resize_vector = moving - self._group_resize_anchor
+        self._group_resize_states = {
+            item: (item.mapToScene(item.transformOriginPoint()), item.source.scale)
+            for item in items
+        }
+        self.scene_model.begin_item_interaction(items[-1], include_selection=True)
+        self.viewport().setCursor(SourceItem.cursor_for_edit_handle(handle, 0.0))
+
+    def _resize_group_to(self, scene_position: QPointF) -> None:
+        """Scale every selected source and its centre around one fixed corner."""
+        vector = self._group_resize_vector
+        denominator = vector.x() ** 2 + vector.y() ** 2
+        if denominator <= 0.0 or not self._group_resize_states:
+            return
+        pointer = scene_position - self._group_resize_anchor
+        factor = (pointer.x() * vector.x() + pointer.y() * vector.y()) / denominator
+        minimum = max(
+            0.1 / scale for _center, scale in self._group_resize_states.values()
+        )
+        maximum = min(
+            10.0 / scale for _center, scale in self._group_resize_states.values()
+        )
+        factor = max(minimum, min(maximum, factor))
+
+        for item, (center, original_scale) in self._group_resize_states.items():
+            relative = center - self._group_resize_anchor
+            target_center = self._group_resize_anchor + relative * factor
+            new_scale = original_scale * factor
+            new_position = QPointF(
+                target_center.x() - item.source.width / 2.0,
+                target_center.y() - item.source.height / 2.0,
+            )
+            item.source.scale = new_scale
+            item.setScale(new_scale)
+            item._suppress_position_sync = True
+            try:
+                item.setPos(new_position)
+            finally:
+                item._suppress_position_sync = False
+            item.source.x = new_position.x()
+            item.source.y = new_position.y()
+            item._queue_user_changes({
+                "x": new_position.x(), "y": new_position.y(), "scale": new_scale,
+            })
+            item.update()
+        bounds = self.scene_model.multi_selection_bounds()
+        if bounds is not None:
+            self._show_interaction_hint(
+                f"{round(bounds.width())} × {round(bounds.height())}"
+            )
+        self.scene_model.update()
+
+    def _finish_group_resize(self) -> None:
+        """Commit one consolidated history update for every resized source."""
+        self.scene_model.finish_item_interaction()
+        self._group_resize_handle = None
+        self._group_resize_states.clear()
+        self._show_interaction_hint("")
+        self.scene_model.update()
+
     def mouseReleaseEvent(self, event: object) -> None:
         """End panning."""
+        if self._group_resize_handle is not None:
+            self._finish_group_resize()
+            self.viewport().unsetCursor()
+            event.accept()  # type: ignore[union-attr]
+            return
         if self._panning:
             self._panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)

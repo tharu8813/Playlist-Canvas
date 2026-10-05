@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -52,7 +53,11 @@ class LyricsSectionTests(unittest.TestCase):
         self.section.connect(lambda key, value: updates.append((key, value)))
         self.section.widgets["subtitle_animation"].setCurrentIndex(0)
         self.section.widgets["subtitle_line_spacing"].setValue(12)
-        self.assertEqual(updates, [("subtitle_animation", "glow"), ("subtitle_line_spacing", 12.0)])
+        with patch("sys.excepthook") as slot_error:
+            self.section.widgets["subtitle_accent_enabled"].click()
+            slot_error.assert_not_called()
+        self.assertEqual(updates, [("subtitle_animation", "glow"), ("subtitle_line_spacing", 12.0),
+                                  ("subtitle_accent_enabled", True)])
 
     def test_bindings_kinds_and_previous_line_dependency(self) -> None:
         kinds = {key: kind for key, (_path, _widget, kind) in self.section.bindings().items()}
@@ -67,6 +72,62 @@ class LyricsSectionTests(unittest.TestCase):
             "subtitle_previous_opacity": False, "subtitle_previous_blur": False,
             "subtitle_accent_color": False,
         })
+
+    def test_subtitle_transition_shortcut_and_duration_follow_selection(self) -> None:
+        from unittest.mock import patch
+        from app.inspector.source_inspector import SourceInspector
+        from app.services.source_store import SourceStore
+        from app.ui.design_system import apply_studio_style
+        from app.utils.i18n import Language, Translator
+
+        apply_studio_style(self.app)
+        translator = Translator()
+        translator.set_language(Language.KOREAN)
+        store = SourceStore()
+        inspector = SourceInspector(store, translator)
+        self.addCleanup(inspector.deleteLater)
+        self.addCleanup(inspector.close)
+        inspector.resize(380, 800)
+        inspector.show()
+        lyrics = Source(SourceType.LYRICS, "Lyrics", subtitle_animation="none")
+        store.add(lyrics)
+        self.app.processEvents()
+        effect = inspector.lyrics.widgets["subtitle_animation"]
+        duration = inspector.lyrics.widgets["subtitle_animation_duration"]
+        self.assertEqual(inspector._field_categories["subtitle_animation"], "animation")
+        self.assertFalse(duration.isEnabled())
+        self.assertFalse(inspector.lyrics_transition_button.isHidden())
+        with patch("app.inspector.source_inspector.LyricsAnimationDialog") as dialog_type:
+            dialog_type.return_value.exec.return_value = 0
+            inspector.lyrics_transition_button.click()
+            dialog_type.assert_called_once_with(lyrics, translator, inspector)
+        with patch("app.inspector.source_inspector.LyricsAnimationDialog") as dialog_type:
+            dialog_type.return_value.exec.return_value = 1
+            dialog_type.return_value.settings.return_value = {
+                "subtitle_flow_direction": "left",
+                "subtitle_role_styles": {"next": {"color": "#55AACC", "scale": 1.2}},
+            }
+            inspector.lyrics_animation_button.click()
+            self.assertEqual(lyrics.subtitle_flow_direction, "left")
+            self.assertEqual(lyrics.subtitle_role_styles["next"]["scale"], 1.2)
+        effect.setCurrentIndex(effect.findData("rise"))
+        self.assertTrue(duration.isEnabled())
+        duration.setValue(0.65)
+        restored = Source.from_dict(lyrics.to_dict())
+        self.assertEqual(restored.subtitle_animation, "rise")
+        self.assertAlmostEqual(restored.subtitle_animation_duration, 0.65)
+        effect.setCurrentIndex(effect.findData("none"))
+        store.add(Source(SourceType.TEXT, "Text"))
+        self.assertTrue(inspector.lyrics_transition_button.isHidden())
+        self.assertTrue(inspector._sections[("animation", "sub_transition")].isHidden())
+        store.select(lyrics.id)
+        self.assertFalse(duration.isEnabled())
+        effect.setCurrentIndex(effect.findData("glow"))
+        self.assertTrue(duration.isEnabled())
+        self.assertAlmostEqual(duration.value(), 0.65)
+        translator.set_language(Language.ENGLISH)
+        self.assertEqual(duration.suffix(), " s")
+        self.assertIn("Subtitle transition", inspector.lyrics_transition_button.text())
 
 
 class TypographySectionTests(unittest.TestCase):

@@ -73,7 +73,7 @@ _STEP_NAMES = {
     STEP_DECODE: ("디코딩", "decoding"),
     STEP_RHYTHM: ("비트", "beats"),
     STEP_BARS: ("마디", "bars"),
-    STEP_KEY_ENERGY: ("키·에너지", "key/energy"),
+    STEP_KEY_ENERGY: ("키·에너지·장르·분위기", "key/energy/genre/mood"),
     STEP_BEAT_MODEL: ("비트 모델", "beat model"),
     STEP_VOCALS: ("보컬 구간", "vocals"),
 }

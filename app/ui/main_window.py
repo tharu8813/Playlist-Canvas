@@ -63,8 +63,8 @@ from app.dialogs.missing_media_dialog import MissingMediaDialog
 from app.dialogs.new_project_dialog import NewProjectDialog
 from app.dialogs.playlist_export_dialog import PlaylistExportDialog
 from app.dialogs.preset_dialog import DesignPresetDialog
-from app.dialogs.ai_project_builder_dialog import AIProjectBuilderDialog
 from app.dialogs.audio_metadata_dialog import AudioMetadataDialog
+from app.dialogs.mp3_metadata_editor_dialog import Mp3MetadataEditorDialog
 from app.dialogs.m3u_import_dialog import M3uImportDialog
 from app.dialogs.project_settings_dialog import ProjectSettingsDialog
 from app.dialogs.project_crash_report_dialog import ProjectCrashReportDialog
@@ -538,12 +538,6 @@ class MainWindow(QMainWindow):
         )
         self.presets_action.triggered.connect(self._choose_preset)
         toolbar.addAction(self.presets_action)
-        self.ai_project_builder_action = QAction(self)
-        self.ai_project_builder_action.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-        )
-        self.ai_project_builder_action.triggered.connect(self._show_ai_project_builder)
-        toolbar.addAction(self.ai_project_builder_action)
         toolbar.addSeparator()
         self.fit_action = QAction(self)
         self.fit_action.setShortcut("F")
@@ -1096,15 +1090,34 @@ class MainWindow(QMainWindow):
         self.inspector.name_edit.selectAll()
 
     def _center_selected_sources(self, horizontal: bool) -> None:
-        """Center selected sources on the artboard horizontally or vertically."""
+        """Center the collective selection on the artboard along one axis."""
+        sources = self._selected_editable_sources()
+        if not sources:
+            return
+        selected_ids = {source.id for source in sources}
+        items = [
+            item for item in self.canvas.scene_model.selectedItems()
+            if hasattr(item, "source") and item.source.id in selected_ids
+        ]
+        if not items:
+            return
+        bounds = items[0].mapRectToScene(items[0].content_rect())
+        for item in items[1:]:
+            bounds = bounds.united(
+                item.mapRectToScene(item.content_rect())
+            )
         artboard = self.canvas.scene_model.artboard_rect
-        for source in self._selected_editable_sources():
-            if horizontal:
-                position = artboard.center().x() - source.width * source.scale / 2
-                self.store.update(source.id, x=position)
-            else:
-                position = artboard.center().y() - source.height * source.scale / 2
-                self.store.update(source.id, y=position)
+        delta = (
+            artboard.center().x() - bounds.center().x()
+            if horizontal else
+            artboard.center().y() - bounds.center().y()
+        )
+        for source in sources:
+            changes = (
+                {"x": source.x + delta}
+                if horizontal else {"y": source.y + delta}
+            )
+            self.store.update(source.id, **changes)
 
     def _move_selected_to_edge(self, front: bool) -> None:
         """Bring selected sources in front of, or behind, every other source."""
@@ -1287,7 +1300,6 @@ class MainWindow(QMainWindow):
         self.save_preset_action = QAction(self)
         self.save_preset_action.triggered.connect(self._save_current_as_preset)
         self.project_menu.addAction(self.save_preset_action)
-        self.project_menu.addAction(self.ai_project_builder_action)
         self.project_menu.addSeparator()
         self.upgrade_project_action = QAction(self)
         self.upgrade_project_action.setEnabled(False)
@@ -1382,6 +1394,9 @@ class MainWindow(QMainWindow):
         self.lrc_generator_action = QAction(self)
         self.lrc_generator_action.triggered.connect(self._show_lrc_generator)
         self.tools_menu.addAction(self.lrc_generator_action)
+        self.mp3_metadata_action = QAction(self)
+        self.mp3_metadata_action.triggered.connect(self._show_mp3_metadata_editor)
+        self.tools_menu.addAction(self.mp3_metadata_action)
         self.automix_editor_action = QAction(self)
         self.automix_editor_action.triggered.connect(lambda: self.preview_controller.edit_transition())
         settings = getattr(self, "_project_settings", None)
@@ -1423,6 +1438,7 @@ class MainWindow(QMainWindow):
             self.clear_selection_action: "clear_selection", self.reset_layout_action: "reset_layout",
             self.show_playlist_action: "track_list", self.show_timeline_action: "timeline",
             self.lrc_generator_action: "lyrics", self.automix_editor_action: "automix",
+            self.mp3_metadata_action: "audio",
             self.language_menu.menuAction(): "language", self.help_action: "help",
             self.shortcuts_action: "shortcuts", self.check_updates_action: "check_updates",
             self.about_action: "about",
@@ -1683,6 +1699,7 @@ class MainWindow(QMainWindow):
         self.timeline_panel = TimelinePanel(
             self.playlist_service, self.store, self.translator
         )
+        self.timeline_panel.preview_requested.connect(self.preview_controller.preview_at)
         self.bottom_tabs.addTab(self.timeline_panel, "")
         self.preview_tab_page = QFrame()
         self.preview_tab_page.setObjectName("previewWorkspaceTab")
@@ -4240,10 +4257,6 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Yes:
             self._apply_preset(preset)
 
-    def _show_ai_project_builder(self) -> None:
-        """Open the standalone configurable AI Project Builder."""
-        AIProjectBuilderDialog(self.translator, self).exec()
-
     def _apply_preset(self, preset: PresetDefinition) -> None:
         """Replace canvas sources with a preset while preserving the playlist."""
         artboard = self.canvas.scene_model.artboard_rect
@@ -4341,6 +4354,13 @@ class MainWindow(QMainWindow):
                 )
             for field in scalable_fields:
                 setattr(source, field, getattr(source, field) * factor)
+            for line_style in source.subtitle_line_styles:
+                if "font_size" in line_style:
+                    line_style["font_size"] = float(line_style["font_size"]) * factor
+                if "font_size_offset" in line_style:
+                    line_style["font_size_offset"] = (
+                        float(line_style["font_size_offset"]) * factor
+                    )
             source.shadow.blur_radius *= factor
             source.shadow.offset_x *= factor
             source.shadow.offset_y *= factor
@@ -4757,13 +4777,37 @@ class MainWindow(QMainWindow):
 
     def _show_lrc_generator(self) -> None:
         """Open the audio-assisted LRC authoring workflow."""
+        selected_ids = self.playlist_editor._selected_ids()
+        selected_track = next(
+            (
+                track for track in self.playlist_service.tracks
+                if len(selected_ids) == 1 and track.id == selected_ids[0]
+            ),
+            None,
+        )
         dialog = LrcGeneratorDialog(
             self.project_content_service.items,
             self.translator,
             self,
             playlist_tracks=self.playlist_service.tracks,
+            target_track_id=selected_track.id if selected_track else "",
+            initial_audio_path=selected_track.file_path if selected_track else "",
+            initial_cues=selected_track.lyrics if selected_track else None,
+            initial_title=selected_track.title if selected_track else "",
+            initial_artist=selected_track.artist if selected_track else "",
         )
-        dialog.exec()
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if accepted and dialog.result_track_id:
+            cues = dialog.timed_cues()
+            lyrics_path = (
+                str(dialog.saved_paths[-1].resolve())
+                if dialog.saved_paths else ""
+            )
+            self.playlist_service.update_track(
+                dialog.result_track_id,
+                lyrics_path=lyrics_path,
+                lyrics=[cue.copy() for cue in cues],
+            )
         if dialog.saved_paths and dialog.add_saved_files_to_project:
             added = self.project_content_service.add_paths(dialog.saved_paths)
             if added:
@@ -4774,6 +4818,10 @@ class MainWindow(QMainWindow):
                     f"Added {added} saved LRC file(s) to project content.",
                     5000,
                 )
+
+    def _show_mp3_metadata_editor(self) -> None:
+        """Open the standalone editor for source MP3 ID3 tags."""
+        Mp3MetadataEditorDialog(self.translator, self).exec()
 
     def _offer_legacy_upgrade(self) -> None:
         self.project_controller.offer_legacy_upgrade()
@@ -4845,10 +4893,6 @@ class MainWindow(QMainWindow):
             if self.translator.is_korean
             else "Save current canvas as preset…"
         )
-        self.ai_project_builder_action.setText(
-            "AI 프로젝트 빌더" if self.translator.is_korean
-            else "AI Project Builder"
-        )
         self.fit_action.setText(text("fit_canvas"))
         self.grid_action.setText(text("grid"))
         self.canvas.scene_model.set_placeholder_language(korean)
@@ -4859,6 +4903,10 @@ class MainWindow(QMainWindow):
         self.lrc_generator_action.setText(
             "LRC 파일 생성기" if self.translator.is_korean
             else "LRC File Generator"
+        )
+        self.mp3_metadata_action.setText(
+            "MP3 메타데이터 편집기" if self.translator.is_korean
+            else "MP3 Metadata Editor"
         )
         self.automix_editor_action.setText("AutoMix 편집기" if korean else "AutoMix Editor")
         self.automix_editor_action.setStatusTip(
@@ -5138,7 +5186,8 @@ class MainWindow(QMainWindow):
                 Qt.FocusReason.ShortcutFocusReason
             )
         elif selected == 1:
-            self.timeline_panel.track_table.setFocus(
+            (self.timeline_panel.visual if self.timeline_panel.view_combo.currentIndex() == 0
+             else self.timeline_panel.track_table).setFocus(
                 Qt.FocusReason.ShortcutFocusReason
             )
 

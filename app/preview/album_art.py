@@ -234,7 +234,8 @@ def _render_ambient_field(palette: _Palette, width: int, height: int,
     painter = QPainter(image)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     t = phase * _AMBIENT_FLOW_SPEED
-    reach = max(width, height) * (0.52 + min(0.16, blur_radius / 200.0))
+    softness = max(0.0, min(1.0, blur_radius / 80.0))
+    reach = max(width, height) * (0.42 + 0.38 * softness)
     for index, (rgb, weight) in enumerate(palette[1:], start=1):
         fx = 0.10 + 0.037 * index
         fy = 0.083 + 0.041 * index
@@ -248,7 +249,10 @@ def _render_ambient_field(palette: _Palette, width: int, height: int,
         alpha = max(70, min(225, round(130 + 180 * weight)))
         vivid.setAlpha(alpha)
         glow.setColorAt(0.0, vivid)
-        glow.setColorAt(0.58, QColor(vivid.red(), vivid.green(), vivid.blue(), round(alpha * 0.4)))
+        glow.setColorAt(
+            0.35 + 0.4 * softness,
+            QColor(vivid.red(), vivid.green(), vivid.blue(), round(alpha * 0.4)),
+        )
         glow.setColorAt(1.0, QColor(vivid.red(), vivid.green(), vivid.blue(), 0))
         painter.fillRect(0, 0, width, height, QBrush(glow))
     shade = QColor("#05070C")
@@ -278,6 +282,7 @@ def create_cached_ambient_background(audio_path: str | Path, width: int, height:
                                      blur_radius: float = 24.0,
                                      cover_path: str | Path = "",
                                      phase: float = 0.0, *,
+                                     motion: float = 1.0,
                                      brightness: float = 0.0,
                                      contrast: float = 0.0) -> QPixmap:
     """Return the ambient backdrop for one instant, reusing cached work.
@@ -316,7 +321,10 @@ def create_cached_ambient_background(audio_path: str | Path, width: int, height:
     field_scale = min(1.0, _AMBIENT_FIELD_LONG_EDGE / max(width, height))
     small_w = max(2, round(width * field_scale))
     small_h = max(2, round(height * field_scale))
-    phase_step = round(max(0.0, float(phase)) * AMBIENT_FLOW_HZ)
+    phase_step = round(
+        max(0.0, float(phase)) * max(0.0, min(3.0, float(motion)))
+        * AMBIENT_FLOW_HZ
+    )
     scaled = _cached_ambient_scaled(
         palette, small_w, small_h, round(max(0.0, blur_radius) * 10),
         phase_step, width, height, float(brightness), float(contrast),

@@ -41,6 +41,28 @@ def _validate_confidence(name: str, value: float) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class MusicTagRegion:
+    """Measured music style/mood scores for a source-audio window, not a single forced label."""
+
+    start_seconds: float
+    end_seconds: float
+    genres: tuple[tuple[str, float], ...] = ()
+    moods: tuple[tuple[str, float], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not (_is_finite_number(self.start_seconds) and _is_finite_number(self.end_seconds)
+                and 0.0 <= self.start_seconds < self.end_seconds):
+            raise ValueError("MusicTagRegion requires a finite, positive source window.")
+        for tags in (self.genres, self.moods):
+            names = set()
+            for name, score in tags:
+                if not isinstance(name, str) or not name.strip() or name in names:
+                    raise ValueError("MusicTagRegion labels must be unique, non-empty strings.")
+                names.add(name)
+                _validate_confidence("MusicTagRegion score", score)
+
+
+@dataclass(frozen=True, slots=True)
 class TrackAnalysis:
     """One track's AutoMix-relevant audio analysis.
 
@@ -92,6 +114,14 @@ class TrackAnalysis:
 
     analyzer_id: str = ""
     analyzer_version: str = ""
+    music_tags: tuple[MusicTagRegion, ...] = ()
+    """YAMNet music styles/moods in measured windows; empty means unknown."""
+    rms_curve: tuple[float, ...] = ()
+    bass_curve: tuple[float, ...] = ()
+    brightness_curve: tuple[float, ...] = ()
+    percussive_curve: tuple[float, ...] = ()
+    """Measured one-second audio features. RMS is linear amplitude; the other
+    curves are 0..1 (structure.timbre). Empty means unavailable, never silence."""
 
     def __post_init__(self) -> None:
         if not isinstance(self.track_id, str) or not self.track_id.strip():
@@ -147,6 +177,17 @@ class TrackAnalysis:
             raise ValueError("TrackAnalysis audible end must not precede its start.")
         if not isinstance(self.analyzer_id, str) or not isinstance(self.analyzer_version, str):
             raise ValueError("TrackAnalysis analyzer_id/analyzer_version must be strings.")
+        previous_end = 0.0
+        for name in ("rms_curve", "bass_curve", "brightness_curve", "percussive_curve"):
+            curve = getattr(self, name)
+            if len(curve) > int(self.duration_seconds) + 1 or any(
+                    not _is_finite_number(v) or v < 0.0 or (name != "rms_curve" and v > 1.0) for v in curve):
+                raise ValueError(f"TrackAnalysis.{name} must contain valid one-second measurements within the track.")
+        for region in self.music_tags:
+            if not isinstance(region, MusicTagRegion) or not (
+                    previous_end <= region.start_seconds < region.end_seconds <= self.duration_seconds):
+                raise ValueError("TrackAnalysis.music_tags must be sorted, disjoint and within the track.")
+            previous_end = region.end_seconds
 
     def beat_alignment_quality(self) -> str:
         """Classify how much a transition planner should trust this analysis.
@@ -192,6 +233,13 @@ class TrackAnalysis:
             "decay_start_seconds": self.decay_start_seconds,
             "analyzer_id": self.analyzer_id,
             "analyzer_version": self.analyzer_version,
+            **{name: list(getattr(self, name)) for name in
+               ("rms_curve", "bass_curve", "brightness_curve", "percussive_curve")},
+            "music_tags": [
+                {"start_seconds": r.start_seconds, "end_seconds": r.end_seconds,
+                 "genres": [list(tag) for tag in r.genres], "moods": [list(tag) for tag in r.moods]}
+                for r in self.music_tags
+            ],
         }
 
     @classmethod
@@ -219,4 +267,11 @@ class TrackAnalysis:
             decay_start_seconds=fields.get("decay_start_seconds"),
             analyzer_id=fields.get("analyzer_id", ""),
             analyzer_version=fields.get("analyzer_version", ""),
+            **{name: tuple(fields.get(name, ())) for name in
+               ("rms_curve", "bass_curve", "brightness_curve", "percussive_curve")},
+            music_tags=tuple(MusicTagRegion(
+                start_seconds=r["start_seconds"], end_seconds=r["end_seconds"],
+                genres=tuple(tuple(tag) for tag in r.get("genres", ())),
+                moods=tuple(tuple(tag) for tag in r.get("moods", ())),
+            ) for r in fields.get("music_tags", ())),
         )

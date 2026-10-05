@@ -21,7 +21,6 @@ from app.models.project import ProjectDocument, ProjectSettings
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.dialogs.preset_dialog import DesignPresetDialog
-from app.dialogs.ai_project_builder_dialog import AIProjectBuilderDialog
 from app.dialogs.audio_metadata_dialog import AudioMetadataDialog
 from app.dialogs.new_project_dialog import NewProjectDialog
 from app.dialogs.startup_dialog import StartupDialog
@@ -472,20 +471,18 @@ class MainWindowProjectTests(MainWindowTestCase):
             self.assertTrue(self.window._autosave_debounce_timer.isActive())
             show_error.assert_called_once()
 
-    def test_design_presets_and_ai_builder_are_separate_tools(self) -> None:
+    def test_design_presets_remain_available_without_ai_builder(self) -> None:
         preset_dialog = DesignPresetDialog(self.window.translator, self.window)
-        builder_dialog = AIProjectBuilderDialog(self.window.translator, self.window)
         try:
             self.assertTrue(hasattr(preset_dialog, "selected_preset"))
             self.assertFalse(hasattr(preset_dialog, "prompt_preview"))
-            self.assertTrue(hasattr(builder_dialog, "prompt_preview"))
-            self.assertFalse(hasattr(builder_dialog, "selected_preset"))
-            self.assertIsNot(
-                self.window.presets_action, self.window.ai_project_builder_action
-            )
+            self.assertIn(self.window.presets_action, self.window.project_menu.actions())
+            for language in (Language.KOREAN, Language.ENGLISH):
+                self.window.translator.set_language(language)
+                labels = {action.text() for action in self.window.project_menu.actions() + self.window.toolbar.actions()}
+                self.assertFalse(labels & {"AI 프로젝트 빌더", "AI Project Builder"})
         finally:
             preset_dialog.close()
-            builder_dialog.close()
 
     def test_file_recent_projects_menu_opens_the_selected_entry(self) -> None:
         with TemporaryDirectory(prefix="recent-project-menu-") as directory:
@@ -573,6 +570,62 @@ class MainWindowProjectTests(MainWindowTestCase):
             dialog_type.call_args.kwargs["playlist_tracks"],
             self.window.playlist_service.tracks,
         )
+
+    def test_lrc_generator_finish_applies_result_to_selected_track(self) -> None:
+        track = PlaylistTrack("selected.wav", "Selected track")
+        self.window.playlist_service.replace([track])
+        item = self.window.playlist_editor.list_widget.item(0)
+        item.setSelected(True)
+        cues = [{"start": 1.0, "end": 9.0, "text": "Applied"}]
+
+        with patch("app.ui.main_window.LrcGeneratorDialog") as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.DialogCode.Accepted
+            dialog.result_track_id = track.id
+            dialog.timed_cues.return_value = cues
+            dialog.saved_paths = []
+            dialog.add_saved_files_to_project = False
+            self.window._show_lrc_generator()
+
+        self.assertEqual(track.lyrics, cues)
+        self.assertEqual(track.lyrics_path, "")
+        kwargs = dialog_type.call_args.kwargs
+        self.assertEqual(kwargs["target_track_id"], track.id)
+        self.assertEqual(kwargs["initial_audio_path"], track.file_path)
+
+    def test_lrc_generator_finish_without_file_or_track_stays_open(self) -> None:
+        dialog = LrcGeneratorDialog([], self.window.translator, self.window)
+        try:
+            dialog.audio_path = "unmatched.wav"
+            dialog.lines = ["Unsaved"]
+            dialog.timestamps = [1.0]
+            with patch.object(QDialog, "accept") as accept:
+                dialog.accept()
+            accept.assert_not_called()
+            self.assertTrue(dialog.status_label.property("error"))
+        finally:
+            dialog.done(QDialog.DialogCode.Rejected)
+
+    def test_lrc_generator_finish_can_clear_selected_track_lyrics(self) -> None:
+        track = PlaylistTrack(
+            "selected.wav",
+            "Selected track",
+            lyrics_path="selected.lrc",
+            lyrics=[{"start": 1.0, "end": 2.0, "text": "Remove me"}],
+        )
+        self.window.playlist_service.replace([track])
+
+        with patch("app.ui.main_window.LrcGeneratorDialog") as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.DialogCode.Accepted
+            dialog.result_track_id = track.id
+            dialog.timed_cues.return_value = []
+            dialog.saved_paths = []
+            dialog.add_saved_files_to_project = False
+            self.window._show_lrc_generator()
+
+        self.assertEqual(track.lyrics, [])
+        self.assertEqual(track.lyrics_path, "")
 
     def test_missing_audio_metadata_can_be_edited_before_project_import(self) -> None:
         track = PlaylistTrack(

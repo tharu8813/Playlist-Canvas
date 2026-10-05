@@ -51,6 +51,7 @@ def transition_rows(plan: CompiledRenderPlan, titles: Mapping[str, str] | None =
             row.update({
                 "timeline_start": transition.timeline_start, "duration": transition.duration,
                 "type": transition.type.value, "dsp": ("eq" if style is not None and transition.band_windows is not None
+                        and dict(transition.details).get("manual_style") == "eq"
                         else style.value if style else "legacy"),
                 "incoming_rate": incoming.playback_rate,
                 **dict(transition.details),

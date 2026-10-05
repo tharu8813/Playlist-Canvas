@@ -241,7 +241,8 @@ def grab(widget: QWidget) -> QImage:
 class Session:
     """One MainWindow in one language, holding the sample playlist and its analyses."""
 
-    def __init__(self, app: QApplication, language: str, songs: list[dict], ffmpeg: Path) -> None:
+    def __init__(self, app: QApplication, language: str, songs: list[dict], ffmpeg: Path,
+                 *, analyze: bool = True) -> None:
         from app.automix.analysis.registry import create_analysis_provider
         from app.automix.analysis.service import AnalysisService
         from app.presets.preset_service import PresetService
@@ -271,21 +272,22 @@ class Session:
             tracks.append(track)
         window.playlist_service.add_tracks(tracks)
         window.project_settings = replace(
-            window.project_settings, transition_mode="automix",
+            window.project_settings, transition_mode="automix" if analyze else "none",
             title="Late Night Drive", author="Playlist Canvas",
         )
         preset = next(p for p in PresetService().all() if p.identifier == "aurora")
         window._apply_preset(preset)
-        result = AnalysisService(create_analysis_provider("auto", ffmpeg)).analyze_tracks(tracks)
-        window._automix_analyses_received(result.analyses)
-        try:
-            from app.automix.structure.service import StructureAnalysisService
-            from app.automix.structure.sonara import SonaraStructureProvider
+        if analyze:
+            result = AnalysisService(create_analysis_provider("auto", ffmpeg)).analyze_tracks(tracks)
+            window._automix_analyses_received(result.analyses)
+            try:
+                from app.automix.structure.service import StructureAnalysisService
+                from app.automix.structure.sonara import SonaraStructureProvider
 
-            structures = StructureAnalysisService(SonaraStructureProvider(ffmpeg)).analyze_tracks(tracks)
-            window._automix_structures_received(structures.analyses)
-        except Exception as error:  # noqa: BLE001 - structure is optional
-            print(f"structure analysis skipped: {error}")
+                structures = StructureAnalysisService(SonaraStructureProvider(ffmpeg)).analyze_tracks(tracks)
+                window._automix_structures_received(structures.analyses)
+            except Exception as error:  # noqa: BLE001 - structure is optional
+                print(f"structure analysis skipped: {error}")
         self.window = window
         self.tracks = window.playlist_service.tracks
         self.refresh()
@@ -558,7 +560,97 @@ def capture_dialogs(session: Session) -> None:
     session.refresh()
 
 
-CAPTURES = (capture_canvas, capture_track, capture_lyrics_editor, capture_automix_editor,
+def capture_source_effects(session: Session) -> None:
+    """Capture source customization using sample data; no audio analysis is needed."""
+    from mutagen.id3 import APIC, ID3, TALB, TIT2, TPE1
+    from app.dialogs.lyrics_animation_dialog import LyricsAnimationDialog
+    from app.dialogs.lyrics_line_style_dialog import LyricsLineStyleDialog
+    from app.dialogs.mp3_metadata_editor_dialog import Mp3MetadataEditorDialog
+    from app.models.source import Source, SourceType
+
+    window = session.window
+    source = next((s for s in window.store.sources() if s.source_type == SourceType.LYRICS), None)
+    if source is None:
+        source = Source(SourceType.LYRICS, "가사 / 자막" if session.language == "ko" else "Lyrics / subtitles",
+                        x=740, y=130, width=1000, height=720, font_size=42)
+        window.store.add(source)
+    source = replace(source, subtitle_advanced_categories=["motion", "styles", "intro"],
+                     fill_color="#00000000", font_size=30,
+                     subtitle_animation="cascade", subtitle_stagger=0.12,
+                     subtitle_intro_enabled=True, subtitle_intro_midtrack=True)
+    dialog = LyricsAnimationDialog(source, window.translator, window)
+    dialog.show()
+    session.refresh()
+    save(grab(dialog), session.language, "lyrics_transition")
+    dialog.tabs.setCurrentIndex(2)
+    dialog.role.setCurrentIndex(2)
+    session.refresh()
+    save(grab(dialog), session.language, "lyrics_role_styles")
+    dialog.tabs.setCurrentIndex(3)
+    session.refresh()
+    save(grab(dialog), session.language, "lyrics_intro")
+    dialog.reject()
+    dialog.deleteLater()
+    settle(session.app)
+
+    dialog = LyricsLineStyleDialog(replace(source, subtitle_advanced_categories=[],
+        subtitle_line_styles=[{}, {"font_size_offset": -10.0}]),
+        window.translator, window)
+    dialog.show()
+    session.refresh()
+    save(grab(dialog), session.language, "lyrics_line_styles")
+    dialog.reject()
+    dialog.deleteLater()
+    settle(session.app)
+
+    sample = Path(session.tracks[0].file_path).with_name("Night Drive metadata.mp3")
+    tags = ID3()
+    tags.add(TIT2(encoding=3, text="Night Drive"))
+    tags.add(TPE1(encoding=3, text="Lumen"))
+    tags.add(TALB(encoding=3, text="After Hours"))
+    tags.add(APIC(encoding=3, mime="image/png", type=3,
+                  data=Path(session.tracks[0].cover_path).read_bytes()))
+    tags.save(sample)
+    dialog = Mp3MetadataEditorDialog(window.translator, window)
+    dialog.load_file(sample)
+    dialog._file_label.setText(r"C:\Music\Night Drive.mp3")
+    dialog.show()
+    session.refresh()
+    save(grab(dialog), session.language, "mp3_metadata")
+    dialog.reject()
+    dialog.deleteLater()
+    settle(session.app)
+
+    window.store.update(source.id, music_reactive_enabled=True)
+    window.store.select(source.id)
+    inspector = window.inspector
+    inspector.property_tabs.setCurrentIndex(inspector._tab_indices["animation"])
+    session.refresh()
+    groups = [inspector._sections[("animation", key)] for key in ("music_reaction", "music_response")]
+    # Stack the two real settings groups so every option is legible in the guide.
+    captures = [grab(group) for group in groups]
+    image = QImage(max(i.width() for i in captures), sum(i.height() for i in captures), QImage.Format.Format_RGB32)
+    image.fill(QColor("#202427"))
+    painter = QPainter(image)
+    y = 0
+    for capture in captures:
+        painter.drawImage(0, y, capture)
+        y += capture.height()
+    painter.end()
+    save(image, session.language, "canvas_music_reaction")
+    window.bottom_tabs.setCurrentIndex(1)
+    timed_source = next(s for s in window.store.sources() if s.source_type == SourceType.PROGRESS_BAR)
+    window.store.update(timed_source.id, timeline_start=18.0, timeline_duration=65.0)
+    window.store.select(timed_source.id)
+    window.workspace_splitter.lock_edge_sizes({1: 470})
+    window.workspace_splitter.setSizes([450, 470])
+    session.refresh()
+    window.timeline_panel.visual.verticalScrollBar().setValue(0)
+    settle(session.app)
+    save(grab(window.bottom_tabs), session.language, "canvas_timeline")
+
+
+CAPTURES = (capture_canvas, capture_source_effects, capture_track, capture_lyrics_editor, capture_automix_editor,
             capture_preview, capture_dialogs)
 
 
@@ -586,7 +678,8 @@ def main() -> int:
         folder.mkdir()
         songs = build_sample_media(folder)
         for language in arguments.lang or ["ko", "en"]:
-            session = Session(app, language, songs, Path(arguments.ffmpeg))
+            session = Session(app, language, songs, Path(arguments.ffmpeg),
+                              analyze=not arguments.only or bool(set(arguments.only) - {"canvas", "source_effects"}))
             for capture in CAPTURES:
                 if not arguments.only or capture.__name__.removeprefix("capture_") in arguments.only:
                     capture(session)

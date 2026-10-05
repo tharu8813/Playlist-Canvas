@@ -27,6 +27,8 @@ without one renders exactly as before.
 
 from __future__ import annotations
 
+from app.utils.performance import timed
+
 import logging
 import math
 import os
@@ -392,10 +394,13 @@ def _tempo_ramp_filters(index: int, clip: AudioRenderClip, ramp_filter: str) -> 
             text += f", {name} pitch {ramp.pitch_at((start + end) / 2):.6f}"
         return text
 
+    commands = ';'.join(command(*segment) for segment in segments[1:])
+    start, end, rate = segments[0]
+    pitch = f":pitch={ramp.pitch_at((start + end) / 2):.6f}" if ramp.end_pitch != 1.0 else ""
     return [
         f"asetnsamples=n={RAMP_COMMAND_FRAME_SAMPLES}:p=0",
-        f"asendcmd=c='{';'.join(command(*segment) for segment in segments[1:])}'",
-        f"{name}=tempo={segments[0][2]:.6f}",
+        *([f"asendcmd=c='{commands}'"] if commands else []),
+        f"{name}=tempo={rate:.6f}{pitch}",
     ]
 
 
@@ -567,7 +572,19 @@ def _band_filters(
     return filters
 
 
-EXIT_EFFECTS = frozenset({TransitionDsp.ECHO_OUT, TransitionDsp.TAPE_STOP})
+EXIT_EFFECTS = frozenset({TransitionDsp.ECHO_OUT, TransitionDsp.TAPE_STOP,
+                          TransitionDsp.BEAT_ROLL, TransitionDsp.LOWPASS_OUT})
+
+
+def roll_slice_seconds(transition: AudioRenderTransition) -> float:
+    """One beat-synced slice, never longer than the actual transition."""
+    beat = transition.beat_seconds or ECHO_DEFAULT_BEAT_SECONDS
+    return min(transition.duration, beat * transition.roll_beats)
+
+
+def lowpass_cutoff(transition: AudioRenderTransition, progress: float) -> float:
+    """Exponential cutoff: steady movement on a musical/log-frequency scale."""
+    return 18000.0 * (transition.filter_cutoff_hz / 18000.0) ** min(1.0, max(0.0, progress))
 
 
 def echo_taps(duration: float, beat: float, feedback: float | None = None) -> list[tuple[float, float]]:
@@ -613,6 +630,36 @@ def _exit_filters(
     """End ``source`` inside its outgoing window with ``style``'s own envelope."""
     duration = transition.duration
     window = max(0.0, clip_duration - duration)
+    if style in (TransitionDsp.BEAT_ROLL, TransitionDsp.LOWPASS_OUT):
+        head_samples = round(window * SAMPLE_RATE)
+        tail_samples = max(1, round(duration * SAMPLE_RATE))
+        tail = [f"atrim=start_sample={head_samples}", "asetpts=PTS-STARTPTS"]
+        if style is TransitionDsp.BEAT_ROLL:
+            size = max(1, round(roll_slice_seconds(transition) * SAMPLE_RATE))
+            edge = min(0.003, size / SAMPLE_RATE / 4)
+            tail.extend([
+                f"atrim=end_sample={size}",
+                f"afade=t=in:d={edge:.6f}",
+                f"afade=t=out:st={size / SAMPLE_RATE - edge:.6f}:d={edge:.6f}",
+                f"aloop=loop={max(0, math.ceil(tail_samples / size) - 1)}:size={size}",
+                "asetpts=N/SR/TB",
+            ])
+        else:
+            name = f"lowpass@close{index}"
+            steps = max(1, math.ceil(duration / SWEEP_STEP_SECONDS))
+            commands = ";".join(
+                f"{duration * step / steps:.4f} {name} f {lowpass_cutoff(transition, step / steps):.2f}"
+                for step in range(steps + 1))
+            tail.extend([f"asetnsamples=n={round(SWEEP_STEP_SECONDS * SAMPLE_RATE)}:p=0",
+                         f"asendcmd=c='{commands}'", f"{name}=f=18000:r=f64"])
+        tail.extend([f"apad=whole_len={tail_samples}", f"atrim=end_sample={tail_samples}",
+                     f"afade=t=out:d={duration:.6f}:curve=qsin"])
+        return [
+            f"[{source}]asplit=2[{output}head][{output}tail]",
+            f"[{output}head]atrim=end_sample={head_samples}[{output}h]",
+            f"[{output}tail]{','.join(tail)}[{output}t]",
+            f"[{output}h][{output}t]concat=n=2:v=0:a=1[{output}]",
+        ]
     if style is TransitionDsp.ECHO_OUT:
         beat = echo_beat(transition)
         taps = echo_taps(duration, beat, transition.echo_feedback)
@@ -683,7 +730,8 @@ def _limited_overlap_filters(
     # of the window; TAPE_STOP: from TAPE_STOP_ENTRY on, silent before it.
     entry = {TransitionDsp.DROP_IN: 0.0, TransitionDsp.ECHO_OUT: 0.0,
              TransitionDsp.TAPE_STOP: tape_entry(transition) * transition.duration}.get(style)
-    incoming_curve = "nofade" if entry is not None else curve
+    incoming_curve = ("qsin" if style in (TransitionDsp.BEAT_ROLL, TransitionDsp.LOWPASS_OUT)
+                      else "nofade" if entry is not None else curve)
     attack = []
     if entry is not None:
         start_at = f"st={entry:.6f}:" if entry > 0.0 else ""
@@ -763,6 +811,7 @@ class AutoMixAudioPipeline:
     def __init__(self, ffmpeg_executable: Path) -> None:
         self.ffmpeg_executable = Path(ffmpeg_executable)
 
+    @timed("automix.mix_render_seconds")
     def render(
         self,
         plan: AudioRenderPlan,

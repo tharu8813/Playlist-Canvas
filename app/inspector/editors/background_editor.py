@@ -18,6 +18,15 @@ def edit(inspector: "SourceInspector", source: Source) -> None:
         apply_image_backed_fields(inspector, source, show_file=source.background_mode == "image")
         album_art_background = source.background_mode == "album_art"
         inspector._set_field_visible("background_ambient", album_art_background)
+        ambient_background = album_art_background and source.background_ambient
+        inspector._set_field_visible("background_ambient_blur", ambient_background)
+        inspector._set_field_visible("background_ambient_motion", ambient_background)
+        inspector._set_field_visible("background_bass_reactive", ambient_background)
+        inspector._set_field_visible(
+            "background_bass_strength",
+            ambient_background and source.background_bass_reactive,
+        )
+        inspector._set_field_visible("blur", not ambient_background)
         inspector._set_field_visible("background_track_transition", album_art_background)
         inspector._set_field_visible(
             "background_track_transition_seconds",

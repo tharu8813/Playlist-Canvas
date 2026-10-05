@@ -14,6 +14,8 @@ from typing import Hashable, Sequence
 
 import numpy as np
 
+from app.utils.performance import timed
+
 from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QImage, QOpenGLContext, QSurfaceFormat
 from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
@@ -108,6 +110,8 @@ class GpuUploadStats:
     peak_allocated_bytes: int = 0
     texture_budget_bytes: int = 0
     filtered_layers: int = 0
+    texture_allocations: int = 0
+    presented_scene_frames: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,8 +153,11 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
             self._failure_reported = False
             self._submitted_frames = 0
             self._presented_frames = 0
+            self._presented_scene_frames = 0
+            self._last_presented_serial = 0
             self._dropped_pending_frames = 0
             self._texture_uploads = 0
+            self._texture_allocations = 0
             self._texture_reuses = 0
             self._uploaded_bytes = 0
             self._texture_evictions = 0
@@ -192,8 +199,10 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
             return GpuUploadStats(
                 submitted_frames=self._submitted_frames,
                 presented_frames=self._presented_frames,
+                presented_scene_frames=self._presented_scene_frames,
                 dropped_pending_frames=self._dropped_pending_frames,
                 texture_uploads=self._texture_uploads,
+                texture_allocations=self._texture_allocations,
                 texture_reuses=self._texture_reuses,
                 uploaded_bytes=self._uploaded_bytes,
                 texture_evictions=self._texture_evictions,
@@ -246,6 +255,9 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
 
         def _on_frame_swapped(self) -> None:
             self._presented_frames += 1
+            if self._frame_serial > self._last_presented_serial:
+                self._presented_scene_frames += 1
+                self._last_presented_serial = self._frame_serial
             self.frame_presented.emit()
 
         def initializeGL(self) -> None:  # type: ignore[override]
@@ -266,6 +278,7 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
             except Exception as error:
                 self._fail(str(error))
 
+        @timed("preview.gl_submission_seconds")
         def paintGL(self) -> None:  # type: ignore[override]
             if not self._ready or self._functions is None:
                 return
@@ -350,6 +363,7 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
             self._active_canvas_size = canvas_size
             self._pending_image = QImage()
 
+        @timed("preview.texture_prepare_upload_seconds")
         def _upload_layer(self, layer: GpuPreviewLayer) -> None:
             if layer.video_frame is not None and layer.video_frame.isValid():
                 self._upload_video_frame_layer(layer)
@@ -408,6 +422,7 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
             )
             if not texture.isCreated():
                 raise RuntimeError("Could not allocate the preview texture.")
+            self._texture_allocations += 1
             texture.setMinificationFilter(QOpenGLTexture.Filter.Linear)
             texture.setMagnificationFilter(QOpenGLTexture.Filter.Linear)
             texture.setWrapMode(QOpenGLTexture.WrapMode.ClampToEdge)
@@ -433,15 +448,12 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
         ) -> bytearray:
             """Copy mapped rows without invoking QVideoFrame.toImage()."""
             stride = frame.bytesPerLine(plane)
-            source = memoryview(frame.bits(plane)).cast("B")
-            result = bytearray(max(0, row_bytes * rows))
-            for row in range(rows):
-                source_start = row * stride
-                target_start = row * row_bytes
-                result[target_start:target_start + row_bytes] = source[
-                    source_start:source_start + row_bytes
-                ]
-            return result
+            source = np.frombuffer(
+                memoryview(frame.bits(plane)), dtype=np.uint8, count=stride * rows,
+            ).reshape(rows, stride)
+            # NumPy packs padded rows in native code; keep owned storage after unmap.
+            packed = np.ascontiguousarray(source[:, :row_bytes])
+            return bytearray(memoryview(packed).cast("B"))
 
         @staticmethod
         def _copy_scaled_video_plane(
@@ -449,6 +461,10 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
             target_width: int, target_rows: int, *, channels: int = 1,
         ) -> bytearray:
             """Nearest-sample one mapped plane while respecting padded strides."""
+            if source_width == target_width and source_rows == target_rows:
+                return GpuTexturePreviewSurface._copy_video_plane(
+                    frame, plane, source_width * channels, source_rows,
+                )
             stride = frame.bytesPerLine(plane)
             source = np.frombuffer(
                 memoryview(frame.bits(plane)), dtype=np.uint8,
@@ -464,7 +480,7 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
                 0, max(0, source_width - 1), max(1, target_width),
             ).astype(np.intp)
             scaled = pixels[y_indices[:, None], x_indices[None, :], :]
-            return bytearray(scaled.tobytes())
+            return bytearray(memoryview(scaled).cast("B"))
 
         @staticmethod
         def _upload_raw_texture(
@@ -605,6 +621,7 @@ if GPU_TEXTURE_SURFACE_AVAILABLE:
                     QOpenGLTexture.TextureFormat.RG8_UNorm,
                     QOpenGLTexture.PixelFormat.RG, uv_data,
                 )
+                self._texture_allocations += 2
                 allocation = len(y_data) + len(uv_data)
                 self._textures[layer.key] = _TextureEntry(
                     y_texture, layer.native_serial,

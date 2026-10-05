@@ -9,7 +9,7 @@ from typing import Sequence
 from app.models.playlist import PlaylistTrack
 from app.models.source import Source, SourceType
 from app.preview.album_art import AMBIENT_FLOW_HZ
-from app.preview.frame_state import MixJunction, mix_phase_durations, segment_junction
+from app.preview.frame_state import MixJunction, mix_phase_durations, segment_junction, lyric_instrumental_windows
 from app.timeline.compiler import compile_playlist
 from app.timeline.render_plan import CompiledRenderPlan, visual_segments
 
@@ -73,6 +73,7 @@ class ExportTimelinePlanner:
         compiled_plan: CompiledRenderPlan | None = None,
         *, track_number_offset: int = 0,
     ) -> list[ExportFrameSample]:
+        sources = [source.resolved_lyrics() for source in sources]
         if compiled_plan is not None and compiled_plan != compile_playlist(tracks):
             return ExportTimelinePlanner._build_compiled(tracks, sources, animation_fps, compiled_plan)
         samples: list[ExportFrameSample] = []
@@ -441,10 +442,29 @@ class ExportTimelinePlanner:
             # export would freeze it on one capture-invariant frame.
             # AMBIENT_FLOW_HZ matches the phase quantisation used to dedupe
             # frames downstream, so a finer rate would just coalesce.
-            flow_steps = max(1, round(stable * AMBIENT_FLOW_HZ))
+            motion = max(
+                (source.background_ambient_motion for source in sources
+                 if source.source_type is SourceType.BACKGROUND
+                 and source.background_mode == "album_art"
+                 and source.background_ambient),
+                default=1.0,
+            )
+            flow_steps = max(1, round(
+                stable * min(float(animation_fps), AMBIENT_FLOW_HZ * motion)
+            ))
             sample_points.update(
                 intro + stable * step / flow_steps
                 for step in range(flow_steps + 1)
+            )
+
+        if any(
+            source.uses_bass_reaction
+            for source in sources
+        ):
+            bass_steps = max(1, round(stable * animation_fps))
+            sample_points.update(
+                intro + stable * step / bass_steps
+                for step in range(bass_steps + 1)
             )
 
         if any(source.loop_motion != "none" for source in sources):
@@ -510,6 +530,19 @@ class ExportTimelinePlanner:
         ]
         if lyric_sources:
             track_offset = track.lyrics_timing_offset_seconds
+            for source in lyric_sources:
+                intervals = list(lyric_instrumental_windows(track, source)) if source.subtitle_intro_midtrack else []
+                cues = [cue for cue in track.lyrics if str(cue.get("text", "")).strip()]
+                if source.subtitle_intro_enabled and cues:
+                    intervals.append((0.0, float(cues[0]["start"]) - track_offset - source.subtitle_timing_offset))
+                for a, b in intervals:
+                    if source.subtitle_animation != "none":
+                        b += source.subtitle_animation_duration
+                    a, b = max(intro, a), min(intro + stable, b)
+                    if b <= a:
+                        continue
+                    steps = max(1, ceil((b - a) * animation_fps))
+                    sample_points.update(a + (b - a) * step / steps for step in range(steps + 1))
             for cue in track.lyrics:
                 for point in (
                     float(cue.get("start", 0.0)),

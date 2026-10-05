@@ -45,6 +45,13 @@ class PreviewController:
 
     # -- bottom-tab embedded playback preview ---------------------------
 
+    def preview_at(self, seconds: float) -> None:
+        """Open the existing player from a visual timeline position."""
+        window = self.window
+        window._show_bottom_panel(PREVIEW_TAB_INDEX)
+        if window._inline_preview is not None:
+            window._inline_preview._seek_to_seconds(seconds)
+
     def open_playlist_preview(self) -> None:
         """Select the bottom Preview tab and start its embedded playback mode."""
         window = self.window

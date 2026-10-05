@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from app.automix.models import TrackAnalysis
 from app.automix.overrides import (
     ECHO_BEAT_CHOICES, EQ_BANDS, MANUAL_STYLES, MAX_DURATION_SECONDS, MAX_ECHO_FEEDBACK, MAX_RAMP_SECONDS,
-    MIN_EQ_WINDOW,
+    MIN_EQ_WINDOW, ROLL_BEAT_CHOICES,
     STYLE_ALIASES, STYLE_AUTO,
     STYLE_CUT, STYLE_EQ, BandWindows, TransitionOverride, Window, pair_key,
 )
@@ -62,6 +62,10 @@ STYLE_CHOICES = {
                      "박에서 박으로 깔끔하게 끊깁니다.",
                      "No overlap: straight to the next song at the cue. "
                      "Cues on beats give a clean beat-to-beat cut."),
+    "beat_roll": ("비트 롤", "Beat roll", "큐의 짧은 박자 구간을 반복하며 잦아듭니다. 반복 길이를 박 단위로 정합니다.",
+                  "Repeats a short beat slice at the cue while fading out. Set the loop length in beats."),
+    "lowpass_out": ("로우패스", "Lowpass", "앞 곡의 고음을 점차 닫으며 넘깁니다. 마지막 필터 주파수를 직접 정합니다.",
+                    "Closes the outgoing song's highs while blending. Set the final filter cutoff."),
     "legacy": ("크로스페이드", "Crossfade", "한 곡이 작아지는 동안 다음 곡이 커집니다.",
                "One song gets quieter as the next gets louder."),
     "cut": ("컷", "Cut", "겹치지 않고 큐 지점에서 바로 다음 곡으로 넘어갑니다.",
@@ -476,7 +480,8 @@ def planned_values(junction: Junction) -> dict[str, object]:
 
 
 _EFFECT_FIELDS = {"echo_out": ("echo_beats", "echo_feedback", "echo_low_cut"), "tape_stop": ("tape_entry",),
-                  "vocal_safe_eq": ("vocal_handoff",)}
+                  "vocal_safe_eq": ("vocal_handoff",), "beat_roll": ("roll_beats",),
+                  "lowpass_out": ("filter_cutoff_hz",)}
 
 
 def changed_items(current: Junction, automatic: Junction | None, override: TransitionOverride | None) -> set[str]:
@@ -572,9 +577,10 @@ STYLE_GROUPS = (
     ("페이드", "Fades", ("short_fade", "drop_in")),
     ("EQ 믹스 · 박자가 맞는 곡", "EQ mixes · beat-matched songs",
      ("bass_swap", "vocal_safe_eq", "filter_blend", "filter_sweep", STYLE_EQ)),
-    ("효과 · 템포가 달라도 됨", "Effects · any tempo", ("echo_out", "tape_stop", "downbeat_cut")),
+    ("효과 · 템포가 달라도 됨", "Effects · any tempo",
+     ("echo_out", "tape_stop", "downbeat_cut", "beat_roll", "lowpass_out")),
 )
-_BASIC_STYLES = ("short_fade", "vocal_safe_eq", "echo_out", "downbeat_cut")
+_BASIC_STYLES = ("short_fade", "vocal_safe_eq", "echo_out", "downbeat_cut", "beat_roll", "lowpass_out")
 """Simple mode's choices besides automatic: one of each kind."""
 LENGTH_PRESETS = (4.0, 8.0, 16.0)
 _CUT_STYLES = (STYLE_CUT, "downbeat_cut")
@@ -596,6 +602,8 @@ def effect_length(style: str, outgoing: TrackAnalysis | None) -> float | None:
         return round(min(ECHO_BARS * bar, ECHO_MAX_SECONDS), 3)
     if style == "tape_stop":
         return round(min(max(bar, TAPE_STOP_SECONDS[0]), TAPE_STOP_SECONDS[1]), 3)
+    if style in ("beat_roll", "lowpass_out"):
+        return round(min(8.0, 2 * bar), 3)
     return None
 
 
@@ -945,6 +953,21 @@ class TransitionPropertiesPanel(QWidget):
         tape_row.addWidget(self.tape_entry_slider, 1)
         tape_row.addWidget(self.tape_entry_value)
 
+        self.roll_label = QLabel()
+        self.roll_combo = QComboBox()
+        for beats in ROLL_BEAT_CHOICES:
+            self.roll_combo.addItem(f"{beats:g}", beats)
+        self.roll_combo.currentIndexChanged.connect(
+            lambda index: self._emit({"roll_beats": self.roll_combo.itemData(index)}))
+        self.cutoff_label = QLabel()
+        self.cutoff_spin = QDoubleSpinBox()
+        self.cutoff_spin.setRange(200.0, 8000.0)
+        self.cutoff_spin.setDecimals(0)
+        self.cutoff_spin.setSingleStep(100.0)
+        self.cutoff_spin.setSuffix(" Hz")
+        self.cutoff_spin.valueChanged.connect(lambda value: self._queue("filter_cutoff_hz", value))
+        self.cutoff_spin.editingFinished.connect(self.flush)
+
         self.handoff_label = QLabel()
         self.handoff_slider = QSlider(Qt.Orientation.Horizontal)
         self.handoff_slider.setRange(10, 90)
@@ -985,8 +1008,11 @@ class TransitionPropertiesPanel(QWidget):
                               self.echo_low_cut_check)
         self.tape_box = group(self.tape_entry_label, tape_row)
         self.handoff_box = group(self.handoff_label, handoff_row)
+        self.roll_box = group(self.roll_label, self.roll_combo)
+        self.cutoff_box = group(self.cutoff_label, self.cutoff_spin)
         # One "details" section: whichever of these belongs to the chosen style.
-        self.detail_box = group(self.detail_header, self.echo_box, self.tape_box, self.handoff_box)
+        self.detail_box = group(self.detail_header, self.echo_box, self.tape_box, self.handoff_box,
+                                self.roll_box, self.cutoff_box)
         self.length_box = group(self.length_header, length_row, length_value)
         self.position_box = group(self.position_header, position_row)
         self.cue_box = self.position_box
@@ -1118,6 +1144,9 @@ class TransitionPropertiesPanel(QWidget):
             for beats, button in self.echo_beat_buttons.items():
                 button.setChecked(abs(override.echo_beats - beats) < 1e-9)
             self.tape_entry_slider.setValue(round(override.tape_entry * 100))
+            self.roll_combo.setCurrentIndex(ROLL_BEAT_CHOICES.index(override.roll_beats))
+            if not (self.cutoff_spin.hasFocus() and self.cutoff_spin.lineEdit().isModified()):
+                self.cutoff_spin.setValue(override.filter_cutoff_hz)
             self.key_combo.setCurrentIndex(KEY_SHIFT_CHOICES.index(override.key_shift)
                                            if override.key_shift in KEY_SHIFT_CHOICES else 0)
             self.style_group.setExclusive(False)
@@ -1296,8 +1325,14 @@ class TransitionPropertiesPanel(QWidget):
         # Effects are what the user came to shape: their settings show in both modes.
         self.echo_box.setVisible(style == "echo_out")
         self.tape_box.setVisible(style == "tape_stop")
+        self.roll_box.setVisible(style == "beat_roll")
+        self.cutoff_box.setVisible(style == "lowpass_out")
+        self.roll_label.setText("반복 길이 (박) · BPM 미분석 시 120 BPM 기준" if korean
+                               else "Loop length (beats) · 120 BPM if tempo unknown")
+        self.cutoff_label.setText("마지막 로우패스 주파수" if korean else "Final lowpass cutoff")
         self.handoff_box.setVisible(self.advanced and style == "vocal_safe_eq")
-        details = [box for box in (self.echo_box, self.tape_box, self.handoff_box) if not box.isHidden()]
+        details = [box for box in (self.echo_box, self.tape_box, self.handoff_box,
+                                  self.roll_box, self.cutoff_box) if not box.isHidden()]
         self.detail_box.setVisible(bool(details))
         name = (STYLE_CHOICES[style][0 if korean else 1] if style in STYLE_CHOICES and style != STYLE_AUTO
                 else self._auto_style)
