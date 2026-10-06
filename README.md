@@ -4,7 +4,7 @@
 <div align="center">
 <img src="docs/images/playlist-canvas-icon.png" width="128" alt="Playlist Canvas 아이콘">
 
-Playlist Canvas
+# Playlist Canvas
 
 Playlist Creation Studio for Windows
 
@@ -27,7 +27,7 @@ Playlist Creation Studio for Windows
 
 ⸻
 
-Playlist Canvas란?
+## Playlist Canvas란?
 
 Playlist Canvas는 플레이리스트를 하나의 콘텐츠로 완성하기 위한 Windows용 제작 스튜디오입니다.
 
@@ -39,7 +39,7 @@ Music → Mix → Lyrics → Visual → Timeline → Preview → Render
 
 프로그래밍 지식이나 별도의 Python 설치는 필요하지 않습니다.
 
-⸻
+---
 
 단순한 플레이리스트 영상 생성기를 넘어
 
@@ -71,9 +71,9 @@ Playlist Canvas의 목표는 버튼 하나를 눌러 정해진 형태의 영상�
 
 타임라인과 미리보기에서 결과를 확인한 뒤 최종 결과물을 MP4 영상으로 렌더링할 수 있습니다.
 
-⸻
+---
 
-도움말
+## 도움말
 
 Playlist Canvas에는 한국어와 영어 오프라인 도움말이 포함되어 있습니다.
 
@@ -87,7 +87,7 @@ Playlist Canvas에는 한국어와 영어 오프라인 도움말이 포함되어
 
 %LOCALAPPDATA%\PlaylistCanvas\logs
 
-⸻
+---
 
 만든 영상을 공개하거나 수익화할 수 있나요?
 
@@ -112,9 +112,9 @@ Playlist Canvas 출처 표시는 선택 사항이며, 영상에 워터마크를 
 이 영상은 Playlist Canvas를 이용해 제작되었습니다.
 https://github.com/tharu8813/Playlist-Canvas
 
-⸻
+---
 
-라이선스
+## 라이선스
 
 Playlist Canvas는 일반적인 오픈소스 라이선스가 아니라 Source-Available Noncommercial Share-Alike 방식으로 배포됩니다.
 
@@ -126,9 +126,9 @@ Playlist Canvas Source-Available Noncommercial Share-Alike License 1.0
 
 FFmpeg와 기타 외부 구성요소에는 각각 별도의 라이선스가 적용됩니다.
 
-⸻
+---
 
-개발 방식
+## 개발 방식
 
 Playlist Canvas는 바이브 코딩(Vibe Coding) 방식으로 개발된 프로젝트입니다.
 
@@ -138,9 +138,9 @@ Playlist Canvas는 바이브 코딩(Vibe Coding) 방식으로 개발된 프로�
 
 단순한 프로토타입으로 시작했지만 현재는 캔버스 편집, 오디오 분석, AutoMix, 타임라인, 실시간 미리보기, FFmpeg 렌더링과 배포 시스템을 포함하는 데스크톱 제작 도구로 발전했습니다.
 
-⸻
+---
 
-예제
+## 예제
 
 Playlist Canvas로 제작한 예제 영상:
 
@@ -148,7 +148,7 @@ YouTube에서 보기
 
 해당 영상은 Playlist Canvas 1.3.0.0 AutoMix를 기준으로 제작되었습니다.
 
-⸻
+---
 
 <div align="center">
 
