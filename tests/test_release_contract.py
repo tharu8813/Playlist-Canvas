@@ -17,6 +17,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("bundled_ffmpeg", specification)
         self.assertIn("app_icon.ico", specification)
         self.assertIn('name="Playlist Canvas"', specification)
+        self.assertIn('"sitecustomize", "usercustomize"', specification)
 
     def test_every_ffmpeg_subprocess_uses_hidden_window_options(self) -> None:
         paths = (

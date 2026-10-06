@@ -82,7 +82,8 @@ analysis = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=list(HEAVY_ANALYZER_PACKAGES),
+    # Build-host customization must never change the installed Python runtime.
+    excludes=[*HEAVY_ANALYZER_PACKAGES, "sitecustomize", "usercustomize"],
     noarchive=False,
 )
 # Qt uses Windows' system ICU. An unrelated Poppler installation on the build

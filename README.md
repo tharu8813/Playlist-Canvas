@@ -26,7 +26,7 @@ Playlist Canvas는 음악, 앨범 커버, 가사, 배경과 다양한 시각 효
 
 ## 다운로드와 설치
 
-1. [최신 릴리즈 페이지](https://github.com/tharu8813/Playlist-Canvas/releases/latest)의 **Assets**에서 `Playlist Canvas-1.3.1.0-setup.exe`를 내려받습니다. `Source code` 파일은 일반 사용자용 설치 파일이 아닙니다.
+1. [최신 릴리즈 페이지](https://github.com/tharu8813/Playlist-Canvas/releases/latest)의 **Assets**에서 `Playlist.Canvas-1.3.1.0-setup.exe`를 내려받습니다. `Source code` 파일은 일반 사용자용 설치 파일이 아닙니다.
 2. 설치 파일을 실행하고 언어·설치 위치·바로가기 옵션을 선택합니다.
 3. 설치가 끝나면 시작 메뉴나 바탕 화면에서 **Playlist Canvas**를 실행합니다.
 4. **도구 → 설정 → FFmpeg → FFmpeg 자동 다운로드 및 설치**를 실행합니다.
