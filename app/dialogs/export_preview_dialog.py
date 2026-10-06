@@ -56,6 +56,7 @@ from app.preview.gpu_texture_surface import (
 from app.preview.gpu_health import GpuPreviewHealth
 from app.preview.text_template import format_timestamp
 from app.controllers.preview_audio_controller import PreviewAudioController
+from app.widgets.audio_sync_warning import AudioSyncWarning
 from app.renderer.ffmpeg_renderer import FFmpegRenderer, VisualizerOverlay
 from app.renderer.python_visualizer import PythonVisualizerRenderer
 from app.services.source_store import SourceStore
@@ -958,6 +959,9 @@ class ExportPreviewDialog(QDialog):
         header.addWidget(self.performance_toggle)
         header.addWidget(self.button_box)
         layout.addLayout(header)
+        self.audio_sync_warning = AudioSyncWarning(self, audio_output=self.audio_output,
+                                                  media_player=self.media_player, translator=translator)
+        layout.addWidget(self.audio_sync_warning)
 
         performance_layout = QGridLayout(self.performance_bar)
         performance_layout.setContentsMargins(12, 8, 12, 8)

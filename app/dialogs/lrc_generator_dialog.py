@@ -46,6 +46,7 @@ from app.services.lrc_draft_service import LrcDraft, LrcDraftError, LrcDraftServ
 from app.services.preview_audio_settings import preview_volume, save_preview_volume
 from app.services.playlist_service import PlaylistService
 from app.utils.i18n import Translator
+from app.widgets.audio_sync_warning import AudioSyncWarning
 
 
 _STEP_HELP_TOPICS = {0: "lrc_audio", 1: "lrc_input", 2: "lrc_timing", 3: "lrc_review"}
@@ -435,6 +436,9 @@ class LrcGeneratorDialog(QDialog):
         for page in (audio_page, lyrics_page, timing_page, review_page):
             self.pages.addWidget(page)
         root.addWidget(self.pages, 1)
+        self.audio_sync_warning = AudioSyncWarning(self, audio_output=self.audio_output,
+                                                  media_player=self.media_player, translator=translator)
+        root.addWidget(self.audio_sync_warning)
 
         footer = QHBoxLayout()
         self.status_label = QLabel()

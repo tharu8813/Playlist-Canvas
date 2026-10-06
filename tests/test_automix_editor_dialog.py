@@ -19,6 +19,25 @@ from tests.test_automix_manual_transitions import _analyses, _tracks  # noqa: E4
 
 
 class AutoMixEditorTests(unittest.TestCase):
+    def test_bluetooth_notice_fits_small_window_with_playback_controls(self):
+        host = self._host()
+        with patch("app.widgets.audio_sync_warning.is_bluetooth_output", return_value=True):
+            for language in ("ko", "en"):
+                with self.subTest(language=language):
+                    host.translator.set_language(language)
+                    _host, editor = self._editor(host)
+                    editor.show()
+                    editor.resize(editor.minimumSize())
+                    self.app.processEvents()
+                    warning = editor.audio_sync_warning
+                    self.assertTrue(warning.isVisible())
+                    self.assertGreaterEqual(warning.height(), warning.heightForWidth(warning.width()))
+                    self.assertTrue(editor.rect().contains(warning.mapTo(editor, warning.rect().bottomRight())))
+                    self.assertTrue(editor.play_button.isVisible())
+                    editor._ensure_player()
+                    self.assertIs(warning._audio_output, editor._audio_output)
+                    editor.close()
+
     def test_dj_effect_controls_commit_custom_values_and_undo(self):
         host, editor = self._editor()
         panel = editor.properties

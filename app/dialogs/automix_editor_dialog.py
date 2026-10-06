@@ -39,6 +39,7 @@ from app.controllers.transition_audition_controller import (
 from app.dialogs.help_dialog import install_help_shortcut, open_help
 from app.ui.studio_icons import menu_icon
 from app.widgets.activity_progress import activity_for
+from app.widgets.audio_sync_warning import AudioSyncWarning
 from app.widgets.automix_timeline import AutoMixTimeline
 from app.widgets.transition_editor import (
     FIELD_NAMES, EditContext, TransitionPropertiesPanel, applied_notes, bars_text, changed_items,
@@ -421,6 +422,8 @@ class AutoMixEditorDialog(QDialog):
         status.addWidget(self.volume_label)
         status.addWidget(self.volume_slider)
         transport_layout.addLayout(status)
+        self.audio_sync_warning = AudioSyncWarning(self, korean=self.korean, volume_slider=self.volume_slider)
+        transport_layout.addWidget(self.audio_sync_warning)
         transport_layout.addWidget(self.save_label)
 
         layout = QVBoxLayout(self)
@@ -1128,9 +1131,11 @@ class AutoMixEditorDialog(QDialog):
             from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
             self._audio_output = QAudioOutput(self)
+            self.audio_sync_warning.bind_output(self._audio_output)
             self._audio_output.setVolume(self.volume_slider.value() / 100.0)
             self._player = QMediaPlayer(self)
             self._player.setAudioOutput(self._audio_output)
+            self.audio_sync_warning.bind_player(self._player)
             self._player.positionChanged.connect(self._position_changed)
             self._player.mediaStatusChanged.connect(self._media_status)
         return self._player

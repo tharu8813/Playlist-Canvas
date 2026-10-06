@@ -46,6 +46,7 @@ from app.models.playlist import (
     EQ_BANDS_HZ, EQ_LIMIT_DB, VOLUME_RANGE_DB, PlaylistTrack, track_audio_filter,
 )
 from app.widgets.activity_progress import activity_for
+from app.widgets.audio_sync_warning import AudioSyncWarning
 from app.widgets.track_analysis_panel import TrackAnalysisPanel
 from app.dialogs.lrc_generator_dialog import LrcGeneratorDialog
 from app.services.lyrics_service import LyricsError, LyricsService
@@ -152,6 +153,9 @@ class TrackDetailsDialog(QDialog):
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
         root.addWidget(self._build_header())
+        self.audio_sync_warning = AudioSyncWarning(self, audio_output=self.audio_output,
+                                                  media_player=self.media_player, translator=translator)
+        root.addWidget(self.audio_sync_warning)
         self.tabs = QTabWidget()
         self.tabs.setObjectName("trackDetailsTabs")
         self.info_tab = QWidget()
