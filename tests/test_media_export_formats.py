@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
@@ -41,6 +42,10 @@ class ExportDestinationTests(unittest.TestCase):
 
     def tearDown(self):
         self.dialog.close()
+        # Unparented dialogs must be deleted on the GUI thread before encoding.
+        for widget in QApplication.topLevelWidgets():
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         self.directory.cleanup()
 
     def test_filename_folder_and_extension_are_independent(self):

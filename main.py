@@ -108,21 +108,25 @@ def main() -> int:
     # so launching gives immediate feedback; it closes once the editor is up.
     splash = LaunchSplash(PRODUCT_NAME, __version__, icon)
     splash.show()
-    splash.set_status("프로그램을 불러오는 중…", "Loading…")
+    splash.set_status("프로그램을 불러오는 중…", "Loading the application…", 10)
     install_exception_hook()
     from app.utils.temp_cleanup import sweep_stale_temp_dirs
 
     threading.Thread(target=sweep_stale_temp_dirs, daemon=True).start()
+    splash.set_status("분석 환경을 준비하는 중…", "Preparing audio analysis…", 30)
     from app.automix.cache import cache_directories, prune_caches
 
     # Imports stay on this thread: a daemon thread still importing when the
     # app quits hung interpreter shutdown. The thread only touches files.
     threading.Thread(target=prune_caches, args=(cache_directories(),), daemon=True).start()
+    splash.set_status("편집 도구를 불러오는 중…", "Loading editing tools…", 50)
     from app.ui.main_window import MainWindow
 
-    splash.set_status("작업 공간을 준비하는 중…", "Preparing the workspace…")
+    splash.set_status("작업 공간을 준비하는 중…", "Preparing the workspace…", 75)
     window = MainWindow()
+    splash.set_status("편집 화면을 여는 중…", "Opening the editor…", 90)
     window.show()
+    splash.set_status("준비 완료", "Ready", 100)
     splash.finish(window)
     if "--smoke-test" in sys.argv:
         QTimer.singleShot(0, application.quit)
