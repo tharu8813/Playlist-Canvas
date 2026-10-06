@@ -211,7 +211,6 @@ class MainWindowExportTests(MainWindowTestCase):
         try:
             self.assertEqual(dialog.quality_mode_combo.currentData(), "balanced")
             self.assertFalse(dialog.advanced_group.isHidden())
-            self.assertTrue(dialog.storage_group.isHidden())
             self.assertIn("권장", dialog.quality_mode_combo.currentText())
             self.assertIn("예상 작업량", dialog.workload_label.text())
             self.assertIn("권장", dialog.quality_description_label.text())
@@ -221,9 +220,6 @@ class MainWindowExportTests(MainWindowTestCase):
                 (settings.crf, settings.preset, settings.audio_bitrate),
                 ExportSettingsDialog.QUALITY_PROFILES["balanced"],
             )
-            self.assertIn("예상 결과 영상", dialog.storage_estimate_label.text())
-            self.assertIn("작업 중 최대 필요 공간", dialog.storage_estimate_label.text())
-            self.assertGreater(dialog.storage_disk_bar.maximum(), 0)
         finally:
             dialog.close()
 
@@ -534,6 +530,7 @@ class MainWindowExportTests(MainWindowTestCase):
             PlaylistTrack("C:/music/song.mp3", "Song", duration_seconds=120.0),
         ])
         with (
+            patch.object(ExportSettingsDialog, "exec", return_value=QDialog.DialogCode.Accepted),
             patch(
                 "app.controllers.export_controller.FFmpegRenderer",
                 side_effect=FFmpegNotFoundError("missing"),

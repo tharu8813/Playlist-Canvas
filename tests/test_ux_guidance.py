@@ -16,6 +16,8 @@ from PySide6.QtWidgets import QDialogButtonBox, QMessageBox
 
 from app.dialogs.new_project_dialog import NewProjectDialog
 from app.dialogs.startup_dialog import StartupDialog
+from app.dialogs.export_settings_dialog import ExportSettingsDialog
+from PySide6.QtWidgets import QDialog
 from app.models.playlist import PlaylistTrack
 from app.utils.i18n import Language
 from tests.main_window_base import MainWindowTestCase
@@ -94,6 +96,7 @@ class UxGuidanceTests(MainWindowTestCase):
         # NoButton is what closing the message box with X returns.
         for answer in (QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.NoButton):
             with (
+                patch.object(ExportSettingsDialog, "exec", return_value=QDialog.DialogCode.Accepted),
                 patch(
                     "app.controllers.export_controller.FFmpegRenderer",
                     side_effect=FFmpegNotFoundError("missing"),

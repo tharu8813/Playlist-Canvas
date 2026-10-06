@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -21,7 +20,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QProgressBar,
     QSizePolicy,
     QSpinBox,
     QVBoxLayout,
@@ -38,10 +36,9 @@ from app.services.app_settings_service import (
 )
 from app.utils.i18n import Language, Translator
 from app.services.video_encoder_service import AUTO_VIDEO_ENCODER
-from app.renderer.canvas_pipe import piped_export_supported
-from app.services.export_storage_service import estimate_export_storage, format_bytes
 from app.services.export_validation_service import EXPORT_FPS_OPTIONS
 from app.utils.time_format import format_clock
+from app.services.export_formats import VIDEO_FORMATS, AUDIO_FORMATS, SUBTITLE_FORMATS
 
 
 class ExportSettingsDialog(QDialog):
@@ -57,14 +54,12 @@ class ExportSettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, track_count: int, duration_seconds: float,
                  translator: Translator, default_output_path: str | Path,
                  parent: QWidget | None = None,
-                 canvas_size: tuple[int, int] | None = None,
-                 estimated_layer_count: int = 1) -> None:
+                 canvas_size: tuple[int, int] | None = None) -> None:
         super().__init__(parent)
         install_help_shortcut(self, ("other", "export"), translator)
         self.translator = translator
         self._base_settings = settings
         self.canvas_size = canvas_size
-        self.estimated_layer_count = max(1, int(estimated_layer_count))
         self._applying_quality_profile = False
         self.setMinimumWidth(760)
         self.setSizeGripEnabled(True)
@@ -76,15 +71,6 @@ class ExportSettingsDialog(QDialog):
         self.workload_label = QLabel()
         self.workload_label.setObjectName("mutedLabel")
         self.workload_label.setWordWrap(True)
-        self.storage_estimate_label = QLabel()
-        self.storage_estimate_label.setObjectName("infoCallout")
-        self.storage_estimate_label.setWordWrap(True)
-        self.storage_disk_label = QLabel()
-        self.storage_disk_label.setObjectName("mutedLabel")
-        self.storage_disk_bar = QProgressBar()
-        self.storage_disk_bar.setRange(0, 1000)
-        self.storage_disk_bar.setTextVisible(False)
-        self.storage_disk_bar.setFixedHeight(8)
         self.resolution_combo = QComboBox()
         self._populate_resolutions(settings)
         self.fps_combo = QComboBox()
@@ -104,11 +90,21 @@ class ExportSettingsDialog(QDialog):
         self.audio_bitrate_combo.addItems(AUDIO_BITRATES)
         self.audio_bitrate_combo.setCurrentText(settings.audio_bitrate)
         self.advanced_check = QCheckBox()
-        self.storage_button = QPushButton()
-        self.storage_button.setCheckable(True)
-        self.storage_button.setChecked(False)
-        self.storage_button.toggled.connect(self._set_storage_visible)
-        self.output_path_edit = QLineEdit(str(default_output_path))
+        default_path = Path(default_output_path).expanduser().resolve()
+        self.export_type_combo = QComboBox()
+        self.export_type_combo.addItem("", "video")
+        self.export_type_combo.addItem("", "audio")
+        self.export_type_combo.addItem("", "subtitles")
+        self.format_combo = QComboBox()
+        self.filename_edit = QLineEdit(default_path.stem)
+        self.output_path_edit = QLineEdit(str(default_path.parent))
+        self.output_directory_edit = self.output_path_edit
+        self.export_type_label = QLabel()
+        self.format_label = QLabel()
+        self.filename_label = QLabel()
+        self.output_directory_label = QLabel()
+        self.output_filename_label = QLabel()
+        self.output_filename_label.setObjectName("mutedLabel")
         self.output_path_edit.setMinimumWidth(330)
         self.output_browse_button = QPushButton()
         self.output_browse_button.clicked.connect(self._browse_output_path)
@@ -160,18 +156,21 @@ class ExportSettingsDialog(QDialog):
         advanced_grid.setColumnStretch(1, 1)
         advanced_grid.setColumnStretch(3, 1)
         output_group = QGroupBox()
-        output_layout = QHBoxLayout(output_group)
-        output_layout.addWidget(self.output_path_edit, 1)
-        output_layout.addWidget(self.output_browse_button)
-        storage_group = QGroupBox()
-        storage_layout = QVBoxLayout(storage_group)
-        storage_layout.setSpacing(6)
-        storage_layout.addWidget(self.storage_estimate_label)
-        storage_layout.addWidget(self.storage_disk_label)
-        storage_layout.addWidget(self.storage_disk_bar)
+        output_layout = QFormLayout(output_group)
+        format_row = QHBoxLayout()
+        format_row.addWidget(self.export_type_combo, 1)
+        format_row.addWidget(self.format_label)
+        format_row.addWidget(self.format_combo, 1)
+        output_layout.addRow(self.export_type_label, format_row)
+        output_layout.addRow(self.filename_label, self.filename_edit)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self.output_path_edit, 1)
+        folder_row.addWidget(self.output_browse_button)
+        output_layout.addRow(self.output_directory_label, folder_row)
+        output_layout.addRow(self.output_filename_label)
         layout = QVBoxLayout(self)
         # Keep the dialog at least as tall as its content so showing the
-        # advanced section or a multi-line estimate grows the window instead
+        # advanced section grows the window instead
         # of compressing the group boxes above it.
         layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.addWidget(self.summary_label)
@@ -188,8 +187,6 @@ class ExportSettingsDialog(QDialog):
         # entry point and the advanced controls remain available below it.
         # Both controls already share the same settings update path.
         layout.addWidget(advanced_group)
-        layout.addWidget(self.storage_button)
-        layout.addWidget(storage_group)
         footer = QHBoxLayout()
         footer.addWidget(self.save_default_check)
         footer.addStretch(1)
@@ -200,7 +197,7 @@ class ExportSettingsDialog(QDialog):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum,
         )
         for section in (
-            output_group, render_group, quality_group, storage_group, advanced_group,
+            output_group, render_group, quality_group, advanced_group,
         ):
             section.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum,
@@ -209,7 +206,6 @@ class ExportSettingsDialog(QDialog):
         self.render_group = render_group
         self.advanced_group = advanced_group
         self.output_group = output_group
-        self.storage_group = storage_group
         self.track_count = track_count
         self.duration_seconds = duration_seconds
         initial_profile = self._matching_quality_profile(
@@ -233,7 +229,12 @@ class ExportSettingsDialog(QDialog):
             self._update_workload_hint
         )
         self.fps_combo.currentIndexChanged.connect(self._update_workload_hint)
-        self.output_path_edit.textChanged.connect(self._update_storage_estimate)
+        self.filename_edit.textChanged.connect(self._update_output_filename)
+        self.format_combo.currentIndexChanged.connect(self._format_changed)
+        self.export_type_combo.currentIndexChanged.connect(self._export_type_changed)
+        self.setTabOrder(self.export_type_combo, self.format_combo)
+        self.setTabOrder(self.format_combo, self.filename_edit)
+        self.setTabOrder(self.filename_edit, self.output_path_edit)
         self.setTabOrder(self.output_path_edit, self.output_browse_button)
         self.setTabOrder(self.output_browse_button, self.resolution_combo)
         self.setTabOrder(self.resolution_combo, self.fps_combo)
@@ -250,7 +251,7 @@ class ExportSettingsDialog(QDialog):
             self.button_box.button(QDialogButtonBox.StandardButton.Ok),
         )
         self.retranslate()
-        self._set_storage_visible(False)
+        self._export_type_changed()
         preferred_width = min(960, max(820, self.sizeHint().width()))
         self.resize(preferred_width, self.sizeHint().height())
 
@@ -403,67 +404,6 @@ class ExportSettingsDialog(QDialog):
             if korean else
             f"Estimated workload: {level} · {width} × {height}, {fps} FPS\n{detail}"
         )
-        self._update_storage_estimate()
-
-    def _update_storage_estimate(self, _value: object = None) -> None:
-        """Refresh the size range and destination-drive headroom."""
-        data = self.resolution_combo.currentData()
-        if not isinstance(data, tuple) or len(data) < 2:
-            return
-        try:
-            fps = int(self.fps_combo.currentText())
-        except ValueError:
-            fps = 30
-        estimate = estimate_export_storage(
-            int(data[0]), int(data[1]), fps, self.duration_seconds,
-            self.crf_spin.value(), self.audio_bitrate_combo.currentText(),
-            self.estimated_layer_count,
-            piped=piped_export_supported(),
-        )
-        korean = self.translator.is_korean
-        self.storage_estimate_label.setText(
-            (
-                f"화면·프레임 준비: 약 {format_bytes(estimate.visual_files)}\n"
-                f"오디오·부가 작업: 약 {format_bytes(estimate.processing_files)}\n"
-                f"예상 결과 영상: 약 {format_bytes(estimate.result_low)}"
-                f" ~ {format_bytes(estimate.result_high)}\n"
-                f"작업 중 최대 필요 공간: 약 {format_bytes(estimate.peak_temporary)}"
-            )
-            if korean else
-            (
-                f"Visual/frame preparation: ~{format_bytes(estimate.visual_files)}\n"
-                f"Audio/additional processing: ~{format_bytes(estimate.processing_files)}\n"
-                f"Estimated result: ~{format_bytes(estimate.result_low)}"
-                f"–{format_bytes(estimate.result_high)}\n"
-                f"Estimated peak working space: ~{format_bytes(estimate.peak_temporary)}"
-            )
-        )
-        raw_path = self.output_path_edit.text().strip()
-        parent = Path(raw_path).expanduser().parent if raw_path else Path.cwd()
-        try:
-            usage = shutil.disk_usage(parent)
-        except OSError:
-            self.storage_disk_label.setText(
-                "출력 드라이브의 남은 공간을 확인할 수 없습니다."
-                if korean else "Output drive space is unavailable."
-            )
-            self.storage_disk_bar.setValue(0)
-            return
-        used_fraction = 1.0 - usage.free / max(1, usage.total)
-        self.storage_disk_bar.setValue(round(used_fraction * 1000))
-        self.storage_disk_label.setText(
-            f"출력 드라이브 여유 공간: {format_bytes(usage.free)} / {format_bytes(usage.total)}"
-            if korean else
-            f"Output drive free: {format_bytes(usage.free)} / {format_bytes(usage.total)}"
-        )
-
-    def _set_storage_visible(self, visible: bool) -> None:
-        self.storage_group.setVisible(visible)
-        self.storage_button.setText(
-            ("예상 저장공간 숨기기" if visible else "예상 저장공간 보기")
-            if self.translator.is_korean else
-            ("Hide storage estimate" if visible else "Show storage estimate")
-        )
 
     @property
     def app_settings(self) -> AppSettings:
@@ -547,25 +487,78 @@ class ExportSettingsDialog(QDialog):
 
     @property
     def output_path(self) -> Path:
-        """Return the normalized MP4 destination selected in this dialog."""
-        path = Path(self.output_path_edit.text().strip()).expanduser()
-        if path.suffix.lower() != ".mp4":
-            path = path.with_suffix(".mp4")
-        return path.resolve()
+        """Combine folder, filename, and the explicitly selected extension."""
+        folder = Path(self.output_path_edit.text().strip()).expanduser()
+        name = self.filename_edit.text().strip()
+        suffix = Path(name).suffix.lower().lstrip(".")
+        if suffix in VIDEO_FORMATS + AUDIO_FORMATS + SUBTITLE_FORMATS:
+            name = name[:-(len(suffix) + 1)]
+        return (folder / f"{name}.{self.output_format}").resolve()
+
+    @property
+    def audio_only(self) -> bool:
+        return self.export_type_combo.currentData() == "audio"
+
+    @property
+    def subtitle_only(self) -> bool:
+        return self.export_type_combo.currentData() == "subtitles"
+
+    @property
+    def output_format(self) -> str:
+        return str(self.format_combo.currentData() or "mp4")
+
+    def _export_type_changed(self, _index: int = -1) -> None:
+        formats = SUBTITLE_FORMATS if self.subtitle_only else AUDIO_FORMATS if self.audio_only else VIDEO_FORMATS
+        self.format_combo.blockSignals(True)
+        self.format_combo.clear()
+        for name in formats:
+            self.format_combo.addItem(f"{name.upper()} (*.{name})", name)
+        self.format_combo.blockSignals(False)
+        video = not (self.audio_only or self.subtitle_only)
+        self.render_group.setVisible(video)
+        self.quality_group.setVisible(video)
+        self.advanced_group.setVisible(not self.subtitle_only and (self.audio_only or self.advanced_check.isChecked()))
+        self.save_default_check.setVisible(not self.subtitle_only)
+        for widget in (self.codec_label, self.codec_combo, self.crf_label,
+                       self.crf_spin, self.preset_label, self.preset_combo):
+            widget.setVisible(video)
+        advanced_layout = self.advanced_group.layout()
+        advanced_layout.addWidget(self.audio_label, 0 if self.audio_only else 1,
+                                  0 if self.audio_only else 2)
+        advanced_layout.addWidget(self.audio_bitrate_combo, 0 if self.audio_only else 1,
+                                  1 if self.audio_only else 3)
+        advanced_layout.setColumnStretch(3, 0 if self.audio_only else 1)
+        self.retranslate()
+        self._format_changed()
+        if self.isVisible():
+            self.layout().activate()
+            self.resize(self.width(), self.sizeHint().height())
+
+    def _format_changed(self, _index: int = -1) -> None:
+        lossless = self.output_format in {"wav", "flac"}
+        self.audio_bitrate_combo.setEnabled(not lossless)
+        self.audio_label.setText(
+            ("오디오 품질 (무손실)" if lossless else "오디오 비트레이트")
+            if self.translator.is_korean else
+            ("Audio quality (lossless)" if lossless else "Audio bitrate")
+        )
+        self._update_output_filename()
+
+    def _update_output_filename(self, _text: str = "") -> None:
+        self.output_filename_label.setText(
+            ("저장 파일: " if self.translator.is_korean else "File: ")
+            + self.output_path.name
+        )
 
     def _browse_output_path(self) -> None:
         korean = self.translator.is_korean
-        selected, _filter = QFileDialog.getSaveFileName(
+        selected = QFileDialog.getExistingDirectory(
             self,
-            "출력 파일 선택" if korean else "Choose output file",
+            "저장 폴더 선택" if korean else "Choose export folder",
             self.output_path_edit.text().strip(),
-            "MP4 Video (*.mp4)",
         )
         if selected:
-            path = Path(selected)
-            if path.suffix.lower() != ".mp4":
-                path = path.with_suffix(".mp4")
-            self.output_path_edit.setText(str(path))
+            self.output_path_edit.setText(selected)
 
     def _accept_if_valid(self) -> None:
         """Validate the destination before expensive frame preparation begins."""
@@ -574,8 +567,29 @@ class ExportSettingsDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "출력 경로 필요" if korean else "Output path required",
-                "내보낼 MP4 파일 경로를 선택하세요."
-                if korean else "Choose where the exported MP4 file should be saved.",
+                "내보낼 파일의 저장 폴더를 선택하세요."
+                if korean else "Choose the folder for the exported file.",
+            )
+            return
+        name = self.filename_edit.text().strip()
+        stem = name.split(".")[0].upper()
+        reserved = {"CON", "PRN", "AUX", "NUL"} | {
+            f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)
+        }
+        if (not name or any(char in '<>:"/\\|?*' or ord(char) < 32 for char in name)
+                or name.endswith((".", " ")) or stem in reserved
+                or not self.output_path.stem):
+            QMessageBox.warning(
+                self, "파일 이름 확인" if korean else "Check filename",
+                "사용 가능한 파일 이름을 입력하세요. 경로와 특수문자는 사용할 수 없습니다."
+                if korean else "Enter a valid filename without paths or reserved characters.",
+            )
+            return
+        folder = Path(self.output_path_edit.text().strip()).expanduser()
+        if folder.exists() and not folder.is_dir():
+            QMessageBox.warning(
+                self, "저장 폴더 확인" if korean else "Check export folder",
+                "파일이 아닌 저장 폴더를 선택하세요." if korean else "Select a folder for the export.",
             )
             return
         output = self.output_path
@@ -593,7 +607,7 @@ class ExportSettingsDialog(QDialog):
             # identity rejects the latter even after the user clicks Yes.
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        self.output_path_edit.setText(str(output))
+        self.output_path_edit.setText(str(output.parent))
         self.accept()
 
     def _apply_balanced_optimization(self) -> None:
@@ -612,16 +626,18 @@ class ExportSettingsDialog(QDialog):
         self.render_group.setTitle("기본 영상 설정" if korean else "Basic video settings")
         self.advanced_group.setTitle("고급 인코딩 설정" if korean else "Advanced encoding settings")
         self.output_group.setTitle("출력 파일" if korean else "Output file")
-        self.storage_group.setTitle(
-            "예상 저장 공간" if korean else "Estimated storage"
+        self.export_type_label.setText("내보내기 항목" if korean else "Export type")
+        self.export_type_combo.setItemText(0, "영상 + 오디오" if korean else "Video + audio")
+        self.export_type_combo.setItemText(1, "오디오만 내보내기" if korean else "Audio only")
+        self.export_type_combo.setItemText(2, "자막 내보내기" if korean else "Subtitles")
+        self.format_label.setText("파일 형식" if korean else "File format")
+        self.filename_label.setText("파일 이름" if korean else "File name")
+        self.output_directory_label.setText("저장 폴더" if korean else "Save folder")
+        self.advanced_group.setTitle(
+            ("오디오 설정" if korean else "Audio settings") if self.audio_only else
+            ("고급 인코딩 설정" if korean else "Advanced encoding settings")
         )
         self.quality_mode_label.setText("용도" if korean else "Purpose")
-        self.storage_button.setText(
-            ("예상 저장공간 숨기기" if self.storage_button.isChecked()
-             else "예상 저장공간 보기") if korean else
-            ("Hide storage estimate" if self.storage_button.isChecked()
-             else "Show storage estimate")
-        )
         self.output_browse_button.setText("찾아보기" if korean else "Browse")
         self.resolution_label.setText("해상도" if korean else "Resolution")
         self.fps_label.setText("프레임 레이트" if korean else "Frame rate")
@@ -669,6 +685,23 @@ class ExportSettingsDialog(QDialog):
             + "Review the quality and output destination, then start the export."
         )
         self._update_quality_description()
+        if self.audio_only:
+            self.summary_label.setText(
+                f"내보낼 곡 {self.track_count}개 · 총 재생 시간 {duration}\n"
+                "화면 없이 플레이리스트의 오디오만 저장합니다. 곡 전환과 음량 처리가 적용됩니다."
+                if korean else
+                f"{self.track_count} track(s) · total duration {duration}\n"
+                "Save playlist audio with track transitions and loudness processing."
+            )
+        elif self.subtitle_only:
+            self.summary_label.setText(
+                f"내보낼 곡 {self.track_count}개 · 총 재생 시간 {duration}\n"
+                "믹싱 시간에 맞춰 가사를 저장합니다. 겹치는 가사는 나가는 곡을 윗줄, 들어오는 곡을 아랫줄에 표시합니다."
+                if korean else
+                f"{self.track_count} track(s) · total duration {duration}\n"
+                "Save lyrics on the mix timeline. Overlapping lyrics show the outgoing track above the incoming track."
+            )
+        self._format_changed()
 
     @staticmethod
     def _format_duration(seconds: float) -> str:

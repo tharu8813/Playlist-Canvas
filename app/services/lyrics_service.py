@@ -223,10 +223,21 @@ class LyricsService:
     @classmethod
     def _parse_lrc(cls, content: str) -> list[dict[str, float | str]]:
         cues: list[dict[str, float | str]] = []
+        previous: list[dict[str, float | str]] = []
         for line in content.splitlines():
             text = cls.decode_line_breaks(cls._lrc_time.sub("", line).strip())
-            for minute, second in cls._lrc_time.findall(line):
-                cues.append({"start": int(minute) * 60 + float(second), "end": 0.0, "text": text})
+            timestamps = cls._lrc_time.findall(line)
+            if timestamps:
+                previous = []
+                for minute, second in timestamps:
+                    cue = {"start": int(minute) * 60 + float(second), "end": 0.0, "text": text}
+                    cues.append(cue)
+                    previous.append(cue)
+            elif line.strip().startswith("[") or not line.strip():
+                previous = []
+            elif previous:
+                for cue in previous:
+                    cue["text"] = f"{cue['text']}\n{text}"
         cues.sort(key=lambda cue: float(cue["start"]))
         for index, cue in enumerate(cues):
             cue["end"] = float(cues[index + 1]["start"]) if index + 1 < len(cues) else float(cue["start"]) + 8.0

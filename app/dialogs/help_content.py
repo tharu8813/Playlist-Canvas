@@ -158,7 +158,7 @@ _CANVAS = (
 <li><b>음악 추가</b> — 하단 플레이리스트의 <b>+ 음악 추가</b> 또는 파일 끌어 놓기. 이름이 같은 .lrc/.srt/.vtt가 있으면 가사로 연결됩니다.</li>
 <li><b>화면 꾸미기</b> — 왼쪽 <b>요소</b> 탭에서 배경·텍스트·앨범 커버·가사·진행 바·비주얼라이저를 추가하고 속성 패널에서 다듬습니다.</li>
 <li><b>확인</b> — <b>미리보기</b>(<code>Ctrl+Alt+3</code>)로 음악과 함께 재생해 봅니다.</li>
-<li><b>내보내기</b> — <b>내보내기</b>(<code>Ctrl+E</code>)로 MP4를 만듭니다. 처음 한 번 <a href='topic:ffmpeg'>FFmpeg 설치</a>가 필요합니다.</li>
+<li><b>내보내기</b> — <b>내보내기</b>(<code>Ctrl+E</code>)에서 영상·오디오·자막을 선택합니다. 영상·오디오와 믹싱 시간 확인에는 <a href='topic:ffmpeg'>FFmpeg 설치</a>가 필요합니다.</li>
 </ol>
 <div class='note'>처음 실행하면 화면 구성을 소개하는 짧은 안내가 나옵니다. <b>도구 → 설정 → 유지 관리 → 프로그램 초기화</b> 후 다시 볼 수 있습니다.</div>""",
        """<p>At startup the <b>Start a project</b> window lets you create a project, open a file or pick a recent project. Dropping a project file on it opens it too.</p>
@@ -178,7 +178,7 @@ _CANVAS = (
 <li><b>Add music</b> — <b>+ Add music</b> in the Playlist, or drop files. A .lrc/.srt/.vtt with the same name is attached as lyrics.</li>
 <li><b>Design the screen</b> — add a background, text, album art, lyrics, a progress bar or visualizers from <b>Sources</b> and fine-tune them in the inspector.</li>
 <li><b>Check</b> — play it with the music in <b>Preview</b> (<code>Ctrl+Alt+3</code>).</li>
-<li><b>Export</b> — make the MP4 with <b>Export</b> (<code>Ctrl+E</code>). <a href='topic:ffmpeg'>FFmpeg</a> must be installed once.</li>
+<li><b>Export</b> — choose video, audio, or subtitles under <b>Export</b> (<code>Ctrl+E</code>). Video/audio and mix timing need <a href='topic:ffmpeg'>FFmpeg</a>.</li>
 </ol>
 <div class='note'>A short tour of the workspace appears on first launch. <b>Tools → Settings → Maintenance → Reset program</b> shows it again.</div>""",
        ("workspace", "project_settings", "playlist", "export"),
@@ -598,7 +598,7 @@ _CANVAS = (
 <ul>
 <li><b>+ 음악 추가</b>를 누르거나 음악 파일·M3U8/M3U 플레이리스트를 목록으로 끌어 놓습니다. 지원 형식: MP3, WAV, FLAC, AAC, M4A, OGG.</li>
 <li>같은 폴더에 이름이 같은 <code>.lrc</code>/<code>.srt</code>/<code>.vtt</code>가 있으면 가사로 연결합니다(<a href='topic:settings'>설정 → 콘텐츠</a>에서 동작 변경). 이름이 비슷한 파일은 추가할지 물어봅니다.</li>
-<li>M3U8을 추가하면 담긴 곡의 아트·제목·아티스트·앨범을 확인하는 창이 먼저 열립니다. 찾을 수 없는 파일과 웹 스트림은 건너뜁니다. <b>파일 → 목록 파일</b>에서 M3U8 가져오기·내보내기도 할 수 있습니다.</li>
+<li>M3U8을 추가하면 담긴 곡의 아트·제목·아티스트·앨범을 확인하는 창이 먼저 열립니다. 찾을 수 없는 파일과 웹 스트림은 건너뜁니다. <b>파일</b> 메뉴에서 M3U8 가져오기·내보내기를 선택할 수 있습니다. <b>타임라인 내보내기</b>는 믹싱 후 곡 시작 시간과 곡 정보를 설명문·CSV로 저장합니다.</li>
 </ul>
 <h2>목록 다루기</h2>
 <ul>
@@ -615,7 +615,7 @@ _CANVAS = (
 <ul>
 <li>Choose <b>+ Add music</b>, or drop music files or an M3U8/M3U playlist on the list. Supported: MP3, WAV, FLAC, AAC, M4A, OGG.</li>
 <li>A <code>.lrc</code>/<code>.srt</code>/<code>.vtt</code> with the same name in the same folder is attached as lyrics (change this in <a href='topic:settings'>Settings → Content</a>); for similarly named files you are asked.</li>
-<li>Adding an M3U8 first shows its tracks with art, title, artist and album to confirm. Missing files and web streams are skipped. <b>File → Playlist files</b> also imports and exports M3U8.</li>
+<li>Adding an M3U8 first shows its tracks with art, title, artist and album to confirm. Missing files and web streams are skipped. The <b>File</b> menu imports and exports M3U8. <b>Export timeline</b> saves mixed track start times and track details as a description and CSV.</li>
 </ul>
 <h2>Working with the list</h2>
 <ul>
@@ -1702,28 +1702,30 @@ Transitions shorten the video by the overlaps.</li>
        ("화면 비율 캔버스 크기 곡 전환 없음 크로스페이드 AutoMix 포함 참조 썸네일 작성자 설명",
         "aspect ratio canvas size transitions none crossfade AutoMix include reference thumbnail author description")),
 
-    _e("other", "export", ("영상 내보내기", "Exporting the video"),
-       ("내보내기,MP4", "export,MP4"),
-       """<p>오른쪽 위 <b>내보내기</b>(<code>Ctrl+E</code>)를 누르면 내보내기 설정 창이 열립니다. 내보내기에는 <a href='topic:ffmpeg'>FFmpeg</a>가 필요합니다.</p>
+    _e("other", "export", ("영상·오디오·자막 내보내기", "Exporting video, audio, and subtitles"),
+       ("내보내기,자막,LRC,SRT", "export,subtitles,LRC,SRT"),
+       """<p>오른쪽 위 <b>내보내기</b>(<code>Ctrl+E</code>)를 누르면 내보내기 설정 창이 열립니다. 영상·오디오와 믹싱 시간 확인에는 <a href='topic:ffmpeg'>FFmpeg</a>가 필요합니다. 믹싱 없는 자막은 FFmpeg 없이 저장할 수 있습니다.</p>
 [[img:export_settings]]
 <ul>
-<li><b>출력 파일</b>: MP4 저장 위치(같은 파일이 있으면 덮어쓸지 묻습니다)</li>
+<li><b>출력 파일</b>: 내보내기 항목·파일 형식·파일 이름·저장 폴더를 따로 선택합니다. 같은 파일이 있으면 덮어쓸지 묻습니다.</li>
+<li><b>영상 + 오디오</b>: MP4·MOV·MKV. <b>오디오만 내보내기</b>: MP3·M4A·WAV·FLAC·OGG.</li>
+<li><b>자막 내보내기</b>: LRC·SRT. 등록한 가사와 시간 보정을 실제 믹싱 타임라인에 맞춥니다. 겹치는 가사는 <b>나가는 곡을 윗줄, 들어오는 곡을 아랫줄</b>에 표시하고 각 줄 앞에 <code>- </code>를 붙입니다. 겹침이 끝나면 한 곡만 표시합니다.</li>
 <li><b>용도</b>: <b>권장 · 대부분의 영상</b>(균형, 사용 가능한 NVIDIA GPU는 자동 사용) · <b>빠른 내보내기</b> · <b>고화질 보관용</b> · <b>작은 파일</b>. 고급 값을 바꾸면 <b>사용자 설정</b>이 됩니다.</li>
 <li><b>해상도</b>(HD·Full HD·QHD·4K, 프로젝트 비율 유지)와 <b>프레임 레이트</b>. 예상 작업량이 함께 표시됩니다.</li>
 <li><b>고급 인코딩 설정</b>: 비디오 인코더(자동 선택 권장, CPU H.264/H.265, 지원되는 GPU 인코더), 화질 CRF(낮을수록 고화질), 인코딩 속도(preset), 오디오 품질(AAC). <b>권장 설정으로 되돌리기</b></li>
-<li><b>예상 저장공간 보기</b>: 화면 준비·오디오 작업·결과 영상 크기와 작업 중 최대 필요 공간, 출력 드라이브 여유 공간</li>
 <li><b>이 값을 다음 내보내기의 기본값으로 저장</b></li>
 </ul>
 <p>내보내기에 포함된 곡만 들어가며(플레이리스트에서 제외한 곡은 빠짐), 곡 전환·곡별 볼륨/EQ·가사·애니메이션이 미리보기와 같게 적용됩니다.</p>
 <div class='note'>4K나 60 FPS는 화면 준비와 인코딩 시간을 크게 늘립니다. 잘 모르겠으면 <b>권장</b>과 Full HD 30 FPS로 시작하세요.</div>""",
-       """<p><b>Export</b> at the top right (<code>Ctrl+E</code>) opens the export settings. Exporting needs <a href='topic:ffmpeg'>FFmpeg</a>.</p>
+       """<p><b>Export</b> at the top right (<code>Ctrl+E</code>) opens the export settings. Video/audio and mix timing need <a href='topic:ffmpeg'>FFmpeg</a>. Unmixed subtitles can be saved without FFmpeg.</p>
 [[img:export_settings]]
 <ul>
-<li><b>Output file</b>: where to save the MP4 (you are asked before overwriting)</li>
+<li><b>Output file</b>: choose the export type, format, file name, and folder separately. You are asked before overwriting.</li>
+<li><b>Video + audio</b>: MP4, MOV, MKV. <b>Audio only</b>: MP3, M4A, WAV, FLAC, OGG.</li>
+<li><b>Subtitles</b>: LRC and SRT. Attached lyrics and timing offsets follow the actual mix timeline. Overlapping lyrics show the <b>outgoing track above the incoming track</b>, each with a <code>- </code> prefix. Only one track remains after the overlap.</li>
 <li><b>Purpose</b>: <b>Recommended · Most videos</b> (balanced; uses an available NVIDIA GPU) · <b>Fast export</b> · <b>High-quality archive</b> · <b>Small file</b>. Changing an advanced value makes it <b>Custom</b>.</li>
 <li><b>Resolution</b> (HD, Full HD, QHD, 4K — the project ratio is kept) and <b>frame rate</b>, with the estimated workload</li>
 <li><b>Advanced encoding</b>: video encoder (automatic recommended, CPU H.264/H.265, supported GPU encoders), quality CRF (lower is better), encoding speed (preset), audio quality (AAC). <b>Back to recommended</b></li>
-<li><b>Show estimated storage</b>: screen, audio work and result size, peak space needed while working, and free space on the output drive</li>
 <li><b>Save these values as the default for the next export</b></li>
 </ul>
 <p>Only tracks included in export go in (tracks excluded in the playlist are left out); transitions, per-track volume/EQ, lyrics and animations are applied just like in Preview.</p>
@@ -1938,7 +1940,7 @@ Transitions shorten the video by the overlaps.</li>
 <h2>내보내기·믹스가 실패할 때</h2>
 <ul><li><b>설정 → FFmpeg</b>의 상태를 확인하고 필요하면 권장 버전을 다시 설치합니다.</li>
 <li>GPU 인코더가 실패하면 CPU H.264(<code>libx264</code>)로 다시 시도합니다.</li>
-<li>디스크 공간이 부족하면 출력 위치를 바꾸거나 공간을 비웁니다(<b>예상 저장공간 보기</b> 참고).</li></ul>
+<li>디스크 공간이 부족하면 출력 위치를 바꾸거나 공간을 비웁니다. 내보내기 진행 창에서 저장 공간 사용량을 확인할 수 있습니다.</li></ul>
 <h2>미리보기 화면이 이상할 때</h2>
 <p>GPU 미리보기가 불안정하면 <a href='topic:preview_quality'>CPU 호환 모드</a>로 바꾼 뒤 프로그램을 다시 시작합니다.</p>
 <h2>지원 정보</h2>
@@ -1950,7 +1952,7 @@ Transitions shorten the video by the overlaps.</li>
 <h2>Export or mixing fails</h2>
 <ul><li>Check the status in <b>Settings → FFmpeg</b> and reinstall the recommended version if needed.</li>
 <li>If a GPU encoder fails, retry with CPU H.264 (<code>libx264</code>).</li>
-<li>If the disk is full, change the output location or free space (see <b>Show estimated storage</b>).</li></ul>
+<li>If the disk is full, change the output location or free space. The export progress window shows storage use.</li></ul>
 <h2>Preview looks wrong</h2>
 <p>If GPU preview is unstable, switch to <a href='topic:preview_quality'>CPU compatibility mode</a> and restart.</p>
 <h2>Support information</h2>

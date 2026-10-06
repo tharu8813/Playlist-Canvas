@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFontDatabase, QImage, QImageReader, QImageWriter
-from PySide6.QtWidgets import QApplication, QMessageBox, QStyle, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog, QStyle, QSystemTrayIcon
 
 from app.automix.settings import automix_settings_for
 from app.models.source import Source, SourceType
@@ -79,6 +79,10 @@ from app.renderer.render_worker import RenderWorker
 from app.services.app_settings_service import AppSettings, VIDEO_ENCODERS
 from app.services.export_policy import ExportPolicy
 from app.services.export_storage_service import ExportStorageMonitor, estimate_export_storage
+from app.services.export_storage_service import estimate_audio_export_storage
+from app.services.export_formats import is_audio_export, is_subtitle_export
+from app.services.subtitle_export_service import SubtitleExportService
+from app.services.lyrics_service import LyricsError
 from app.services.playlist_service import PlaylistService
 from app.timeline.compiler import compile_playlist
 from app.controllers.preview_audio_controller import prepare_audio_for_ui
@@ -504,6 +508,8 @@ class ExportOrchestrator:
             "encode": "영상 만들기" if korean else "Creating video",
             "complete": "내보내기 완료" if korean else "Export complete",
         }
+        if window._active_export_output_path and is_audio_export(window._active_export_output_path):
+            names["encode"] = "오디오 저장" if korean else "Saving audio"
         name = names.get(step)
         if name is None:
             return
@@ -889,30 +895,6 @@ class ExportOrchestrator:
             ):
                 return
             active_tracks = [track for track in window.playlist_service.tracks if track.enabled]
-        try:
-            configured_path = window.settings_service.current.ffmpeg_path or None
-            renderer = FFmpegRenderer(configured_path)
-        except FFmpegNotFoundError:
-            answer = QMessageBox.warning(
-                window,
-                "FFmpeg 필요" if korean else "FFmpeg required",
-                (
-                    "영상을 내보내려면 FFmpeg 설치가 필요합니다.\n\n"
-                    "확인을 누르면 설정의 FFmpeg 설치 화면으로 이동합니다. "
-                    "자동 설치를 사용하거나 기존 ffmpeg.exe를 선택해 주세요."
-                )
-                if korean else (
-                    "FFmpeg is required to export a video.\n\n"
-                    "Click OK to open the FFmpeg setup page. Use automatic "
-                    "installation or select an existing ffmpeg executable."
-                ),
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Ok,
-            )
-            # Closing the box with X returns NoButton: treat it as Cancel.
-            if answer == QMessageBox.StandardButton.Ok:
-                window._show_settings(focus_ffmpeg=True)
-            return
         invalid_track = next(
             (track for track in active_tracks if track.duration_seconds <= 0.0), None
         )
@@ -943,13 +925,52 @@ class ExportOrchestrator:
                 round(window.canvas.scene_model.artboard_rect.width()),
                 round(window.canvas.scene_model.artboard_rect.height()),
             ),
-            estimated_layer_count=min(3, max(1, len(window.store.sources()))),
         )
         if export_options.exec() != export_options.DialogCode.Accepted:
             return
         requested_app_settings = export_options.app_settings
         quality_profile_name = export_options.quality_mode_combo.currentText()
         output = str(export_options.output_path)
+        if is_subtitle_export(output) and window.project_settings.transition_mode == "none":
+            self.export_subtitles(active_tracks, output)
+            return
+        try:
+            configured_path = window.settings_service.current.ffmpeg_path or None
+            renderer = FFmpegRenderer(configured_path)
+        except FFmpegNotFoundError:
+            answer = QMessageBox.warning(
+                window, "FFmpeg 필요" if korean else "FFmpeg required",
+                (
+                    "영상·오디오 내보내기와 믹싱 시간 확인에는 FFmpeg 설치가 필요합니다.\n\n"
+                    "확인을 누르면 설정의 FFmpeg 설치 화면으로 이동합니다. "
+                    "자동 설치를 사용하거나 기존 ffmpeg.exe를 선택해 주세요."
+                ) if korean else (
+                    "FFmpeg is required to export video/audio or resolve mix timing.\n\n"
+                    "Click OK to open the FFmpeg setup page. Use automatic "
+                    "installation or select an existing ffmpeg executable."
+                ),
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer == QMessageBox.StandardButton.Ok:
+                window._show_settings(focus_ffmpeg=True)
+            return
+        if is_subtitle_export(output):
+            self.export_subtitles(active_tracks, output, renderer)
+            return
+        if is_audio_export(output):
+            render_settings = RenderSettings(audio_bitrate=requested_app_settings.audio_bitrate)
+            try:
+                renderer.preflight_export(active_tracks, output, render_settings)
+            except RenderError as error:
+                QMessageBox.critical(
+                    window, "내보내기 사전 검사 실패" if korean else "Export preflight failed", str(error),
+                )
+                return
+            if export_options.save_as_default:
+                window.settings_service.save(requested_app_settings)
+            self.start_audio_export(renderer, active_tracks, output, render_settings)
+            return
         resolved = self.resolve_render_settings(
             renderer, requested_app_settings, output,
             export_options.save_as_default,
@@ -1302,6 +1323,124 @@ class ExportOrchestrator:
         window._export_dialog.cancel_requested.connect(window._render_worker.cancel)
         window.statusBar().showMessage("렌더링 중..." if korean else "Rendering...")
         window._render_worker.start()
+
+    def export_subtitles(
+        self, tracks: list, output: str, renderer: FFmpegRenderer | None = None,
+    ) -> None:
+        """Use the actual rendered mix plan so subtitle overlaps follow audio playback."""
+        window = self.window
+        korean = window.translator.is_korean
+        if not any(track.lyrics for track in tracks):
+            QMessageBox.warning(
+                window, "자막 내보내기" if korean else "Export subtitles",
+                "내보낼 가사가 없습니다. 곡에 시간 정보가 있는 가사를 등록하세요."
+                if korean else "No lyrics are available. Attach timed lyrics to the tracks first.",
+            )
+            return
+        plan = None
+        cancel = threading.Event()
+        progress = None
+        try:
+            if renderer is not None:
+                progress = QProgressDialog(
+                    "믹싱 자막 시간 확인 중…" if korean else "Resolving subtitle mix timing…",
+                    "취소" if korean else "Cancel", 0, 0, window,
+                )
+                progress.setWindowModality(Qt.WindowModality.WindowModal)
+                progress.canceled.connect(cancel.set)
+                window._export_preparation_cancel = cancel
+                window._lock_main_form_for_export()
+                window.activity_progress.begin(
+                    "export", "자막 내보내기" if korean else "Exporting subtitles",
+                    detail="믹싱 시간 확인 중" if korean else "Resolving mix timing",
+                )
+                progress.show()
+                with TemporaryDirectory(prefix="playlist-subtitle-timing-", ignore_cleanup_errors=True) as directory:
+                    _, plan = prepare_audio_for_ui(
+                        renderer, tracks, Path(directory), window.project_settings.transition_mode,
+                        window.project_settings.crossfade_seconds, RenderSettings(), cancel,
+                        lambda _stage, _fraction, message: progress.setLabelText(message),
+                        automix_settings=automix_settings_for(window.project_settings),
+                    )
+            if cancel.is_set():
+                raise RenderCancelledError("Subtitle export cancelled.")
+            path = SubtitleExportService().export(
+                tracks, output, plan, title=window.project_settings.title,
+                artist=window.project_settings.author,
+            )
+        except RenderCancelledError:
+            window.statusBar().showMessage("자막 내보내기를 취소했습니다." if korean else "Subtitle export cancelled.", 5000)
+            return
+        except (LyricsError, RenderError) as error:
+            message = (
+                "선택한 믹싱 구간에 내보낼 가사가 없습니다. 가사와 곡의 재생 구간을 확인하세요."
+                if korean and str(error) == "No timed lyrics were found in the selected audio timeline." else str(error)
+            )
+            QMessageBox.warning(window, "자막 내보내기 오류" if korean else "Subtitle export error", message)
+            return
+        finally:
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+                window._export_preparation_cancel = None
+                window._unlock_main_form_after_export()
+                window.activity_progress.finish("export")
+                window._resume_close_after_export_cancel()
+        window.statusBar().showMessage(
+            f"자막 내보내기 완료: {path}" if korean else f"Subtitles exported: {path}", 7000,
+        )
+        self.show_complete_dialog(RenderResult(path, len(tracks)))
+
+    def start_audio_export(
+        self, renderer: FFmpegRenderer, tracks: list, output: str, settings: RenderSettings,
+    ) -> None:
+        """Start only the audio worker and share the existing cancel/completion lifecycle."""
+        window = self.window
+        korean = window.translator.is_korean
+        window._export_notified_steps.clear()
+        window._active_export_output_path = Path(output).resolve()
+        window._pending_export_result = None
+        window._export_dialog = ExportProgressDialog(window)
+        dialog = window._export_dialog
+        dialog.set_korean(korean)
+        dialog.set_audio_only(True)
+        format_name = Path(output).suffix.lstrip(".").upper()
+        quality = "무손실" if korean else "Lossless"
+        if format_name not in {"WAV", "FLAC"}:
+            quality = settings.audio_bitrate
+        dialog.set_export_details(
+            len(tracks), window._playlist_duration(tracks),
+            f"{'오디오만 내보내기' if korean else 'Audio only'} · {format_name} · {quality}", output,
+        )
+        dialog.set_storage_estimate(estimate_audio_export_storage(
+            window._playlist_duration(tracks), format_name.lower(), settings.audio_bitrate,
+        ))
+        dialog.set_busy("Preparing audio", "오디오 준비 중" if korean else "Preparing audio")
+        dialog.minimize_requested.connect(window._minimize_during_export)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        window._lock_main_form_for_export()
+        window.activity_progress.begin(
+            "export", "오디오 내보내기" if korean else "Exporting audio",
+            detail="오디오 준비 중" if korean else "Preparing audio",
+        )
+        try:
+            worker = self.create_render_worker(
+                renderer, QImage(), [], output, settings, [], [], None, None,
+                preparation_weight=0.0,
+            )
+            window._render_worker = worker
+            worker.succeeded.connect(window._export_succeeded)
+            worker.failed.connect(window._export_failed)
+            worker.cancelled.connect(window._export_cancelled)
+            worker.finished.connect(window._export_finished)
+            dialog.cancel_requested.connect(worker.cancel)
+            self.start_storage_monitor(output)
+            dialog.show()
+            worker.start()
+        except Exception as error:
+            report_unexpected_error("Starting audio export", error)
+            window._export_failed(str(error))
+            window._export_finished()
 
     def create_render_worker(
         self, renderer: "FFmpegRenderer", frames: object, static_layers: list,
@@ -1865,7 +2004,8 @@ class ExportOrchestrator:
             window._export_dialog.complete(True)
             window._export_dialog = None
         korean = window.translator.is_korean
-        message = f"영상 생성 완료: {result.output_path}" if korean else f"Video created: {result.output_path}"
+        media = ("오디오" if korean else "Audio") if is_audio_export(result.output_path) else ("영상" if korean else "Video")
+        message = f"{media} 생성 완료: {result.output_path}" if korean else f"{media} created: {result.output_path}"
         window.statusBar().showMessage(message, 7000)
         window._active_export_output_path = result.output_path
         window._pending_export_result = result

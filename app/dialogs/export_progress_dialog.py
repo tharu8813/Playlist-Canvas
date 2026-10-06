@@ -196,6 +196,7 @@ class ExportProgressDialog(QDialog):
         self._allow_close = False
         self._last_log = ""
         self._korean = False
+        self._audio_only = False
         self._cancel_title = "Cancel export"
         self._cancel_message = (
             "Cancel the current export?\n"
@@ -457,7 +458,7 @@ class ExportProgressDialog(QDialog):
                 "audio": "오디오 작업 파일",
                 "effects": "음악 반응 효과 파일",
                 "processing": "기타 작업 파일",
-                "output": "생성 중인 결과 영상",
+                "output": "생성 중인 결과 오디오" if self._audio_only else "생성 중인 결과 영상",
             }
             if self._korean else
             {
@@ -465,7 +466,7 @@ class ExportProgressDialog(QDialog):
                 "audio": "Audio working files",
                 "effects": "Music-reactive effect files",
                 "processing": "Other working files",
-                "output": "Result video in progress",
+                "output": "Result audio in progress" if self._audio_only else "Result video in progress",
             }
         )
         self.storage_heading.setText(
@@ -482,7 +483,7 @@ class ExportProgressDialog(QDialog):
             self.storage_estimate_hint.setText(
                 (
                     f"예상 최대 약 {format_bytes(estimate.peak_temporary)}"
-                    f" · 결과 영상 약 {format_bytes(estimate.result_low)}"
+                    f" · {'결과 오디오' if self._audio_only else '결과 영상'} 약 {format_bytes(estimate.result_low)}"
                     f" ~ {format_bytes(estimate.result_high)}"
                 )
                 if self._korean else
@@ -495,7 +496,7 @@ class ExportProgressDialog(QDialog):
             self.storage_widget.setToolTip(
                 (
                     f"예상 최대 작업 공간 약 {format_bytes(estimate.peak_temporary)}\n"
-                    f"예상 결과 영상 {format_bytes(estimate.result_low)}"
+                    f"{'예상 결과 오디오' if self._audio_only else '예상 결과 영상'} {format_bytes(estimate.result_low)}"
                     f" ~ {format_bytes(estimate.result_high)}\n"
                     "실제 값은 파일이 생성·삭제되면서 달라집니다."
                 )
@@ -631,7 +632,19 @@ class ExportProgressDialog(QDialog):
         except ValueError:
             return 0
 
+    def set_audio_only(self, enabled: bool) -> None:
+        """Show only audio preparation, saving, and completion for an audio export."""
+        self._audio_only = enabled
+        layout = self.steps_widget.layout()
+        for index in (0, 1, 4, 5):
+            layout.itemAt(index).widget().setVisible(not enabled)
+        self._refresh_steps("Preparing audio" if enabled else "Preparing visual frames")
+        self._refresh_storage_labels()
+
     def _step_names(self) -> tuple[str, ...]:
+        if self._audio_only:
+            return (("", "오디오 준비", "", "오디오 저장", "완료") if self._korean else
+                    ("", "Audio", "", "Save audio", "Done"))
         return (
             ("화면 준비", "오디오 준비", "효과 준비", "영상 만들기", "완료")
             if self._korean else
@@ -650,6 +663,7 @@ class ExportProgressDialog(QDialog):
         return [
             (name, 1.0 if index < active_index else None if index == active_index else 0.0)
             for index, name in enumerate(self._step_names()[:-1])
+            if name
         ]
 
     def _refresh_steps(self, stage: str) -> None:
@@ -684,6 +698,7 @@ class ExportProgressDialog(QDialog):
             "Combining audio": "audio",
             "Preparing visualizers": "effects",
             "Encoding video": "encode",
+            "Encoding audio": "encode",
             "Capturing and encoding": "encode",
             "Finalizing export": "encode",
             "Complete": "complete",
@@ -769,6 +784,7 @@ class ExportProgressDialog(QDialog):
             "Preparing visualizers": "음악 반응 효과 준비",
             "Preparing visual layers": "추가 화면 준비",
             "Encoding video": "최종 영상 만들기",
+            "Encoding audio": "오디오 저장",
             "Capturing and encoding": "화면 캡처와 영상 만들기",
             "Finalizing export": "내보내기 마무리",
             "Preparing download": "다운로드 준비",
@@ -779,6 +795,8 @@ class ExportProgressDialog(QDialog):
 
     def _detail_text(self, message: str) -> str:
         """Translate visualizer progress details while retaining their live numbers."""
+        if self._korean and message.startswith("Saving audio"):
+            return message.replace("Saving audio", "오디오 저장 중", 1)
         # Visualizer workers can provide a stage-local ETA, while this dialog
         # calculates the overall export ETA. Showing both in different rows was
         # visually inconsistent and the two estimates represented different

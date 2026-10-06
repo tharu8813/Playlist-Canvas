@@ -29,6 +29,7 @@ class ExportValidationResult:
     pixel_format: str = ""
     warnings: tuple[str, ...] = ()
     error: str = ""
+    audio_only: bool = False
 
     @property
     def passed(self) -> bool:
@@ -38,6 +39,8 @@ class ExportValidationResult:
     def summary(self) -> str:
         if not self.available:
             return self.error or "Output metadata was unavailable."
+        if self.audio_only:
+            return f"{self.codec.upper()} · {self.duration_seconds:.2f}s"
         fps = f"{self.fps:.3f}".rstrip("0").rstrip(".")
         frame_text = f", {self.frame_count} frames" if self.frame_count else ""
         return f"{self.width} × {self.height} · {fps} FPS · {self.duration_seconds:.2f}s{frame_text}"
@@ -114,3 +117,38 @@ def validate_export_output(
         )
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
         return ExportValidationResult(False, error=f"FFprobe failed: {error}")
+
+
+def validate_audio_export_output(
+    output_path: str | Path, expected_duration_seconds: float,
+    ffmpeg_executable: str | Path | None = None,
+) -> ExportValidationResult:
+    """Check that an audio export has sound, no video, and the resolved mix duration."""
+    probe = _find_ffprobe(ffmpeg_executable)
+    if probe is None:
+        return ExportValidationResult(False, error="FFprobe was not found.", audio_only=True)
+    try:
+        completed = subprocess.run(
+            [str(probe), "-v", "error", "-show_entries", "stream=codec_type,codec_name",
+             "-show_entries", "format=duration", "-of", "json", str(output_path)],
+            capture_output=True, text=True, check=False, timeout=15,
+            **hidden_process_kwargs(),
+        )
+        payload = json.loads(completed.stdout or "{}")
+        streams = payload.get("streams") or []
+        audio = next((item for item in streams if item.get("codec_type") == "audio"), {})
+        duration = float((payload.get("format") or {}).get("duration") or 0.0)
+        warnings = []
+        if not audio:
+            warnings.append("No audio stream was found.")
+        if any(item.get("codec_type") == "video" for item in streams):
+            warnings.append("An unexpected video stream was found.")
+        if abs(duration - expected_duration_seconds) > 0.15:
+            warnings.append(f"duration {duration:.2f}s (expected {expected_duration_seconds:.2f}s)")
+        return ExportValidationResult(
+            True, duration_seconds=duration, codec=str(audio.get("codec_name") or ""),
+            warnings=tuple(warnings), audio_only=True,
+            error="" if completed.returncode == 0 else (completed.stderr or "FFprobe failed").strip(),
+        )
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
+        return ExportValidationResult(False, error=f"FFprobe failed: {error}", audio_only=True)

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from app.dialogs.help_dialog import install_help_shortcut
 from app.utils.i18n import Translator
 from app.services.export_validation_service import ExportValidationResult
+from app.services.export_formats import is_audio_export, is_subtitle_export
 
 
 class ExportCompleteDialog(QDialog):
@@ -42,8 +43,13 @@ class ExportCompleteDialog(QDialog):
         self.resize(700, 330)
 
         korean = translator.is_korean
+        audio_only = is_audio_export(self.output_path)
         self.setWindowTitle("내보내기 완료" if korean else "Export complete")
         title = QLabel("영상 내보내기를 완료했습니다" if korean else "Your video is ready")
+        if audio_only:
+            title.setText("오디오 내보내기를 완료했습니다" if korean else "Your audio is ready")
+        elif is_subtitle_export(self.output_path):
+            title.setText("자막 내보내기를 완료했습니다" if korean else "Your subtitles are ready")
         title.setObjectName("dialogTitle")
         subtitle = QLabel(
             "바로 확인하거나 파일을 공유할 준비를 할 수 있습니다."
@@ -82,6 +88,10 @@ class ExportCompleteDialog(QDialog):
             "영상 재생하기" if korean else "Play video"
         )
         self.play_button.setObjectName("primaryButton")
+        if audio_only:
+            self.play_button.setText("오디오 재생하기" if korean else "Play audio")
+        elif is_subtitle_export(self.output_path):
+            self.play_button.setText("자막 열기" if korean else "Open subtitles")
         self.folder_button = QPushButton(
             "저장 폴더 열기" if korean else "Open export folder"
         )
@@ -151,9 +161,9 @@ class ExportCompleteDialog(QDialog):
         ):
             return
         self._show_open_error(
-            "영상을 재생할 수 없습니다. 기본 동영상 앱과 파일 위치를 확인해 주세요."
+            "파일을 재생할 수 없습니다. 기본 재생 앱과 파일 위치를 확인해 주세요."
             if self.translator.is_korean else
-            "The video could not be opened. Check the file and the default video app."
+            "The file could not be opened. Check the file and the default media app."
         )
 
     def _open_folder(self) -> None:

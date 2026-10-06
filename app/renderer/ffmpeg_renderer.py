@@ -33,6 +33,11 @@ from app.renderer.python_visualizer import PythonVisualizerError, PythonVisualiz
 from app.utils.subprocess_utils import hidden_process_kwargs
 from app.services.export_validation_service import ExportValidationResult
 from app.services.export_policy import ExportPolicy
+from app.services.export_formats import (
+    VIDEO_FORMATS, AUDIO_FORMATS, AUDIO_ENCODERS, is_audio_export,
+    audio_encoding_arguments, video_container_arguments,
+)
+from app.services.export_validation_service import validate_audio_export_output
 
 
 LOGGER = logging.getLogger(__name__)
@@ -325,6 +330,14 @@ class FFmpegRenderer:
         UI exports supply the prepared audio and plan before capturing frames.
         """
         cancel_event = cancel_event or threading.Event()
+        if is_audio_export(output_path):
+            return self.render_audio(
+                tracks, output_path, settings or RenderSettings(),
+                progress_callback=progress_callback, cancel_event=cancel_event,
+                metadata=metadata, storage_path_callback=storage_path_callback,
+                transition_mode=transition_mode, crossfade_seconds=crossfade_seconds,
+                automix_settings=automix_settings,
+            )
         if (compiled_plan is None) != (prepared_audio_path is None):
             raise RenderError("Prepared audio and its compiled plan must be supplied together.")
         if cancel_event.is_set():
@@ -460,7 +473,7 @@ class FFmpegRenderer:
             raise RenderCancelledError("Rendering was cancelled.")
         self._report(progress_callback, "Preparing export", 0.02, "Preparing temporary files")
         target = Path(output_path).expanduser().resolve()
-        if target.suffix.lower() != ".mp4":
+        if target.suffix.lower().lstrip(".") not in VIDEO_FORMATS:
             target = target.with_suffix(".mp4")
         target.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix="playlist-video-") as temporary_directory:
@@ -716,7 +729,7 @@ class FFmpegRenderer:
             try:
                 output_descriptor, output_staging_name = mkstemp(
                     prefix=f".{target.stem}-",
-                    suffix=".rendering.mp4",
+                    suffix=f".rendering{target.suffix}",
                     dir=target.parent,
                 )
                 os.close(output_descriptor)
@@ -807,7 +820,7 @@ class FFmpegRenderer:
                     # FFmpeg to retain queued frames while the UI appears stuck at
                     # 99%. The validated project timeline is authoritative.
                     "-t", f"{total_duration:.6f}",
-                    "-movflags", "+faststart",
+                    *video_container_arguments(target),
                     "-progress", "pipe:1", "-nostats", "-y", str(temporary_video),
                 ])
             else:
@@ -827,7 +840,7 @@ class FFmpegRenderer:
                     # the base, alpha-pair and audio streams can make FFmpeg keep
                     # buffering after the last visible frame.
                     "-t", f"{total_duration:.6f}",
-                    "-movflags", "+faststart",
+                    *video_container_arguments(target),
                     "-progress", "pipe:1", "-nostats", "-y", str(temporary_video),
                 ])
             LOGGER.info(
@@ -1068,6 +1081,11 @@ class FFmpegRenderer:
                 )
             self._available_encoders = frozenset(completed.stdout.split())
         if encoder not in self._available_encoders:
+            if encoder in AUDIO_ENCODERS.values():
+                raise EncoderUnavailableError(
+                    f"The audio encoder '{encoder}' is unavailable in this FFmpeg build. "
+                    "Choose another audio format or install an FFmpeg build with this encoder."
+                )
             raise EncoderUnavailableError(
                 f"The selected video encoder '{encoder}' is unavailable in this FFmpeg build. "
                 "Choose a supported CPU/GPU encoder in Settings."
@@ -1098,12 +1116,14 @@ class FFmpegRenderer:
         if missing is not None:
             raise RenderError(f"Audio file is missing: {missing}")
 
-        self._validate_settings(settings)
+        audio_only = is_audio_export(output_path)
+        if not audio_only:
+            self._validate_settings(settings)
         target = Path(output_path).expanduser().resolve()
-        if target.suffix.lower() != ".mp4":
+        if target.suffix.lower().lstrip(".") not in VIDEO_FORMATS + AUDIO_FORMATS:
             target = target.with_suffix(".mp4")
         if target.exists() and not target.is_file():
-            raise RenderError("The selected output path is not a video file.")
+            raise RenderError("The selected output path is not a file.")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             descriptor, probe_name = mkstemp(
@@ -1119,8 +1139,85 @@ class FFmpegRenderer:
                 "folder and try again."
             ) from error
 
-        self.ensure_encoder_available(settings.video_codec)
-        self.ensure_encoder_usable(settings)
+        if audio_only:
+            self.ensure_encoder_available(AUDIO_ENCODERS[target.suffix.lower().lstrip(".")])
+        else:
+            self.ensure_encoder_available(settings.video_codec)
+            self.ensure_encoder_usable(settings)
+
+    def render_audio(
+        self, tracks: list[PlaylistTrack], output_path: str | Path, settings: RenderSettings,
+        *, progress_callback=None, cancel_event=None, metadata=None,
+        storage_path_callback=None, transition_mode="none", crossfade_seconds=3.0,
+        automix_settings=None,
+    ) -> RenderResult:
+        """Export the same playlist mix through a lossless intermediate, without visuals."""
+        cancel_event = cancel_event or threading.Event()
+        if cancel_event.is_set():
+            raise RenderCancelledError("Rendering was cancelled.")
+        self.preflight_export(tracks, output_path, settings)
+        target = Path(output_path).expanduser().resolve()
+        format_name = target.suffix.lower().lstrip(".")
+        active_tracks = [track for track in tracks if track.enabled]
+        with TemporaryDirectory(prefix="playlist-audio-") as directory:
+            temporary = Path(directory)
+            if storage_path_callback:
+                storage_path_callback("render", temporary)
+            plans = []
+            audio_path = self.prepare_playlist_audio(
+                active_tracks, temporary, settings,
+                transition_mode=transition_mode, crossfade_seconds=crossfade_seconds,
+                progress_callback=progress_callback, cancel_event=cancel_event,
+                plan_callback=plans.append, automix_settings=automix_settings,
+                audio_codec="flac",
+            )
+            plan = plans[0]
+            duration = plan.duration_seconds
+            metadata_path = self._write_export_ffmetadata(
+                temporary, active_tracks, metadata or ExportMetadata(), target, plan,
+            )
+            arguments = ["-i", str(audio_path)]
+            if metadata_path:
+                arguments += ["-f", "ffmetadata", "-i", str(metadata_path)]
+            arguments += ["-map", "0:a:0", "-vn"]
+            if metadata_path:
+                arguments += ["-map_metadata", "1", "-map_chapters",
+                              "1" if format_name in {"mp3", "m4a"} else "-1"]
+            arguments += audio_encoding_arguments(format_name, settings.audio_bitrate)
+            arguments += ["-ar", "48000", "-ac", "2", "-t", f"{duration:.6f}"]
+            try:
+                descriptor, staging_name = mkstemp(
+                    prefix=f".{target.stem}-", suffix=f".rendering{target.suffix}", dir=target.parent,
+                )
+                os.close(descriptor)
+            except OSError as error:
+                raise RenderError("Could not create the temporary output audio file.") from error
+            staging = Path(staging_name)
+            if storage_path_callback:
+                storage_path_callback("output", staging)
+
+            def progress(line: str) -> None:
+                seconds = self._parse_progress_seconds(line)
+                if seconds is not None:
+                    fraction = min(1.0, max(0.0, seconds / max(duration, 0.001)))
+                    self._report(progress_callback, "Encoding audio", 0.64 + fraction * 0.35,
+                                 f"Saving audio {min(seconds, duration):.1f}s / {duration:.1f}s")
+
+            try:
+                self._report(progress_callback, "Encoding audio", 0.64, "Saving audio")
+                self._run(arguments + ["-progress", "pipe:1", "-nostats", "-y", str(staging)],
+                          progress_parser=progress, cancel_event=cancel_event)
+                if cancel_event.is_set():
+                    raise RenderCancelledError("Rendering was cancelled.")
+                try:
+                    staging.replace(target)
+                except OSError as error:
+                    raise RenderError(f"Could not replace '{target.name}'. Check the destination folder.") from error
+            finally:
+                staging.unlink(missing_ok=True)
+        validation = validate_audio_export_output(target, duration, self.executable)
+        self._report(progress_callback, "Complete", 1.0, "Export completed")
+        return RenderResult(target, len(active_tracks), validation)
 
     def ensure_encoder_usable(self, settings: RenderSettings) -> None:
         """Encode at the selected format so hardware startup checks are realistic."""

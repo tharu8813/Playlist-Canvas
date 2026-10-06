@@ -105,11 +105,11 @@ class PlaylistExportDialog(QDialog):
     def retranslate(self) -> None:
         """Refresh static dialog text when the application language changes."""
         korean = self.translator.is_korean
-        self.setWindowTitle("플레이리스트 파일 만들기" if korean else "Create playlist files")
-        self._heading_label.setText("YouTube 업로드 파일" if korean else "YouTube upload files")
+        self.setWindowTitle("타임라인 내보내기" if korean else "Export timeline")
+        self._heading_label.setText("타임라인 내보내기" if korean else "Export timeline")
         self._description_label.setText(
-            "description.txt와 playlist.csv를 UTF-8로 만듭니다."
-            if korean else "Creates UTF-8 description.txt and playlist.csv files."
+            "믹싱 타임라인의 곡 시작 시간을 YouTube 설명문(description.txt)과 곡 정보(playlist.csv)로 저장합니다."
+            if korean else "Save track start times from the mix timeline as a YouTube description (description.txt) and track details (playlist.csv)."
         )
         self.browse_button.setText("찾아보기" if korean else "Browse")
         self.output_label.setText("저장 폴더" if korean else "Output folder")
@@ -120,7 +120,7 @@ class PlaylistExportDialog(QDialog):
             "설명문을 클립보드에 자동 복사" if korean else "Copy description to clipboard"
         )
         self.button_box.button(QDialogButtonBox.StandardButton.Ok).setText(
-            "파일 만들기" if korean else "Create files"
+            "타임라인 내보내기" if korean else "Export timeline"
         )
         self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText(
             "취소" if korean else "Cancel"

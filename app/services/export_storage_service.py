@@ -118,6 +118,20 @@ def format_bytes(count: int) -> str:
     return f"{value:.1f} TB"
 
 
+def estimate_audio_export_storage(
+    duration_seconds: float, format_name: str, audio_bitrate: str,
+) -> ExportStorageEstimate:
+    """Budget audio processing without allocating any Canvas intermediates."""
+    seconds = max(0.0, duration_seconds)
+    pcm_size = seconds * 48_000 * 2 * 2
+    result = pcm_size if format_name in {"wav", "flac"} else seconds * parse_bitrate(audio_bitrate) / 8
+    processing = int(pcm_size * 3 + 8 * MIB) if seconds else 0
+    return ExportStorageEstimate(
+        0, processing, int(result * (0.4 if format_name == "flac" else 0.95)),
+        int(result * 1.1 + MIB), int(processing * 1.3 + result * 1.1 + MIB),
+    )
+
+
 class ExportStorageMonitor(QThread):
     """Scan export-owned paths away from the GUI thread at a low frequency."""
 

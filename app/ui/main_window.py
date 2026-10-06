@@ -4124,7 +4124,7 @@ class MainWindow(QMainWindow):
                 self._export_preparation_cancel = cancel
                 progress.show()
                 self.activity_progress.begin(
-                    "playlist_files", "재생목록 파일 만들기" if korean else "Creating playlist files",
+                    "playlist_files", "타임라인 내보내기" if korean else "Exporting timeline",
                     detail="믹스 시간 확인 중" if korean else "Preparing mix timestamps",
                 )
 
@@ -4157,7 +4157,7 @@ class MainWindow(QMainWindow):
         except (PlaylistExportError, RenderError) as error:
             QMessageBox.warning(
                 self,
-                "파일 만들기 오류" if korean else "File creation error",
+                "타임라인 내보내기 오류" if korean else "Timeline export error",
                 str(error),
             )
             return
@@ -4171,7 +4171,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message.replace("\n", " "), 7000)
         QMessageBox.information(
             self,
-            "플레이리스트 파일 완료" if korean else "Playlist files complete",
+            "타임라인 내보내기 완료" if korean else "Timeline export complete",
             message,
         )
 
@@ -4957,7 +4957,7 @@ class MainWindow(QMainWindow):
             "타임라인 열기" if self.translator.is_korean else "Show Timeline"
         )
         self.playlist_files_action.setText(
-            "목록 파일" if self.translator.is_korean else "Playlist files"
+            "타임라인 내보내기" if self.translator.is_korean else "Export timeline"
         )
         self.import_m3u_action.setText(
             "M3U8 플레이리스트 가져오기…" if korean else "Import M3U8 playlist…"
@@ -5128,9 +5128,9 @@ class MainWindow(QMainWindow):
             shortcut = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
             action.setToolTip(f"{action.text()} ({shortcut})" if shortcut else action.text())
         self.playlist_files_action.setToolTip(
-            "YouTube 설명문과 CSV 목록 파일을 만듭니다."
+            "믹싱 타임라인의 곡 시작 시간과 곡 정보를 YouTube 설명문·CSV로 저장합니다."
             if self.translator.is_korean
-            else "Create YouTube description and playlist CSV files."
+            else "Export mix timeline timestamps and track details as a YouTube description and CSV."
         )
         self.settings_action.setToolTip(
             "FFmpeg, 출력, 렌더링 기본값을 설정합니다."
