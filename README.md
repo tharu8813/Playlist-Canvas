@@ -18,11 +18,23 @@
 
 ![Playlist Canvas 작업 화면](app/resources/help/ko/canvas_workspace.png)
 
-Playlist Canvas는 음악, 앨범 커버, 가사, 배경과 다양한 시각 효과를 배치해 **MP4 영상으로 만드는 Windows 프로그램**입니다. 디자인 프리셋으로 시작하고, 음악을 넣고, 원하는 모습으로 다듬으면 됩니다. 프로그래밍 지식이나 별도의 Python 설치는 필요하지 않습니다.
+Playlist Canvas는 음악, 앨범 커버, 가사, 배경과 다양한 시각 효과를 배치해 **MP4 영상으로 완성하는 Windows 데스크톱 소프트웨어**입니다. 디자인 프리셋으로 시작해도 되고, 타임라인·레이어·전환 편집으로 세밀하게 제작해도 됩니다. 프로그래밍 지식이나 별도의 Python 설치는 필요하지 않습니다.
 
-**이 프로젝트는 아이디어 구상부터 구현까지 전 과정을 바이브 코딩(Vibe Coding) 방식으로 제작했습니다. 이용된 모델은 CHatGPT 5.6 Sol(Codex), Claude Opus 5.5(Claude Code)가 사용되었습니다.**
+**이 프로젝트는 아이디어 구상부터 구현까지 전 과정을 바이브 코딩(Vibe Coding) 방식으로 제작했습니다. 이용된 모델은 ChatGPT 5.6 Sol(Codex), Claude Opus 5.5(Claude Code)입니다.**
 
-예제 영상은 [이곳](https://www.youtube.com/watch?v=k2-e5Nhj7RY)을 클릭해서 확인하세요! (Playlist Canvas 1.3.0.0v AutoMix 기준)
+예제 영상은 [이곳](https://www.youtube.com/watch?v=k2-e5Nhj7RY)에서 확인할 수 있습니다. (Playlist Canvas 1.3.0.0v AutoMix 기준)
+
+## 지금 어떤 프로그램인가요?
+
+Playlist Canvas는 다음을 하나의 워크플로로 묶은 앱입니다.
+
+- **비주얼 편집기**: 레이어 배치, 스타일/애니메이션, 음악 반응 효과, 타임라인 기반 편집
+- **오디오·가사 도구**: 가사 타이밍 편집, 곡별 오디오/EQ 조정, 메타데이터 편집
+- **AutoMix 엔진**: 박자·키·보컬·분위기 분석 기반 전환 추천 및 수동 정밀 보정
+- **렌더링 파이프라인**: 미리보기부터 최종 MP4 내보내기까지 FFmpeg 기반 출력
+- **제품 운영 기능**: 프로젝트 저장/복구, 로컬라이징, 도움말, 업데이트/무결성 검사
+
+즉, 한 문장으로는 **“작은 NLE(영상 편집기) + 오디오 믹싱 툴 + 음악 분석 엔진을 합친 특화 데스크톱 앱”**에 가깝습니다.
 
 ## 다운로드와 설치
 
